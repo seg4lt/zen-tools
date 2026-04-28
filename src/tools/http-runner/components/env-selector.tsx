@@ -37,6 +37,28 @@ export function EnvSelector() {
     });
   }, [dispatch]);
 
+  // The working-dir picker auto-selects an env on the backend. Listen for
+  // the broadcast so the badge and dependent queries stay in sync.
+  useEffect(() => {
+    function onAutoSelected(e: Event) {
+      const detail = (e as CustomEvent<{ env: string }>).detail;
+      if (!detail?.env) return;
+      dispatch({ type: "setEnv", env: detail.env });
+      void queryClient.invalidateQueries({ queryKey: ["environments"] });
+      void queryClient.invalidateQueries({ queryKey: ["env-vars"] });
+      void queryClient.invalidateQueries({ queryKey: ["extracted-vars"] });
+    }
+    window.addEventListener(
+      "zen:env-auto-selected",
+      onAutoSelected as EventListener,
+    );
+    return () =>
+      window.removeEventListener(
+        "zen:env-auto-selected",
+        onAutoSelected as EventListener,
+      );
+  }, [dispatch, queryClient]);
+
   const selectEnv = async (name: string) => {
     setOpen(false);
     await tauri.setActiveEnvironment(name);

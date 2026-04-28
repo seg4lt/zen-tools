@@ -118,8 +118,10 @@ export const tauri = {
   discoverPerfFiles: () => invoke<FileTreeItem[]>("discover_perf_files"),
   findEnvFile: (directory: string) =>
     invoke<string | null>("find_env_file_command", { directory }),
-  setWorkingDir: (path: string) => invoke<void>("set_working_dir", { path }),
-  getWorkingDir: () => invoke<string>("get_working_dir"),
+  /** Returns the auto-picked default environment name (if any). */
+  setWorkingDir: (path: string) =>
+    invoke<string | null>("set_working_dir", { path }),
+  getWorkingDir: () => invoke<string | null>("get_working_dir"),
   pickDirectory: () => invoke<string | null>("pick_directory"),
 
   // parse

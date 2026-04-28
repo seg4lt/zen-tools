@@ -1,5 +1,13 @@
 import { useQuery } from "@tanstack/react-query";
-import { ChevronRight, FileText, Folder, FolderOpen, Settings, BarChart3 } from "lucide-react";
+import {
+  BarChart3,
+  ChevronRight,
+  FileText,
+  Folder,
+  FolderOpen,
+  FolderSearch,
+  Settings,
+} from "lucide-react";
 import { tauri, type FileTreeItem, type FileType } from "../lib/tauri";
 import { cn } from "@/lib/utils";
 
@@ -30,9 +38,22 @@ function iconFor(type: FileType, isDir: boolean) {
  * `set_working_dir` invalidations cascade.
  */
 export function HttpFileTree({ selectedPath, onSelect }: HttpFileTreeProps) {
-  const { data: items = [], isLoading, isError, error } = useQuery({
+  const {
+    data: items = [],
+    isLoading,
+    isError,
+    error,
+  } = useQuery({
     queryKey: ["http-files"],
     queryFn: () => tauri.discoverHttpFiles(),
+  });
+
+  // The backend returns [] both when no working dir is set AND when the
+  // directory has no .http files. We disambiguate with a quick getWorkingDir
+  // probe — if no path is set, render the "pick a directory" CTA.
+  const { data: workingDir } = useQuery({
+    queryKey: ["working-dir"],
+    queryFn: () => tauri.getWorkingDir(),
   });
 
   if (isLoading) {
@@ -46,6 +67,14 @@ export function HttpFileTree({ selectedPath, onSelect }: HttpFileTreeProps) {
     );
   }
   if (items.length === 0) {
+    if (!workingDir) {
+      return (
+        <div className="flex flex-col items-center justify-center gap-2 p-6 text-center text-xs text-muted-foreground">
+          <FolderSearch className="size-6 opacity-40" />
+          <p>Click 📁 in the title bar to pick a working directory.</p>
+        </div>
+      );
+    }
     return (
       <div className="p-3 text-xs text-muted-foreground">
         No HTTP files in this directory.

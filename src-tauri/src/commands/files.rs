@@ -11,12 +11,15 @@ use zen_parser::{find_env_file, parse_env_file, PerfConfig};
 use zen_types::prelude::*;
 
 /// Recursively discover `.http` / `.rest` / `.env.json` / `perf.yaml` files
-/// under the working directory, sorted directory-first.
+/// under the working directory, sorted directory-first. Returns an empty
+/// list when no working directory is selected.
 #[tauri::command]
 pub async fn discover_http_files(
     state: tauri::State<'_, Mutex<AppState>>,
 ) -> AppResult<Vec<FileTreeItem>> {
-    let working_dir = state.lock().await.working_dir.clone();
+    let Some(working_dir) = state.lock().await.working_dir.clone() else {
+        return Ok(Vec::new());
+    };
     Ok(collect_http_files(&working_dir))
 }
 
@@ -25,7 +28,9 @@ pub async fn discover_http_files(
 pub async fn discover_perf_files(
     state: tauri::State<'_, Mutex<AppState>>,
 ) -> AppResult<Vec<FileTreeItem>> {
-    let working_dir = state.lock().await.working_dir.clone();
+    let Some(working_dir) = state.lock().await.working_dir.clone() else {
+        return Ok(Vec::new());
+    };
     Ok(PerfConfig::discover_perf_file_tree(&working_dir))
 }
 
@@ -36,11 +41,13 @@ pub async fn find_env_file_command(directory: String) -> AppResult<Option<String
 }
 
 /// Set a new working directory, clearing every cached state piece.
+/// Auto-loads `http-client.env.json` if found and pre-selects a sensible
+/// default environment (`development` → `dev` → first alphabetical).
 #[tauri::command]
 pub async fn set_working_dir(
     path: String,
     state: tauri::State<'_, Mutex<AppState>>,
-) -> AppResult<()> {
+) -> AppResult<Option<String>> {
     let path = PathBuf::from(&path);
     if !path.exists() {
         return Err(AppError::BadRequest(format!(
@@ -50,7 +57,7 @@ pub async fn set_working_dir(
     }
 
     let mut s = state.lock().await;
-    s.working_dir = path.clone();
+    s.working_dir = Some(path.clone());
     s.file_registry.clear();
     s.global_env_file = None;
     s.local_env_file = None;
@@ -69,13 +76,39 @@ pub async fn set_working_dir(
         }
     }
 
-    Ok(())
+    // Auto-select a default env so `{{host}}` etc. resolve right away.
+    let chosen = s.global_env_file.as_ref().and_then(pick_default_env);
+    if let Some(name) = chosen.clone() {
+        s.selected_env = Some(EnvName::new(name));
+    }
+
+    Ok(chosen)
 }
 
-/// Read the current working directory.
+/// Choose a sensible default environment from the loaded env file.
+/// Preference order: `development` → `dev` → first alphabetical name.
+fn pick_default_env(env: &EnvironmentFile) -> Option<String> {
+    let names = env.env_names();
+    if names.iter().any(|n| n == "development") {
+        return Some("development".to_string());
+    }
+    if names.iter().any(|n| n == "dev") {
+        return Some("dev".to_string());
+    }
+    names.into_iter().next()
+}
+
+/// Read the current working directory, or `None` if none is set.
 #[tauri::command]
-pub async fn get_working_dir(state: tauri::State<'_, Mutex<AppState>>) -> AppResult<String> {
-    Ok(state.lock().await.working_dir.display().to_string())
+pub async fn get_working_dir(
+    state: tauri::State<'_, Mutex<AppState>>,
+) -> AppResult<Option<String>> {
+    Ok(state
+        .lock()
+        .await
+        .working_dir
+        .as_ref()
+        .map(|p| p.display().to_string()))
 }
 
 /// Show a native directory picker. Returns the selected path or `None` if

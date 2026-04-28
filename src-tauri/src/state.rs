@@ -14,8 +14,9 @@ use zen_types::prelude::*;
 /// sections are kept short — long-running work (HTTP execution, perf
 /// loops) drops the lock first.
 pub struct AppState {
-    /// Currently-selected workspace root.
-    pub working_dir: PathBuf,
+    /// Currently-selected workspace root. `None` until the user picks one
+    /// (no `$HOME` default — we don't want to scan the entire home dir).
+    pub working_dir: Option<PathBuf>,
     /// Workspace-level env file (if any).
     pub global_env_file: Option<EnvironmentFile>,
     /// File-local env override (loaded when an http file is opened).
@@ -52,14 +53,10 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// Build a fresh state. Working dir defaults to `$HOME` (or the current
-    /// process directory if home cannot be resolved).
+    /// Build a fresh, "no working directory selected" state.
     pub fn new() -> Self {
-        let working_dir = dirs::home_dir()
-            .or_else(|| std::env::current_dir().ok())
-            .unwrap_or_else(|| PathBuf::from("/"));
         Self {
-            working_dir,
+            working_dir: None,
             global_env_file: None,
             local_env_file: None,
             selected_env: None,

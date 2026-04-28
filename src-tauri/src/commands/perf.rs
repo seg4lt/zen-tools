@@ -260,9 +260,14 @@ pub async fn export_perf_results(
         .as_ref()
         .ok_or_else(|| AppError::NotInitialised("no perf metrics to export".into()))?
         .clone();
-    let dir = output_dir
-        .map(PathBuf::from)
-        .unwrap_or_else(|| s.working_dir.clone());
+    let dir = match output_dir.map(PathBuf::from).or_else(|| s.working_dir.clone()) {
+        Some(d) => d,
+        None => {
+            return Err(AppError::NotInitialised(
+                "no output directory: pick a working directory or pass output_dir".into(),
+            ))
+        }
+    };
 
     let test_name = s
         .perf_config
