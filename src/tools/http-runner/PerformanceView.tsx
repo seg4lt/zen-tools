@@ -21,7 +21,19 @@ export function PerformanceView() {
   const { dispatch } = useHttpRunner();
   const queryClient = useQueryClient();
   const [treeWidth, setTreeWidth] = useState(240);
-  const [selectedConfig, setSelectedConfig] = useState<string | null>(null);
+  // Persist the selected perf config across tab switches and restarts so
+  // mutating Cmd+1/Cmd+2 doesn't lose the user's place.
+  const [selectedConfig, setSelectedConfigState] = useState<string | null>(() =>
+    typeof window !== "undefined"
+      ? window.localStorage.getItem("zen-tools.perf-config")
+      : null,
+  );
+  const setSelectedConfig = (path: string | null) => {
+    setSelectedConfigState(path);
+    if (typeof window === "undefined") return;
+    if (path) window.localStorage.setItem("zen-tools.perf-config", path);
+    else window.localStorage.removeItem("zen-tools.perf-config");
+  };
   const [selectedTest, setSelectedTest] = useState<number | null>(null);
   const [running, setRunning] = useState(false);
   const [currentUsers, setCurrentUsers] = useState<number | undefined>(

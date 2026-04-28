@@ -16,6 +16,9 @@ export interface ChainStep {
   name: string;
 }
 
+/** Which run command is currently in flight, if any. */
+export type RunMode = null | "single" | "withDeps";
+
 export interface HttpRunnerState {
   /** Path of the currently-selected `.http` file. */
   selectedFilePath: string | null;
@@ -33,6 +36,8 @@ export interface HttpRunnerState {
   logs: { ts: string; message: string; level: "info" | "warn" | "error" }[];
   /** Whether a request is currently in flight. */
   isRunning: boolean;
+  /** Which command kicked off the in-flight run. */
+  runMode: RunMode;
 }
 
 const initialState: HttpRunnerState = {
@@ -44,14 +49,17 @@ const initialState: HttpRunnerState = {
   activeEnv: null,
   logs: [],
   isRunning: false,
+  runMode: null,
 };
 
 export type HttpRunnerAction =
   | { type: "selectFile"; path: string | null; file: HttpFile | null }
+  /** Update only the parsed file (used after a save) — keeps selection. */
+  | { type: "updateParsedFile"; file: HttpFile }
   | { type: "selectRequest"; id: string | null }
   | { type: "result"; result: RequestResult }
   | { type: "chain"; steps: ChainStep[] }
-  | { type: "setRunning"; running: boolean }
+  | { type: "setRunning"; running: boolean; mode?: RunMode }
   | { type: "setEnv"; env: string | null }
   | {
       type: "log";
@@ -71,7 +79,13 @@ function reducer(
         selectedFilePath: action.path,
         selectedFile: action.file,
         selectedRequestId: null,
+        chainSteps: [],
       };
+    case "updateParsedFile":
+      // Same path → swap parsed body without touching selection so the
+      // editor cursor and response panel stay put after a Save.
+      if (state.selectedFile?.path !== action.file.path) return state;
+      return { ...state, selectedFile: action.file };
     case "selectRequest":
       // Reset the displayed chain when the selection changes — the next
       // run command will populate it.
@@ -83,7 +97,11 @@ function reducer(
     case "chain":
       return { ...state, chainSteps: action.steps };
     case "setRunning":
-      return { ...state, isRunning: action.running };
+      return {
+        ...state,
+        isRunning: action.running,
+        runMode: action.running ? (action.mode ?? state.runMode) : null,
+      };
     case "setEnv":
       return { ...state, activeEnv: action.env };
     case "log":

@@ -22,7 +22,7 @@ import {
   foldKeymap,
   indentOnInput,
 } from "@codemirror/language";
-import { vim } from "@replit/codemirror-vim";
+import { vim, Vim } from "@replit/codemirror-vim";
 import { httpLanguage } from "../lib/lang-http";
 import { makeEditorTheme } from "../lib/cm-theme";
 import { runGutter } from "../lib/run-gutter";
@@ -85,6 +85,20 @@ export function HttpEditor({
     onRunLineRef.current = onRunLine;
     onRunLineWithDepsRef.current = onRunLineWithDeps;
   }, [onChange, onSave, onRunLine, onRunLineWithDeps]);
+
+  // Register Vim ex commands once. `:w` / `:write` save through onSave so
+  // muscle memory works inside vim mode too. The Vim wrapper passes its
+  // own adapter object — we ignore it and read the live view instead.
+  useEffect(() => {
+    const save = () => {
+      const view = viewRef.current;
+      if (!view) return;
+      onSaveRef.current?.(view.state.doc.toString());
+    };
+    Vim.defineEx("write", "w", save);
+    Vim.defineEx("wq", "wq", save);
+    Vim.defineEx("x", "x", save);
+  }, []);
 
   const buildExtensions = (isDark: boolean): Extension[] => [
     vim(),
@@ -187,12 +201,18 @@ export function HttpEditor({
       setValue: (next) => {
         const view = viewRef.current;
         if (!view) return;
+        if (view.state.doc.toString() === next) return;
+        // Preserve the cursor position by clamping it into the new doc
+        // length, so a save (which re-pushes the same content) doesn't
+        // jump the user to position 0.
+        const head = Math.min(view.state.selection.main.head, next.length);
         view.dispatch({
           changes: {
             from: 0,
             to: view.state.doc.length,
             insert: next,
           },
+          selection: { anchor: head, head },
         });
       },
       getValue: () => viewRef.current?.state.doc.toString() ?? "",

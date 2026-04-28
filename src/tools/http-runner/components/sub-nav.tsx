@@ -91,14 +91,22 @@ export function HttpRunnerSubNav() {
           <Button
             variant="ghost"
             size="sm"
-            className="h-7 gap-1 px-2 text-xs"
+            className={cn(
+              "h-7 gap-1 px-2 text-xs",
+              state.logs.some((l) => l.level === "error") &&
+                "text-destructive",
+            )}
             title="Logs (Cmd+L)"
           >
             <ScrollText className="size-3.5" />
             Logs
             {state.logs.length > 0 && (
               <Badge
-                variant="secondary"
+                variant={
+                  state.logs.some((l) => l.level === "error")
+                    ? "destructive"
+                    : "secondary"
+                }
                 className="ml-1 h-4 px-1 text-[10px]"
               >
                 {state.logs.length}

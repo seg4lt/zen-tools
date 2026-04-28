@@ -4,11 +4,12 @@ import { ToolPill } from "./tool-pill";
 import { WorkingDirPicker } from "./working-dir-picker";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Separator } from "@/components/ui/separator";
+import { isMac } from "@/lib/keyboard";
 
 /**
- * Top bar with traffic-light gap on the left, segmented tool pills, and
- * action group on the right (working dir + theme toggle). Drag region
- * covers everything but interactive children.
+ * Top bar with traffic-light gap on the left (macOS only), segmented
+ * tool pills, and action group on the right (working dir + theme
+ * toggle). Drag region covers everything but interactive children.
  */
 export function TitleBar() {
   const { location } = useRouterState();
@@ -21,8 +22,9 @@ export function TitleBar() {
       data-tauri-drag-region
       className="relative flex h-10 shrink-0 items-center gap-2 border-b bg-card/80 px-3 backdrop-blur-sm"
     >
-      {/* macOS traffic-light gap (we use overlay style; OS draws here) */}
-      <div className="w-16 shrink-0" data-tauri-drag-region />
+      {/* macOS overlay style draws traffic lights in this region. On
+          other platforms there's nothing here so reclaim the space. */}
+      {isMac && <div className="w-16 shrink-0" data-tauri-drag-region />}
 
       {/* Segmented tool pills */}
       <div className="flex h-7 items-center gap-1 rounded-md bg-muted/50 p-0.5">

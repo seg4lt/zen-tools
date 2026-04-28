@@ -1,6 +1,12 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Play, GitBranch, RefreshCw, Save } from "lucide-react";
+import {
+  GitBranch,
+  Loader2,
+  Play,
+  RefreshCw,
+  Save,
+} from "lucide-react";
 import { DragHandle } from "@/components/drag-handle";
 import { Button } from "@/components/ui/button";
 import { HttpFileTree } from "./components/http-file-tree";
@@ -41,6 +47,7 @@ export function RequestsView() {
   const queryClient = useQueryClient();
   const editorRef = useRef<HttpEditorHandle>(null);
   const [editorValue, setEditorValue] = useState("");
+  const [isDirty, setIsDirty] = useState(false);
 
   // ── pane layout helpers ────────────────────────────────────────────
   const toggleCollapse = (key: PaneKey) =>
@@ -131,6 +138,7 @@ export function RequestsView() {
     if (rawContent !== undefined && rawContent !== null) {
       setEditorValue(rawContent);
       editorRef.current?.setValue(rawContent);
+      setIsDirty(false);
     }
   }, [rawContent]);
 
@@ -150,11 +158,10 @@ export function RequestsView() {
       try {
         await tauri.writeFileContent(state.selectedFilePath, value);
         const fresh = await tauri.reloadHttpFile(state.selectedFilePath);
-        dispatch({
-          type: "selectFile",
-          path: fresh.file.path,
-          file: fresh.file,
-        });
+        // Use updateParsedFile (not selectFile) so the editor cursor +
+        // selected request are preserved across the save.
+        dispatch({ type: "updateParsedFile", file: fresh.file });
+        setIsDirty(false);
         dispatch({ type: "log", message: `Saved ${fresh.file.filename}` });
       } catch (err) {
         dispatch({
@@ -173,6 +180,13 @@ export function RequestsView() {
       requestId: string,
       withDeps: boolean,
     ): Promise<void> => {
+      // Optimistically flip the running flag + run-mode so the right
+      // button shows a spinner immediately, before any event arrives.
+      dispatch({
+        type: "setRunning",
+        running: true,
+        mode: withDeps ? "withDeps" : "single",
+      });
       try {
         if (withDeps) {
           await tauri.runRequestWithDeps(filePath, requestId);
@@ -180,6 +194,7 @@ export function RequestsView() {
           await tauri.runRequest(filePath, requestId);
         }
       } catch (err) {
+        dispatch({ type: "setRunning", running: false });
         dispatch({
           type: "log",
           level: "error",
@@ -283,9 +298,16 @@ export function RequestsView() {
     </PaneFrame>
   );
 
+  const runningSingle = state.isRunning && state.runMode === "single";
+  const runningDeps = state.isRunning && state.runMode === "withDeps";
+
   const editorPane = (
     <PaneFrame
-      title={state.selectedFile?.filename ?? "Editor"}
+      title={
+        state.selectedFile
+          ? `${state.selectedFile.filename}${isDirty ? " ●" : ""}`
+          : "Editor"
+      }
       state={paneStates.editor}
       hidden={isMaximized && maxKey !== "editor"}
       onToggleCollapse={() => toggleCollapse("editor")}
@@ -303,7 +325,12 @@ export function RequestsView() {
               }
               title="Run (Cmd+Enter)"
             >
-              <Play className="size-3" /> Run
+              {runningSingle ? (
+                <Loader2 className="size-3 animate-spin" />
+              ) : (
+                <Play className="size-3" />
+              )}{" "}
+              Run
             </Button>
             <Button
               variant="ghost"
@@ -316,7 +343,12 @@ export function RequestsView() {
               }
               title="Run with dependencies (Cmd+Shift+Enter)"
             >
-              <GitBranch className="size-3" /> Deps
+              {runningDeps ? (
+                <Loader2 className="size-3 animate-spin" />
+              ) : (
+                <GitBranch className="size-3" />
+              )}{" "}
+              Deps
             </Button>
             <Button
               variant="ghost"
@@ -325,9 +357,11 @@ export function RequestsView() {
               onClick={() =>
                 editorRef.current && handleSave(editorRef.current.getValue())
               }
-              title="Save (Cmd+S)"
+              title={isDirty ? "Save (Cmd+S) — unsaved changes" : "Save (Cmd+S)"}
             >
-              <Save className="size-3" />
+              <Save
+                className={isDirty ? "size-3 text-primary" : "size-3"}
+              />
             </Button>
           </>
         ) : null
@@ -338,6 +372,7 @@ export function RequestsView() {
           imperativeRef={editorRef}
           value={editorValue}
           onSave={handleSave}
+          onChange={(next) => setIsDirty(next !== editorValue)}
           onRunLine={(line) => handleRunLine(line)}
           onRunLineWithDeps={(line) => handleRunLine(line, true)}
         />

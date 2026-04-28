@@ -67,7 +67,8 @@ export function EnvSelector() {
     void queryClient.invalidateQueries({ queryKey: ["extracted-vars"] });
   };
 
-  const label = state.activeEnv ?? "no env";
+  const label = state.activeEnv ?? (envs.length > 0 ? "select env" : "no env");
+  const hasEnv = state.activeEnv != null;
 
   return (
     <Popover open={open} onOpenChange={setOpen}>
@@ -78,8 +79,15 @@ export function EnvSelector() {
           className="h-7 gap-1.5 px-2 text-xs"
           title="Pick environment"
         >
-          <Globe className="size-3.5" />
-          <Badge variant="secondary" className="px-1 text-[10px]">
+          <Globe
+            className={
+              hasEnv ? "size-3.5 text-primary" : "size-3.5 text-muted-foreground"
+            }
+          />
+          <Badge
+            variant={hasEnv ? "default" : "secondary"}
+            className="px-1 text-[10px]"
+          >
             {label}
           </Badge>
           <ChevronDown className="size-3 opacity-60" />
@@ -87,9 +95,17 @@ export function EnvSelector() {
       </PopoverTrigger>
       <PopoverContent className="w-56 p-0" align="end">
         <Command>
-          <CommandInput placeholder="Search environments…" className="h-8" />
+          <CommandInput
+            autoFocus
+            placeholder="Search environments…"
+            className="h-8"
+          />
           <CommandList>
-            <CommandEmpty>No environments found.</CommandEmpty>
+            <CommandEmpty>
+              {envs.length === 0
+                ? "No env file in this directory."
+                : "No matching environment."}
+            </CommandEmpty>
             <CommandGroup>
               {envs.map((env) => (
                 <CommandItem

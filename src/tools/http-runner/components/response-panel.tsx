@@ -28,13 +28,20 @@ export function ResponsePanel() {
   const userPickedRef = useRef(false);
   const lastChainSize = useRef(0);
 
+  // Selecting a different request resets the user-picked flag and the
+  // chain memory, so the auto-switching logic below treats the new
+  // request as a clean slate.
+  useEffect(() => {
+    userPickedRef.current = false;
+    lastChainSize.current = 0;
+    setTab("body");
+  }, [id]);
+
   // Auto-switch to the chain tab when a chain (>1 step) appears, so the
   // user sees the dependency execution play out instead of staring at
-  // the body tab. Resets the "user picked" flag whenever a fresh chain
-  // starts so subsequent auto-switches still happen.
+  // the body tab.
   useEffect(() => {
     if (chainSteps.length > 1 && lastChainSize.current === 0) {
-      userPickedRef.current = false;
       setTab("chain");
     }
     lastChainSize.current = chainSteps.length;
