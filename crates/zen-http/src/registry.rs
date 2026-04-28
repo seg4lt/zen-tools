@@ -28,7 +28,10 @@ impl FileRegistry {
 
     /// Resolve a path (relative or absolute) against `base_file`'s parent
     /// directory and canonicalise it.
-    pub fn resolve_path(base_file: &Path, relative_path: &str) -> Result<PathBuf, FileRegistryError> {
+    pub fn resolve_path(
+        base_file: &Path,
+        relative_path: &str,
+    ) -> Result<PathBuf, FileRegistryError> {
         let base_dir = base_file
             .parent()
             .ok_or_else(|| FileRegistryError::InvalidPath(base_file.display().to_string()))?;
@@ -48,12 +51,11 @@ impl FileRegistry {
             return Ok(file);
         }
 
-        let content = std::fs::read_to_string(&canonical).map_err(|source| {
-            FileRegistryError::ReadError {
+        let content =
+            std::fs::read_to_string(&canonical).map_err(|source| FileRegistryError::ReadError {
                 path: canonical.clone(),
                 source,
-            }
-        })?;
+            })?;
 
         let mut parsed = parse_http_file(&canonical.display().to_string(), &content);
         let source = canonical.display().to_string();

@@ -14,8 +14,7 @@ use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::Mutex;
 use tracing::debug;
 use zen_http::{
-    has_cross_file_dependencies, resolve_execution_order, CrossFileDependencyResolver,
-    HttpExecutor,
+    has_cross_file_dependencies, resolve_execution_order, CrossFileDependencyResolver, HttpExecutor,
 };
 use zen_types::prelude::*;
 
@@ -98,13 +97,7 @@ pub async fn run_request_with_deps(
     };
 
     spawn_chain_run(
-        app_handle,
-        executor,
-        env_vars,
-        extracted,
-        local_vars,
-        cookies,
-        chain,
+        app_handle, executor, env_vars, extracted, local_vars, cookies, chain,
     );
     Ok(())
 }
@@ -175,9 +168,7 @@ async fn prepare_run(
         .iter()
         .find(|r| r.stable_id() == request_id || r.id == request_id)
         .cloned()
-        .ok_or_else(|| {
-            AppError::BadRequest(format!("request not found: {request_id}"))
-        })?;
+        .ok_or_else(|| AppError::BadRequest(format!("request not found: {request_id}")))?;
     Ok(RunContext {
         executor: s.executor.clone(),
         env_vars: s.current_env_vars(),
@@ -218,7 +209,10 @@ async fn build_chain(
     }
 
     // Local-only deps.
-    let order = resolve_execution_order(&arc_file.requests, &target.name.clone().unwrap_or_else(|| target.id.clone()))?;
+    let order = resolve_execution_order(
+        &arc_file.requests,
+        &target.name.clone().unwrap_or_else(|| target.id.clone()),
+    )?;
     let mut chain = Vec::with_capacity(order.len());
     for name in order {
         if let Some(req) = arc_file

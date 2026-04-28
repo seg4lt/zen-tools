@@ -1,0 +1,87 @@
+@baseUrl = {{host}}/api
+
+### Health check
+# @name Health
+# @assert status = 200
+# @assert body contains "OK"
+# @assert response_time < 100
+GET {{host}}/health
+
+###
+
+### Get all users (with cross-file auth dependency)
+# @name GetUsers
+# @depends auth.http:Login
+# @assert status = 200
+# @assert response_time < 500
+GET {{baseUrl}}/users
+Authorization: Bearer {{token}}
+
+###
+
+### Get user by ID (with cross-file auth)
+# @name GetUserById
+# @depends auth.http:Login
+GET {{baseUrl}}/users/1
+Authorization: Bearer {{token}}
+
+###
+
+### Create a new user
+# @name CreateUser
+POST {{baseUrl}}/users
+Content-Type: application/json
+
+{
+  "name": "New User",
+  "email": "newuser@example.com"
+}
+
+###
+
+### Update user
+# @name UpdateUser
+PUT {{baseUrl}}/users/1
+Content-Type: application/json
+
+{
+  "name": "Updated Name",
+  "email": "updated@example.com"
+}
+
+###
+
+### Delete user
+# @name DeleteUser
+DELETE {{baseUrl}}/users/2
+
+###
+
+### Slow response (for perf testing latency distribution)
+# @name SlowResponse
+GET {{host}}/api/slow?ms=100
+
+###
+
+### Variable delay slow response
+# @name SlowVariable
+GET {{host}}/api/slow?ms=200
+
+###
+
+### Random delay (1-2000ms) for distribution testing
+# @name RandomDelay
+GET {{host}}/api/random-delay
+
+###
+
+### Slow 5 second call (simulates slow auth/setup)
+# @name SlowSetup
+GET {{host}}/api/slow?ms=5000
+
+###
+
+### Fast API that depends on slow setup
+# @name FastAfterSlowSetup
+# @depends api.http:SlowSetup
+GET {{host}}/health

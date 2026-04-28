@@ -78,7 +78,13 @@ pub fn export_to_files(
 ) -> Result<(PathBuf, PathBuf), PerfError> {
     let safe_name: String = test_name
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
 

@@ -117,7 +117,10 @@ impl AppState {
 
     /// Cookies for the current env (cloned).
     pub fn current_cookies(&self) -> Vec<(String, String)> {
-        self.cookies.get(&self.env_key()).cloned().unwrap_or_default()
+        self.cookies
+            .get(&self.env_key())
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// Persist new extracted vars from a request chain.

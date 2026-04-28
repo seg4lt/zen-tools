@@ -109,7 +109,9 @@ impl PerfRunner {
                 )
                 .await
             }
-            TestType::Concurrent { users, duration, .. } => {
+            TestType::Concurrent {
+                users, duration, ..
+            } => {
                 self.run_concurrent(
                     &request,
                     &assertions,
@@ -167,7 +169,9 @@ impl PerfRunner {
                 )
                 .await
             }
-            TestType::Soak { users, duration, .. } => {
+            TestType::Soak {
+                users, duration, ..
+            } => {
                 self.run_concurrent(
                     &request,
                     &assertions,

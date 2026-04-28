@@ -1,0 +1,77 @@
+# Performance Test Configuration
+# Variables like {{users}}, {{duration}}, {{rps}} are substituted from perf.variable.yaml
+
+tests:
+  # Single request baseline test
+  - name: "Login Baseline"
+    request: "auth.http:Login"
+    type: atomic
+
+  # Fixed concurrent users for a duration (uses variables)
+  - name: "API Load Test"
+    request: "api.http:GetUsers"
+    type: concurrent
+    users: {{load_users}}
+    duration: {{load_duration}}
+
+  # Rate-limited load test
+  - name: "API Rate Limited"
+    request: "api.http:GetUsers"
+    type: concurrent
+    users: {{load_users}}
+    duration: {{load_duration}}
+    rps: {{load_rps}}
+
+  # Light load test
+  - name: "API Light Load"
+    request: "api.http:GetUsers"
+    type: concurrent
+    users: {{light_users}}
+    duration: {{light_duration}}
+    rps: {{light_rps}}
+
+  # Stress test - gradually increase users
+  - name: "API Stress Test"
+    request: "api.http:GetUsers"
+    type: stress
+    start_users: 1
+    end_users: {{stress_users}}
+    ramp_up: 10s
+    duration: {{stress_duration}}
+
+  # Spike test - sudden traffic burst
+  - name: "Spike Test"
+    request: "auth.http:Login"
+    type: spike
+    base_users: 5
+    spike_users: {{spike_users}}
+    spike_duration: 5s
+    total_duration: {{spike_duration}}
+
+  # Soak test - long-running steady load
+  - name: "Soak Test"
+    request: "api.http:Health"
+    type: soak
+    users: {{soak_users}}
+    duration: {{soak_duration}}
+
+  # Slow endpoint test
+  - name: "Slow API Test"
+    request: "api.http:SlowResponse"
+    type: concurrent
+    users: {{load_users}}
+    duration: 15s
+
+  # Random delay test - shows latency distribution
+  - name: "Random Delay Test"
+    request: "api.http:RandomDelay"
+    type: concurrent
+    users: {{light_users}}
+    duration: {{load_duration}}
+
+  # Dependency test - 5s setup runs ONCE, then fast requests
+  - name: "Dep Test (5s setup)"
+    request: "api.http:FastAfterSlowSetup"
+    type: concurrent
+    users: {{light_users}}
+    duration: 10s

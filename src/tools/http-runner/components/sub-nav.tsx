@@ -1,4 +1,5 @@
-import { Link, useRouterState } from "@tanstack/react-router";
+import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
+import { useCallback } from "react";
 import { ScrollText, Variable, Zap, BarChart3 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -7,6 +8,7 @@ import { useHttpRunner } from "../store/http-runner-store";
 import { EnvSelector } from "./env-selector";
 import { VariableViewer } from "./variable-viewer";
 import { LogsPanel } from "./logs-panel";
+import { useShortcut } from "@/lib/keyboard";
 
 const SUBVIEWS = [
   {
@@ -34,6 +36,21 @@ export function HttpRunnerSubNav() {
     ? "performance"
     : "requests";
   const { state } = useHttpRunner();
+  const navigate = useNavigate();
+
+  // Mod+1 / Mod+2 toggle the sub-views.
+  useShortcut(
+    "mod+1",
+    useCallback(() => {
+      void navigate({ to: "/http-runner/requests" });
+    }, [navigate]),
+  );
+  useShortcut(
+    "mod+2",
+    useCallback(() => {
+      void navigate({ to: "/http-runner/performance" });
+    }, [navigate]),
+  );
 
   return (
     <div className="flex h-9 shrink-0 items-center gap-2 border-b bg-card/50 px-3">

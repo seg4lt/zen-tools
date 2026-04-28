@@ -16,9 +16,7 @@ use zen_http::{
     FileRegistry, HttpExecutor,
 };
 use zen_parser::{parse_request_ref, PerfConfig, PerfTest};
-use zen_perf::{
-    metrics::MetricsSnapshot, Assertion, PerfRunner, PerfUpdate, StopHandle,
-};
+use zen_perf::{metrics::MetricsSnapshot, Assertion, PerfRunner, PerfUpdate, StopHandle};
 use zen_types::prelude::*;
 
 const PERF_UPDATE_EVENT: &str = "perf:update";
@@ -101,9 +99,7 @@ async fn prepare_run(
         .iter()
         .find(|r| r.name.as_deref() == Some(name.as_str()))
         .cloned()
-        .ok_or_else(|| {
-            AppError::BadRequest(format!("request '{name}' not found in {file_ref}"))
-        })?;
+        .ok_or_else(|| AppError::BadRequest(format!("request '{name}' not found in {file_ref}")))?;
 
     // Build the chain of dependencies (without executing them yet).
     let chain: Vec<HttpRequest> = if target.depends_on.is_empty() {
@@ -115,10 +111,8 @@ async fn prepare_run(
         full.pop();
         full
     } else {
-        let names = resolve_execution_order(
-            &arc_file.requests,
-            &target.name.clone().unwrap_or_default(),
-        )?;
+        let names =
+            resolve_execution_order(&arc_file.requests, &target.name.clone().unwrap_or_default())?;
         names
             .into_iter()
             .take_while(|name| Some(name.as_str()) != target.name.as_deref())
@@ -278,7 +272,13 @@ pub async fn export_perf_results(
 
     let safe_name: String = test_name
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
     let summary_path = dir.join(format!("{safe_name}_{timestamp}_summary.csv"));

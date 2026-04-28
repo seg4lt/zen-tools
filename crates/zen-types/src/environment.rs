@@ -67,15 +67,7 @@ impl EnvironmentFile {
 
         let environments = raw
             .into_iter()
-            .map(|(name, variables)| {
-                (
-                    name.clone(),
-                    Environment {
-                        name,
-                        variables,
-                    },
-                )
-            })
+            .map(|(name, variables)| (name.clone(), Environment { name, variables }))
             .collect();
 
         Ok(Self { path, environments })
@@ -94,9 +86,15 @@ mod tests {
         }"#;
         let env = EnvironmentFile::from_json(PathBuf::from("env.json"), content).unwrap();
         let names = env.env_names();
-        assert_eq!(names, vec!["development".to_string(), "production".to_string()]);
         assert_eq!(
-            env.get("development").unwrap().get_string("host").as_deref(),
+            names,
+            vec!["development".to_string(), "production".to_string()]
+        );
+        assert_eq!(
+            env.get("development")
+                .unwrap()
+                .get_string("host")
+                .as_deref(),
             Some("http://localhost:3000")
         );
     }

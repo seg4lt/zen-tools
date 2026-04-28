@@ -183,7 +183,9 @@ impl HttpRequest {
 
     /// Display name for UIs — falls back to a short slice of the UUID.
     pub fn display_name(&self) -> &str {
-        self.name.as_deref().unwrap_or(&self.id[..8.min(self.id.len())])
+        self.name
+            .as_deref()
+            .unwrap_or(&self.id[..8.min(self.id.len())])
     }
 
     /// URL minus scheme + host (best-effort).

@@ -113,7 +113,9 @@ impl Assertion {
             return Some(Assertion::BodyContains(caps.get(1)?.as_str().to_string()));
         }
         if let Some(caps) = BODY_NOT_CONTAINS.captures(s) {
-            return Some(Assertion::BodyNotContains(caps.get(1)?.as_str().to_string()));
+            return Some(Assertion::BodyNotContains(
+                caps.get(1)?.as_str().to_string(),
+            ));
         }
         if let Some(caps) = RESPONSE_TIME.captures(s) {
             let ms: u64 = caps.get(1)?.as_str().parse().ok()?;
@@ -217,8 +219,8 @@ impl Assertion {
                 }
             }
             Assertion::JsonPathCompare { path, op, value } => {
-                let actual = extract_json_path(&response.body, path)
-                    .and_then(|s| s.parse::<f64>().ok());
+                let actual =
+                    extract_json_path(&response.body, path).and_then(|s| s.parse::<f64>().ok());
                 let passed = actual.is_some_and(|a| op.evaluate(a, *value));
                 let op_str = match op {
                     CompareOp::Lt => "<",
@@ -336,12 +338,16 @@ mod tests {
     #[test]
     fn evaluates_status_and_body() {
         let r = mock_response(200, r#"{"users":[]}"#);
-        assert!(Assertion::StatusEquals(200)
-            .evaluate(&r, Duration::from_millis(50))
-            .passed);
-        assert!(Assertion::BodyContains("users".into())
-            .evaluate(&r, Duration::from_millis(50))
-            .passed);
+        assert!(
+            Assertion::StatusEquals(200)
+                .evaluate(&r, Duration::from_millis(50))
+                .passed
+        );
+        assert!(
+            Assertion::BodyContains("users".into())
+                .evaluate(&r, Duration::from_millis(50))
+                .passed
+        );
     }
 
     #[test]

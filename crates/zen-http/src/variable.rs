@@ -205,8 +205,12 @@ mod tests {
     #[test]
     fn substitutes_basic_placeholder() {
         let env = map(&[("host", "localhost:8080"), ("token", "abc123")]);
-        let result =
-            substitute_variables("http://{{host}}/api", &HashMap::default(), &HashMap::default(), &env);
+        let result = substitute_variables(
+            "http://{{host}}/api",
+            &HashMap::default(),
+            &HashMap::default(),
+            &env,
+        );
         assert_eq!(result, "http://localhost:8080/api");
     }
 
@@ -215,7 +219,10 @@ mod tests {
         let extracted = map(&[("token", "extracted")]);
         let local = map(&[("token", "local")]);
         let env = map(&[("token", "env")]);
-        assert_eq!(substitute_variables("{{token}}", &extracted, &local, &env), "extracted");
+        assert_eq!(
+            substitute_variables("{{token}}", &extracted, &local, &env),
+            "extracted"
+        );
         assert_eq!(
             substitute_variables("{{token}}", &HashMap::default(), &local, &env),
             "local"

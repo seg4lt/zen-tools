@@ -1,0 +1,149 @@
+@baseUrl = {{host}}/api
+
+### ========================================
+### JSON Extraction Examples
+### ========================================
+
+### Login - extract token from JSON response
+# @name Login
+# @extract token = $.accessToken
+# @extract userId = userId
+POST {{baseUrl}}/auth/login
+Content-Type: application/json
+
+{
+  "email": "test@example.com",
+  "password": "password123"
+}
+
+###
+
+### ========================================
+### Header Extraction Examples
+### ========================================
+
+### Get headers info - extract values from response headers
+# @name GetHeaders
+# @extract requestId = $header.X-Request-Id
+# @extract rateLimit = $header.X-RateLimit-Limit
+# @extract remaining = $header.X-RateLimit-Remaining
+# @extract serverVersion = $header.X-Server-Version
+GET {{baseUrl}}/headers
+
+###
+
+### Use extracted header values
+# @name UseHeaderVars
+# @depends GetHeaders
+POST {{baseUrl}}/echo
+Content-Type: application/json
+
+{
+  "requestId": "{{requestId}}",
+  "rateLimit": "{{rateLimit}}",
+  "remaining": "{{remaining}}",
+  "serverVersion": "{{serverVersion}}"
+}
+
+###
+
+### ========================================
+### Form/URL-encoded Extraction Examples
+### ========================================
+
+### OAuth callback - extract from form-urlencoded response
+# @name OAuthCallback
+# @extract authCode = $form.code
+# @extract state = $form.state
+# @extract tokenType = $form.token_type
+GET {{baseUrl}}/oauth/callback
+
+###
+
+### Use extracted form values
+# @name UseFormVars
+# @depends OAuthCallback
+POST {{baseUrl}}/echo
+Content-Type: application/json
+
+{
+  "authCode": "{{authCode}}",
+  "state": "{{state}}",
+  "tokenType": "{{tokenType}}"
+}
+
+###
+
+### ========================================
+### Cookie Session Examples
+### (Cookies are automatically passed!)
+### ========================================
+
+### Start a session - server sets Set-Cookie header
+# @name StartSession
+# @extract sessionId = $.sessionId
+POST {{baseUrl}}/session/start
+
+###
+
+### Check session - cookie is automatically included
+# @name CheckSession
+# @depends StartSession
+GET {{baseUrl}}/session/check
+
+###
+
+### Echo request - shows what cookies were received
+# @name EchoCookies
+# @depends StartSession
+POST {{baseUrl}}/echo
+Content-Type: application/json
+
+{
+  "message": "Check the response to see cookies sent!"
+}
+
+###
+
+### ========================================
+### Combined Flow Example
+### ========================================
+
+### Full auth flow with extractions
+# @name FullAuthFlow
+# @extract token = $.accessToken
+# @extract userId = userId
+POST {{baseUrl}}/auth/login
+Content-Type: application/json
+
+{
+  "email": "demo@example.com",
+  "password": "password123"
+}
+
+###
+
+### Use token and get rate limit info
+# @name AuthenticatedRequest
+# @depends FullAuthFlow
+# @extract remaining = $header.X-RateLimit-Remaining
+GET {{baseUrl}}/headers
+Authorization: Bearer {{token}}
+
+###
+
+### Final echo showing everything
+# @name FinalEcho
+# @depends FullAuthFlow
+# @depends AuthenticatedRequest
+POST {{baseUrl}}/echo
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "userId": "{{userId}}",
+  "rateLimitRemaining": "{{remaining}}",
+  "note": "This request includes auth token, cookies, and extracted vars!"
+}
+
+###

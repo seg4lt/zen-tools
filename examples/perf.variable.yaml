@@ -1,0 +1,26 @@
+# Local Development Overrides
+#
+# These override the root perf.variable.yaml for quick local testing.
+# Hierarchy: root/perf.variable.yaml -> examples/perf.variable.yaml (this file wins)
+
+# Load test - lighter for local dev
+load_users: 3
+load_duration: 10s
+load_rps: 20
+
+# Light load - even lighter
+light_users: 2
+light_duration: 5s
+light_rps: 5
+
+# Stress test - much lighter locally
+stress_users: 15
+stress_duration: 20s
+
+# Spike test - reduced spike
+spike_users: 20
+spike_duration: 10s
+
+# Soak test - quick soak for dev
+soak_users: 3
+soak_duration: 30s

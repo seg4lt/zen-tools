@@ -161,10 +161,9 @@ impl HttpExecutor {
                     ),
                 }
             }
-            Err(e) => RequestResult::error(
-                request.stable_id(),
-                format!("request to {url} failed: {e}"),
-            ),
+            Err(e) => {
+                RequestResult::error(request.stable_id(), format!("request to {url} failed: {e}"))
+            }
         }
     }
 }

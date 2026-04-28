@@ -201,7 +201,8 @@ mod tests {
 
     #[test]
     fn parses_name_and_depends() {
-        let content = "# @name GetUsers\n# @depends Login\nGET http://x/users\nAuthorization: Bearer {{t}}\n";
+        let content =
+            "# @name GetUsers\n# @depends Login\nGET http://x/users\nAuthorization: Bearer {{t}}\n";
         let file = parse_http_file("test.http", content);
         assert_eq!(file.requests[0].name.as_deref(), Some("GetUsers"));
         assert_eq!(

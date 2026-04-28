@@ -63,7 +63,9 @@ impl DependencyResolver {
 
         for req in requests {
             let id = req.name.clone().unwrap_or_else(|| req.id.clone());
-            let Some(&from) = nodes.get(&id) else { continue };
+            let Some(&from) = nodes.get(&id) else {
+                continue;
+            };
             for dep in &req.depends_on {
                 if let DependencyRef::Local { name } = dep {
                     if let Some(&to) = nodes.get(name) {
@@ -181,13 +183,12 @@ impl<'a> CrossFileDependencyResolver<'a> {
         let target_id = self.add_request(target_request)?;
         self.resolve_recursive(&target_id)?;
 
-        let &target_node = self
-            .nodes
-            .get(&target_id)
-            .ok_or_else(|| CrossFileDependencyError::RequestNotFound {
+        let &target_node = self.nodes.get(&target_id).ok_or_else(|| {
+            CrossFileDependencyError::RequestNotFound {
                 file: target_id.file_path.clone(),
                 request: target_id.request_name.clone(),
-            })?;
+            }
+        })?;
 
         let mut ancestors = self.ancestors_of(target_node);
         let mut sub: DiGraph<QualifiedRequestId, ()> = DiGraph::new();
@@ -263,28 +264,27 @@ impl<'a> CrossFileDependencyResolver<'a> {
         dep: &DependencyRef,
     ) -> Result<QualifiedRequestId, CrossFileDependencyError> {
         match dep {
-            DependencyRef::Local { name } => {
-                Ok(QualifiedRequestId::new(&from.file_path, name))
-            }
+            DependencyRef::Local { name } => Ok(QualifiedRequestId::new(&from.file_path, name)),
             DependencyRef::CrossFile {
                 file_path,
                 request_name,
             } => {
                 let base = Path::new(&from.file_path);
-                let resolved = FileRegistry::resolve_path(base, file_path).map_err(|e| match e {
-                    FileRegistryError::FileNotFound(_) => {
-                        CrossFileDependencyError::FileNotFound(file_path.clone())
-                    }
-                    FileRegistryError::ReadError { path, source } => {
-                        CrossFileDependencyError::FileReadError(
-                            path.display().to_string(),
-                            source.to_string(),
-                        )
-                    }
-                    FileRegistryError::InvalidPath(p) => {
-                        CrossFileDependencyError::FileNotFound(p)
-                    }
-                })?;
+                let resolved =
+                    FileRegistry::resolve_path(base, file_path).map_err(|e| match e {
+                        FileRegistryError::FileNotFound(_) => {
+                            CrossFileDependencyError::FileNotFound(file_path.clone())
+                        }
+                        FileRegistryError::ReadError { path, source } => {
+                            CrossFileDependencyError::FileReadError(
+                                path.display().to_string(),
+                                source.to_string(),
+                            )
+                        }
+                        FileRegistryError::InvalidPath(p) => {
+                            CrossFileDependencyError::FileNotFound(p)
+                        }
+                    })?;
                 self.registry.get_or_load(&resolved).map_err(|e| match e {
                     FileRegistryError::FileNotFound(p) => {
                         CrossFileDependencyError::FileNotFound(p.display().to_string())
@@ -295,9 +295,7 @@ impl<'a> CrossFileDependencyResolver<'a> {
                             source.to_string(),
                         )
                     }
-                    FileRegistryError::InvalidPath(p) => {
-                        CrossFileDependencyError::FileNotFound(p)
-                    }
+                    FileRegistryError::InvalidPath(p) => CrossFileDependencyError::FileNotFound(p),
                 })?;
                 Ok(QualifiedRequestId::new(
                     resolved.display().to_string(),

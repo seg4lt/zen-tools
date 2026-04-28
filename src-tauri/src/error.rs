@@ -3,9 +3,7 @@
 
 use serde::{Serialize, Serializer};
 use thiserror::Error;
-use zen_http::{
-    CrossFileDependencyError, DependencyError, FileRegistryError, HttpError,
-};
+use zen_http::{CrossFileDependencyError, DependencyError, FileRegistryError, HttpError};
 use zen_parser::ParserError;
 use zen_perf::PerfError;
 

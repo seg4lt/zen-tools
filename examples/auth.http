@@ -1,0 +1,44 @@
+@baseUrl = {{host}}/api
+
+### Login
+# @name Login
+# @extract token = $.accessToken
+# @assert status = 200
+# @assert body contains "accessToken"
+# @assert response_time < 1000
+POST {{baseUrl}}/auth/login
+Content-Type: application/json
+
+{
+  "email": "{{username}}",
+  "password": "password123"
+}
+
+###
+
+### Get current user profile
+# @name GetProfile
+# @depends Login
+GET {{baseUrl}}/users/me
+Authorization: Bearer {{token}}
+
+###
+
+### Update profile
+# @name UpdateProfile
+# @depends Login
+PUT {{baseUrl}}/users/me
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "name": "Updated Name"
+}
+
+###
+
+### Logout
+# @name Logout
+# @depends Login
+POST {{baseUrl}}/auth/logout
+Authorization: Bearer {{token}}

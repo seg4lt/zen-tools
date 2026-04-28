@@ -77,10 +77,7 @@ mod tests {
     fn substitutes_simple_placeholders() {
         let mut vars = PerfVariables::new();
         vars.insert("users".into(), serde_yaml::Value::Number(10.into()));
-        vars.insert(
-            "name".into(),
-            serde_yaml::Value::String("hello".into()),
-        );
+        vars.insert("name".into(), serde_yaml::Value::String("hello".into()));
         let out = substitute_perf_variables("name={{name}} users={{users}}", &vars);
         assert_eq!(out, "name=hello users=10");
     }
