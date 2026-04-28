@@ -144,6 +144,14 @@ export const tauri = {
   loadEnvFile: (path: string) =>
     invoke<string[]>("load_env_file", { path }),
 
+  // execute
+  runRequest: (filePath: string, requestId: string) =>
+    invoke<void>("run_request", { filePath, requestId }),
+  runRequestWithDeps: (filePath: string, requestId: string) =>
+    invoke<void>("run_request_with_deps", { filePath, requestId }),
+  buildCurlCommand: (filePath: string, requestId: string) =>
+    invoke<string>("build_curl_command", { filePath, requestId }),
+
   // misc
   openInEditor: (path: string) => invoke<void>("open_in_editor", { path }),
 };

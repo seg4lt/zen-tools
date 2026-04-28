@@ -1,5 +1,6 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Play, GitBranch } from "lucide-react";
 import { DragHandle } from "@/components/drag-handle";
 import { Button } from "@/components/ui/button";
 import { HttpFileTree } from "./components/http-file-tree";
@@ -8,36 +9,59 @@ import {
   HttpEditor,
   type HttpEditorHandle,
 } from "./components/http-editor";
-import { tauri } from "./lib/tauri";
+import { ResponsePanel } from "./components/response-panel";
+import { onRequestChain, onRequestResult, tauri } from "./lib/tauri";
 import { stableId, useHttpRunner } from "./store/http-runner-store";
 
 /**
- * Three-pane layout: file tree | request list | editor.
- * Response panel and run plumbing are added in subsequent commits.
+ * Three-pane layout: file tree | request list | (editor + response panel
+ * stacked vertically). Streams `request:result` and `request:chain` events
+ * from the Tauri backend into the reducer.
  */
 export function RequestsView() {
   const { state, dispatch } = useHttpRunner();
   const [treeWidth, setTreeWidth] = useState(220);
   const [listWidth, setListWidth] = useState(280);
+  const [responseHeight, setResponseHeight] = useState(280);
   const queryClient = useQueryClient();
   const editorRef = useRef<HttpEditorHandle>(null);
   const [editorValue, setEditorValue] = useState("");
 
-  // Parse on file selection.
+  // Subscribe to streaming events once.
+  useEffect(() => {
+    const unlisteners: Array<Promise<() => void>> = [
+      onRequestResult((payload) => {
+        dispatch({ type: "result", result: payload });
+        if (payload.status.type === "running") {
+          dispatch({ type: "setRunning", running: true });
+        } else if (payload.status.type !== "idle") {
+          dispatch({ type: "setRunning", running: false });
+        }
+        if (payload.logMessage) {
+          dispatch({ type: "log", message: payload.logMessage });
+        }
+      }),
+      onRequestChain((payload) => {
+        dispatch({ type: "chain", steps: payload.steps });
+      }),
+    ];
+    return () => {
+      unlisteners.forEach((p) => p.then((fn) => fn()).catch(() => {}));
+    };
+  }, [dispatch]);
+
   const { data: opened } = useQuery({
     queryKey: ["http-file", state.selectedFilePath],
     queryFn: () => tauri.openHttpFile(state.selectedFilePath!),
     enabled: state.selectedFilePath !== null,
   });
 
-  // Read the raw text on file selection so the editor shows the full source.
   const { data: rawContent } = useQuery({
     queryKey: ["http-file-content", state.selectedFilePath],
     queryFn: () => tauri.readFileContent(state.selectedFilePath!),
     enabled: state.selectedFilePath !== null,
   });
 
-  // Sync the parsed file into the store.
   useEffect(() => {
     if (opened && opened.file.path !== state.selectedFile?.path) {
       dispatch({
@@ -48,7 +72,6 @@ export function RequestsView() {
     }
   }, [opened, state.selectedFile?.path, dispatch]);
 
-  // Push fresh file content into the editor.
   useEffect(() => {
     if (rawContent !== undefined && rawContent !== null) {
       setEditorValue(rawContent);
@@ -56,7 +79,6 @@ export function RequestsView() {
     }
   }, [rawContent]);
 
-  // Jump editor cursor to the line of the selected request.
   useEffect(() => {
     if (!state.selectedRequestId || !state.selectedFile) return;
     const req = state.selectedFile.requests.find(
@@ -67,59 +89,81 @@ export function RequestsView() {
     }
   }, [state.selectedRequestId, state.selectedFile]);
 
-  const handleSave = async (value: string) => {
-    if (!state.selectedFilePath) return;
-    try {
-      await tauri.writeFileContent(state.selectedFilePath, value);
-      // Re-parse so request list stays in sync.
-      const fresh = await tauri.reloadHttpFile(state.selectedFilePath);
-      dispatch({
-        type: "selectFile",
-        path: fresh.file.path,
-        file: fresh.file,
-      });
-      dispatch({ type: "log", message: `Saved ${fresh.file.filename}` });
-    } catch (err) {
-      dispatch({
-        type: "log",
-        level: "error",
-        message: `Save failed: ${(err as { message?: string }).message ?? err}`,
-      });
-    }
-  };
+  const handleSave = useCallback(
+    async (value: string) => {
+      if (!state.selectedFilePath) return;
+      try {
+        await tauri.writeFileContent(state.selectedFilePath, value);
+        const fresh = await tauri.reloadHttpFile(state.selectedFilePath);
+        dispatch({
+          type: "selectFile",
+          path: fresh.file.path,
+          file: fresh.file,
+        });
+        dispatch({ type: "log", message: `Saved ${fresh.file.filename}` });
+      } catch (err) {
+        dispatch({
+          type: "log",
+          level: "error",
+          message: `Save failed: ${(err as { message?: string }).message ?? err}`,
+        });
+      }
+    },
+    [dispatch, state.selectedFilePath],
+  );
 
-  /**
-   * Map an editor line number to the parsed request that owns it. The
-   * parser records each request's `lineNumber` (1-based) — we walk the
-   * sorted list and pick the last request whose start line is ≤ the
-   * cursor's line.
-   */
-  const handleRunLine = (line: number) => {
-    if (!state.selectedFile) return;
-    const sorted = [...state.selectedFile.requests].sort(
-      (a, b) => a.lineNumber - b.lineNumber,
-    );
-    let match: (typeof sorted)[number] | null = null;
-    for (const req of sorted) {
-      if (req.lineNumber <= line) match = req;
-      else break;
-    }
-    if (!match) {
-      dispatch({
-        type: "log",
-        level: "warn",
-        message: `No request found at line ${line}`,
-      });
-      return;
-    }
-    const id = stableId(state.selectedFile.path, match);
-    dispatch({ type: "selectRequest", id });
-    dispatch({
-      type: "log",
-      message: `Run requested: ${match.name ?? match.url}`,
-    });
-    // Phase 11 will fire the actual run command here.
-  };
+  const runRequest = useCallback(
+    async (
+      filePath: string,
+      requestId: string,
+      withDeps: boolean,
+    ): Promise<void> => {
+      try {
+        if (withDeps) {
+          await tauri.runRequestWithDeps(filePath, requestId);
+        } else {
+          await tauri.runRequest(filePath, requestId);
+        }
+      } catch (err) {
+        dispatch({
+          type: "log",
+          level: "error",
+          message: `Run failed: ${(err as { message?: string }).message ?? err}`,
+        });
+      }
+    },
+    [dispatch],
+  );
+
+  const handleRunLine = useCallback(
+    (line: number, withDeps = false) => {
+      if (!state.selectedFile) return;
+      const sorted = [...state.selectedFile.requests].sort(
+        (a, b) => a.lineNumber - b.lineNumber,
+      );
+      let match: (typeof sorted)[number] | null = null;
+      for (const req of sorted) {
+        if (req.lineNumber <= line) match = req;
+        else break;
+      }
+      if (!match) {
+        dispatch({
+          type: "log",
+          level: "warn",
+          message: `No request found at line ${line}`,
+        });
+        return;
+      }
+      const id = stableId(state.selectedFile.path, match);
+      dispatch({ type: "selectRequest", id });
+      void runRequest(state.selectedFile.path, id, withDeps);
+    },
+    [state.selectedFile, dispatch, runRequest],
+  );
+
+  const selectedRequest = state.selectedFile?.requests.find(
+    (r) => stableId(state.selectedFile!.path, r) === state.selectedRequestId,
+  );
 
   return (
     <div className="flex h-full w-full min-h-0">
@@ -196,36 +240,86 @@ export function RequestsView() {
         onResize={setListWidth}
       />
 
-      {/* Editor pane */}
+      {/* Editor + response stack */}
       <div className="flex h-full min-h-0 flex-1 flex-col">
-        <PaneHeader
-          title={state.selectedFile?.filename ?? "Editor"}
-          right={
-            state.selectedFilePath ? (
-              <Button
-                variant="ghost"
-                size="sm"
-                className="h-6 px-2 text-xs"
-                onClick={() => editorRef.current && handleSave(editorRef.current.getValue())}
-              >
-                Save
-              </Button>
-            ) : undefined
-          }
+        <div className="flex min-h-0 flex-1 flex-col">
+          <PaneHeader
+            title={state.selectedFile?.filename ?? "Editor"}
+            right={
+              state.selectedFilePath ? (
+                <div className="flex items-center gap-1">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-6 gap-1 px-2 text-xs"
+                    disabled={!selectedRequest || state.isRunning}
+                    onClick={() =>
+                      selectedRequest &&
+                      handleRunLine(selectedRequest.lineNumber)
+                    }
+                    title="Run (Cmd+Enter)"
+                  >
+                    <Play className="size-3" /> Run
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-6 gap-1 px-2 text-xs"
+                    disabled={!selectedRequest || state.isRunning}
+                    onClick={() =>
+                      selectedRequest &&
+                      handleRunLine(selectedRequest.lineNumber, true)
+                    }
+                    title="Run with dependencies (Cmd+Shift+Enter)"
+                  >
+                    <GitBranch className="size-3" /> With deps
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-6 px-2 text-xs"
+                    onClick={() =>
+                      editorRef.current &&
+                      handleSave(editorRef.current.getValue())
+                    }
+                  >
+                    Save
+                  </Button>
+                </div>
+              ) : undefined
+            }
+          />
+          <div className="min-h-0 flex-1">
+            {state.selectedFilePath ? (
+              <HttpEditor
+                imperativeRef={editorRef}
+                value={editorValue}
+                onSave={handleSave}
+                onRunLine={(line) => handleRunLine(line)}
+                onRunLineWithDeps={(line) => handleRunLine(line, true)}
+              />
+            ) : (
+              <div className="flex h-full items-center justify-center">
+                <EmptyHint>Pick a file to edit.</EmptyHint>
+              </div>
+            )}
+          </div>
+        </div>
+        <DragHandle
+          direction="y"
+          initial={responseHeight}
+          min={120}
+          max={600}
+          onResize={setResponseHeight}
         />
-        <div className="min-h-0 flex-1">
-          {state.selectedFilePath ? (
-            <HttpEditor
-              imperativeRef={editorRef}
-              value={editorValue}
-              onSave={handleSave}
-              onRunLine={handleRunLine}
-            />
-          ) : (
-            <div className="flex h-full items-center justify-center">
-              <EmptyHint>Pick a file to edit.</EmptyHint>
-            </div>
-          )}
+        <div
+          className="flex shrink-0 flex-col border-t"
+          style={{ height: `${responseHeight}px` }}
+        >
+          <PaneHeader title="Response" />
+          <div className="min-h-0 flex-1">
+            <ResponsePanel />
+          </div>
         </div>
       </div>
     </div>

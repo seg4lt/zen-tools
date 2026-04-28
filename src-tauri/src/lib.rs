@@ -57,6 +57,10 @@ pub fn run() {
             commands::environment::get_cookies,
             commands::environment::clear_cookies,
             commands::environment::load_env_file,
+            // execute
+            commands::execute::run_request,
+            commands::execute::run_request_with_deps,
+            commands::execute::build_curl_command,
             // misc
             commands::misc::open_in_editor,
         ])

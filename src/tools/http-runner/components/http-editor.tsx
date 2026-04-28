@@ -54,6 +54,8 @@ export interface HttpEditorProps {
    * responsible for mapping the line to the appropriate request.
    */
   onRunLine?: (line: number) => void;
+  /** `Mod+Shift+Enter` variant — run with dependency resolution. */
+  onRunLineWithDeps?: (line: number) => void;
   /** Forwarded ref for imperative control. */
   imperativeRef?: Ref<HttpEditorHandle>;
 }
@@ -65,6 +67,7 @@ export function HttpEditor({
   onChange,
   onSave,
   onRunLine,
+  onRunLineWithDeps,
   imperativeRef,
 }: HttpEditorProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
@@ -72,6 +75,7 @@ export function HttpEditor({
   const onChangeRef = useRef(onChange);
   const onSaveRef = useRef(onSave);
   const onRunLineRef = useRef(onRunLine);
+  const onRunLineWithDepsRef = useRef(onRunLineWithDeps);
   const { theme } = useTheme();
 
   // Keep latest callbacks visible to long-lived listeners.
@@ -79,7 +83,8 @@ export function HttpEditor({
     onChangeRef.current = onChange;
     onSaveRef.current = onSave;
     onRunLineRef.current = onRunLine;
-  }, [onChange, onSave, onRunLine]);
+    onRunLineWithDepsRef.current = onRunLineWithDeps;
+  }, [onChange, onSave, onRunLine, onRunLineWithDeps]);
 
   const buildExtensions = (isDark: boolean): Extension[] => [
     vim(),
@@ -115,6 +120,16 @@ export function HttpEditor({
           const pos = view.state.selection.main.head;
           const lineNum = view.state.doc.lineAt(pos).number;
           onRunLineRef.current?.(lineNum);
+          return true;
+        },
+      },
+      {
+        key: "Mod-Shift-Enter",
+        preventDefault: true,
+        run: (view) => {
+          const pos = view.state.selection.main.head;
+          const lineNum = view.state.doc.lineAt(pos).number;
+          onRunLineWithDepsRef.current?.(lineNum);
           return true;
         },
       },

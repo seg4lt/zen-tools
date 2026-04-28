@@ -11,6 +11,11 @@ import type { HttpFile, HttpRequest, RequestResult } from "../lib/tauri";
 /** Active sub-tab inside the HTTP runner. */
 export type HttpRunnerSubView = "requests" | "performance";
 
+export interface ChainStep {
+  id: string;
+  name: string;
+}
+
 export interface HttpRunnerState {
   /** Path of the currently-selected `.http` file. */
   selectedFilePath: string | null;
@@ -20,6 +25,8 @@ export interface HttpRunnerState {
   selectedRequestId: string | null;
   /** Last result keyed by stable id. */
   results: Record<string, RequestResult>;
+  /** Currently-running execution chain (set by `request:chain` events). */
+  chainSteps: ChainStep[];
   /** Active environment, if any. */
   activeEnv: string | null;
   /** Logs accumulated from streaming events. */
@@ -33,6 +40,7 @@ const initialState: HttpRunnerState = {
   selectedFile: null,
   selectedRequestId: null,
   results: {},
+  chainSteps: [],
   activeEnv: null,
   logs: [],
   isRunning: false,
@@ -42,6 +50,7 @@ export type HttpRunnerAction =
   | { type: "selectFile"; path: string | null; file: HttpFile | null }
   | { type: "selectRequest"; id: string | null }
   | { type: "result"; result: RequestResult }
+  | { type: "chain"; steps: ChainStep[] }
   | { type: "setRunning"; running: boolean }
   | { type: "setEnv"; env: string | null }
   | {
@@ -64,11 +73,15 @@ function reducer(
         selectedRequestId: null,
       };
     case "selectRequest":
-      return { ...state, selectedRequestId: action.id };
+      // Reset the displayed chain when the selection changes — the next
+      // run command will populate it.
+      return { ...state, selectedRequestId: action.id, chainSteps: [] };
     case "result": {
       const next = { ...state.results, [action.result.requestId]: action.result };
       return { ...state, results: next };
     }
+    case "chain":
+      return { ...state, chainSteps: action.steps };
     case "setRunning":
       return { ...state, isRunning: action.running };
     case "setEnv":
