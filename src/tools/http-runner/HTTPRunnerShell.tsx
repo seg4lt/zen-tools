@@ -1,14 +1,16 @@
 import { Outlet } from "@tanstack/react-router";
+import { HttpRunnerStoreProvider } from "./store/http-runner-store";
 
 /**
- * Layout route for the HTTP Runner tool. Owns the 3-pane state context in
- * later phases — for the initial scaffold it just renders the active sub-
- * route inside the central area.
+ * Layout route for the HTTP Runner tool. Provides the per-tool reducer
+ * store; the actual pane layout is owned by the sub-views.
  */
 export function HTTPRunnerShell() {
   return (
-    <div className="flex h-full w-full flex-col">
-      <Outlet />
-    </div>
+    <HttpRunnerStoreProvider>
+      <div className="flex h-full w-full min-h-0 flex-col">
+        <Outlet />
+      </div>
+    </HttpRunnerStoreProvider>
   );
 }

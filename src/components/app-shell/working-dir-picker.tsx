@@ -2,6 +2,7 @@ import { Folder } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { Button } from "@/components/ui/button";
 import { useEffect, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 
 /**
  * Compact button in the top bar showing the active working directory and
@@ -10,6 +11,7 @@ import { useEffect, useState } from "react";
 export function WorkingDirPicker() {
   const [path, setPath] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const queryClient = useQueryClient();
 
   useEffect(() => {
     invoke<string>("get_working_dir")
@@ -25,6 +27,10 @@ export function WorkingDirPicker() {
       if (picked) {
         await invoke<void>("set_working_dir", { path: picked });
         setPath(picked);
+        // Invalidate every query that depends on the working dir.
+        await queryClient.invalidateQueries({ queryKey: ["http-files"] });
+        await queryClient.invalidateQueries({ queryKey: ["perf-files"] });
+        await queryClient.invalidateQueries({ queryKey: ["environments"] });
       }
     } catch (err) {
       console.error("pick directory failed", err);
