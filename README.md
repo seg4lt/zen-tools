@@ -31,7 +31,8 @@ zen-tools/
 │   ├── zen-types/            # pure data model — no I/O, no async
 │   ├── zen-parser/           # .http / env JSON / perf YAML parsers
 │   ├── zen-http/             # HTTP execution + variables + dep graph
-│   └── zen-perf/             # load test engine + metrics + CSV export
+│   ├── zen-perf/             # load test engine + metrics + CSV export
+│   └── zen-test-server/      # axum mock backend (port 3000) for examples/
 ├── src-tauri/                # Tauri binary that composes the crates
 │   ├── tauri.conf.json
 │   ├── capabilities/default.json
@@ -101,17 +102,35 @@ cargo test --workspace                     # 32 unit tests across 4 crates
 
 ## Try it out
 
-1. `pnpm tauri dev`
-2. Click the folder icon in the title bar and pick this repo's
-   `examples/` directory.
-3. Open `api.http` from the file tree.
-4. Click the ▶ icon next to a request line — or place the cursor on the
+1. **In one terminal**, boot the mock backend the examples talk to:
+
+   ```bash
+   cargo run -p zen-test-server
+   ```
+
+   It listens on `http://localhost:3000` and serves `/api/users`,
+   `/api/auth/login` (password `password123`), `/api/session/*`,
+   `/api/slow?ms=N`, `/api/random-delay`, and a handful of others.
+   The `examples/http-client.env.json` `development` env is already
+   pointed at it.
+
+2. **In another terminal**, run the app:
+
+   ```bash
+   pnpm tauri dev
+   ```
+
+3. Click the folder icon in the title bar and pick this repo's
+   `examples/` directory, then choose the `development` environment in
+   the env selector (it points at `http://localhost:3000`).
+4. Open `api.http` from the file tree.
+5. Click the ▶ icon next to a request line — or place the cursor on the
    request and press **Cmd+Enter**.
-5. Press **Cmd+Shift+Enter** on `GetUsers` to run it with its cross-file
+6. Press **Cmd+Shift+Enter** on `GetUsers` to run it with its cross-file
    dependency on `auth.http:Login`. The Dependency Chain tab shows the
    full chain status and the Variables drawer shows the extracted
    `token`.
-6. Switch to the Performance tab (`Cmd+2`), pick `api.perf.yaml`, run
+7. Switch to the Performance tab (`Cmd+2`), pick `api.perf.yaml`, run
    "Login Baseline" or "API Load Test", watch live counters + charts,
    and click Export to save a `*_summary.csv`.
 

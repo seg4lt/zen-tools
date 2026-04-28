@@ -5,6 +5,7 @@ members = [
     "crates/zen-parser",
     "crates/zen-http",
     "crates/zen-perf",
+    "crates/zen-test-server",
     "src-tauri",
 ]
 
@@ -51,6 +52,11 @@ anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 dirs = "5"
+
+# Test server (mock backend for examples)
+axum = "0.7"
+tower-http = { version = "0.5", features = ["cors"] }
+rand = "0.9"
 
 # Internal crates
 zen-types = { path = "crates/zen-types" }
