@@ -38,16 +38,24 @@ export function RequestsView() {
   const [treeWidth, setTreeWidth] = useState(220);
   const [listWidth, setListWidth] = useState(280);
   const [responseHeight, setResponseHeight] = useState(280);
+  // Editor starts collapsed so the file tree, request list, and response
+  // panel get the full real estate. Click the expand button in the
+  // editor header (or any of the run buttons in the list) when you want
+  // to see the source.
   const [paneStates, setPaneStates] = useState<Record<PaneKey, PaneState>>({
     tree: "normal",
     list: "normal",
-    editor: "normal",
+    editor: "collapsed",
     response: "normal",
   });
   const queryClient = useQueryClient();
   const editorRef = useRef<HttpEditorHandle>(null);
   const [editorValue, setEditorValue] = useState("");
   const [isDirty, setIsDirty] = useState(false);
+  /** Pending debounced-save timer. */
+  const saveTimerRef = useRef<number | null>(null);
+  /** Latest editor content captured during typing. */
+  const latestEditorRef = useRef<string>("");
 
   // ── pane layout helpers ────────────────────────────────────────────
   const toggleCollapse = (key: PaneKey) =>
@@ -137,10 +145,21 @@ export function RequestsView() {
   useEffect(() => {
     if (rawContent !== undefined && rawContent !== null) {
       setEditorValue(rawContent);
+      latestEditorRef.current = rawContent;
       editorRef.current?.setValue(rawContent);
       setIsDirty(false);
     }
   }, [rawContent]);
+
+  // Cancel any pending debounced save when the file or component changes.
+  useEffect(() => {
+    return () => {
+      if (saveTimerRef.current !== null) {
+        window.clearTimeout(saveTimerRef.current);
+        saveTimerRef.current = null;
+      }
+    };
+  }, [state.selectedFilePath]);
 
   useEffect(() => {
     if (!state.selectedRequestId || !state.selectedFile) return;
@@ -161,8 +180,18 @@ export function RequestsView() {
         // Use updateParsedFile (not selectFile) so the editor cursor +
         // selected request are preserved across the save.
         dispatch({ type: "updateParsedFile", file: fresh.file });
+        // The editor is the source of truth for the live buffer, so we
+        // bump editorValue (used as the dirty baseline) without pushing
+        // the value back into CodeMirror — that would clobber the
+        // user's cursor.
+        setEditorValue(value);
         setIsDirty(false);
-        dispatch({ type: "log", message: `Saved ${fresh.file.filename}` });
+        // Keep the React Query cache in sync so other consumers
+        // (re-mounts, refresh) get the new content on next access.
+        queryClient.setQueryData(
+          ["http-file-content", state.selectedFilePath],
+          value,
+        );
       } catch (err) {
         dispatch({
           type: "log",
@@ -171,7 +200,31 @@ export function RequestsView() {
         });
       }
     },
-    [dispatch, state.selectedFilePath],
+    [dispatch, queryClient, state.selectedFilePath],
+  );
+
+  /**
+   * Called on every keystroke from the editor. Updates the dirty flag
+   * for the title indicator and schedules a debounced auto-save 600ms
+   * after the user stops typing. The save handler reparses + dispatches
+   * `updateParsedFile`, so the request list and run-gutter stay in sync
+   * with what's on screen.
+   */
+  const handleEditorChange = useCallback(
+    (next: string) => {
+      latestEditorRef.current = next;
+      setIsDirty(next !== editorValue);
+      if (saveTimerRef.current !== null) {
+        window.clearTimeout(saveTimerRef.current);
+      }
+      saveTimerRef.current = window.setTimeout(() => {
+        saveTimerRef.current = null;
+        if (latestEditorRef.current !== editorValue) {
+          void handleSave(latestEditorRef.current);
+        }
+      }, 600);
+    },
+    [editorValue, handleSave],
   );
 
   const runRequest = useCallback(
@@ -288,6 +341,7 @@ export function RequestsView() {
             selectedId={state.selectedRequestId}
             onSelect={(id) => dispatch({ type: "selectRequest", id })}
             onRun={(req) => handleRunLine(req.lineNumber)}
+            onRunWithDeps={(req) => handleRunLine(req.lineNumber, true)}
           />
         ) : (
           <div className="flex h-full items-center justify-center p-4 text-xs text-muted-foreground">
@@ -372,7 +426,7 @@ export function RequestsView() {
           imperativeRef={editorRef}
           value={editorValue}
           onSave={handleSave}
-          onChange={(next) => setIsDirty(next !== editorValue)}
+          onChange={handleEditorChange}
           onRunLine={(line) => handleRunLine(line)}
           onRunLineWithDeps={(line) => handleRunLine(line, true)}
         />

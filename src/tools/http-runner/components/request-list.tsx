@@ -1,4 +1,4 @@
-import { Play } from "lucide-react";
+import { GitBranch, Play } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { HttpRequest } from "../lib/tauri";
 import { stableId } from "../store/http-runner-store";
@@ -8,7 +8,10 @@ interface RequestListProps {
   requests: HttpRequest[];
   selectedId: string | null;
   onSelect: (id: string) => void;
+  /** Run a request without dependency resolution. */
   onRun?: (request: HttpRequest) => void;
+  /** Run a request with full dependency resolution. */
+  onRunWithDeps?: (request: HttpRequest) => void;
 }
 
 const METHOD_CLASS: Record<string, string> = {
@@ -24,7 +27,9 @@ const METHOD_CLASS: Record<string, string> = {
 
 /**
  * Vertical list of requests for the open file. Each row shows a coloured
- * method badge, the request name, and (on hover) a run button.
+ * method badge, the request name, and (on hover) two run buttons: plain
+ * Run and Run-with-deps. The deps button only appears when the request
+ * actually has at least one `# @depends` annotation.
  */
 export function RequestList({
   filePath,
@@ -32,6 +37,7 @@ export function RequestList({
   selectedId,
   onSelect,
   onRun,
+  onRunWithDeps,
 }: RequestListProps) {
   if (requests.length === 0) {
     return (
@@ -47,6 +53,7 @@ export function RequestList({
         const id = stableId(filePath, req);
         const active = id === selectedId;
         const display = req.name ?? `${req.method} ${req.url}`;
+        const hasDeps = req.dependsOn && req.dependsOn.length > 0;
         return (
           <li key={id}>
             <div
@@ -65,15 +72,42 @@ export function RequestList({
               >
                 {req.method}
               </span>
-              <span className="truncate text-xs">{display}</span>
+              <span className="truncate text-xs">
+                {display}
+                {hasDeps && (
+                  <GitBranch
+                    className="ml-1 inline-block size-3 align-text-bottom text-muted-foreground"
+                    aria-label="Has dependencies"
+                  />
+                )}
+              </span>
               <span className="ml-auto truncate font-mono text-[10px] text-muted-foreground">
                 {req.url.length > 24 ? `…${req.url.slice(-23)}` : req.url}
               </span>
-              {onRun && (
+
+              {onRunWithDeps && hasDeps && (
                 <button
                   type="button"
                   className={cn(
                     "ml-1 rounded-sm p-0.5 opacity-0 transition-opacity",
+                    "hover:bg-primary/15 hover:text-primary",
+                    "group-hover:opacity-100 focus:opacity-100",
+                  )}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onRunWithDeps(req);
+                  }}
+                  aria-label={`Run ${display} with dependencies`}
+                  title={`Run with dependencies (${req.dependsOn.length})`}
+                >
+                  <GitBranch className="size-3" />
+                </button>
+              )}
+              {onRun && (
+                <button
+                  type="button"
+                  className={cn(
+                    "ml-0.5 rounded-sm p-0.5 opacity-0 transition-opacity",
                     "hover:bg-primary/15 hover:text-primary",
                     "group-hover:opacity-100 focus:opacity-100",
                   )}

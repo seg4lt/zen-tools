@@ -1,4 +1,11 @@
-import { Maximize2, Minimize2, ChevronsDownUp, ChevronsUpDown } from "lucide-react";
+import {
+  Maximize2,
+  Minimize2,
+  PanelBottomClose,
+  PanelBottomOpen,
+  PanelLeftClose,
+  PanelLeftOpen,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import type { ReactNode } from "react";
@@ -67,14 +74,14 @@ export function PaneFrame({
           >
             {orientation === "horizontal" ? (
               collapsed ? (
-                <ChevronsUpDown className="size-3 -rotate-90" />
+                <PanelLeftOpen className="size-3" />
               ) : (
-                <ChevronsDownUp className="size-3 -rotate-90" />
+                <PanelLeftClose className="size-3" />
               )
             ) : collapsed ? (
-              <ChevronsUpDown className="size-3" />
+              <PanelBottomOpen className="size-3" />
             ) : (
-              <ChevronsDownUp className="size-3" />
+              <PanelBottomClose className="size-3" />
             )}
           </Button>
           <Button
