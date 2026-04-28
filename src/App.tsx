@@ -1,15 +1,28 @@
-/**
- * Root component — replaced in phase 7 with the TanStack Router shell.
- * For the initial scaffold we render a simple welcome screen so the dev
- * loop is verifiable.
- */
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { RouterProvider } from "@tanstack/react-router";
+import { ThemeProvider } from "@/hooks/use-theme";
+import { TooltipProvider } from "@/components/ui/tooltip";
+import { router } from "@/router";
+
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      // Stay fresh for 30s — Tauri commands hit local state, not network.
+      staleTime: 30_000,
+      retry: false,
+      refetchOnWindowFocus: false,
+    },
+  },
+});
+
 export default function App() {
   return (
-    <div className="flex h-screen w-screen flex-col items-center justify-center gap-4 bg-background text-foreground">
-      <h1 className="text-3xl font-semibold tracking-tight">Zen Tools</h1>
-      <p className="text-muted-foreground">
-        Workspace scaffold ready. Tooling will land in subsequent commits.
-      </p>
-    </div>
+    <QueryClientProvider client={queryClient}>
+      <ThemeProvider>
+        <TooltipProvider delayDuration={200}>
+          <RouterProvider router={router} />
+        </TooltipProvider>
+      </ThemeProvider>
+    </QueryClientProvider>
   );
 }
