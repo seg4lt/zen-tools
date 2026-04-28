@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Play, GitBranch } from "lucide-react";
+import { Play, GitBranch, RefreshCw, Save } from "lucide-react";
 import { DragHandle } from "@/components/drag-handle";
 import { Button } from "@/components/ui/button";
 import { HttpFileTree } from "./components/http-file-tree";
@@ -10,22 +10,77 @@ import {
   type HttpEditorHandle,
 } from "./components/http-editor";
 import { ResponsePanel } from "./components/response-panel";
+import { PaneFrame, type PaneState } from "./components/pane-frame";
 import { onRequestChain, onRequestResult, tauri } from "./lib/tauri";
 import { stableId, useHttpRunner } from "./store/http-runner-store";
+
+/** Identifier for one of the four resizable panes. */
+type PaneKey = "tree" | "list" | "editor" | "response";
 
 /**
  * Three-pane layout: file tree | request list | (editor + response panel
  * stacked vertically). Streams `request:result` and `request:chain` events
  * from the Tauri backend into the reducer.
+ *
+ * Each pane has minimize / maximize / restore controls. When any pane is
+ * maximized, the others are hidden and that pane fills the layout. When
+ * a pane is collapsed it shrinks to a 32px strip showing only its
+ * header.
  */
 export function RequestsView() {
   const { state, dispatch } = useHttpRunner();
   const [treeWidth, setTreeWidth] = useState(220);
   const [listWidth, setListWidth] = useState(280);
   const [responseHeight, setResponseHeight] = useState(280);
+  const [paneStates, setPaneStates] = useState<Record<PaneKey, PaneState>>({
+    tree: "normal",
+    list: "normal",
+    editor: "normal",
+    response: "normal",
+  });
   const queryClient = useQueryClient();
   const editorRef = useRef<HttpEditorHandle>(null);
   const [editorValue, setEditorValue] = useState("");
+
+  // ── pane layout helpers ────────────────────────────────────────────
+  const toggleCollapse = (key: PaneKey) =>
+    setPaneStates((prev) => ({
+      ...prev,
+      [key]: prev[key] === "collapsed" ? "normal" : "collapsed",
+      // Collapsing a pane while another is maximized would be confusing,
+      // so collapsing always returns the layout to normal-mode-ish.
+    }));
+
+  const toggleMaximize = (key: PaneKey) =>
+    setPaneStates((prev) => {
+      const isMax = prev[key] === "maximized";
+      return {
+        tree: isMax ? "normal" : "tree" === key ? "maximized" : "normal",
+        list: isMax ? "normal" : "list" === key ? "maximized" : "normal",
+        editor: isMax ? "normal" : "editor" === key ? "maximized" : "normal",
+        response: isMax
+          ? "normal"
+          : "response" === key
+            ? "maximized"
+            : "normal",
+      };
+    });
+
+  const maxKey = (Object.keys(paneStates) as PaneKey[]).find(
+    (k) => paneStates[k] === "maximized",
+  );
+  const isMaximized = maxKey != null;
+
+  // Width/height for a horizontally-arranged pane.
+  const horizontalSize = (
+    key: PaneKey,
+    nominal: number,
+  ): React.CSSProperties => {
+    if (paneStates[key] === "collapsed") return { width: 32, flex: "none" };
+    if (paneStates[key] === "maximized") return { flex: 1 };
+    return { width: nominal, flex: "none" };
+  };
+  // ───────────────────────────────────────────────────────────────────
 
   // Subscribe to streaming events once.
   useEffect(() => {
@@ -165,184 +220,229 @@ export function RequestsView() {
     (r) => stableId(state.selectedFile!.path, r) === state.selectedRequestId,
   );
 
-  return (
-    <div className="flex h-full w-full min-h-0">
-      {/* File tree pane */}
-      <div
-        className="flex h-full min-h-0 flex-col border-r"
-        style={{ width: `${treeWidth}px` }}
-      >
-        <PaneHeader
-          title="Files"
-          right={
+  // ── pane bodies ────────────────────────────────────────────────────
+  const treePane = (
+    <PaneFrame
+      title="Files"
+      state={paneStates.tree}
+      hidden={isMaximized && maxKey !== "tree"}
+      onToggleCollapse={() => toggleCollapse("tree")}
+      onToggleMaximize={() => toggleMaximize("tree")}
+      actions={
+        <Button
+          variant="ghost"
+          size="icon"
+          className="size-5"
+          onClick={() =>
+            queryClient.invalidateQueries({ queryKey: ["http-files"] })
+          }
+          title="Refresh"
+        >
+          <RefreshCw className="size-3" />
+        </Button>
+      }
+    >
+      <div className="h-full overflow-y-auto">
+        <HttpFileTree
+          selectedPath={state.selectedFilePath}
+          onSelect={(item) =>
+            dispatch({
+              type: "selectFile",
+              path: item.path,
+              file: null,
+            })
+          }
+        />
+      </div>
+    </PaneFrame>
+  );
+
+  const listPane = (
+    <PaneFrame
+      title={state.selectedFile?.filename ?? "Requests"}
+      state={paneStates.list}
+      hidden={isMaximized && maxKey !== "list"}
+      onToggleCollapse={() => toggleCollapse("list")}
+      onToggleMaximize={() => toggleMaximize("list")}
+    >
+      <div className="h-full overflow-y-auto">
+        {state.selectedFile ? (
+          <RequestList
+            filePath={state.selectedFile.path}
+            requests={state.selectedFile.requests}
+            selectedId={state.selectedRequestId}
+            onSelect={(id) => dispatch({ type: "selectRequest", id })}
+            onRun={(req) => handleRunLine(req.lineNumber)}
+          />
+        ) : (
+          <div className="flex h-full items-center justify-center p-4 text-xs text-muted-foreground">
+            Pick a file from the tree.
+          </div>
+        )}
+      </div>
+    </PaneFrame>
+  );
+
+  const editorPane = (
+    <PaneFrame
+      title={state.selectedFile?.filename ?? "Editor"}
+      state={paneStates.editor}
+      hidden={isMaximized && maxKey !== "editor"}
+      onToggleCollapse={() => toggleCollapse("editor")}
+      onToggleMaximize={() => toggleMaximize("editor")}
+      actions={
+        state.selectedFilePath ? (
+          <>
             <Button
               variant="ghost"
               size="sm"
-              className="h-6 px-2 text-xs"
+              className="h-5 gap-1 px-1.5 text-[10px]"
+              disabled={!selectedRequest || state.isRunning}
               onClick={() =>
-                queryClient.invalidateQueries({ queryKey: ["http-files"] })
+                selectedRequest && handleRunLine(selectedRequest.lineNumber)
               }
+              title="Run (Cmd+Enter)"
             >
-              Refresh
+              <Play className="size-3" /> Run
             </Button>
-          }
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-5 gap-1 px-1.5 text-[10px]"
+              disabled={!selectedRequest || state.isRunning}
+              onClick={() =>
+                selectedRequest &&
+                handleRunLine(selectedRequest.lineNumber, true)
+              }
+              title="Run with dependencies (Cmd+Shift+Enter)"
+            >
+              <GitBranch className="size-3" /> Deps
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="size-5"
+              onClick={() =>
+                editorRef.current && handleSave(editorRef.current.getValue())
+              }
+              title="Save (Cmd+S)"
+            >
+              <Save className="size-3" />
+            </Button>
+          </>
+        ) : null
+      }
+    >
+      {state.selectedFilePath ? (
+        <HttpEditor
+          imperativeRef={editorRef}
+          value={editorValue}
+          onSave={handleSave}
+          onRunLine={(line) => handleRunLine(line)}
+          onRunLineWithDeps={(line) => handleRunLine(line, true)}
         />
-        <div className="min-h-0 flex-1 overflow-y-auto">
-          <HttpFileTree
-            selectedPath={state.selectedFilePath}
-            onSelect={(item) =>
-              dispatch({
-                type: "selectFile",
-                path: item.path,
-                file: null,
-              })
-            }
-          />
+      ) : (
+        <div className="flex h-full items-center justify-center p-4 text-xs text-muted-foreground">
+          Pick a file to edit.
         </div>
-      </div>
+      )}
+    </PaneFrame>
+  );
 
-      <DragHandle
-        direction="x"
-        initial={treeWidth}
-        min={160}
-        max={420}
-        onResize={setTreeWidth}
-      />
+  const responsePane = (
+    <PaneFrame
+      title="Response"
+      orientation="vertical"
+      state={paneStates.response}
+      hidden={isMaximized && maxKey !== "response"}
+      onToggleCollapse={() => toggleCollapse("response")}
+      onToggleMaximize={() => toggleMaximize("response")}
+    >
+      <ResponsePanel />
+    </PaneFrame>
+  );
 
-      {/* Request list pane */}
+  // ── render ─────────────────────────────────────────────────────────
+  // When a pane is maximized, render only that pane (full bleed).
+  if (isMaximized && maxKey) {
+    const maximized = {
+      tree: treePane,
+      list: listPane,
+      editor: editorPane,
+      response: responsePane,
+    }[maxKey];
+    return <div className="h-full w-full">{maximized}</div>;
+  }
+
+  // Normal three-column + vertical-split layout.
+  const showTreeHandle = paneStates.tree !== "collapsed";
+  const showListHandle = paneStates.list !== "collapsed";
+  const editorCollapsed = paneStates.editor === "collapsed";
+  const responseCollapsed = paneStates.response === "collapsed";
+
+  return (
+    <div className="flex h-full w-full min-h-0">
       <div
         className="flex h-full min-h-0 flex-col border-r"
-        style={{ width: `${listWidth}px` }}
+        style={horizontalSize("tree", treeWidth)}
       >
-        <PaneHeader
-          title={state.selectedFile ? state.selectedFile.filename : "Requests"}
-        />
-        <div className="min-h-0 flex-1 overflow-y-auto">
-          {state.selectedFile ? (
-            <RequestList
-              filePath={state.selectedFile.path}
-              requests={state.selectedFile.requests}
-              selectedId={state.selectedRequestId}
-              onSelect={(id) => dispatch({ type: "selectRequest", id })}
-              onRun={(req) => handleRunLine(req.lineNumber)}
-            />
-          ) : (
-            <EmptyHint>Pick a file from the tree.</EmptyHint>
-          )}
-        </div>
+        {treePane}
       </div>
-
-      <DragHandle
-        direction="x"
-        initial={listWidth}
-        min={200}
-        max={500}
-        onResize={setListWidth}
-      />
-
-      {/* Editor + response stack */}
-      <div className="flex h-full min-h-0 flex-1 flex-col">
-        <div className="flex min-h-0 flex-1 flex-col">
-          <PaneHeader
-            title={state.selectedFile?.filename ?? "Editor"}
-            right={
-              state.selectedFilePath ? (
-                <div className="flex items-center gap-1">
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="h-6 gap-1 px-2 text-xs"
-                    disabled={!selectedRequest || state.isRunning}
-                    onClick={() =>
-                      selectedRequest &&
-                      handleRunLine(selectedRequest.lineNumber)
-                    }
-                    title="Run (Cmd+Enter)"
-                  >
-                    <Play className="size-3" /> Run
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="h-6 gap-1 px-2 text-xs"
-                    disabled={!selectedRequest || state.isRunning}
-                    onClick={() =>
-                      selectedRequest &&
-                      handleRunLine(selectedRequest.lineNumber, true)
-                    }
-                    title="Run with dependencies (Cmd+Shift+Enter)"
-                  >
-                    <GitBranch className="size-3" /> With deps
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="h-6 px-2 text-xs"
-                    onClick={() =>
-                      editorRef.current &&
-                      handleSave(editorRef.current.getValue())
-                    }
-                  >
-                    Save
-                  </Button>
-                </div>
-              ) : undefined
-            }
-          />
-          <div className="min-h-0 flex-1">
-            {state.selectedFilePath ? (
-              <HttpEditor
-                imperativeRef={editorRef}
-                value={editorValue}
-                onSave={handleSave}
-                onRunLine={(line) => handleRunLine(line)}
-                onRunLineWithDeps={(line) => handleRunLine(line, true)}
-              />
-            ) : (
-              <div className="flex h-full items-center justify-center">
-                <EmptyHint>Pick a file to edit.</EmptyHint>
-              </div>
-            )}
-          </div>
-        </div>
+      {showTreeHandle && (
         <DragHandle
-          direction="y"
-          initial={responseHeight}
-          min={120}
-          max={600}
-          onResize={setResponseHeight}
+          direction="x"
+          initial={treeWidth}
+          min={160}
+          max={420}
+          onResize={setTreeWidth}
         />
+      )}
+
+      <div
+        className="flex h-full min-h-0 flex-col border-r"
+        style={horizontalSize("list", listWidth)}
+      >
+        {listPane}
+      </div>
+      {showListHandle && (
+        <DragHandle
+          direction="x"
+          initial={listWidth}
+          min={200}
+          max={500}
+          onResize={setListWidth}
+        />
+      )}
+
+      {/* Right column: editor on top, response on bottom (vertical split). */}
+      <div className="flex h-full min-h-0 flex-1 flex-col">
+        <div
+          className={editorCollapsed ? "shrink-0" : "flex min-h-0 flex-1 flex-col"}
+        >
+          {editorPane}
+        </div>
+        {!editorCollapsed && !responseCollapsed && (
+          <DragHandle
+            direction="y"
+            initial={responseHeight}
+            min={120}
+            max={600}
+            onResize={setResponseHeight}
+          />
+        )}
         <div
           className="flex shrink-0 flex-col border-t"
-          style={{ height: `${responseHeight}px` }}
+          style={
+            responseCollapsed
+              ? { height: 32 }
+              : editorCollapsed
+                ? { flex: 1 }
+                : { height: responseHeight }
+          }
         >
-          <PaneHeader title="Response" />
-          <div className="min-h-0 flex-1">
-            <ResponsePanel />
-          </div>
+          {responsePane}
         </div>
       </div>
     </div>
-  );
-}
-
-function PaneHeader({
-  title,
-  right,
-}: {
-  title: string;
-  right?: React.ReactNode;
-}) {
-  return (
-    <div className="flex h-8 shrink-0 items-center gap-2 border-b bg-card/40 px-3 text-xs font-medium uppercase tracking-wide text-muted-foreground">
-      <span className="truncate">{title}</span>
-      <div className="ml-auto">{right}</div>
-    </div>
-  );
-}
-
-function EmptyHint({ children }: { children: React.ReactNode }) {
-  return (
-    <p className="text-center text-xs text-muted-foreground">{children}</p>
   );
 }

@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from "react";
 import { Loader2 } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
@@ -7,18 +8,55 @@ import { HeadersTable } from "./headers-table";
 import { DependencyChain } from "./dependency-chain";
 import { ResponseBody } from "./response-body";
 
+type Tab = "body" | "headers" | "chain";
+
 /**
  * Bottom-of-the-editor panel showing the latest response for the active
- * request. Tabs: Body / Headers / Dependency Chain.
+ * request. Tabs: Body / Headers / Dependency Chain. The active tab
+ * auto-switches to Dependency Chain when a multi-step chain starts and
+ * back to Body once it completes, so "Run with deps" is visibly
+ * different from a plain run.
  */
 export function ResponsePanel() {
   const { state } = useHttpRunner();
   const id = state.selectedRequestId;
   const result = id ? state.results[id] : undefined;
   const status = result?.status;
-
-  // Walk the result map to find the chain (any chain step that exists).
   const chainSteps = state.chainSteps;
+
+  const [tab, setTab] = useState<Tab>("body");
+  const userPickedRef = useRef(false);
+  const lastChainSize = useRef(0);
+
+  // Auto-switch to the chain tab when a chain (>1 step) appears, so the
+  // user sees the dependency execution play out instead of staring at
+  // the body tab. Resets the "user picked" flag whenever a fresh chain
+  // starts so subsequent auto-switches still happen.
+  useEffect(() => {
+    if (chainSteps.length > 1 && lastChainSize.current === 0) {
+      userPickedRef.current = false;
+      setTab("chain");
+    }
+    lastChainSize.current = chainSteps.length;
+  }, [chainSteps.length]);
+
+  // Once the final step of a chain completes successfully, drop back to
+  // the Body tab — that's where the user expects to see the actual
+  // response. Only do it if the user hasn't manually changed tabs.
+  useEffect(() => {
+    if (
+      !userPickedRef.current &&
+      chainSteps.length > 1 &&
+      status?.type === "success"
+    ) {
+      setTab("body");
+    }
+  }, [status, chainSteps.length]);
+
+  const onTabChange = (next: string) => {
+    userPickedRef.current = true;
+    setTab(next as Tab);
+  };
 
   if (!id) {
     return (
@@ -31,7 +69,11 @@ export function ResponsePanel() {
   return (
     <div className="flex h-full min-h-0 flex-col">
       <StatusBar />
-      <Tabs defaultValue="body" className="flex min-h-0 flex-1 flex-col">
+      <Tabs
+        value={tab}
+        onValueChange={onTabChange}
+        className="flex min-h-0 flex-1 flex-col"
+      >
         <TabsList className="h-8 shrink-0 rounded-none border-b bg-transparent px-2">
           <TabsTrigger value="body" className="h-7 text-xs">
             Body
