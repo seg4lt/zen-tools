@@ -5,3 +5,4 @@ pub mod execute;
 pub mod files;
 pub mod misc;
 pub mod parse;
+pub mod perf;

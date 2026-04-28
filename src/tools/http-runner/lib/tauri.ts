@@ -8,6 +8,13 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import type {
+  MetricsSnapshot,
+  PerfConfigDto,
+  PerfUpdate,
+} from "./perf-types";
+
+export type { MetricsSnapshot, PerfConfigDto, PerfUpdate };
 
 // ────────────────────────────────────────────────────────────────────────────
 // Domain types (mirror zen-types + DTO layer)
@@ -152,6 +159,16 @@ export const tauri = {
   buildCurlCommand: (filePath: string, requestId: string) =>
     invoke<string>("build_curl_command", { filePath, requestId }),
 
+  // perf
+  loadPerfConfig: (path: string) =>
+    invoke<PerfConfigDto>("load_perf_config", { path }),
+  runPerfTest: (testIndex: number) =>
+    invoke<void>("run_perf_test", { testIndex }),
+  stopPerfTest: () => invoke<void>("stop_perf_test"),
+  exportPerfResults: (outputDir?: string) =>
+    invoke<string>("export_perf_results", { outputDir: outputDir ?? null }),
+  getPerfMetrics: () => invoke<MetricsSnapshot | null>("get_perf_metrics"),
+
   // misc
   openInEditor: (path: string) => invoke<void>("open_in_editor", { path }),
 };
@@ -175,4 +192,11 @@ export function onRequestChain(
     "request:chain",
     (e) => handler(e.payload),
   );
+}
+
+/** Listen for `perf:update` events. */
+export function onPerfUpdate(
+  handler: (payload: PerfUpdate) => void,
+): Promise<UnlistenFn> {
+  return listen<PerfUpdate>("perf:update", (e) => handler(e.payload));
 }

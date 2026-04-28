@@ -61,6 +61,12 @@ pub fn run() {
             commands::execute::run_request,
             commands::execute::run_request_with_deps,
             commands::execute::build_curl_command,
+            // perf
+            commands::perf::load_perf_config,
+            commands::perf::run_perf_test,
+            commands::perf::stop_perf_test,
+            commands::perf::export_perf_results,
+            commands::perf::get_perf_metrics,
             // misc
             commands::misc::open_in_editor,
         ])
