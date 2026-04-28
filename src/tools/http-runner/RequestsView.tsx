@@ -38,14 +38,10 @@ export function RequestsView() {
   const [treeWidth, setTreeWidth] = useState(220);
   const [listWidth, setListWidth] = useState(280);
   const [responseHeight, setResponseHeight] = useState(280);
-  // Editor starts collapsed so the file tree, request list, and response
-  // panel get the full real estate. Click the expand button in the
-  // editor header (or any of the run buttons in the list) when you want
-  // to see the source.
   const [paneStates, setPaneStates] = useState<Record<PaneKey, PaneState>>({
     tree: "normal",
     list: "normal",
-    editor: "collapsed",
+    editor: "normal",
     response: "normal",
   });
   const queryClient = useQueryClient();
@@ -545,13 +541,21 @@ export function RequestsView() {
       {/* Right column: top row [list | editor], bottom row [response] */}
       <div className="flex h-full min-h-0 flex-1 flex-col">
         <div className="flex min-h-0 flex-1">
+          {/* List: fixed width unless the editor is collapsed (then it
+              absorbs the freed-up space so we never leave a white gap). */}
           <div
             className="flex h-full min-h-0 flex-col border-r"
-            style={horizontalSize("list", listWidth)}
+            style={
+              paneStates.list === "collapsed"
+                ? { width: 32, flex: "none" }
+                : editorCollapsed
+                  ? { flex: 1 }
+                  : { width: listWidth, flex: "none" }
+            }
           >
             {listPane}
           </div>
-          {showListHandle && (
+          {showListHandle && !editorCollapsed && (
             <DragHandle
               direction="x"
               initial={listWidth}
@@ -560,6 +564,7 @@ export function RequestsView() {
               onResize={setListWidth}
             />
           )}
+          {/* Editor: stretches to fill, except when collapsed (32px). */}
           <div
             className={
               editorCollapsed
