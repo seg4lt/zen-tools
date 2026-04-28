@@ -1,0 +1,19 @@
+[package]
+name = "zen-parser"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Parsers for .http files, env JSON, and perf YAML configs."
+
+[dependencies]
+zen-types = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+regex = { workspace = true }
+once_cell = { workspace = true }
+thiserror = { workspace = true }
+humantime-serde = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }

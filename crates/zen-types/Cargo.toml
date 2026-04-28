@@ -1,0 +1,18 @@
+[package]
+name = "zen-types"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Pure data model shared across the zen-tools workspace."
+
+[lints.rust]
+missing_docs = "warn"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+ahash = { workspace = true }
+thiserror = { workspace = true }

@@ -1,0 +1,27 @@
+[package]
+name = "zen-http"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "HTTP execution, variable substitution, and dependency resolution."
+
+[dependencies]
+zen-types = { workspace = true }
+zen-parser = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+serde_json = { workspace = true }
+regex = { workspace = true }
+urlencoding = { workspace = true }
+jsonpath-rust = { workspace = true }
+petgraph = { workspace = true }
+uuid = { workspace = true }
+ahash = { workspace = true }
+parking_lot = { workspace = true }
+once_cell = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
