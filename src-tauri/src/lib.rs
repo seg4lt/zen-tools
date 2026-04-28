@@ -3,6 +3,15 @@
 //! Composes the workspace crates (`zen-types`, `zen-parser`, `zen-http`,
 //! `zen-perf`) and exposes them to the React front-end via Tauri commands.
 
+#![warn(missing_docs)]
+
+pub mod commands;
+pub mod dto;
+pub mod error;
+pub mod state;
+
+use state::AppState;
+use tokio::sync::Mutex;
 use tracing_subscriber::EnvFilter;
 
 /// Initialise the Tauri app. Called from `main.rs` and from mobile entry
@@ -22,13 +31,35 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_clipboard_manager::init())
-        .invoke_handler(tauri::generate_handler![greet])
+        .manage(Mutex::new(AppState::new()))
+        .invoke_handler(tauri::generate_handler![
+            // files
+            commands::files::discover_http_files,
+            commands::files::discover_perf_files,
+            commands::files::find_env_file_command,
+            commands::files::set_working_dir,
+            commands::files::get_working_dir,
+            commands::files::pick_directory,
+            // parse
+            commands::parse::open_http_file,
+            commands::parse::read_file_content,
+            commands::parse::write_file_content,
+            commands::parse::reload_http_file,
+            // environment
+            commands::environment::list_environments,
+            commands::environment::set_active_environment,
+            commands::environment::get_active_environment,
+            commands::environment::get_env_vars,
+            commands::environment::get_extracted_vars,
+            commands::environment::set_extracted_var,
+            commands::environment::delete_extracted_var,
+            commands::environment::clear_extracted_vars,
+            commands::environment::get_cookies,
+            commands::environment::clear_cookies,
+            commands::environment::load_env_file,
+            // misc
+            commands::misc::open_in_editor,
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
-}
-
-/// Smoke-test command — replaced in later phases.
-#[tauri::command]
-fn greet(name: &str) -> String {
-    format!("Hello, {name}! Welcome to Zen Tools.")
 }

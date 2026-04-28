@@ -83,8 +83,10 @@ pub fn parse_http_file(path: &str, content: &str) -> HttpFile {
 }
 
 fn parse_request_block(lines: &[&str], start: usize) -> Option<(HttpRequest, usize)> {
-    let mut request = HttpRequest::default();
-    request.line_number = start + 1;
+    let mut request = HttpRequest {
+        line_number: start + 1,
+        ..HttpRequest::default()
+    };
     let mut i = start;
     let mut found_request_line = false;
     let mut in_body = false;
