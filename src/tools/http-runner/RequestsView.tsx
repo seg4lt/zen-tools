@@ -424,6 +424,7 @@ export function RequestsView() {
         {!editorCollapsed && !responseCollapsed && (
           <DragHandle
             direction="y"
+            inverse
             initial={responseHeight}
             min={120}
             max={600}

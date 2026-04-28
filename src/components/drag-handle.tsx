@@ -10,6 +10,12 @@ interface DragHandleProps {
   max?: number;
   /** Direction this handle drags in. `"x"` resizes width, `"y"` resizes height. */
   direction?: "x" | "y";
+  /**
+   * Set when the controlled pane sits **after** the handle in flow order
+   * (i.e. to the right for x, or below for y). Inverts the delta so that
+   * dragging the handle towards the pane shrinks it, not grows it.
+   */
+  inverse?: boolean;
   /** Called whenever the pane size changes. */
   onResize: (size: number) => void;
 }
@@ -24,6 +30,7 @@ export function DragHandle({
   min = 100,
   max = 1200,
   direction = "x",
+  inverse = false,
   onResize,
 }: DragHandleProps) {
   const [dragging, setDragging] = useState(false);
@@ -32,10 +39,11 @@ export function DragHandle({
   useEffect(() => {
     if (!dragging) return;
     const onMove = (e: MouseEvent) => {
-      const delta =
+      const raw =
         direction === "x"
           ? e.clientX - startRef.current.pos
           : e.clientY - startRef.current.pos;
+      const delta = inverse ? -raw : raw;
       const next = Math.min(max, Math.max(min, startRef.current.size + delta));
       onResize(next);
     };
@@ -46,7 +54,7 @@ export function DragHandle({
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
     };
-  }, [dragging, direction, min, max, onResize]);
+  }, [dragging, direction, min, max, inverse, onResize]);
 
   const onPointerDown = useCallback(
     (e: React.PointerEvent<HTMLDivElement>) => {
