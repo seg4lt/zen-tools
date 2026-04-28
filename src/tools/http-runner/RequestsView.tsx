@@ -1,29 +1,43 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { DragHandle } from "@/components/drag-handle";
 import { Button } from "@/components/ui/button";
 import { HttpFileTree } from "./components/http-file-tree";
 import { RequestList } from "./components/request-list";
+import {
+  HttpEditor,
+  type HttpEditorHandle,
+} from "./components/http-editor";
 import { tauri } from "./lib/tauri";
 import { stableId, useHttpRunner } from "./store/http-runner-store";
 
 /**
- * Three-pane layout: file tree | request list | editor + response panel
- * (the right two will be filled in later phases).
+ * Three-pane layout: file tree | request list | editor.
+ * Response panel and run plumbing are added in subsequent commits.
  */
 export function RequestsView() {
   const { state, dispatch } = useHttpRunner();
   const [treeWidth, setTreeWidth] = useState(220);
   const [listWidth, setListWidth] = useState(280);
   const queryClient = useQueryClient();
+  const editorRef = useRef<HttpEditorHandle>(null);
+  const [editorValue, setEditorValue] = useState("");
 
+  // Parse on file selection.
   const { data: opened } = useQuery({
     queryKey: ["http-file", state.selectedFilePath],
     queryFn: () => tauri.openHttpFile(state.selectedFilePath!),
     enabled: state.selectedFilePath !== null,
   });
 
-  // Sync the parsed file into the store once the query resolves.
+  // Read the raw text on file selection so the editor shows the full source.
+  const { data: rawContent } = useQuery({
+    queryKey: ["http-file-content", state.selectedFilePath],
+    queryFn: () => tauri.readFileContent(state.selectedFilePath!),
+    enabled: state.selectedFilePath !== null,
+  });
+
+  // Sync the parsed file into the store.
   useEffect(() => {
     if (opened && opened.file.path !== state.selectedFile?.path) {
       dispatch({
@@ -33,6 +47,46 @@ export function RequestsView() {
       });
     }
   }, [opened, state.selectedFile?.path, dispatch]);
+
+  // Push fresh file content into the editor.
+  useEffect(() => {
+    if (rawContent !== undefined && rawContent !== null) {
+      setEditorValue(rawContent);
+      editorRef.current?.setValue(rawContent);
+    }
+  }, [rawContent]);
+
+  // Jump editor cursor to the line of the selected request.
+  useEffect(() => {
+    if (!state.selectedRequestId || !state.selectedFile) return;
+    const req = state.selectedFile.requests.find(
+      (r) => stableId(state.selectedFile!.path, r) === state.selectedRequestId,
+    );
+    if (req) {
+      editorRef.current?.scrollToLine(req.lineNumber);
+    }
+  }, [state.selectedRequestId, state.selectedFile]);
+
+  const handleSave = async (value: string) => {
+    if (!state.selectedFilePath) return;
+    try {
+      await tauri.writeFileContent(state.selectedFilePath, value);
+      // Re-parse so request list stays in sync.
+      const fresh = await tauri.reloadHttpFile(state.selectedFilePath);
+      dispatch({
+        type: "selectFile",
+        path: fresh.file.path,
+        file: fresh.file,
+      });
+      dispatch({ type: "log", message: `Saved ${fresh.file.filename}` });
+    } catch (err) {
+      dispatch({
+        type: "log",
+        level: "error",
+        message: `Save failed: ${(err as { message?: string }).message ?? err}`,
+      });
+    }
+  };
 
   return (
     <div className="flex h-full w-full min-h-0">
@@ -84,11 +138,7 @@ export function RequestsView() {
         style={{ width: `${listWidth}px` }}
       >
         <PaneHeader
-          title={
-            state.selectedFile
-              ? state.selectedFile.filename
-              : "Requests"
-          }
+          title={state.selectedFile ? state.selectedFile.filename : "Requests"}
         />
         <div className="min-h-0 flex-1 overflow-y-auto">
           {state.selectedFile ? (
@@ -96,11 +146,8 @@ export function RequestsView() {
               filePath={state.selectedFile.path}
               requests={state.selectedFile.requests}
               selectedId={state.selectedRequestId}
-              onSelect={(id) =>
-                dispatch({ type: "selectRequest", id })
-              }
+              onSelect={(id) => dispatch({ type: "selectRequest", id })}
               onRun={(req) => {
-                // Phase 11 wires this to the actual run command.
                 dispatch({
                   type: "log",
                   message: `Run requested: ${req.name ?? req.url}`,
@@ -125,13 +172,35 @@ export function RequestsView() {
         onResize={setListWidth}
       />
 
-      {/* Right pane: editor + response — filled in phases 9–11. */}
-      <div className="flex h-full min-h-0 flex-1 flex-col bg-card/40">
-        <PaneHeader title="Editor" />
-        <div className="flex min-h-0 flex-1 items-center justify-center">
-          <EmptyHint>
-            Editor (CodeMirror + Vim) lands in the next commit.
-          </EmptyHint>
+      {/* Editor pane */}
+      <div className="flex h-full min-h-0 flex-1 flex-col">
+        <PaneHeader
+          title={state.selectedFile?.filename ?? "Editor"}
+          right={
+            state.selectedFilePath ? (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-6 px-2 text-xs"
+                onClick={() => editorRef.current && handleSave(editorRef.current.getValue())}
+              >
+                Save
+              </Button>
+            ) : undefined
+          }
+        />
+        <div className="min-h-0 flex-1">
+          {state.selectedFilePath ? (
+            <HttpEditor
+              imperativeRef={editorRef}
+              value={editorValue}
+              onSave={handleSave}
+            />
+          ) : (
+            <div className="flex h-full items-center justify-center">
+              <EmptyHint>Pick a file to edit.</EmptyHint>
+            </div>
+          )}
         </div>
       </div>
     </div>
