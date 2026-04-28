@@ -106,9 +106,37 @@ export function RequestsView() {
           dispatch({ type: "setRunning", running: true });
         } else if (payload.status.type !== "idle") {
           dispatch({ type: "setRunning", running: false });
+          // Newly extracted vars from this step affect downstream URL
+          // previews — refetch the cached map.
+          if (Object.keys(payload.extractedVars ?? {}).length > 0) {
+            void queryClient.invalidateQueries({
+              queryKey: ["extracted-vars"],
+            });
+          }
         }
         if (payload.logMessage) {
           dispatch({ type: "log", message: payload.logMessage });
+        }
+        // Surface errors and non-2xx responses in the logs panel — that
+        // way the Logs button badge lights up red and clicking it shows
+        // exactly what went wrong, instead of being empty when the
+        // dependency-chain UI shows ✗.
+        const label = payload.requestId.split(":").pop() ?? payload.requestId;
+        if (payload.status.type === "error") {
+          dispatch({
+            type: "log",
+            level: "error",
+            message: `${label}: ${payload.status.message}`,
+          });
+        } else if (
+          payload.status.type === "success" &&
+          payload.status.response.statusCode >= 400
+        ) {
+          dispatch({
+            type: "log",
+            level: payload.status.response.statusCode >= 500 ? "error" : "warn",
+            message: `${label}: HTTP ${payload.status.response.statusCode} ${payload.status.response.statusText}`,
+          });
         }
       }),
       onRequestChain((payload) => {
@@ -118,7 +146,7 @@ export function RequestsView() {
     return () => {
       unlisteners.forEach((p) => p.then((fn) => fn()).catch(() => {}));
     };
-  }, [dispatch]);
+  }, [dispatch, queryClient]);
 
   const { data: opened } = useQuery({
     queryKey: ["http-file", state.selectedFilePath],
@@ -130,6 +158,19 @@ export function RequestsView() {
     queryKey: ["http-file-content", state.selectedFilePath],
     queryFn: () => tauri.readFileContent(state.selectedFilePath!),
     enabled: state.selectedFilePath !== null,
+  });
+
+  // Env + extracted vars feed both the request-list URL preview and the
+  // response panel "will hit" preview. Keyed off the active env so they
+  // refetch when the user switches.
+  const { data: envVars } = useQuery({
+    queryKey: ["env-vars", state.activeEnv],
+    queryFn: () => tauri.getEnvVars(),
+    enabled: state.activeEnv !== null,
+  });
+  const { data: extractedVars } = useQuery({
+    queryKey: ["extracted-vars", state.activeEnv],
+    queryFn: () => tauri.getExtractedVars(),
   });
 
   useEffect(() => {
@@ -339,6 +380,9 @@ export function RequestsView() {
             filePath={state.selectedFile.path}
             requests={state.selectedFile.requests}
             selectedId={state.selectedRequestId}
+            envVars={envVars}
+            extractedVars={extractedVars}
+            localVars={state.selectedFile.localVariables}
             onSelect={(id) => dispatch({ type: "selectRequest", id })}
             onRun={(req) => handleRunLine(req.lineNumber)}
             onRunWithDeps={(req) => handleRunLine(req.lineNumber, true)}
@@ -447,7 +491,7 @@ export function RequestsView() {
       onToggleCollapse={() => toggleCollapse("response")}
       onToggleMaximize={() => toggleMaximize("response")}
     >
-      <ResponsePanel />
+      <ResponsePanel envVars={envVars} extractedVars={extractedVars} />
     </PaneFrame>
   );
 
@@ -463,14 +507,25 @@ export function RequestsView() {
     return <div className="h-full w-full">{maximized}</div>;
   }
 
-  // Normal three-column + vertical-split layout.
+  // Layout:
+  //   ┌─tree─┬──────list──┬──editor──┐
+  //   │      │            │          │
+  //   │      ├────────────┴──────────┤
+  //   │      │     response          │
+  //   └──────┴───────────────────────┘
+  // - tree owns the full left column
+  // - the right column is split vertically: top row = list + editor
+  //   (horizontally split), bottom = response (full width of right col)
   const showTreeHandle = paneStates.tree !== "collapsed";
   const showListHandle = paneStates.list !== "collapsed";
   const editorCollapsed = paneStates.editor === "collapsed";
   const responseCollapsed = paneStates.response === "collapsed";
+  const showEditorYHandle =
+    paneStates.list !== "collapsed" || paneStates.editor !== "collapsed";
 
   return (
     <div className="flex h-full w-full min-h-0">
+      {/* Left: file tree, full height */}
       <div
         className="flex h-full min-h-0 flex-col border-r"
         style={horizontalSize("tree", treeWidth)}
@@ -487,30 +542,36 @@ export function RequestsView() {
         />
       )}
 
-      <div
-        className="flex h-full min-h-0 flex-col border-r"
-        style={horizontalSize("list", listWidth)}
-      >
-        {listPane}
-      </div>
-      {showListHandle && (
-        <DragHandle
-          direction="x"
-          initial={listWidth}
-          min={200}
-          max={500}
-          onResize={setListWidth}
-        />
-      )}
-
-      {/* Right column: editor on top, response on bottom (vertical split). */}
+      {/* Right column: top row [list | editor], bottom row [response] */}
       <div className="flex h-full min-h-0 flex-1 flex-col">
-        <div
-          className={editorCollapsed ? "shrink-0" : "flex min-h-0 flex-1 flex-col"}
-        >
-          {editorPane}
+        <div className="flex min-h-0 flex-1">
+          <div
+            className="flex h-full min-h-0 flex-col border-r"
+            style={horizontalSize("list", listWidth)}
+          >
+            {listPane}
+          </div>
+          {showListHandle && (
+            <DragHandle
+              direction="x"
+              initial={listWidth}
+              min={200}
+              max={500}
+              onResize={setListWidth}
+            />
+          )}
+          <div
+            className={
+              editorCollapsed
+                ? "shrink-0 border-l"
+                : "flex min-h-0 flex-1 flex-col border-l"
+            }
+            style={editorCollapsed ? { width: 32 } : undefined}
+          >
+            {editorPane}
+          </div>
         </div>
-        {!editorCollapsed && !responseCollapsed && (
+        {!responseCollapsed && showEditorYHandle && (
           <DragHandle
             direction="y"
             inverse
@@ -525,9 +586,7 @@ export function RequestsView() {
           style={
             responseCollapsed
               ? { height: 32 }
-              : editorCollapsed
-                ? { flex: 1 }
-                : { height: responseHeight }
+              : { height: responseHeight }
           }
         >
           {responsePane}

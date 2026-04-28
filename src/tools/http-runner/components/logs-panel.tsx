@@ -21,29 +21,37 @@ export function LogsPanel({ children }: { children: React.ReactNode }) {
         className="h-[40vh] sm:max-w-none p-0 flex flex-col"
       >
         <SheetHeader className="border-b px-4 py-2">
-          <SheetTitle className="flex items-center gap-2 text-sm">
-            Logs
-            <ClearLogsButton />
-          </SheetTitle>
+          {/* Right-side close button (X) is rendered automatically by
+              SheetContent. Keep this row to its title only so the two
+              don't collide. */}
+          <SheetTitle className="text-sm">Logs</SheetTitle>
         </SheetHeader>
+        <ToolBar />
         <LogList />
       </SheetContent>
     </Sheet>
   );
 }
 
-function ClearLogsButton() {
+function ToolBar() {
   const { state, dispatch } = useHttpRunner();
   return (
-    <Button
-      variant="ghost"
-      size="sm"
-      className="ml-auto h-6 px-2 text-xs"
-      onClick={() => dispatch({ type: "clearLogs" })}
-      disabled={state.logs.length === 0}
-    >
-      <Trash2 className="size-3" /> Clear
-    </Button>
+    <div className="flex h-8 shrink-0 items-center border-b px-3 text-xs">
+      <span className="text-muted-foreground">
+        {state.logs.length}{" "}
+        {state.logs.length === 1 ? "entry" : "entries"}
+      </span>
+      <Button
+        variant="ghost"
+        size="sm"
+        className="ml-auto h-6 gap-1 px-2 text-xs"
+        onClick={() => dispatch({ type: "clearLogs" })}
+        disabled={state.logs.length === 0}
+      >
+        <Trash2 className="size-3" />
+        Clear
+      </Button>
+    </div>
   );
 }
 
@@ -85,7 +93,7 @@ function LogList() {
               {entry.ts.slice(11, 19)}
             </span>
             <span className="font-semibold uppercase">{entry.level}</span>
-            <span>{entry.message}</span>
+            <span className="break-words">{entry.message}</span>
           </li>
         ))}
       </ul>

@@ -7,8 +7,14 @@ import { useHttpRunner } from "../store/http-runner-store";
 import { HeadersTable } from "./headers-table";
 import { DependencyChain } from "./dependency-chain";
 import { ResponseBody } from "./response-body";
+import { resolveUrl } from "../lib/resolve-url";
 
 type Tab = "body" | "headers" | "chain";
+
+export interface ResponsePanelProps {
+  envVars?: Record<string, string>;
+  extractedVars?: Record<string, string>;
+}
 
 /**
  * Bottom-of-the-editor panel showing the latest response for the active
@@ -17,12 +23,25 @@ type Tab = "body" | "headers" | "chain";
  * back to Body once it completes, so "Run with deps" is visibly
  * different from a plain run.
  */
-export function ResponsePanel() {
+export function ResponsePanel({ envVars, extractedVars }: ResponsePanelProps) {
   const { state } = useHttpRunner();
   const id = state.selectedRequestId;
   const result = id ? state.results[id] : undefined;
   const status = result?.status;
   const chainSteps = state.chainSteps;
+
+  // Resolve the selected request's URL for the idle status preview.
+  const selectedRequest = state.selectedFile?.requests.find(
+    (r) => `${state.selectedFile?.path}:${r.name ?? r.id}` === id,
+  );
+  const previewUrl = selectedRequest
+    ? resolveUrl(
+        selectedRequest.url,
+        envVars,
+        extractedVars,
+        state.selectedFile?.localVariables,
+      )
+    : null;
 
   const [tab, setTab] = useState<Tab>("body");
   const userPickedRef = useRef(false);
@@ -75,7 +94,10 @@ export function ResponsePanel() {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <StatusBar />
+      <StatusBar
+        previewMethod={selectedRequest?.method ?? null}
+        previewUrl={previewUrl}
+      />
       <Tabs
         value={tab}
         onValueChange={onTabChange}
@@ -131,13 +153,44 @@ export function ResponsePanel() {
   );
 }
 
-function StatusBar() {
+function StatusBar({
+  previewMethod,
+  previewUrl,
+}: {
+  previewMethod: string | null;
+  previewUrl: string | null;
+}) {
   const { state } = useHttpRunner();
   const id = state.selectedRequestId;
   const result = id ? state.results[id] : undefined;
   const status = result?.status;
 
   if (!status || status.type === "idle") {
+    if (previewUrl) {
+      const stillUnresolved = previewUrl.includes("{{");
+      return (
+        <div className="flex h-7 shrink-0 items-center gap-2 border-b bg-card/40 px-3 text-xs">
+          <span className="text-muted-foreground">Will hit:</span>
+          <span
+            className={cn(
+              "shrink-0 rounded-sm px-1.5 py-0.5 font-mono text-[10px] font-bold",
+              "bg-muted",
+            )}
+          >
+            {previewMethod}
+          </span>
+          <span
+            className={cn(
+              "truncate font-mono text-[11px]",
+              stillUnresolved ? "text-amber-500" : "text-foreground",
+            )}
+            title={previewUrl}
+          >
+            {previewUrl}
+          </span>
+        </div>
+      );
+    }
     return (
       <div className="flex h-7 shrink-0 items-center gap-2 border-b bg-card/40 px-3 text-xs text-muted-foreground">
         Idle

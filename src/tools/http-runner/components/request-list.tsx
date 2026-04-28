@@ -2,11 +2,18 @@ import { GitBranch, Play } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { HttpRequest } from "../lib/tauri";
 import { stableId } from "../store/http-runner-store";
+import { resolveUrl } from "../lib/resolve-url";
 
 interface RequestListProps {
   filePath: string;
   requests: HttpRequest[];
   selectedId: string | null;
+  /** Active env vars used to resolve `{{placeholders}}` in the URL preview. */
+  envVars?: Record<string, string>;
+  /** Extracted vars (from prior runs) used in the URL preview. */
+  extractedVars?: Record<string, string>;
+  /** File-local `@var = value` declarations. */
+  localVars?: Record<string, string>;
   onSelect: (id: string) => void;
   /** Run a request without dependency resolution. */
   onRun?: (request: HttpRequest) => void;
@@ -26,15 +33,19 @@ const METHOD_CLASS: Record<string, string> = {
 };
 
 /**
- * Vertical list of requests for the open file. Each row shows a coloured
- * method badge, the request name, and (on hover) two run buttons: plain
- * Run and Run-with-deps. The deps button only appears when the request
- * actually has at least one `# @depends` annotation.
+ * Vertical list of requests for the open file. Each row shows two
+ * lines: the request name on top (with a coloured method badge) and
+ * the resolved URL — `{{placeholders}}` substituted from the active
+ * env + extracted vars — underneath. Hover reveals a Play and (when
+ * the request has any `@depends` annotation) a GitBranch button.
  */
 export function RequestList({
   filePath,
   requests,
   selectedId,
+  envVars,
+  extractedVars,
+  localVars,
   onSelect,
   onRun,
   onRunWithDeps,
@@ -54,73 +65,87 @@ export function RequestList({
         const active = id === selectedId;
         const display = req.name ?? `${req.method} ${req.url}`;
         const hasDeps = req.dependsOn && req.dependsOn.length > 0;
+        const resolved = resolveUrl(req.url, envVars, extractedVars, localVars);
+        const stillUnresolved = resolved.includes("{{");
+
         return (
           <li key={id}>
             <div
               className={cn(
-                "group flex items-center gap-2 px-2.5 py-1.5",
+                "group flex flex-col gap-0.5 px-2.5 py-1.5",
                 "cursor-pointer hover:bg-muted/50",
                 active && "bg-muted",
               )}
               onClick={() => onSelect(id)}
             >
-              <span
-                className={cn(
-                  "shrink-0 rounded-sm px-1.5 py-0.5 font-mono text-[10px] font-bold leading-none",
-                  METHOD_CLASS[req.method] ?? METHOD_CLASS.GET,
-                )}
-              >
-                {req.method}
-              </span>
-              <span className="truncate text-xs">
-                {display}
+              {/* Top line: badge + name + run buttons (right-aligned) */}
+              <div className="flex items-center gap-2">
+                <span
+                  className={cn(
+                    "shrink-0 rounded-sm px-1.5 py-0.5 font-mono text-[10px] font-bold leading-none",
+                    METHOD_CLASS[req.method] ?? METHOD_CLASS.GET,
+                  )}
+                >
+                  {req.method}
+                </span>
+                <span className="truncate text-xs">{display}</span>
                 {hasDeps && (
                   <GitBranch
-                    className="ml-1 inline-block size-3 align-text-bottom text-muted-foreground"
+                    className="size-3 shrink-0 text-muted-foreground"
                     aria-label="Has dependencies"
                   />
                 )}
-              </span>
-              <span className="ml-auto truncate font-mono text-[10px] text-muted-foreground">
-                {req.url.length > 24 ? `…${req.url.slice(-23)}` : req.url}
-              </span>
-
-              {onRunWithDeps && hasDeps && (
-                <button
-                  type="button"
-                  className={cn(
-                    "ml-1 rounded-sm p-0.5 opacity-0 transition-opacity",
-                    "hover:bg-primary/15 hover:text-primary",
-                    "group-hover:opacity-100 focus:opacity-100",
+                <div className="ml-auto flex items-center gap-0.5">
+                  {onRunWithDeps && hasDeps && (
+                    <button
+                      type="button"
+                      className={cn(
+                        "rounded-sm p-0.5 opacity-0 transition-opacity",
+                        "hover:bg-primary/15 hover:text-primary",
+                        "group-hover:opacity-100 focus:opacity-100",
+                      )}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onRunWithDeps(req);
+                      }}
+                      aria-label={`Run ${display} with dependencies`}
+                      title={`Run with dependencies (${req.dependsOn.length})`}
+                    >
+                      <GitBranch className="size-3" />
+                    </button>
                   )}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onRunWithDeps(req);
-                  }}
-                  aria-label={`Run ${display} with dependencies`}
-                  title={`Run with dependencies (${req.dependsOn.length})`}
-                >
-                  <GitBranch className="size-3" />
-                </button>
-              )}
-              {onRun && (
-                <button
-                  type="button"
-                  className={cn(
-                    "ml-0.5 rounded-sm p-0.5 opacity-0 transition-opacity",
-                    "hover:bg-primary/15 hover:text-primary",
-                    "group-hover:opacity-100 focus:opacity-100",
+                  {onRun && (
+                    <button
+                      type="button"
+                      className={cn(
+                        "rounded-sm p-0.5 opacity-0 transition-opacity",
+                        "hover:bg-primary/15 hover:text-primary",
+                        "group-hover:opacity-100 focus:opacity-100",
+                      )}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onRun(req);
+                      }}
+                      aria-label={`Run ${display}`}
+                      title={`Run ${display}`}
+                    >
+                      <Play className="size-3" />
+                    </button>
                   )}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onRun(req);
-                  }}
-                  aria-label={`Run ${display}`}
-                  title={`Run ${display}`}
-                >
-                  <Play className="size-3" />
-                </button>
-              )}
+                </div>
+              </div>
+              {/* Bottom line: resolved URL */}
+              <div
+                className={cn(
+                  "truncate pl-9 font-mono text-[10px]",
+                  stillUnresolved
+                    ? "text-amber-500"
+                    : "text-muted-foreground",
+                )}
+                title={resolved}
+              >
+                {resolved}
+              </div>
             </div>
           </li>
         );
