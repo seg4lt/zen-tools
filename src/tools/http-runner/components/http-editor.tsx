@@ -25,6 +25,7 @@ import {
 import { vim } from "@replit/codemirror-vim";
 import { httpLanguage } from "../lib/lang-http";
 import { makeEditorTheme } from "../lib/cm-theme";
+import { runGutter } from "../lib/run-gutter";
 import { useTheme } from "@/hooks/use-theme";
 
 export interface HttpEditorHandle {
@@ -47,6 +48,12 @@ export interface HttpEditorProps {
   onChange?: (value: string) => void;
   /** Called when the user requests a save (Mod-s). */
   onSave?: (value: string) => void;
+  /**
+   * Called with the 1-based line number when the user clicks the run
+   * gutter icon or presses `Mod+Enter`. The parent component is
+   * responsible for mapping the line to the appropriate request.
+   */
+  onRunLine?: (line: number) => void;
   /** Forwarded ref for imperative control. */
   imperativeRef?: Ref<HttpEditorHandle>;
 }
@@ -57,61 +64,78 @@ export function HttpEditor({
   readOnly = false,
   onChange,
   onSave,
+  onRunLine,
   imperativeRef,
 }: HttpEditorProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const viewRef = useRef<EditorView | null>(null);
   const onChangeRef = useRef(onChange);
   const onSaveRef = useRef(onSave);
+  const onRunLineRef = useRef(onRunLine);
   const { theme } = useTheme();
 
   // Keep latest callbacks visible to long-lived listeners.
   useEffect(() => {
     onChangeRef.current = onChange;
     onSaveRef.current = onSave;
-  }, [onChange, onSave]);
+    onRunLineRef.current = onRunLine;
+  }, [onChange, onSave, onRunLine]);
+
+  const buildExtensions = (isDark: boolean): Extension[] => [
+    vim(),
+    lineNumbers(),
+    foldGutter(),
+    runGutter((line) => onRunLineRef.current?.(line)),
+    indentOnInput(),
+    bracketMatching(),
+    history(),
+    highlightActiveLine(),
+    httpLanguage(),
+    makeEditorTheme(isDark),
+    EditorView.lineWrapping,
+    EditorState.readOnly.of(readOnly),
+    keymap.of([
+      ...defaultKeymap,
+      ...historyKeymap,
+      ...searchKeymap,
+      ...foldKeymap,
+      indentWithTab,
+      {
+        key: "Mod-s",
+        preventDefault: true,
+        run: (view) => {
+          onSaveRef.current?.(view.state.doc.toString());
+          return true;
+        },
+      },
+      {
+        key: "Mod-Enter",
+        preventDefault: true,
+        run: (view) => {
+          const pos = view.state.selection.main.head;
+          const lineNum = view.state.doc.lineAt(pos).number;
+          onRunLineRef.current?.(lineNum);
+          return true;
+        },
+      },
+    ]),
+    EditorView.updateListener.of((update) => {
+      if (update.docChanged) {
+        onChangeRef.current?.(update.state.doc.toString());
+      }
+    }),
+  ];
 
   // Build the editor view exactly once per mount; theme changes are
   // reconfigured below without remounting.
   useEffect(() => {
     if (!hostRef.current) return;
 
-    const extensions: Extension[] = [
-      vim(),
-      lineNumbers(),
-      foldGutter(),
-      indentOnInput(),
-      bracketMatching(),
-      history(),
-      highlightActiveLine(),
-      httpLanguage(),
-      makeEditorTheme(theme === "dark"),
-      EditorView.lineWrapping,
-      EditorState.readOnly.of(readOnly),
-      keymap.of([
-        ...defaultKeymap,
-        ...historyKeymap,
-        ...searchKeymap,
-        ...foldKeymap,
-        indentWithTab,
-        {
-          key: "Mod-s",
-          preventDefault: true,
-          run: (view) => {
-            onSaveRef.current?.(view.state.doc.toString());
-            return true;
-          },
-        },
-      ]),
-      EditorView.updateListener.of((update) => {
-        if (update.docChanged) {
-          onChangeRef.current?.(update.state.doc.toString());
-        }
-      }),
-    ];
-
     const view = new EditorView({
-      state: EditorState.create({ doc: value, extensions }),
+      state: EditorState.create({
+        doc: value,
+        extensions: buildExtensions(theme === "dark"),
+      }),
       parent: hostRef.current,
     });
     viewRef.current = view;
@@ -129,47 +153,16 @@ export function HttpEditor({
   useEffect(() => {
     const view = viewRef.current;
     if (!view) return;
-    view.dispatch({
-      effects: [],
-    });
-    // Reconfigure by replacing the EditorState with a fresh one preserving
-    // the doc + selection.
     const doc = view.state.doc;
     const selection = view.state.selection;
-    const extensions: Extension[] = [
-      vim(),
-      lineNumbers(),
-      foldGutter(),
-      indentOnInput(),
-      bracketMatching(),
-      history(),
-      highlightActiveLine(),
-      httpLanguage(),
-      makeEditorTheme(theme === "dark"),
-      EditorView.lineWrapping,
-      EditorState.readOnly.of(readOnly),
-      keymap.of([
-        ...defaultKeymap,
-        ...historyKeymap,
-        ...searchKeymap,
-        ...foldKeymap,
-        indentWithTab,
-        {
-          key: "Mod-s",
-          preventDefault: true,
-          run: (v) => {
-            onSaveRef.current?.(v.state.doc.toString());
-            return true;
-          },
-        },
-      ]),
-      EditorView.updateListener.of((update) => {
-        if (update.docChanged) {
-          onChangeRef.current?.(update.state.doc.toString());
-        }
+    view.setState(
+      EditorState.create({
+        doc,
+        selection,
+        extensions: buildExtensions(theme === "dark"),
       }),
-    ];
-    view.setState(EditorState.create({ doc, selection, extensions }));
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [theme, readOnly]);
 
   // Imperative API.

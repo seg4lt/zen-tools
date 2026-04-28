@@ -88,6 +88,39 @@ export function RequestsView() {
     }
   };
 
+  /**
+   * Map an editor line number to the parsed request that owns it. The
+   * parser records each request's `lineNumber` (1-based) — we walk the
+   * sorted list and pick the last request whose start line is ≤ the
+   * cursor's line.
+   */
+  const handleRunLine = (line: number) => {
+    if (!state.selectedFile) return;
+    const sorted = [...state.selectedFile.requests].sort(
+      (a, b) => a.lineNumber - b.lineNumber,
+    );
+    let match: (typeof sorted)[number] | null = null;
+    for (const req of sorted) {
+      if (req.lineNumber <= line) match = req;
+      else break;
+    }
+    if (!match) {
+      dispatch({
+        type: "log",
+        level: "warn",
+        message: `No request found at line ${line}`,
+      });
+      return;
+    }
+    const id = stableId(state.selectedFile.path, match);
+    dispatch({ type: "selectRequest", id });
+    dispatch({
+      type: "log",
+      message: `Run requested: ${match.name ?? match.url}`,
+    });
+    // Phase 11 will fire the actual run command here.
+  };
+
   return (
     <div className="flex h-full w-full min-h-0">
       {/* File tree pane */}
@@ -147,16 +180,7 @@ export function RequestsView() {
               requests={state.selectedFile.requests}
               selectedId={state.selectedRequestId}
               onSelect={(id) => dispatch({ type: "selectRequest", id })}
-              onRun={(req) => {
-                dispatch({
-                  type: "log",
-                  message: `Run requested: ${req.name ?? req.url}`,
-                });
-                dispatch({
-                  type: "selectRequest",
-                  id: stableId(state.selectedFile!.path, req),
-                });
-              }}
+              onRun={(req) => handleRunLine(req.lineNumber)}
             />
           ) : (
             <EmptyHint>Pick a file from the tree.</EmptyHint>
@@ -195,6 +219,7 @@ export function RequestsView() {
               imperativeRef={editorRef}
               value={editorValue}
               onSave={handleSave}
+              onRunLine={handleRunLine}
             />
           ) : (
             <div className="flex h-full items-center justify-center">
