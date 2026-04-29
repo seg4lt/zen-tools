@@ -8,7 +8,13 @@
 
 import { useEffect, useImperativeHandle, useRef, type Ref } from "react";
 import { EditorState, type Extension } from "@codemirror/state";
-import { EditorView, keymap, lineNumbers, highlightActiveLine } from "@codemirror/view";
+import {
+  EditorView,
+  drawSelection,
+  highlightActiveLine,
+  keymap,
+  lineNumbers,
+} from "@codemirror/view";
 import {
   defaultKeymap,
   history,
@@ -26,6 +32,7 @@ import { vim, Vim } from "@replit/codemirror-vim";
 import { httpLanguage } from "../lib/lang-http";
 import { makeEditorTheme } from "../lib/cm-theme";
 import { runGutter } from "../lib/run-gutter";
+import { varHoverTooltip, type VarContext } from "../lib/var-hover";
 import { useTheme } from "@/hooks/use-theme";
 
 export interface HttpEditorHandle {
@@ -62,6 +69,18 @@ export interface HttpEditorProps {
    * `.perf.yaml` (where the gutter is meaningless).
    */
   mode?: "http" | "plain";
+  /**
+   * Optional variable context for the `{{var}}` hover tooltip. Updated
+   * via a ref under the hood so callers can pass fresh values on every
+   * render without forcing the editor to rebuild.
+   */
+  varContext?: VarContext;
+  /**
+   * Whether to install the Vim keybinding layer. Defaults to `true`
+   * (historical behaviour). Toggling rebuilds the editor state — the
+   * caller's content + cursor position survive.
+   */
+  vimMode?: boolean;
   /** Forwarded ref for imperative control. */
   imperativeRef?: Ref<HttpEditorHandle>;
 }
@@ -75,6 +94,8 @@ export function HttpEditor({
   onRunLine,
   onRunLineWithDeps,
   mode = "http",
+  varContext,
+  vimMode = true,
   imperativeRef,
 }: HttpEditorProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
@@ -83,15 +104,19 @@ export function HttpEditor({
   const onSaveRef = useRef(onSave);
   const onRunLineRef = useRef(onRunLine);
   const onRunLineWithDepsRef = useRef(onRunLineWithDeps);
+  // Hover tooltip reads var maps from this ref, so callers can pass
+  // fresh values via a normal prop without rebuilding the editor.
+  const varCtxRef = useRef<VarContext>(varContext ?? {});
   const { theme } = useTheme();
 
-  // Keep latest callbacks visible to long-lived listeners.
+  // Keep latest callbacks + var-context visible to long-lived listeners.
   useEffect(() => {
     onChangeRef.current = onChange;
     onSaveRef.current = onSave;
     onRunLineRef.current = onRunLine;
     onRunLineWithDepsRef.current = onRunLineWithDeps;
-  }, [onChange, onSave, onRunLine, onRunLineWithDeps]);
+    varCtxRef.current = varContext ?? {};
+  }, [onChange, onSave, onRunLine, onRunLineWithDeps, varContext]);
 
   // Register Vim ex commands once. `:w` / `:write` save through onSave so
   // muscle memory works inside vim mode too. The Vim wrapper passes its
@@ -108,7 +133,10 @@ export function HttpEditor({
   }, []);
 
   const buildExtensions = (isDark: boolean): Extension[] => [
-    vim(),
+    // Vim keybindings — toggleable. When disabled the editor falls
+    // back to standard CodeMirror keymap (default + history + search
+    // + fold) installed below.
+    ...(vimMode ? [vim()] : []),
     lineNumbers(),
     foldGutter(),
     // The run-gutter is only meaningful for `.http` files; perf YAML
@@ -116,11 +144,23 @@ export function HttpEditor({
     ...(mode === "http"
       ? [runGutter((line) => onRunLineRef.current?.(line))]
       : []),
+    // `drawSelection()` renders the selection as a `<div>` overlay
+    // (`.cm-selectionBackground`). Without it, CodeMirror falls back
+    // to the browser's native `::selection`, which doesn't always
+    // paint programmatically-set ranges — vim's visual mode
+    // dispatches a selection range via `view.dispatch`, and that
+    // dispatch was producing no visible highlight without this
+    // extension. Same for multi-cursor / rectangle selections.
+    drawSelection(),
+    EditorState.allowMultipleSelections.of(true),
     indentOnInput(),
     bracketMatching(),
     history(),
     highlightActiveLine(),
     ...(mode === "http" ? [httpLanguage()] : []),
+    // `{{var}}` hover-resolution. Reads `varCtxRef.current` at hover
+    // time so the latest env/extracted/local values are always shown.
+    varHoverTooltip(varCtxRef),
     makeEditorTheme(isDark),
     EditorView.lineWrapping,
     EditorState.readOnly.of(readOnly),
@@ -189,7 +229,9 @@ export function HttpEditor({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Re-build theme + readOnly + mode when they change without remounting.
+  // Re-build theme + readOnly + mode + vimMode when they change
+  // without remounting. The doc + selection ride through unchanged so
+  // toggling vim doesn't lose the user's content or cursor.
   useEffect(() => {
     const view = viewRef.current;
     if (!view) return;
@@ -203,7 +245,7 @@ export function HttpEditor({
       }),
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [theme, readOnly, mode]);
+  }, [theme, readOnly, mode, vimMode]);
 
   // Imperative API.
   useImperativeHandle(

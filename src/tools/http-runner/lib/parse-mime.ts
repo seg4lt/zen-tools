@@ -13,3 +13,10 @@ export function languageForContentType(contentType?: string): Extension[] {
   }
   return [];
 }
+
+/** Heuristic: does this look like a JSON content-type? */
+export function isJsonContentType(contentType?: string): boolean {
+  if (!contentType) return false;
+  const lower = contentType.toLowerCase();
+  return lower.includes("application/json") || lower.includes("+json");
+}

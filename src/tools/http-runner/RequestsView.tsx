@@ -23,6 +23,7 @@ import { PaneFrame, type PaneState } from "./components/pane-frame";
 import { PerfTestList } from "./components/perf-test-list";
 import { PerfDashboard } from "./components/perf-dashboard";
 import { PerfSchemaSheet } from "./components/perf-schema-sheet";
+import { useVimMode } from "./hooks/use-vim-mode";
 import { usePerfRunner } from "./hooks/use-perf-runner";
 import { onRequestChain, onRequestResult, tauri } from "./lib/tauri";
 import { stableId, useHttpRunner } from "./store/http-runner-store";
@@ -55,6 +56,15 @@ type PaneKey = "tree" | "list" | "editor" | "response";
  */
 export function RequestsView() {
   const { state, dispatch } = useHttpRunner();
+  const { vimMode: vimModeEnabled } = useVimMode();
+  // The streaming-event listener (registered once on mount) reads
+  // `selectedFile` lazily through a ref so it sees the current value
+  // at fire time — without this, captured `state` would be the null
+  // at first render and the recorded URL would always be empty.
+  const selectedFileRef = useRef(state.selectedFile);
+  useEffect(() => {
+    selectedFileRef.current = state.selectedFile;
+  }, [state.selectedFile]);
   const [treeWidth, setTreeWidth] = useState(220);
   const [listWidth, setListWidth] = useState(280);
   const [responseHeight, setResponseHeight] = useState(280);
@@ -168,6 +178,65 @@ export function RequestsView() {
             message: `${label}: HTTP ${payload.status.response.statusCode} ${payload.status.response.statusText}`,
           });
         }
+
+        // Persist the run to history (last-10 ring buffer per request,
+        // backend-owned). Skip the ephemeral idle/running events —
+        // only completed outcomes are worth keeping for diffing.
+        if (
+          payload.status.type === "success" ||
+          payload.status.type === "error"
+        ) {
+          const file = selectedFileRef.current;
+          const requestForUrl = file?.requests.find(
+            (r) => stableId(file.path, r) === payload.requestId,
+          );
+          const method = requestForUrl?.method ?? "GET";
+          const url = requestForUrl?.url ?? "";
+          const entry =
+            payload.status.type === "success"
+              ? {
+                  timestamp:
+                    payload.completedAt ?? new Date().toISOString(),
+                  outcome: "success" as const,
+                  method,
+                  url,
+                  statusCode: payload.status.response.statusCode,
+                  statusText: payload.status.response.statusText,
+                  durationMs: payload.status.response.duration,
+                  sizeBytes: payload.status.response.sizeBytes,
+                  body: payload.status.response.body,
+                  bodyTruncated: false,
+                  headers: payload.status.response.headers,
+                  extractedVars: payload.extractedVars ?? {},
+                  errorMessage: null,
+                }
+              : {
+                  timestamp:
+                    payload.completedAt ?? new Date().toISOString(),
+                  outcome: "error" as const,
+                  method,
+                  url,
+                  statusCode: null,
+                  statusText: null,
+                  durationMs: null,
+                  sizeBytes: null,
+                  body: "",
+                  bodyTruncated: false,
+                  headers: [],
+                  extractedVars: payload.extractedVars ?? {},
+                  errorMessage: payload.status.message,
+                };
+          void tauri
+            .recordRun(payload.requestId, entry)
+            .then(() => {
+              void queryClient.invalidateQueries({
+                queryKey: ["run-history", payload.requestId],
+              });
+            })
+            .catch((err) =>
+              console.warn("zen-tools: record_run failed", err),
+            );
+        }
       }),
       onRequestChain((payload) => {
         dispatch({ type: "chain", steps: payload.steps });
@@ -224,6 +293,15 @@ export function RequestsView() {
       // it was when the env file's project was first added.
       void queryClient.invalidateQueries({ queryKey: ["environments"] });
       void queryClient.invalidateQueries({ queryKey: ["env-vars"] });
+      void queryClient.invalidateQueries({ queryKey: ["extracted-vars"] });
+      // The backend may have just auto-selected an environment because
+      // none was active. Mirror that selection into the front-end
+      // store so `{{host}}` etc. resolve immediately on the Sent tab
+      // and request-list URL preview — the env-vars query is keyed on
+      // `state.activeEnv`, and without this it stays disabled.
+      if (opened.autoSelectedEnv) {
+        dispatch({ type: "setEnv", env: opened.autoSelectedEnv });
+      }
     }
   }, [opened, state.selectedFile?.path, dispatch, queryClient]);
 
@@ -617,6 +695,12 @@ export function RequestsView() {
           imperativeRef={editorRef}
           value={editorValue}
           mode={isPerf ? "plain" : "http"}
+          vimMode={vimModeEnabled}
+          varContext={{
+            extracted: extractedVars,
+            local: state.selectedFile?.localVariables,
+            env: envVars,
+          }}
           onSave={handleSave}
           onChange={handleEditorChange}
           onRunLine={(line) => handleRunLine(line)}

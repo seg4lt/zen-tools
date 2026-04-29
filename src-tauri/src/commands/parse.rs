@@ -7,9 +7,25 @@ use std::path::{Path, PathBuf};
 use tokio::sync::Mutex;
 use tracing::debug;
 use zen_parser::{find_env_file, parse_env_file};
+use zen_types::prelude::*;
+
+/// Choose a sensible default environment from a list of names.
+/// Mirrors the picker used by `add_working_dir`.
+fn pick_default_env_name(names: &[String]) -> Option<String> {
+    if names.iter().any(|n| n == "development") {
+        return Some("development".to_string());
+    }
+    if names.iter().any(|n| n == "dev") {
+        return Some("dev".to_string());
+    }
+    names.first().cloned()
+}
 
 /// Open an `.http` file, register it in the cache, and resolve any
-/// directory-local env file.
+/// directory-local env file. If no environment is currently selected
+/// but the file's local env contains some, **auto-select a default**
+/// (`development` → `dev` → first alphabetical) and surface the
+/// chosen name so the front-end can refresh its env-aware queries.
 #[tauri::command]
 pub async fn open_http_file(
     path: String,
@@ -25,13 +41,29 @@ pub async fn open_http_file(
 
     // Look for a local env file alongside the http file.
     let mut local_env_dto = None;
+    let mut auto_selected_env: Option<String> = None;
     if let Some(parent) = path_buf.parent() {
         if let Some(env_path) = find_env_file(parent) {
             if let Ok(content) = std::fs::read_to_string(&env_path) {
                 match parse_env_file(env_path.clone(), &content) {
                     Ok(env) => {
+                        let names = env.env_names();
                         local_env_dto = Some(EnvironmentFileDto::from(&env));
-                        state.lock().await.local_env_file = Some(env);
+                        let mut s = state.lock().await;
+                        s.local_env_file = Some(env);
+                        // If no env is selected (the project root
+                        // didn't contain an env file so add_working_dir
+                        // couldn't auto-pick one), do it now from
+                        // whatever the file's directory contributed.
+                        // Without this, `{{host}}` etc. stay raw on
+                        // the Sent tab even though the env file is
+                        // sitting right there.
+                        if s.selected_env.is_none() {
+                            if let Some(name) = pick_default_env_name(&names) {
+                                s.selected_env = Some(EnvName::new(name.clone()));
+                                auto_selected_env = Some(name);
+                            }
+                        }
                     }
                     Err(e) => debug!(?e, "failed to parse local env file"),
                 }
@@ -42,6 +74,7 @@ pub async fn open_http_file(
     Ok(OpenedHttpFileDto {
         file: (*arc_file).clone(),
         local_env: local_env_dto,
+        auto_selected_env,
     })
 }
 
@@ -78,5 +111,6 @@ pub async fn reload_http_file(
     Ok(OpenedHttpFileDto {
         file: (*arc_file).clone(),
         local_env: None,
+        auto_selected_env: None,
     })
 }

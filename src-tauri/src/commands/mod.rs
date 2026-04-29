@@ -7,3 +7,4 @@ pub mod misc;
 pub mod parse;
 pub mod perf;
 pub mod preferences;
+pub mod runs;

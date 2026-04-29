@@ -120,7 +120,9 @@ impl PerfTestDto {
 }
 
 /// Wrapper around HttpFile for opening — adds the `EnvironmentFileDto`
-/// resolved alongside it (so the UI can show the env selector immediately).
+/// resolved alongside it (so the UI can show the env selector immediately)
+/// plus the env name (if any) that the backend auto-picked because no
+/// environment was previously selected.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OpenedHttpFileDto {
@@ -128,4 +130,8 @@ pub struct OpenedHttpFileDto {
     pub file: HttpFile,
     /// Local env file resolved from the file's directory, if any.
     pub local_env: Option<EnvironmentFileDto>,
+    /// Environment name auto-selected because the user had none active
+    /// when this file was opened. Front-end should mirror this into
+    /// its store so `{{host}}` etc. resolve straight away.
+    pub auto_selected_env: Option<String>,
 }

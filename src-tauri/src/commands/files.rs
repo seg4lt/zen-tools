@@ -1,5 +1,6 @@
 //! File-discovery and working-directory commands.
 
+use crate::commands::preferences::{load_preferences, write_preferences};
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 use serde::Serialize;
@@ -7,7 +8,7 @@ use std::path::{Path, PathBuf};
 use tauri::AppHandle;
 use tauri_plugin_dialog::DialogExt;
 use tokio::sync::Mutex;
-use tracing::debug;
+use tracing::{debug, warn};
 use zen_parser::{find_env_file, parse_env_file};
 use zen_types::prelude::*;
 
@@ -62,6 +63,7 @@ pub async fn find_env_file_command(directory: String) -> AppResult<Option<String
 #[tauri::command]
 pub async fn add_working_dir(
     path: String,
+    app_handle: AppHandle,
     state: tauri::State<'_, Mutex<AppState>>,
 ) -> AppResult<Vec<String>> {
     let path = PathBuf::from(&path);
@@ -72,33 +74,39 @@ pub async fn add_working_dir(
         )));
     }
 
-    let mut s = state.lock().await;
-    let already = s.working_dirs.iter().any(|p| p == &path);
-    if !already {
-        let was_empty = s.working_dirs.is_empty();
-        s.working_dirs.push(path.clone());
+    let working_dirs: Vec<PathBuf> = {
+        let mut s = state.lock().await;
+        let already = s.working_dirs.iter().any(|p| p == &path);
+        if !already {
+            let was_empty = s.working_dirs.is_empty();
+            s.working_dirs.push(path.clone());
 
-        // First project added → match the old single-dir behaviour and
-        // auto-load whatever env file lives at the root, picking a
-        // sensible default name. Later additions don't touch env state.
-        if was_empty {
-            if let Some(env_path) = find_env_file(&path) {
-                match std::fs::read_to_string(&env_path) {
-                    Ok(content) => match parse_env_file(env_path.clone(), &content) {
-                        Ok(env) => s.global_env_file = Some(env),
-                        Err(e) => debug!(?e, "failed to parse global env file"),
-                    },
-                    Err(e) => debug!(?e, "failed to read global env file"),
+            // First project added → match the old single-dir behaviour
+            // and auto-load whatever env file lives at the root,
+            // picking a sensible default name. Later additions don't
+            // touch env state.
+            if was_empty {
+                if let Some(env_path) = find_env_file(&path) {
+                    match std::fs::read_to_string(&env_path) {
+                        Ok(content) => match parse_env_file(env_path.clone(), &content) {
+                            Ok(env) => s.global_env_file = Some(env),
+                            Err(e) => debug!(?e, "failed to parse global env file"),
+                        },
+                        Err(e) => debug!(?e, "failed to read global env file"),
+                    }
                 }
-            }
-            if s.selected_env.is_none() {
-                if let Some(name) = s.global_env_file.as_ref().and_then(pick_default_env) {
-                    s.selected_env = Some(EnvName::new(name));
+                if s.selected_env.is_none() {
+                    if let Some(name) = s.global_env_file.as_ref().and_then(pick_default_env) {
+                        s.selected_env = Some(EnvName::new(name));
+                    }
                 }
             }
         }
-    }
-    Ok(s.working_dirs.iter().map(|p| p.display().to_string()).collect())
+        s.working_dirs.clone()
+    };
+
+    persist_project_list(&app_handle, &working_dirs);
+    Ok(working_dirs.iter().map(|p| p.display().to_string()).collect())
 }
 
 /// Remove a project root by exact path match. Does **not** clear env
@@ -107,12 +115,35 @@ pub async fn add_working_dir(
 #[tauri::command]
 pub async fn remove_working_dir(
     path: String,
+    app_handle: AppHandle,
     state: tauri::State<'_, Mutex<AppState>>,
 ) -> AppResult<Vec<String>> {
     let target = PathBuf::from(&path);
-    let mut s = state.lock().await;
-    s.working_dirs.retain(|p| p != &target);
-    Ok(s.working_dirs.iter().map(|p| p.display().to_string()).collect())
+    let working_dirs: Vec<PathBuf> = {
+        let mut s = state.lock().await;
+        s.working_dirs.retain(|p| p != &target);
+        s.working_dirs.clone()
+    };
+
+    persist_project_list(&app_handle, &working_dirs);
+    Ok(working_dirs.iter().map(|p| p.display().to_string()).collect())
+}
+
+/// Read the on-disk preferences, mutate `working_dirs`, and write back
+/// atomically. The frontend used to do this — but a frontend crash
+/// between `add_working_dir` and the disk write would lose the
+/// project. Owning persistence on the backend collapses both calls
+/// into a single command, so the user can never see "I added a
+/// project but it's gone after restart".
+fn persist_project_list(app: &AppHandle, working_dirs: &[PathBuf]) {
+    let mut prefs = load_preferences(app).unwrap_or_default();
+    prefs.working_dirs = working_dirs
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect();
+    if let Err(e) = write_preferences(app, &prefs) {
+        warn!(?e, "failed to persist project list");
+    }
 }
 
 /// List currently-open project roots.

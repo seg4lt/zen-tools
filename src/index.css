@@ -146,6 +146,18 @@ body,
   text-rendering: optimizeLegibility;
 }
 
+/* Editable surfaces (CodeMirror's contenteditable) must always allow
+   text selection regardless of any ancestor's `user-select: none` —
+   otherwise a stuck inline body style or a Tailwind `select-none`
+   higher up the tree would silently break vim visual mode and mouse
+   drag-select inside the editor. */
+.cm-content,
+.cm-editor,
+[contenteditable="true"] {
+  user-select: text !important;
+  -webkit-user-select: text !important;
+}
+
 /* CodeMirror run-gutter — clickable Play icon next to request lines. */
 .cm-run-gutter {
   width: 18px;

@@ -90,6 +90,13 @@ export interface EnvironmentFileDto {
 export interface OpenedHttpFileDto {
   file: HttpFile;
   localEnv: EnvironmentFileDto | null;
+  /**
+   * Set when the backend auto-selected an environment as a side
+   * effect of opening this file (because nothing was previously
+   * active). The frontend should mirror it into the runner store +
+   * invalidate env-aware queries.
+   */
+  autoSelectedEnv: string | null;
 }
 
 /** Ordered list of `[name, value]` pairs — duplicate-named headers (Set-Cookie, Vary, etc.) survive. */
@@ -200,15 +207,43 @@ export const tauri = {
   getPreferences: () => invoke<Preferences>("get_preferences"),
   savePreferences: (prefs: Preferences) =>
     invoke<void>("save_preferences", { prefs }),
+
+  // run history (last 10 runs per request, persisted to runs.json)
+  recordRun: (requestId: string, entry: RunHistoryEntry) =>
+    invoke<void>("record_run", { requestId, entry }),
+  getRunHistory: (requestId: string) =>
+    invoke<RunHistoryEntry[]>("get_run_history", { requestId }),
+  clearRunHistory: (requestId?: string) =>
+    invoke<void>("clear_run_history", { requestId: requestId ?? null }),
 };
 
+/** One captured run for a request. Mirrors the Rust `RunHistoryEntry`. */
+export interface RunHistoryEntry {
+  /** ISO-8601 wall-clock completion time. */
+  timestamp: string;
+  outcome: "success" | "error";
+  method: string;
+  url: string;
+  statusCode: number | null;
+  statusText: string | null;
+  durationMs: number | null;
+  sizeBytes: number | null;
+  body: string;
+  bodyTruncated: boolean;
+  headers: HeaderPairs;
+  extractedVars: Record<string, string>;
+  errorMessage: string | null;
+}
+
 /**
- * Persisted UI state — open project list and folder expansion. Mirrors
- * the Rust `Preferences` struct.
+ * Persisted UI state — open project list, folder expansion, and the
+ * Vim-mode toggle. Mirrors the Rust `Preferences` struct.
  */
 export interface Preferences {
   workingDirs: string[];
   expandedPaths: string[];
+  /** `true` when the editor's Vim keybindings should be active. */
+  vimMode: boolean;
 }
 
 // ────────────────────────────────────────────────────────────────────────────

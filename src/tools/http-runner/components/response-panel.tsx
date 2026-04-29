@@ -7,10 +7,11 @@ import { useHttpRunner } from "../store/http-runner-store";
 import { HeadersTable } from "./headers-table";
 import { DependencyChain } from "./dependency-chain";
 import { ResponseBody } from "./response-body";
+import { RunHistoryPanel } from "./run-history-panel";
 import { resolveUrl } from "../lib/resolve-url";
 import type { HttpRequest } from "../lib/tauri";
 
-type Tab = "sent" | "body" | "headers" | "chain";
+type Tab = "sent" | "body" | "headers" | "history" | "chain";
 
 export interface ResponsePanelProps {
   envVars?: Record<string, string>;
@@ -148,6 +149,9 @@ export function ResponsePanel({ envVars, extractedVars }: ResponsePanelProps) {
           <TabsTrigger value="headers" className="h-7 text-xs">
             Response Headers
           </TabsTrigger>
+          <TabsTrigger value="history" className="h-7 text-xs">
+            History
+          </TabsTrigger>
           <TabsTrigger value="chain" className="h-7 text-xs">
             Dependency Chain
             {chainSteps.length > 1 && (
@@ -202,6 +206,12 @@ export function ResponsePanel({ envVars, extractedVars }: ResponsePanelProps) {
           ) : (
             <EmptyHint>No headers yet.</EmptyHint>
           )}
+        </TabsContent>
+        <TabsContent
+          value="history"
+          className="min-h-0 flex-1 overflow-hidden"
+        >
+          <RunHistoryPanel requestId={id} />
         </TabsContent>
         <TabsContent value="chain" className="min-h-0 flex-1 overflow-y-auto">
           <DependencyChain

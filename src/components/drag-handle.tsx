@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 
 interface DragHandleProps {
@@ -53,12 +53,20 @@ export function DragHandle({
         el.releasePointerCapture(pointerId);
       }
       setDragging(false);
-      // Clear the global cursor + selection lock we set on pointerdown.
-      document.body.style.userSelect = "";
-      document.body.style.cursor = "";
     },
     [],
   );
+
+  // Aggressive on-mount safety net: if any *previous* version of this
+  // component (or some other stale code path) left
+  // `body.style.userSelect = "none"` behind, the editor — and every
+  // other contenteditable surface — becomes un-selectable for the
+  // rest of the session. Wipe any inline body styles we might have
+  // ever set, on every DragHandle mount, regardless of who set them.
+  useEffect(() => {
+    if (document.body.style.userSelect) document.body.style.userSelect = "";
+    if (document.body.style.cursor) document.body.style.cursor = "";
+  }, []);
 
   const onPointerDown = useCallback(
     (e: React.PointerEvent<HTMLDivElement>) => {
@@ -72,14 +80,11 @@ export function DragHandle({
         size: initial,
       };
       // Capture means subsequent pointer{move,up,cancel} fire on this
-      // element no matter where the cursor goes.
+      // element no matter where the cursor goes — selection can't
+      // start in another surface because those mousedown events
+      // won't reach it. No body-level user-select toggling needed.
       e.currentTarget.setPointerCapture(e.pointerId);
       setDragging(true);
-      // Block text selection + force the resize cursor everywhere
-      // while the drag is in progress.
-      document.body.style.userSelect = "none";
-      document.body.style.cursor =
-        direction === "x" ? "col-resize" : "row-resize";
     },
     [direction, initial],
   );

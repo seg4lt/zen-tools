@@ -10,7 +10,9 @@ pub mod dto;
 pub mod error;
 pub mod state;
 
+use commands::runs::{load_runs, RunHistory};
 use state::AppState;
+use tauri::Manager;
 use tokio::sync::Mutex;
 use tracing_subscriber::EnvFilter;
 
@@ -31,6 +33,15 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .manage(Mutex::new(AppState::new()))
+        .manage(Mutex::new(RunHistory::default()))
+        .setup(|app| {
+            // Hydrate run history from disk so previous-session runs
+            // are immediately available in the History tab.
+            let store = app.state::<Mutex<RunHistory>>();
+            let mut s = store.blocking_lock();
+            load_runs(app.handle(), &mut s);
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             // files
             commands::files::discover_http_files,
@@ -71,6 +82,10 @@ pub fn run() {
             // preferences
             commands::preferences::get_preferences,
             commands::preferences::save_preferences,
+            // run history
+            commands::runs::record_run,
+            commands::runs::get_run_history,
+            commands::runs::clear_run_history,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

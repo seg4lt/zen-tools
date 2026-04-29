@@ -15,20 +15,14 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useRef } from "react";
 import { tauri } from "../lib/tauri";
 
-/** Read the persisted preferences. Resolves to defaults on first launch. */
+/**
+ * Read the persisted preferences. Resolves to defaults on first
+ * launch. Used during bootstrap to discover which projects to
+ * re-add; the **backend owns** the canonical persistence — every
+ * `add_working_dir` / `remove_working_dir` writes the JSON itself.
+ */
 async function readPrefs() {
   return tauri.getPreferences();
-}
-
-/**
- * Persist the projects list — preserves any other preference fields by
- * fetching the current file first, mutating only `workingDirs`, then
- * writing back. Cheap because the file is small.
- */
-async function persistWorkingDirs(workingDirs: string[]): Promise<void> {
-  const prefs = await readPrefs();
-  prefs.workingDirs = workingDirs;
-  await tauri.savePreferences(prefs);
 }
 
 /**
@@ -81,12 +75,12 @@ export function useProjectsBootstrap() {
           }
         }
         if (cancelled) return;
-        // Persist the surviving subset so the next start doesn't keep
-        // retrying broken paths.
+        // The backend already persists every successful
+        // `add_working_dir` to disk, so any path that survived the
+        // bootstrap loop is already saved. Broken paths simply weren't
+        // re-added and won't be retried because the JSON now reflects
+        // only the surviving subset.
         const surviving = await tauri.listWorkingDirs();
-        if (surviving.length !== prefs.workingDirs.length) {
-          await persistWorkingDirs(surviving);
-        }
         await queryClient.invalidateQueries({ queryKey: ["working-dirs"] });
         await queryClient.invalidateQueries({ queryKey: ["http-files"] });
         await queryClient.invalidateQueries({ queryKey: ["environments"] });
@@ -126,8 +120,9 @@ export function useProjectActions() {
     const picked = await tauri.pickDirectory();
     if (!picked) return null;
     const before = await tauri.listWorkingDirs();
+    // Backend writes the project list to the preferences JSON itself
+    // before returning, so a crash here can't lose state.
     const list = await tauri.addWorkingDir(picked);
-    await persistWorkingDirs(list);
     await queryClient.invalidateQueries({ queryKey: ["working-dirs"] });
     await queryClient.invalidateQueries({ queryKey: ["http-files"] });
     // The env list can change every time a project is added (a new
@@ -154,8 +149,9 @@ export function useProjectActions() {
 
   const removeProject = useCallback(
     async (path: string): Promise<void> => {
-      const list = await tauri.removeWorkingDir(path);
-      await persistWorkingDirs(list);
+      // Backend persists the new list to disk before returning — no
+      // separate frontend save step required.
+      await tauri.removeWorkingDir(path);
       await queryClient.invalidateQueries({ queryKey: ["working-dirs"] });
       await queryClient.invalidateQueries({ queryKey: ["http-files"] });
     },

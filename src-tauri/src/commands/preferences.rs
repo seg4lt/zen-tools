@@ -17,7 +17,7 @@ use tauri::{AppHandle, Manager};
 
 /// Persisted UI state. New optional fields can be added without
 /// breaking older preferences files thanks to `#[serde(default)]`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Preferences {
     /// Open project roots, in user-defined order.
@@ -28,6 +28,25 @@ pub struct Preferences {
     /// explicitly *collapsed* (versus the default-expanded behaviour).
     #[serde(default)]
     pub expanded_paths: Vec<String>,
+    /// Whether the editor's Vim keybindings are active. `true` (the
+    /// historical default) keeps `:w`, normal/insert mode etc.; flip
+    /// to `false` for plain editing.
+    #[serde(default = "default_vim_mode")]
+    pub vim_mode: bool,
+}
+
+fn default_vim_mode() -> bool {
+    true
+}
+
+impl Default for Preferences {
+    fn default() -> Self {
+        Self {
+            working_dirs: Vec::new(),
+            expanded_paths: Vec::new(),
+            vim_mode: default_vim_mode(),
+        }
+    }
 }
 
 /// Resolve the preferences file path. Creates the parent directory if
@@ -41,17 +60,17 @@ fn preferences_path(app: &AppHandle) -> AppResult<PathBuf> {
     Ok(dir.join("preferences.json"))
 }
 
-/// Read the preferences JSON. Returns defaults when the file is
-/// missing — the very first launch must not fail.
-#[tauri::command]
-pub async fn get_preferences(app: AppHandle) -> AppResult<Preferences> {
-    let path = preferences_path(&app)?;
+/// Synchronous read used by other backend modules (e.g.
+/// `commands::files` when persisting the project list). Returns
+/// defaults if the file is missing or malformed — the call site is
+/// expected to persist the merged result back via [`write_preferences`].
+pub fn load_preferences(app: &AppHandle) -> AppResult<Preferences> {
+    let path = preferences_path(app)?;
+    tracing::info!(path = %path.display(), "preferences load");
     if !path.exists() {
         return Ok(Preferences::default());
     }
     let content = std::fs::read_to_string(&path)?;
-    // Be lenient: if the file got corrupted, log it but keep working
-    // by returning defaults instead of crashing the app.
     match serde_json::from_str::<Preferences>(&content) {
         Ok(prefs) => Ok(prefs),
         Err(e) => {
@@ -61,15 +80,27 @@ pub async fn get_preferences(app: AppHandle) -> AppResult<Preferences> {
     }
 }
 
-/// Persist the preferences JSON atomically. Writes to a sibling
-/// `.tmp` file then renames into place so a crash mid-write can't
+/// Synchronous atomic write used by other backend modules. Writes to
+/// a sibling `.tmp` and renames into place so a crash mid-write can't
 /// leave a half-written file.
-#[tauri::command]
-pub async fn save_preferences(prefs: Preferences, app: AppHandle) -> AppResult<()> {
-    let path = preferences_path(&app)?;
+pub fn write_preferences(app: &AppHandle, prefs: &Preferences) -> AppResult<()> {
+    let path = preferences_path(app)?;
     let tmp = path.with_extension("json.tmp");
-    let json = serde_json::to_string_pretty(&prefs)?;
+    let json = serde_json::to_string_pretty(prefs)?;
     std::fs::write(&tmp, json)?;
     std::fs::rename(&tmp, &path)?;
     Ok(())
+}
+
+/// Read the preferences JSON. Returns defaults when the file is
+/// missing — the very first launch must not fail.
+#[tauri::command]
+pub async fn get_preferences(app: AppHandle) -> AppResult<Preferences> {
+    load_preferences(&app)
+}
+
+/// Persist the preferences JSON atomically.
+#[tauri::command]
+pub async fn save_preferences(prefs: Preferences, app: AppHandle) -> AppResult<()> {
+    write_preferences(&app, &prefs)
 }
