@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Loader2 } from "lucide-react";
+import { ArrowLeft, Loader2 } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
@@ -99,8 +99,36 @@ export function ResponsePanel({ envVars, extractedVars }: ResponsePanelProps) {
     );
   }
 
+  // The leaf is the last step of the planned chain — i.e. the request
+  // the user originally triggered "Run with deps" on. When the viewer
+  // has navigated *away* from it (by clicking another card in the
+  // chain tab) we offer a one-click way back.
+  const leafStep =
+    chainSteps.length > 0 ? chainSteps[chainSteps.length - 1] : null;
+  const viewingNonLeaf =
+    leafStep != null && id != null && id !== leafStep.id;
+
   return (
     <div className="flex h-full min-h-0 flex-col">
+      {viewingNonLeaf && leafStep && (
+        <button
+          type="button"
+          onClick={() => {
+            dispatch({ type: "selectRequest", id: leafStep.id });
+            userPickedRef.current = true;
+            setTab("body");
+          }}
+          className={cn(
+            "flex h-7 shrink-0 items-center gap-1.5 border-b bg-primary/10 px-3 text-left text-xs",
+            "text-primary hover:bg-primary/15",
+          )}
+          title={`Back to ${leafStep.name}`}
+        >
+          <ArrowLeft className="size-3" />
+          <span className="font-medium">Back to</span>
+          <span className="font-mono">{leafStep.name}</span>
+        </button>
+      )}
       <StatusBar
         previewMethod={selectedRequest?.method ?? null}
         previewUrl={previewUrl}

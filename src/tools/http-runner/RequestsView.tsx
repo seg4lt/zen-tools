@@ -1,11 +1,14 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  BookOpen,
+  Download,
   GitBranch,
   Loader2,
   Play,
   RefreshCw,
   Save,
+  Square,
 } from "lucide-react";
 import { DragHandle } from "@/components/drag-handle";
 import { Button } from "@/components/ui/button";
@@ -17,8 +20,25 @@ import {
 } from "./components/http-editor";
 import { ResponsePanel } from "./components/response-panel";
 import { PaneFrame, type PaneState } from "./components/pane-frame";
+import { PerfTestList } from "./components/perf-test-list";
+import { PerfDashboard } from "./components/perf-dashboard";
+import { PerfSchemaSheet } from "./components/perf-schema-sheet";
+import { usePerfRunner } from "./hooks/use-perf-runner";
 import { onRequestChain, onRequestResult, tauri } from "./lib/tauri";
 import { stableId, useHttpRunner } from "./store/http-runner-store";
+
+/** `true` for `.perf.yaml` / `perf.yaml` / `perf.yml`. */
+function isPerfFile(path: string | null): boolean {
+  if (!path) return false;
+  const lower = path.toLowerCase();
+  return (
+    lower.endsWith(".perf.yaml") ||
+    lower.endsWith("/perf.yaml") ||
+    lower.endsWith("/perf.yml") ||
+    lower === "perf.yaml" ||
+    lower === "perf.yml"
+  );
+}
 
 /** Identifier for one of the four resizable panes. */
 type PaneKey = "tree" | "list" | "editor" | "response";
@@ -38,12 +58,19 @@ export function RequestsView() {
   const [treeWidth, setTreeWidth] = useState(220);
   const [listWidth, setListWidth] = useState(280);
   const [responseHeight, setResponseHeight] = useState(280);
-  const [paneStates, setPaneStates] = useState<Record<PaneKey, PaneState>>({
-    tree: "normal",
-    list: "normal",
-    editor: "normal",
-    response: "normal",
+  // Two orthogonal pieces of pane state:
+  // - `collapsed[key]` toggles a 32px strip vs. the normal-sized pane.
+  // - `maximizedPane` is exclusive: when set, only that pane renders
+  //   full-bleed and the others are hidden. Restoring it leaves each
+  //   pane's collapsed state intact (the previous coupled-state
+  //   implementation reset every pane to "normal" on max/restore).
+  const [collapsed, setCollapsed] = useState<Record<PaneKey, boolean>>({
+    tree: false,
+    list: false,
+    editor: false,
+    response: false,
   });
+  const [maximizedPane, setMaximizedPane] = useState<PaneKey | null>(null);
   const queryClient = useQueryClient();
   const editorRef = useRef<HttpEditorHandle>(null);
   const [editorValue, setEditorValue] = useState("");
@@ -62,41 +89,40 @@ export function RequestsView() {
   const applyingExternalRef = useRef<boolean>(false);
 
   // ── pane layout helpers ────────────────────────────────────────────
-  const toggleCollapse = (key: PaneKey) =>
-    setPaneStates((prev) => ({
-      ...prev,
-      [key]: prev[key] === "collapsed" ? "normal" : "collapsed",
-      // Collapsing a pane while another is maximized would be confusing,
-      // so collapsing always returns the layout to normal-mode-ish.
-    }));
+  const toggleCollapse = (key: PaneKey) => {
+    // If the user collapses the pane that is currently maximized, drop
+    // out of max mode first so the rest of the layout reappears.
+    if (maximizedPane === key) setMaximizedPane(null);
+    setCollapsed((prev) => ({ ...prev, [key]: !prev[key] }));
+  };
 
-  const toggleMaximize = (key: PaneKey) =>
-    setPaneStates((prev) => {
-      const isMax = prev[key] === "maximized";
-      return {
-        tree: isMax ? "normal" : "tree" === key ? "maximized" : "normal",
-        list: isMax ? "normal" : "list" === key ? "maximized" : "normal",
-        editor: isMax ? "normal" : "editor" === key ? "maximized" : "normal",
-        response: isMax
-          ? "normal"
-          : "response" === key
-            ? "maximized"
-            : "normal",
-      };
-    });
+  const toggleMaximize = (key: PaneKey) => {
+    setMaximizedPane((prev) => (prev === key ? null : key));
+  };
 
-  const maxKey = (Object.keys(paneStates) as PaneKey[]).find(
-    (k) => paneStates[k] === "maximized",
-  );
-  const isMaximized = maxKey != null;
+  const isMaximized = maximizedPane !== null;
+  const maxKey = maximizedPane;
 
-  // Width/height for a horizontally-arranged pane.
+  /**
+   * Translate the orthogonal `collapsed` + `maximizedPane` flags into
+   * the tri-state PaneFrame still expects (`normal` / `collapsed` /
+   * `maximized`).
+   */
+  const paneState = (key: PaneKey): PaneState =>
+    maximizedPane === key
+      ? "maximized"
+      : collapsed[key]
+        ? "collapsed"
+        : "normal";
+
+  // Width/height for a horizontally-arranged pane in the **normal**
+  // (non-maximized) layout. Maximized panes bypass this helper because
+  // the layout short-circuits to a single full-bleed pane.
   const horizontalSize = (
     key: PaneKey,
     nominal: number,
   ): React.CSSProperties => {
-    if (paneStates[key] === "collapsed") return { width: 32, flex: "none" };
-    if (paneStates[key] === "maximized") return { flex: 1 };
+    if (collapsed[key]) return { width: 32, flex: "none" };
     return { width: nominal, flex: "none" };
   };
   // ───────────────────────────────────────────────────────────────────
@@ -152,10 +178,15 @@ export function RequestsView() {
     };
   }, [dispatch, queryClient]);
 
+  const isPerf = isPerfFile(state.selectedFilePath);
+
+  // Only parse `.http`/`.rest` through the http parser. `.perf.yaml`
+  // files are loaded as raw text + parsed via `loadPerfConfig` in the
+  // perf-runner hook below.
   const { data: opened } = useQuery({
     queryKey: ["http-file", state.selectedFilePath],
     queryFn: () => tauri.openHttpFile(state.selectedFilePath!),
-    enabled: state.selectedFilePath !== null,
+    enabled: state.selectedFilePath !== null && !isPerf,
   });
 
   const { data: rawContent } = useQuery({
@@ -163,6 +194,8 @@ export function RequestsView() {
     queryFn: () => tauri.readFileContent(state.selectedFilePath!),
     enabled: state.selectedFilePath !== null,
   });
+
+  const perf = usePerfRunner(isPerf ? state.selectedFilePath : null);
 
   // Env + extracted vars feed both the request-list URL preview and the
   // response panel "will hit" preview. Keyed off the active env so they
@@ -184,8 +217,15 @@ export function RequestsView() {
         path: opened.file.path,
         file: opened.file,
       });
+      // Opening a file may have loaded a sibling `*.env.json` into
+      // `local_env_file` on the backend, expanding the union of
+      // available environment names. Invalidate so the EnvSelector
+      // dropdown picks them up — without this the list stays whatever
+      // it was when the env file's project was first added.
+      void queryClient.invalidateQueries({ queryKey: ["environments"] });
+      void queryClient.invalidateQueries({ queryKey: ["env-vars"] });
     }
-  }, [opened, state.selectedFile?.path, dispatch]);
+  }, [opened, state.selectedFile?.path, dispatch, queryClient]);
 
   useEffect(() => {
     if (rawContent !== undefined && rawContent !== null) {
@@ -234,10 +274,19 @@ export function RequestsView() {
       if (!state.selectedFilePath) return;
       try {
         await tauri.writeFileContent(state.selectedFilePath, value);
-        const fresh = await tauri.reloadHttpFile(state.selectedFilePath);
-        // Use updateParsedFile (not selectFile) so the editor cursor +
-        // selected request are preserved across the save.
-        dispatch({ type: "updateParsedFile", file: fresh.file });
+        // Only `.http`/`.rest` files go through the http parser. For
+        // perf YAMLs we just invalidate the perf-config query so the
+        // test list re-parses on the next render.
+        if (isPerf) {
+          await queryClient.invalidateQueries({
+            queryKey: ["perf-config", state.selectedFilePath],
+          });
+        } else {
+          const fresh = await tauri.reloadHttpFile(state.selectedFilePath);
+          // Use updateParsedFile (not selectFile) so the editor cursor +
+          // selected request are preserved across the save.
+          dispatch({ type: "updateParsedFile", file: fresh.file });
+        }
         // The editor is the source of truth for the live buffer, so we
         // bump editorValue (used as the dirty baseline) without pushing
         // the value back into CodeMirror — that would clobber the
@@ -258,7 +307,7 @@ export function RequestsView() {
         });
       }
     },
-    [dispatch, queryClient, state.selectedFilePath],
+    [dispatch, isPerf, queryClient, state.selectedFilePath],
   );
 
   /**
@@ -357,7 +406,7 @@ export function RequestsView() {
   const treePane = (
     <PaneFrame
       title="Files"
-      state={paneStates.tree}
+      state={paneState("tree")}
       hidden={isMaximized && maxKey !== "tree"}
       onToggleCollapse={() => toggleCollapse("tree")}
       onToggleMaximize={() => toggleMaximize("tree")}
@@ -390,16 +439,28 @@ export function RequestsView() {
     </PaneFrame>
   );
 
+  const listPaneTitle = isPerf
+    ? (state.selectedFilePath?.split("/").pop() ?? "Perf tests")
+    : (state.selectedFile?.filename ?? "Requests");
+
   const listPane = (
     <PaneFrame
-      title={state.selectedFile?.filename ?? "Requests"}
-      state={paneStates.list}
+      title={listPaneTitle}
+      state={paneState("list")}
       hidden={isMaximized && maxKey !== "list"}
       onToggleCollapse={() => toggleCollapse("list")}
       onToggleMaximize={() => toggleMaximize("list")}
     >
       <div className="h-full overflow-y-auto">
-        {state.selectedFile ? (
+        {isPerf ? (
+          <PerfTestList
+            tests={perf.tests}
+            selectedIndex={perf.selectedTest}
+            isRunning={perf.isRunning}
+            onSelect={perf.setSelectedTest}
+            onRun={(idx) => void perf.run(idx)}
+          />
+        ) : state.selectedFile ? (
           <RequestList
             filePath={state.selectedFile.path}
             requests={state.selectedFile.requests}
@@ -423,69 +484,131 @@ export function RequestsView() {
   const runningSingle = state.isRunning && state.runMode === "single";
   const runningDeps = state.isRunning && state.runMode === "withDeps";
 
+  const editorTitle = isPerf
+    ? `${state.selectedFilePath?.split("/").pop() ?? "Perf"}${isDirty ? " ●" : ""}`
+    : state.selectedFile
+      ? `${state.selectedFile.filename}${isDirty ? " ●" : ""}`
+      : "Editor";
+
   const editorPane = (
     <PaneFrame
-      title={
-        state.selectedFile
-          ? `${state.selectedFile.filename}${isDirty ? " ●" : ""}`
-          : "Editor"
-      }
-      state={paneStates.editor}
+      title={editorTitle}
+      state={paneState("editor")}
       hidden={isMaximized && maxKey !== "editor"}
       onToggleCollapse={() => toggleCollapse("editor")}
       onToggleMaximize={() => toggleMaximize("editor")}
       actions={
         state.selectedFilePath ? (
-          <>
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-5 gap-1 px-1.5 text-[10px]"
-              disabled={!selectedRequest || state.isRunning}
-              onClick={() =>
-                selectedRequest && handleRunLine(selectedRequest.lineNumber)
-              }
-              title="Run (Cmd+Enter)"
-            >
-              {runningSingle ? (
-                <Loader2 className="size-3 animate-spin" />
-              ) : (
-                <Play className="size-3" />
-              )}{" "}
-              Run
-            </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-5 gap-1 px-1.5 text-[10px]"
-              disabled={!selectedRequest || state.isRunning}
-              onClick={() =>
-                selectedRequest &&
-                handleRunLine(selectedRequest.lineNumber, true)
-              }
-              title="Run with dependencies (Cmd+Shift+Enter)"
-            >
-              {runningDeps ? (
-                <Loader2 className="size-3 animate-spin" />
-              ) : (
-                <GitBranch className="size-3" />
-              )}{" "}
-              Deps
-            </Button>
-            <Button
-              variant="ghost"
-              size="icon"
-              className="size-5"
-              onClick={() =>
-                editorRef.current && handleSave(editorRef.current.getValue())
-              }
-              title={isDirty ? "Save (Cmd+S) — unsaved changes" : "Save (Cmd+S)"}
-            >
-              <Save
-                className={isDirty ? "size-3 text-primary" : "size-3"}
-              />
-            </Button>
-          </>
+          isPerf ? (
+            <>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-5 gap-1 px-1.5 text-[10px]"
+                disabled={perf.selectedTest === null || perf.isRunning}
+                onClick={() =>
+                  perf.selectedTest !== null && void perf.run(perf.selectedTest)
+                }
+                title="Run perf test"
+              >
+                <Play className="size-3" /> Run
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-5 gap-1 px-1.5 text-[10px]"
+                disabled={!perf.isRunning}
+                onClick={() => void perf.stop()}
+                title="Stop perf test"
+              >
+                <Square className="size-3" /> Stop
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-5 gap-1 px-1.5 text-[10px]"
+                disabled={!perf.metrics}
+                onClick={() => void perf.exportResults()}
+                title="Export results to CSV"
+              >
+                <Download className="size-3" /> Export
+              </Button>
+              <PerfSchemaSheet>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-5 gap-1 px-1.5 text-[10px]"
+                  title="YAML schema reference"
+                >
+                  <BookOpen className="size-3" /> Schema
+                </Button>
+              </PerfSchemaSheet>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="size-5"
+                onClick={() =>
+                  editorRef.current && handleSave(editorRef.current.getValue())
+                }
+                title={isDirty ? "Save (Cmd+S) — unsaved changes" : "Save (Cmd+S)"}
+              >
+                <Save
+                  className={isDirty ? "size-3 text-primary" : "size-3"}
+                />
+              </Button>
+            </>
+          ) : (
+            <>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-5 gap-1 px-1.5 text-[10px]"
+                disabled={!selectedRequest || state.isRunning}
+                onClick={() =>
+                  selectedRequest && handleRunLine(selectedRequest.lineNumber)
+                }
+                title="Run (Cmd+Enter)"
+              >
+                {runningSingle ? (
+                  <Loader2 className="size-3 animate-spin" />
+                ) : (
+                  <Play className="size-3" />
+                )}{" "}
+                Run
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-5 gap-1 px-1.5 text-[10px]"
+                disabled={!selectedRequest || state.isRunning}
+                onClick={() =>
+                  selectedRequest &&
+                  handleRunLine(selectedRequest.lineNumber, true)
+                }
+                title="Run with dependencies (Cmd+Shift+Enter)"
+              >
+                {runningDeps ? (
+                  <Loader2 className="size-3 animate-spin" />
+                ) : (
+                  <GitBranch className="size-3" />
+                )}{" "}
+                Deps
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="size-5"
+                onClick={() =>
+                  editorRef.current && handleSave(editorRef.current.getValue())
+                }
+                title={isDirty ? "Save (Cmd+S) — unsaved changes" : "Save (Cmd+S)"}
+              >
+                <Save
+                  className={isDirty ? "size-3 text-primary" : "size-3"}
+                />
+              </Button>
+            </>
+          )
         ) : null
       }
     >
@@ -493,6 +616,7 @@ export function RequestsView() {
         <HttpEditor
           imperativeRef={editorRef}
           value={editorValue}
+          mode={isPerf ? "plain" : "http"}
           onSave={handleSave}
           onChange={handleEditorChange}
           onRunLine={(line) => handleRunLine(line)}
@@ -508,14 +632,22 @@ export function RequestsView() {
 
   const responsePane = (
     <PaneFrame
-      title="Response"
+      title={isPerf ? "Metrics" : "Response"}
       orientation="vertical"
-      state={paneStates.response}
+      state={paneState("response")}
       hidden={isMaximized && maxKey !== "response"}
       onToggleCollapse={() => toggleCollapse("response")}
       onToggleMaximize={() => toggleMaximize("response")}
     >
-      <ResponsePanel envVars={envVars} extractedVars={extractedVars} />
+      {isPerf ? (
+        <PerfDashboard
+          metrics={perf.metrics}
+          currentUsers={perf.currentUsers}
+          exportToast={perf.exportToast}
+        />
+      ) : (
+        <ResponsePanel envVars={envVars} extractedVars={extractedVars} />
+      )}
     </PaneFrame>
   );
 
@@ -540,12 +672,11 @@ export function RequestsView() {
   // - tree owns the full left column
   // - the right column is split vertically: top row = list + editor
   //   (horizontally split), bottom = response (full width of right col)
-  const showTreeHandle = paneStates.tree !== "collapsed";
-  const showListHandle = paneStates.list !== "collapsed";
-  const editorCollapsed = paneStates.editor === "collapsed";
-  const responseCollapsed = paneStates.response === "collapsed";
-  const showEditorYHandle =
-    paneStates.list !== "collapsed" || paneStates.editor !== "collapsed";
+  const showTreeHandle = !collapsed.tree;
+  const showListHandle = !collapsed.list;
+  const editorCollapsed = collapsed.editor;
+  const responseCollapsed = collapsed.response;
+  const showEditorYHandle = !collapsed.list || !collapsed.editor;
 
   return (
     <div className="flex h-full w-full min-h-0">
@@ -574,7 +705,7 @@ export function RequestsView() {
           <div
             className="flex h-full min-h-0 flex-col border-r"
             style={
-              paneStates.list === "collapsed"
+              collapsed.list
                 ? { width: 32, flex: "none" }
                 : editorCollapsed
                   ? { flex: 1 }

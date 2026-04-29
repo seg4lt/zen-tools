@@ -7,9 +7,20 @@ interface PerfCountersProps {
   currentUsers?: number;
 }
 
-/** Card grid with the headline counters: total / RPS / error / p99 / users. */
+interface CounterCard {
+  label: string;
+  value: string;
+  tone?: "destructive" | "warning";
+}
+
+/**
+ * Headline counter grid — total / RPS / errors / p99 / users / bytes.
+ * Quiet by design: no left accent bars, no chart-color tinting. Just
+ * the number, the label, and a tone change when an error rate is
+ * non-zero.
+ */
 export function PerfCounters({ metrics, currentUsers }: PerfCountersProps) {
-  const cards = [
+  const cards: CounterCard[] = [
     {
       label: "Total requests",
       value: metrics.totalRequests.toLocaleString(),
@@ -45,11 +56,14 @@ export function PerfCounters({ metrics, currentUsers }: PerfCountersProps) {
   return (
     <div className="grid grid-cols-2 gap-2 lg:grid-cols-3 xl:grid-cols-6">
       {cards.map((c) => (
-        <Card key={c.label} className="border bg-card/40">
+        <Card
+          key={c.label}
+          className="border bg-card/40 shadow-none"
+        >
           <CardContent className="flex flex-col gap-0.5 p-3">
             <span
               className={cn(
-                "text-2xl font-semibold tabular-nums",
+                "text-2xl font-semibold tabular-nums leading-tight",
                 c.tone === "destructive" && "text-destructive",
                 c.tone === "warning" && "text-amber-500",
               )}

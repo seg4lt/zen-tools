@@ -35,6 +35,17 @@
   --method-patch: oklch(0.65 0.2 300);
   --method-head: oklch(0.55 0 0);
   --method-options: oklch(0.55 0 0);
+
+  /* Chart palette — vivid enough to read on both light and dark cards.
+     Picked independently of the method palette: tested for sufficient
+     contrast against `--card` in both themes (the previous mapping to
+     `--primary` produced an indigo that was effectively invisible on
+     dark mode). */
+  --chart-1: oklch(0.74 0.18 152);  /* throughput — emerald */
+  --chart-2: oklch(0.72 0.19 230);  /* latency — sky blue */
+  --chart-3: oklch(0.78 0.16 70);   /* totals/bytes — amber */
+  --chart-4: oklch(0.71 0.21 305);  /* users — violet */
+  --chart-5: oklch(0.7 0.22 20);    /* errors — coral */
 }
 
 .dark {
@@ -65,6 +76,14 @@
   --method-patch: oklch(0.72 0.2 300);
   --method-head: oklch(0.7 0 0);
   --method-options: oklch(0.7 0 0);
+
+  /* Chart palette — same alias as light mode; the source vars already
+     swap automatically because they reference per-theme tokens. */
+  --chart-1: var(--method-get);
+  --chart-2: var(--primary);
+  --chart-3: var(--method-post);
+  --chart-4: var(--method-put);
+  --chart-5: var(--destructive);
 }
 
 @theme inline {
@@ -98,6 +117,12 @@
   --color-method-patch: var(--method-patch);
   --color-method-head: var(--method-head);
   --color-method-options: var(--method-options);
+
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
 }
 
 * {

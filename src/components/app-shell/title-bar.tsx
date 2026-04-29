@@ -1,15 +1,14 @@
 import { useRouterState } from "@tanstack/react-router";
 import { TOOLS } from "@/config/tools";
 import { ToolPill } from "./tool-pill";
-import { WorkingDirPicker } from "./working-dir-picker";
 import { ThemeToggle } from "@/components/theme-toggle";
-import { Separator } from "@/components/ui/separator";
 import { isMac } from "@/lib/keyboard";
 
 /**
  * Top bar with traffic-light gap on the left (macOS only), segmented
- * tool pills, and action group on the right (working dir + theme
- * toggle). Drag region covers everything but interactive children.
+ * tool pills, and action group on the right (theme toggle). Project
+ * roots are managed inside the file-tree pane, not up here, so the
+ * working-dir picker is no longer present.
  */
 export function TitleBar() {
   const { location } = useRouterState();
@@ -43,8 +42,6 @@ export function TitleBar() {
         // Stop the drag region from swallowing pointer events on this group.
         data-tauri-drag-region={false}
       >
-        <WorkingDirPicker />
-        <Separator orientation="vertical" className="mx-1 h-4" />
         <ThemeToggle />
       </div>
     </header>

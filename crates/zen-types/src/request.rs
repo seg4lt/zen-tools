@@ -61,8 +61,17 @@ impl HttpMethod {
 }
 
 /// A dependency reference declared in an `.http` file annotation.
+///
+/// `rename_all_fields` is required so the inner `file_path` /
+/// `request_name` fields are camelCased on the wire — without it the
+/// front-end's `{ kind: "crossFile"; filePath; requestName }` shape
+/// would silently mismatch.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum DependencyRef {
     /// Local dependency: request name in the same file.
     Local {

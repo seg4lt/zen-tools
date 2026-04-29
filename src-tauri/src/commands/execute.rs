@@ -24,12 +24,14 @@ const REQUEST_RESULT_EVENT: &str = "request:result";
 const REQUEST_CHAIN_EVENT: &str = "request:chain";
 
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ChainStep {
     id: String,
     name: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ChainPayload {
     steps: Vec<ChainStep>,
 }

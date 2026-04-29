@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 
 interface DragHandleProps {
@@ -21,9 +21,20 @@ interface DragHandleProps {
 }
 
 /**
- * A 1-pixel resize handle that lives between two panes. Captures pointer
- * down + mousemove globally so dragging keeps working when the cursor
- * leaves the handle's hitbox.
+ * Resize handle between two panes.
+ *
+ * Uses the **Pointer Events API with element-level capture** rather than
+ * window-scoped `mousemove`/`mouseup` listeners. This is what fixes the
+ * "drag continues after I let go" symptom: when the cursor leaves the
+ * Tauri webview during a drag, macOS would swallow the matching
+ * `mouseup`, leaving our `dragging` flag stuck `true`. With
+ * `setPointerCapture` the OS forwards every subsequent pointer event
+ * (including `pointerup` and `pointercancel`) to the captured element
+ * regardless of where the cursor actually is.
+ *
+ * The visible separator is 1 px to keep the layout tight; the
+ * **interactive area is widened to ~6 px** via negative margins so the
+ * cursor doesn't have to land on a single pixel.
  */
 export function DragHandle({
   initial,
@@ -36,9 +47,46 @@ export function DragHandle({
   const [dragging, setDragging] = useState(false);
   const startRef = useRef({ pos: 0, size: initial });
 
-  useEffect(() => {
-    if (!dragging) return;
-    const onMove = (e: MouseEvent) => {
+  const stopDrag = useCallback(
+    (el: HTMLDivElement, pointerId: number) => {
+      if (el.hasPointerCapture(pointerId)) {
+        el.releasePointerCapture(pointerId);
+      }
+      setDragging(false);
+      // Clear the global cursor + selection lock we set on pointerdown.
+      document.body.style.userSelect = "";
+      document.body.style.cursor = "";
+    },
+    [],
+  );
+
+  const onPointerDown = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      // Don't let CodeMirror or any other element behind us see the
+      // press — its selection logic would steal focus and break the
+      // capture mid-drag.
+      e.preventDefault();
+      e.stopPropagation();
+      startRef.current = {
+        pos: direction === "x" ? e.clientX : e.clientY,
+        size: initial,
+      };
+      // Capture means subsequent pointer{move,up,cancel} fire on this
+      // element no matter where the cursor goes.
+      e.currentTarget.setPointerCapture(e.pointerId);
+      setDragging(true);
+      // Block text selection + force the resize cursor everywhere
+      // while the drag is in progress.
+      document.body.style.userSelect = "none";
+      document.body.style.cursor =
+        direction === "x" ? "col-resize" : "row-resize";
+    },
+    [direction, initial],
+  );
+
+  const onPointerMove = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      if (!dragging) return;
       const raw =
         direction === "x"
           ? e.clientX - startRef.current.pos
@@ -46,37 +94,52 @@ export function DragHandle({
       const delta = inverse ? -raw : raw;
       const next = Math.min(max, Math.max(min, startRef.current.size + delta));
       onResize(next);
-    };
-    const onUp = () => setDragging(false);
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
-    return () => {
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
-    };
-  }, [dragging, direction, min, max, inverse, onResize]);
-
-  const onPointerDown = useCallback(
-    (e: React.PointerEvent<HTMLDivElement>) => {
-      startRef.current = {
-        pos: direction === "x" ? e.clientX : e.clientY,
-        size: initial,
-      };
-      setDragging(true);
     },
-    [direction, initial],
+    [dragging, direction, min, max, inverse, onResize],
+  );
+
+  const onPointerUp = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      stopDrag(e.currentTarget, e.pointerId);
+    },
+    [stopDrag],
+  );
+
+  // pointercancel fires when the OS interrupts the drag (window
+  // dragged off-screen, app loses focus, etc.). Without this branch
+  // the handle would be left stuck in its `dragging` state.
+  const onPointerCancel = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      stopDrag(e.currentTarget, e.pointerId);
+    },
+    [stopDrag],
   );
 
   return (
     <div
       onPointerDown={onPointerDown}
-      className={cn(
-        "shrink-0 bg-border transition-colors hover:bg-primary/40",
-        direction === "x" ? "w-px cursor-col-resize" : "h-px cursor-row-resize",
-        dragging && "bg-primary/60",
-      )}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerUp}
+      onPointerCancel={onPointerCancel}
       role="separator"
       aria-orientation={direction === "x" ? "vertical" : "horizontal"}
-    />
+      className={cn(
+        "group relative shrink-0 z-10 select-none touch-none",
+        direction === "x"
+          ? "w-1.5 -mx-[3px] cursor-col-resize"
+          : "h-1.5 -my-[3px] cursor-row-resize",
+      )}
+    >
+      <div
+        aria-hidden
+        className={cn(
+          "absolute bg-border transition-colors group-hover:bg-primary/40",
+          direction === "x"
+            ? "left-1/2 top-0 h-full w-px -translate-x-1/2"
+            : "left-0 top-1/2 w-full h-px -translate-y-1/2",
+          dragging && "bg-primary/60",
+        )}
+      />
+    </div>
   );
 }

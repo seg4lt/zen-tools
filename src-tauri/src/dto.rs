@@ -6,6 +6,7 @@
 
 use serde::Serialize;
 use std::path::Path;
+use std::time::Duration;
 use zen_parser::{PerfConfig, PerfTest, TestType};
 use zen_types::prelude::*;
 
@@ -41,6 +42,35 @@ pub struct PerfConfigDto {
     pub tests: Vec<PerfTestDto>,
 }
 
+/// Variant tag of a [`TestType`] in IPC-friendly form.
+///
+/// `TestType` itself is shaped for **YAML parsing** (snake_case fields,
+/// the same struct serves both directions), so we cannot blindly slap
+/// `rename_all_fields = "camelCase"` on it without breaking on-disk
+/// configs. The frontend only needs the discriminator + the already-
+/// flattened `maxUsers`/`totalDurationMs`/`targetRps` summary fields,
+/// so this DTO carries just the tag.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TestTypeDto {
+    /// `"atomic" | "concurrent" | "stress" | "spike" | "soak"`.
+    #[serde(rename = "type")]
+    pub kind: &'static str,
+}
+
+impl TestTypeDto {
+    fn from_test_type(t: &TestType) -> Self {
+        let kind = match t {
+            TestType::Atomic => "atomic",
+            TestType::Concurrent { .. } => "concurrent",
+            TestType::Stress { .. } => "stress",
+            TestType::Spike { .. } => "spike",
+            TestType::Soak { .. } => "soak",
+        };
+        Self { kind }
+    }
+}
+
 /// One perf test in DTO form.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -49,13 +79,15 @@ pub struct PerfTestDto {
     pub name: String,
     /// `"file.http:Name"` reference.
     pub request: String,
-    /// Test-type-specific configuration.
-    pub test_type: TestType,
+    /// Test type discriminator (atomic / concurrent / stress / spike / soak).
+    pub test_type: TestTypeDto,
     /// Maximum concurrent users.
     pub max_users: u32,
     /// Total duration in milliseconds.
     pub total_duration_ms: u64,
-    /// Optional rate limit.
+    /// Ramp-up duration in milliseconds (0 for tests without ramp-up).
+    pub ramp_up_ms: u64,
+    /// Optional rate limit (req/s); `null` when unspecified.
     pub target_rps: Option<u32>,
 }
 
@@ -71,12 +103,17 @@ impl PerfConfigDto {
 
 impl PerfTestDto {
     fn from_test(test: &PerfTest) -> Self {
+        let ramp_up = match &test.test_type {
+            TestType::Stress { ramp_up, .. } => *ramp_up,
+            _ => Duration::ZERO,
+        };
         Self {
             name: test.name.clone(),
             request: test.request.clone(),
-            test_type: test.test_type.clone(),
+            test_type: TestTypeDto::from_test_type(&test.test_type),
             max_users: test.max_users(),
             total_duration_ms: test.total_duration().as_millis() as u64,
+            ramp_up_ms: ramp_up.as_millis() as u64,
             target_rps: test.target_rps(),
         }
     }

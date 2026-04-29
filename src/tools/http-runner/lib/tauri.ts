@@ -45,6 +45,19 @@ export interface FileTreeItem {
   fileType: FileType;
 }
 
+/**
+ * One project's slice of the discovered tree. The frontend renders one
+ * top-level node per `DiscoveredProject` returned by `discoverHttpFiles`.
+ */
+export interface DiscoveredProject {
+  /** Absolute path of the project root. */
+  root: string;
+  /** Basename of the root, used as the section header. */
+  name: string;
+  /** Pre-order DFS list of files + directories under this root. */
+  items: FileTreeItem[];
+}
+
 export type DependencyRef =
   | { kind: "local"; name: string }
   | { kind: "crossFile"; filePath: string; requestName: string };
@@ -121,14 +134,16 @@ export interface AppErrorBody {
 
 export const tauri = {
   // files
-  discoverHttpFiles: () => invoke<FileTreeItem[]>("discover_http_files"),
-  discoverPerfFiles: () => invoke<FileTreeItem[]>("discover_perf_files"),
+  discoverHttpFiles: () => invoke<DiscoveredProject[]>("discover_http_files"),
   findEnvFile: (directory: string) =>
     invoke<string | null>("find_env_file_command", { directory }),
-  /** Returns the auto-picked default environment name (if any). */
-  setWorkingDir: (path: string) =>
-    invoke<string | null>("set_working_dir", { path }),
-  getWorkingDir: () => invoke<string | null>("get_working_dir"),
+  /** Add a project root. Returns the canonical list after the update. */
+  addWorkingDir: (path: string) =>
+    invoke<string[]>("add_working_dir", { path }),
+  /** Remove a project root. Returns the canonical list after the update. */
+  removeWorkingDir: (path: string) =>
+    invoke<string[]>("remove_working_dir", { path }),
+  listWorkingDirs: () => invoke<string[]>("list_working_dirs"),
   pickDirectory: () => invoke<string | null>("pick_directory"),
 
   // parse
@@ -180,7 +195,21 @@ export const tauri = {
 
   // misc
   openInEditor: (path: string) => invoke<void>("open_in_editor", { path }),
+
+  // preferences (persisted to disk in the OS-specific app-data dir)
+  getPreferences: () => invoke<Preferences>("get_preferences"),
+  savePreferences: (prefs: Preferences) =>
+    invoke<void>("save_preferences", { prefs }),
 };
+
+/**
+ * Persisted UI state — open project list and folder expansion. Mirrors
+ * the Rust `Preferences` struct.
+ */
+export interface Preferences {
+  workingDirs: string[];
+  expandedPaths: string[];
+}
 
 // ────────────────────────────────────────────────────────────────────────────
 // Event helpers

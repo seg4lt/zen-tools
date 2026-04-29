@@ -8,18 +8,69 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch, Mutex};
-use tokio::time::{interval, sleep};
+use tokio::time::{interval, sleep_until, Instant as TokioInstant};
 use tracing::{debug, instrument};
 use zen_http::HttpExecutor;
 use zen_parser::perf_config::{PerfTest, TestType};
 use zen_types::prelude::*;
 
+/// Global RPS gate shared across all worker tasks of one perf test run.
+///
+/// Each request must call [`RpsLimiter::wait`] before firing; the
+/// limiter assigns a monotonically-increasing "next allowed instant" and
+/// the worker sleeps until it. With N workers and a target of R req/s,
+/// each worker effectively gets R/N req/s without any per-worker math —
+/// contention happens only inside the short critical section that
+/// stamps the next slot.
+struct RpsLimiter {
+    period: Duration,
+    next: Mutex<TokioInstant>,
+}
+
+impl RpsLimiter {
+    /// Build a limiter for `rps` requests per second. Returns `None`
+    /// when `rps == 0` (no cap).
+    fn new(rps: u32) -> Option<Arc<Self>> {
+        if rps == 0 {
+            return None;
+        }
+        let period = Duration::from_secs_f64(1.0 / rps as f64);
+        Some(Arc::new(Self {
+            period,
+            next: Mutex::new(TokioInstant::now()),
+        }))
+    }
+
+    /// Block until the worker's slot. Slots are issued FIFO via the
+    /// inner mutex — every caller advances the cursor by `period`.
+    async fn wait(&self) {
+        let send_at = {
+            let mut next = self.next.lock().await;
+            let now = TokioInstant::now();
+            let send_at = if *next < now { now } else { *next };
+            *next = send_at + self.period;
+            send_at
+        };
+        sleep_until(send_at).await;
+    }
+}
+
 /// Streaming update messages emitted by [`PerfRunner`].
 ///
 /// The Tauri layer forwards these to the front-end as `perf:update`
 /// events.
+///
+/// `rename_all` renames variants (`Started` → `started`, …) and
+/// `rename_all_fields` renames the **fields inside each variant**
+/// (`test_name` → `testName`, `final_metrics` → `finalMetrics`, …).
+/// Without the second directive serde would only rename variants and
+/// the front-end would see `update.testName === undefined`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum PerfUpdate {
     /// Test has begun.
     Started {
@@ -88,14 +139,16 @@ impl PerfRunner {
         local_vars: HashMap<String, String>,
         stop_rx: watch::Receiver<bool>,
     ) -> Result<MetricsSnapshot, PerfError> {
-        let _ = self
-            .update_tx
-            .send(PerfUpdate::Started {
-                test_name: test.name.clone(),
-            })
-            .await;
+        // NOTE: the `Started` event is emitted by the caller (the
+        // Tauri layer) **before** the dependency pre-run, so the user
+        // can hit Stop during a slow setup. Re-emitting here would
+        // produce a duplicate log line.
 
         let collector = Arc::new(Mutex::new(MetricsCollector::new()));
+        // Build the RPS gate once per test run from the YAML's optional
+        // `rps:` field — `None` means "no cap, run as fast as possible"
+        // (the original behaviour).
+        let limiter = test.target_rps().and_then(RpsLimiter::new);
 
         let result = match &test.test_type {
             TestType::Atomic => {
@@ -122,6 +175,7 @@ impl PerfRunner {
                     &local_vars,
                     collector.clone(),
                     stop_rx,
+                    limiter.clone(),
                 )
                 .await
             }
@@ -144,6 +198,7 @@ impl PerfRunner {
                     &local_vars,
                     collector.clone(),
                     stop_rx,
+                    limiter.clone(),
                 )
                 .await
             }
@@ -166,6 +221,7 @@ impl PerfRunner {
                     &local_vars,
                     collector.clone(),
                     stop_rx,
+                    limiter.clone(),
                 )
                 .await
             }
@@ -182,6 +238,7 @@ impl PerfRunner {
                     &local_vars,
                     collector.clone(),
                     stop_rx,
+                    limiter.clone(),
                 )
                 .await
             }
@@ -252,6 +309,7 @@ impl PerfRunner {
         local_vars: &HashMap<String, String>,
         collector: Arc<Mutex<MetricsCollector>>,
         mut stop_rx: watch::Receiver<bool>,
+        limiter: Option<Arc<RpsLimiter>>,
     ) -> Result<bool, PerfError> {
         let (sample_tx, mut sample_rx) = mpsc::channel::<RequestSample>(1024);
         let (user_stop_tx, _) = watch::channel(false);
@@ -266,18 +324,35 @@ impl PerfRunner {
                 local_vars.clone(),
                 sample_tx.clone(),
                 user_stop_tx.subscribe(),
+                limiter.clone(),
             ));
         }
         drop(sample_tx);
 
-        let start = Instant::now();
+        // Use a single-shot deadline + `biased` select so the duration
+        // is enforced precisely. The previous 50ms-sleep-in-select
+        // implementation raced randomly against `sample_rx.recv()` and
+        // the interval ticks; with a fast localhost endpoint the
+        // sample branch wins every cycle and the duration check goes
+        // unfired for 100s of ms past the configured deadline.
+        let deadline = TokioInstant::now() + duration;
         let mut progress = interval(Duration::from_millis(100));
         let mut history = interval(Duration::from_secs(1));
 
         loop {
             tokio::select! {
-                Some(sample) = sample_rx.recv() => {
-                    collector.lock().await.record(sample);
+                biased;
+                _ = stop_rx.changed() => {
+                    if *stop_rx.borrow() {
+                        let _ = user_stop_tx.send(true);
+                        for h in handles { let _ = h.await; }
+                        return Ok(true);
+                    }
+                }
+                _ = sleep_until(deadline) => {
+                    let _ = user_stop_tx.send(true);
+                    for h in handles { let _ = h.await; }
+                    return Ok(false);
                 }
                 _ = progress.tick() => {
                     let mut c = collector.lock().await;
@@ -293,19 +368,8 @@ impl PerfRunner {
                 _ = history.tick() => {
                     collector.lock().await.update_history();
                 }
-                _ = stop_rx.changed() => {
-                    if *stop_rx.borrow() {
-                        let _ = user_stop_tx.send(true);
-                        for h in handles { let _ = h.await; }
-                        return Ok(true);
-                    }
-                }
-                _ = sleep(Duration::from_millis(50)) => {
-                    if start.elapsed() >= duration {
-                        let _ = user_stop_tx.send(true);
-                        for h in handles { let _ = h.await; }
-                        return Ok(false);
-                    }
+                Some(sample) = sample_rx.recv() => {
+                    collector.lock().await.record(sample);
                 }
             }
         }
@@ -325,6 +389,7 @@ impl PerfRunner {
         local_vars: &HashMap<String, String>,
         collector: Arc<Mutex<MetricsCollector>>,
         mut stop_rx: watch::Receiver<bool>,
+        limiter: Option<Arc<RpsLimiter>>,
     ) -> Result<bool, PerfError> {
         let (sample_tx, mut sample_rx) = mpsc::channel::<RequestSample>(1024);
         let (user_stop_tx, _) = watch::channel(false);
@@ -340,6 +405,7 @@ impl PerfRunner {
                 local_vars.clone(),
                 sample_tx.clone(),
                 user_stop_tx.subscribe(),
+                limiter.clone(),
             ));
         }
 
@@ -351,13 +417,24 @@ impl PerfRunner {
             u64::MAX
         };
 
+        let deadline = TokioInstant::now() + duration;
         let mut progress = interval(Duration::from_millis(100));
         let mut ramp = interval(Duration::from_millis(ramp_step_ms));
 
         loop {
             tokio::select! {
-                Some(sample) = sample_rx.recv() => {
-                    collector.lock().await.record(sample);
+                biased;
+                _ = stop_rx.changed() => {
+                    if *stop_rx.borrow() {
+                        let _ = user_stop_tx.send(true);
+                        for h in handles { let _ = h.await; }
+                        return Ok(true);
+                    }
+                }
+                _ = sleep_until(deadline) => {
+                    let _ = user_stop_tx.send(true);
+                    for h in handles { let _ = h.await; }
+                    return Ok(false);
                 }
                 _ = progress.tick() => {
                     let mut c = collector.lock().await;
@@ -380,23 +457,13 @@ impl PerfRunner {
                             local_vars.clone(),
                             sample_tx.clone(),
                             user_stop_tx.subscribe(),
+                            limiter.clone(),
                         ));
                         current_users += 1;
                     }
                 }
-                _ = stop_rx.changed() => {
-                    if *stop_rx.borrow() {
-                        let _ = user_stop_tx.send(true);
-                        for h in handles { let _ = h.await; }
-                        return Ok(true);
-                    }
-                }
-                _ = sleep(Duration::from_millis(50)) => {
-                    if start.elapsed() >= duration {
-                        let _ = user_stop_tx.send(true);
-                        for h in handles { let _ = h.await; }
-                        return Ok(false);
-                    }
+                Some(sample) = sample_rx.recv() => {
+                    collector.lock().await.record(sample);
                 }
             }
         }
@@ -416,6 +483,7 @@ impl PerfRunner {
         local_vars: &HashMap<String, String>,
         collector: Arc<Mutex<MetricsCollector>>,
         mut stop_rx: watch::Receiver<bool>,
+        limiter: Option<Arc<RpsLimiter>>,
     ) -> Result<bool, PerfError> {
         let (sample_tx, mut sample_rx) = mpsc::channel::<RequestSample>(1024);
         let (user_stop_tx, _) = watch::channel(false);
@@ -431,6 +499,7 @@ impl PerfRunner {
                 local_vars.clone(),
                 sample_tx.clone(),
                 user_stop_tx.subscribe(),
+                limiter.clone(),
             ));
         }
 
@@ -440,12 +509,25 @@ impl PerfRunner {
         let mut spike_applied = false;
         let mut spike_handles = Vec::<tokio::task::JoinHandle<()>>::new();
 
+        let deadline = TokioInstant::now() + total_duration;
         let mut progress = interval(Duration::from_millis(100));
 
         loop {
             tokio::select! {
-                Some(sample) = sample_rx.recv() => {
-                    collector.lock().await.record(sample);
+                biased;
+                _ = stop_rx.changed() => {
+                    if *stop_rx.borrow() {
+                        let _ = user_stop_tx.send(true);
+                        for h in handles { let _ = h.await; }
+                        for h in spike_handles { let _ = h.await; }
+                        return Ok(true);
+                    }
+                }
+                _ = sleep_until(deadline) => {
+                    let _ = user_stop_tx.send(true);
+                    for h in handles { let _ = h.await; }
+                    for h in spike_handles { let _ = h.await; }
+                    return Ok(false);
                 }
                 _ = progress.tick() => {
                     let elapsed = start.elapsed();
@@ -464,6 +546,7 @@ impl PerfRunner {
                                 local_vars.clone(),
                                 sample_tx.clone(),
                                 user_stop_tx.subscribe(),
+                                limiter.clone(),
                             ));
                         }
                         current_users = spike_users;
@@ -484,26 +567,14 @@ impl PerfRunner {
                         target_duration_ms: total_duration.as_millis() as u64,
                     }).await;
                 }
-                _ = stop_rx.changed() => {
-                    if *stop_rx.borrow() {
-                        let _ = user_stop_tx.send(true);
-                        for h in handles { let _ = h.await; }
-                        for h in spike_handles { let _ = h.await; }
-                        return Ok(true);
-                    }
-                }
-                _ = sleep(Duration::from_millis(50)) => {
-                    if start.elapsed() >= total_duration {
-                        let _ = user_stop_tx.send(true);
-                        for h in handles { let _ = h.await; }
-                        for h in spike_handles { let _ = h.await; }
-                        return Ok(false);
-                    }
+                Some(sample) = sample_rx.recv() => {
+                    collector.lock().await.record(sample);
                 }
             }
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     #[allow(clippy::too_many_arguments)]
     fn spawn_user(
         &self,
@@ -514,12 +585,22 @@ impl PerfRunner {
         local_vars: HashMap<String, String>,
         sample_tx: mpsc::Sender<RequestSample>,
         stop_rx: watch::Receiver<bool>,
+        limiter: Option<Arc<RpsLimiter>>,
     ) -> tokio::task::JoinHandle<()> {
         let executor = self.executor.clone();
         tokio::spawn(async move {
             loop {
                 if *stop_rx.borrow() {
                     break;
+                }
+                // Wait for our slot before sending. Without this, every
+                // user is a tight `loop { execute().await }` and the
+                // YAML's `target_rps` is silently ignored.
+                if let Some(l) = &limiter {
+                    l.wait().await;
+                    if *stop_rx.borrow() {
+                        break;
+                    }
                 }
                 let start = Instant::now();
                 let result = executor

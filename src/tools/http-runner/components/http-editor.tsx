@@ -56,6 +56,12 @@ export interface HttpEditorProps {
   onRunLine?: (line: number) => void;
   /** `Mod+Shift+Enter` variant — run with dependency resolution. */
   onRunLineWithDeps?: (line: number) => void;
+  /**
+   * Editor "mode" — drives whether we install the http language and the
+   * run-gutter. `"http"` for `.http`/`.rest` files, `"plain"` for
+   * `.perf.yaml` (where the gutter is meaningless).
+   */
+  mode?: "http" | "plain";
   /** Forwarded ref for imperative control. */
   imperativeRef?: Ref<HttpEditorHandle>;
 }
@@ -68,6 +74,7 @@ export function HttpEditor({
   onSave,
   onRunLine,
   onRunLineWithDeps,
+  mode = "http",
   imperativeRef,
 }: HttpEditorProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
@@ -104,12 +111,16 @@ export function HttpEditor({
     vim(),
     lineNumbers(),
     foldGutter(),
-    runGutter((line) => onRunLineRef.current?.(line)),
+    // The run-gutter is only meaningful for `.http` files; perf YAML
+    // doesn't have line-addressable runnables so we skip it.
+    ...(mode === "http"
+      ? [runGutter((line) => onRunLineRef.current?.(line))]
+      : []),
     indentOnInput(),
     bracketMatching(),
     history(),
     highlightActiveLine(),
-    httpLanguage(),
+    ...(mode === "http" ? [httpLanguage()] : []),
     makeEditorTheme(isDark),
     EditorView.lineWrapping,
     EditorState.readOnly.of(readOnly),
@@ -178,7 +189,7 @@ export function HttpEditor({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Re-build theme + readOnly when they change without remounting.
+  // Re-build theme + readOnly + mode when they change without remounting.
   useEffect(() => {
     const view = viewRef.current;
     if (!view) return;
@@ -192,7 +203,7 @@ export function HttpEditor({
       }),
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [theme, readOnly]);
+  }, [theme, readOnly, mode]);
 
   // Imperative API.
   useImperativeHandle(

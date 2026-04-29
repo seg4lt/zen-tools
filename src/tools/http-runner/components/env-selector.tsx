@@ -60,11 +60,20 @@ export function EnvSelector() {
   }, [dispatch, queryClient]);
 
   const selectEnv = async (name: string) => {
-    setOpen(false);
-    await tauri.setActiveEnvironment(name);
-    dispatch({ type: "setEnv", env: name });
-    void queryClient.invalidateQueries({ queryKey: ["env-vars"] });
-    void queryClient.invalidateQueries({ queryKey: ["extracted-vars"] });
+    // Update state + backend BEFORE closing the popover. The previous
+    // order (close-first, await-after) sometimes raced with cmdk's
+    // focus management — the popover would unmount mid-await and the
+    // selection would silently no-op.
+    try {
+      await tauri.setActiveEnvironment(name);
+      dispatch({ type: "setEnv", env: name });
+      void queryClient.invalidateQueries({ queryKey: ["env-vars"] });
+      void queryClient.invalidateQueries({ queryKey: ["extracted-vars"] });
+    } catch (err) {
+      console.error("set active environment failed", err);
+    } finally {
+      setOpen(false);
+    }
   };
 
   const label = state.activeEnv ?? (envs.length > 0 ? "select env" : "no env");

@@ -36,12 +36,26 @@ export type PerfUpdate =
   | { type: "stopped"; testName: string; finalMetrics: MetricsSnapshot }
   | { type: "error"; testName: string; message: string };
 
+export type TestTypeKind =
+  | "atomic"
+  | "concurrent"
+  | "stress"
+  | "spike"
+  | "soak";
+
 export interface PerfTestDto {
   name: string;
   request: string;
-  testType: { type: string } & Record<string, unknown>;
+  /**
+   * Test discriminator. The Rust DTO intentionally only ships the tag
+   * (the type-specific config is what actually drives the runner and
+   * is summarised through `maxUsers` / `totalDurationMs` / `rampUpMs`
+   * / `targetRps` on this same object).
+   */
+  testType: { type: TestTypeKind };
   maxUsers: number;
   totalDurationMs: number;
+  rampUpMs: number;
   targetRps: number | null;
 }
 

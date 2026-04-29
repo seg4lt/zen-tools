@@ -8,7 +8,6 @@ import {
 import { TitleBar } from "@/components/app-shell/title-bar";
 import { HTTPRunnerShell } from "@/tools/http-runner/HTTPRunnerShell";
 import { RequestsView } from "@/tools/http-runner/RequestsView";
-import { PerformanceView } from "@/tools/http-runner/PerformanceView";
 
 const rootRoute = createRootRoute({
   component: () => (
@@ -49,10 +48,15 @@ const requestsRoute = createRoute({
   component: RequestsView,
 });
 
+// Legacy `/performance` URLs from the previous two-tab layout redirect
+// back to the unified Requests view — perf files are now opened the
+// same way as `.http` files.
 const performanceRoute = createRoute({
   getParentRoute: () => httpRunnerRoute,
   path: "performance",
-  component: PerformanceView,
+  beforeLoad: () => {
+    throw redirect({ to: "/http-runner/requests" });
+  },
 });
 
 const routeTree = rootRoute.addChildren([

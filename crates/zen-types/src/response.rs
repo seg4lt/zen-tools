@@ -76,8 +76,16 @@ impl HttpResponse {
 
 /// Status of a single request execution. Adjacently tagged for ergonomic
 /// TypeScript discrimination on the frontend.
+///
+/// `rename_all_fields = "camelCase"` is defensive — every current field
+/// is single-word, but adding e.g. `started_at: DateTime<Local>` later
+/// would silently mismatch the front-end without it.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum ExecutionStatus {
     /// Not yet started.
     #[default]

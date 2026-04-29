@@ -14,9 +14,11 @@ use zen_types::prelude::*;
 /// sections are kept short — long-running work (HTTP execution, perf
 /// loops) drops the lock first.
 pub struct AppState {
-    /// Currently-selected workspace root. `None` until the user picks one
-    /// (no `$HOME` default — we don't want to scan the entire home dir).
-    pub working_dir: Option<PathBuf>,
+    /// Open project roots. Each entry is a folder the user has added via
+    /// the "+" button on the file tree. Empty until the user adds at
+    /// least one (no `$HOME` default — scanning the entire home dir is
+    /// expensive and almost never what the user wants).
+    pub working_dirs: Vec<PathBuf>,
     /// Workspace-level env file (if any).
     pub global_env_file: Option<EnvironmentFile>,
     /// File-local env override (loaded when an http file is opened).
@@ -53,10 +55,10 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// Build a fresh, "no working directory selected" state.
+    /// Build a fresh, "no projects added" state.
     pub fn new() -> Self {
         Self {
-            working_dir: None,
+            working_dirs: Vec::new(),
             global_env_file: None,
             local_env_file: None,
             selected_env: None,

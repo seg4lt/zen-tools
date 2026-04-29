@@ -2,36 +2,49 @@
 
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
+use serde::Serialize;
 use std::path::{Path, PathBuf};
 use tauri::AppHandle;
 use tauri_plugin_dialog::DialogExt;
 use tokio::sync::Mutex;
 use tracing::debug;
-use zen_parser::{find_env_file, parse_env_file, PerfConfig};
+use zen_parser::{find_env_file, parse_env_file};
 use zen_types::prelude::*;
 
-/// Recursively discover `.http` / `.rest` / `.env.json` / `perf.yaml` files
-/// under the working directory, sorted directory-first. Returns an empty
-/// list when no working directory is selected.
+/// One project's slice of the discovered tree. The frontend renders one
+/// such block per open project root.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoveredProject {
+    /// Absolute path of the project root.
+    pub root: String,
+    /// Basename of the root, used as the section header.
+    pub name: String,
+    /// Pre-order DFS list of files + directories under this root.
+    pub items: Vec<FileTreeItem>,
+}
+
+/// Recursively discover `.http` / `.rest` / `.env.json` / perf YAML files
+/// under every open project root. Returns one `DiscoveredProject` per
+/// root; the result is empty when no projects have been added.
 #[tauri::command]
 pub async fn discover_http_files(
     state: tauri::State<'_, Mutex<AppState>>,
-) -> AppResult<Vec<FileTreeItem>> {
-    let Some(working_dir) = state.lock().await.working_dir.clone() else {
-        return Ok(Vec::new());
-    };
-    Ok(collect_http_files(&working_dir))
-}
-
-/// Recursively discover perf YAML files under the working directory.
-#[tauri::command]
-pub async fn discover_perf_files(
-    state: tauri::State<'_, Mutex<AppState>>,
-) -> AppResult<Vec<FileTreeItem>> {
-    let Some(working_dir) = state.lock().await.working_dir.clone() else {
-        return Ok(Vec::new());
-    };
-    Ok(PerfConfig::discover_perf_file_tree(&working_dir))
+) -> AppResult<Vec<DiscoveredProject>> {
+    let dirs = state.lock().await.working_dirs.clone();
+    let mut projects = Vec::with_capacity(dirs.len());
+    for dir in dirs {
+        let name = dir
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| dir.display().to_string());
+        projects.push(DiscoveredProject {
+            root: dir.display().to_string(),
+            name,
+            items: collect_http_files(&dir),
+        });
+    }
+    Ok(projects)
 }
 
 /// Walk upward from `directory` to find an env file (returns absolute path).
@@ -40,14 +53,17 @@ pub async fn find_env_file_command(directory: String) -> AppResult<Option<String
     Ok(find_env_file(Path::new(&directory)).map(|p| p.display().to_string()))
 }
 
-/// Set a new working directory, clearing every cached state piece.
-/// Auto-loads `http-client.env.json` if found and pre-selects a sensible
-/// default environment (`development` → `dev` → first alphabetical).
+/// Add a project root. Validates the path, dedupes, and (when this is
+/// the **first** project) auto-loads `http-client.env.json` and picks a
+/// sensible default environment so `{{host}}` resolves immediately for
+/// the common single-project case.
+///
+/// Returns the canonical list of open projects after the update.
 #[tauri::command]
-pub async fn set_working_dir(
+pub async fn add_working_dir(
     path: String,
     state: tauri::State<'_, Mutex<AppState>>,
-) -> AppResult<Option<String>> {
+) -> AppResult<Vec<String>> {
     let path = PathBuf::from(&path);
     if !path.exists() {
         return Err(AppError::BadRequest(format!(
@@ -57,32 +73,60 @@ pub async fn set_working_dir(
     }
 
     let mut s = state.lock().await;
-    s.working_dir = Some(path.clone());
-    s.file_registry.clear();
-    s.global_env_file = None;
-    s.local_env_file = None;
-    s.selected_env = None;
-    s.extracted_vars.clear();
-    s.cookies.clear();
-    s.last_results.clear();
+    let already = s.working_dirs.iter().any(|p| p == &path);
+    if !already {
+        let was_empty = s.working_dirs.is_empty();
+        s.working_dirs.push(path.clone());
 
-    if let Some(env_path) = find_env_file(&path) {
-        match std::fs::read_to_string(&env_path) {
-            Ok(content) => match parse_env_file(env_path.clone(), &content) {
-                Ok(env) => s.global_env_file = Some(env),
-                Err(e) => debug!(?e, "failed to parse global env file"),
-            },
-            Err(e) => debug!(?e, "failed to read global env file"),
+        // First project added → match the old single-dir behaviour and
+        // auto-load whatever env file lives at the root, picking a
+        // sensible default name. Later additions don't touch env state.
+        if was_empty {
+            if let Some(env_path) = find_env_file(&path) {
+                match std::fs::read_to_string(&env_path) {
+                    Ok(content) => match parse_env_file(env_path.clone(), &content) {
+                        Ok(env) => s.global_env_file = Some(env),
+                        Err(e) => debug!(?e, "failed to parse global env file"),
+                    },
+                    Err(e) => debug!(?e, "failed to read global env file"),
+                }
+            }
+            if s.selected_env.is_none() {
+                if let Some(name) = s.global_env_file.as_ref().and_then(pick_default_env) {
+                    s.selected_env = Some(EnvName::new(name));
+                }
+            }
         }
     }
+    Ok(s.working_dirs.iter().map(|p| p.display().to_string()).collect())
+}
 
-    // Auto-select a default env so `{{host}}` etc. resolve right away.
-    let chosen = s.global_env_file.as_ref().and_then(pick_default_env);
-    if let Some(name) = chosen.clone() {
-        s.selected_env = Some(EnvName::new(name));
-    }
+/// Remove a project root by exact path match. Does **not** clear env
+/// state, cookies, or extracted vars — those are env-keyed, not
+/// project-keyed, and survive project removal.
+#[tauri::command]
+pub async fn remove_working_dir(
+    path: String,
+    state: tauri::State<'_, Mutex<AppState>>,
+) -> AppResult<Vec<String>> {
+    let target = PathBuf::from(&path);
+    let mut s = state.lock().await;
+    s.working_dirs.retain(|p| p != &target);
+    Ok(s.working_dirs.iter().map(|p| p.display().to_string()).collect())
+}
 
-    Ok(chosen)
+/// List currently-open project roots.
+#[tauri::command]
+pub async fn list_working_dirs(
+    state: tauri::State<'_, Mutex<AppState>>,
+) -> AppResult<Vec<String>> {
+    Ok(state
+        .lock()
+        .await
+        .working_dirs
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect())
 }
 
 /// Choose a sensible default environment from the loaded env file.
@@ -96,19 +140,6 @@ fn pick_default_env(env: &EnvironmentFile) -> Option<String> {
         return Some("dev".to_string());
     }
     names.into_iter().next()
-}
-
-/// Read the current working directory, or `None` if none is set.
-#[tauri::command]
-pub async fn get_working_dir(
-    state: tauri::State<'_, Mutex<AppState>>,
-) -> AppResult<Option<String>> {
-    Ok(state
-        .lock()
-        .await
-        .working_dir
-        .as_ref()
-        .map(|p| p.display().to_string()))
 }
 
 /// Show a native directory picker. Returns the selected path or `None` if
@@ -190,7 +221,22 @@ fn collect_recursive(dir: &Path, items: &mut Vec<FileTreeItem>, depth: usize) {
                 expanded: false,
                 file_type: FileType::EnvFile,
             });
-        } else if name == "perf.yaml" || name == "perf.yml" || name.ends_with(".perf.yaml") {
+        } else if name == "perf.variable.yaml" || name == "perf.variable.yml" {
+            // Perf variable files are matched *before* the generic perf
+            // pattern so they get tagged with their own file type.
+            items.push(FileTreeItem {
+                name,
+                path: path.to_string_lossy().to_string(),
+                is_dir: false,
+                depth,
+                expanded: false,
+                file_type: FileType::PerfVariableFile,
+            });
+        } else if name == "perf.yaml"
+            || name == "perf.yml"
+            || name.ends_with(".perf.yaml")
+            || name.ends_with(".perf.yml")
+        {
             items.push(FileTreeItem {
                 name,
                 path: path.to_string_lossy().to_string(),
@@ -218,6 +264,9 @@ fn has_relevant_files(dir: &Path) -> bool {
                     || name == "perf.yaml"
                     || name == "perf.yml"
                     || name.ends_with(".perf.yaml")
+                    || name.ends_with(".perf.yml")
+                    || name == "perf.variable.yaml"
+                    || name == "perf.variable.yml"
                 {
                     return true;
                 }

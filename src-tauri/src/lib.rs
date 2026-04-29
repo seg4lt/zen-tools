@@ -34,10 +34,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             // files
             commands::files::discover_http_files,
-            commands::files::discover_perf_files,
             commands::files::find_env_file_command,
-            commands::files::set_working_dir,
-            commands::files::get_working_dir,
+            commands::files::add_working_dir,
+            commands::files::remove_working_dir,
+            commands::files::list_working_dirs,
             commands::files::pick_directory,
             // parse
             commands::parse::open_http_file,
@@ -68,6 +68,9 @@ pub fn run() {
             commands::perf::get_perf_metrics,
             // misc
             commands::misc::open_in_editor,
+            // preferences
+            commands::preferences::get_preferences,
+            commands::preferences::save_preferences,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

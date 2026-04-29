@@ -146,25 +146,9 @@ pub async fn run_perf_test(
     app_handle: AppHandle,
     state: tauri::State<'_, Mutex<AppState>>,
 ) -> AppResult<()> {
-    let mut prep = prepare_run(test_index, &state).await?;
+    let prep = prepare_run(test_index, &state).await?;
 
-    // Execute the dependency chain once to seed extracted vars + cookies.
-    for dep in &prep.chain {
-        let result = prep
-            .executor
-            .execute(
-                dep,
-                &prep.extracted_vars,
-                &prep.target_local_vars,
-                &prep.env_vars,
-                &prep.cookies,
-            )
-            .await;
-        prep.extracted_vars.extend(result.extracted_vars);
-        prep.cookies.extend(result.new_cookies);
-    }
-
-    // Compile assertions.
+    // Compile assertions early — they don't depend on the dep chain.
     let assertions: Vec<Assertion> = prep
         .target
         .assertions
@@ -172,7 +156,13 @@ pub async fn run_perf_test(
         .filter_map(|a| Assertion::parse(a))
         .collect();
 
-    // Reset perf state and create a stop handle.
+    // Hoist stop-handle creation **before** the dependency pre-run.
+    // Previously we ran the deps synchronously before this block, which
+    // meant a slow setup request (e.g. the 5-second dep in the example
+    // perf yaml) blocked the user from clicking Stop — both because
+    // `perf_running` was still false on the backend and because the
+    // frontend hadn't received the `Started` event that flips its own
+    // `isRunning` flag.
     let stop = StopHandle::new();
     let stop_rx = stop.subscribe();
     {
@@ -206,17 +196,87 @@ pub async fn run_perf_test(
         }
     });
 
-    // Spawn the runner. The file_registry capture keeps the parsed files
-    // alive for the duration of the run.
-    let runner = PerfRunner::new(prep.executor, update_tx);
+    // Emit Started **before** the dep pre-run so the frontend can flip
+    // `isRunning = true` and the user can hit Stop while the setup is
+    // still in flight.
+    let _ = update_tx
+        .send(PerfUpdate::Started {
+            test_name: prep.test.name.clone(),
+        })
+        .await;
+
+    let runner = PerfRunner::new(prep.executor.clone(), update_tx.clone());
     let test_clone = prep.test.clone();
     let target = prep.target;
     let env_vars = prep.env_vars;
-    let extracted_vars = prep.extracted_vars;
-    let local_vars = prep.target_local_vars;
-    let _registry_keepalive = prep.file_registry;
+    let target_local_vars = prep.target_local_vars;
+    let chain = prep.chain;
+    let registry = prep.file_registry;
+    let executor = prep.executor;
+    let mut extracted_vars = prep.extracted_vars;
+    let mut cookies = prep.cookies;
+    let stop_rx_for_task = stop_rx.clone();
+
     tokio::spawn(async move {
-        let _keepalive = _registry_keepalive;
+        let _keepalive = registry.clone();
+
+        // Dep pre-run — cancellable both *between* and *within*
+        // requests. Each execute() future is raced against stop_rx
+        // via `tokio::select!`; if the user clicks Stop, we drop the
+        // in-flight future (reqwest cancels the request) and bail
+        // immediately. Without this, a 5s setup request would block
+        // the entire test until it finished even after Stop.
+        let mut dep_stop_rx = stop_rx_for_task.clone();
+        let mut cancelled = false;
+        for dep in &chain {
+            if *dep_stop_rx.borrow() {
+                cancelled = true;
+                break;
+            }
+            let dep_locals = dep
+                .source_file
+                .as_deref()
+                .map(std::path::PathBuf::from)
+                .and_then(|p| registry.get_or_load(&p).ok())
+                .map(|f| f.local_variables.clone())
+                .unwrap_or_else(|| target_local_vars.clone());
+
+            let exec_fut = executor.execute(
+                dep,
+                &extracted_vars,
+                &dep_locals,
+                &env_vars,
+                &cookies,
+            );
+            tokio::select! {
+                biased;
+                _ = dep_stop_rx.changed() => {
+                    if *dep_stop_rx.borrow() {
+                        cancelled = true;
+                        break;
+                    }
+                }
+                result = exec_fut => {
+                    extracted_vars.extend(result.extracted_vars);
+                    cookies.extend(result.new_cookies);
+                }
+            }
+        }
+
+        if cancelled || *stop_rx_for_task.borrow() {
+            let _ = update_tx
+                .send(PerfUpdate::Stopped {
+                    test_name: test_clone.name.clone(),
+                    final_metrics: MetricsSnapshot::default(),
+                })
+                .await;
+            let state = app_handle.state::<Mutex<AppState>>();
+            let mut s = state.lock().await;
+            s.perf_running = false;
+            s.perf_stop = None;
+            return;
+        }
+
         let _ = runner
             .run_test(
                 &test_clone,
@@ -224,8 +284,8 @@ pub async fn run_perf_test(
                 assertions,
                 env_vars,
                 extracted_vars,
-                local_vars,
-                stop_rx,
+                target_local_vars,
+                stop_rx_for_task,
             )
             .await;
         let state = app_handle.state::<Mutex<AppState>>();
@@ -260,11 +320,16 @@ pub async fn export_perf_results(
         .as_ref()
         .ok_or_else(|| AppError::NotInitialised("no perf metrics to export".into()))?
         .clone();
-    let dir = match output_dir.map(PathBuf::from).or_else(|| s.working_dir.clone()) {
+    // Fall back to the first open project when no explicit output dir
+    // is provided. Multi-root setups can pass a path explicitly.
+    let dir = match output_dir
+        .map(PathBuf::from)
+        .or_else(|| s.working_dirs.first().cloned())
+    {
         Some(d) => d,
         None => {
             return Err(AppError::NotInitialised(
-                "no output directory: pick a working directory or pass output_dir".into(),
+                "no output directory: add a project or pass output_dir".into(),
             ))
         }
     };
