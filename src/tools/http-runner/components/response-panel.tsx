@@ -8,8 +8,9 @@ import { HeadersTable } from "./headers-table";
 import { DependencyChain } from "./dependency-chain";
 import { ResponseBody } from "./response-body";
 import { resolveUrl } from "../lib/resolve-url";
+import type { HttpRequest } from "../lib/tauri";
 
-type Tab = "body" | "headers" | "chain";
+type Tab = "sent" | "body" | "headers" | "chain";
 
 export interface ResponsePanelProps {
   envVars?: Record<string, string>;
@@ -24,16 +25,22 @@ export interface ResponsePanelProps {
  * different from a plain run.
  */
 export function ResponsePanel({ envVars, extractedVars }: ResponsePanelProps) {
-  const { state } = useHttpRunner();
+  const { state, dispatch } = useHttpRunner();
   const id = state.selectedRequestId;
   const result = id ? state.results[id] : undefined;
   const status = result?.status;
   const chainSteps = state.chainSteps;
 
-  // Resolve the selected request's URL for the idle status preview.
-  const selectedRequest = state.selectedFile?.requests.find(
-    (r) => `${state.selectedFile?.path}:${r.name ?? r.id}` === id,
-  );
+  // Look up the request behind the active id. For chain steps from the
+  // open file this resolves directly; cross-file chain steps (e.g.
+  // `Login` from `auth.http` while `users.http` is open) still get their
+  // Body / Response Headers via `state.results[id]`, but the Sent tab's
+  // detailed preview needs the parsed request — which only the open
+  // file currently provides.
+  const selectedRequest: HttpRequest | undefined =
+    state.selectedFile?.requests.find(
+      (r) => `${state.selectedFile?.path}:${r.name ?? r.id}` === id,
+    );
   const previewUrl = selectedRequest
     ? resolveUrl(
         selectedRequest.url,
@@ -104,11 +111,14 @@ export function ResponsePanel({ envVars, extractedVars }: ResponsePanelProps) {
         className="flex min-h-0 flex-1 flex-col"
       >
         <TabsList className="h-8 shrink-0 rounded-none border-b bg-transparent px-2">
+          <TabsTrigger value="sent" className="h-7 text-xs">
+            Sent
+          </TabsTrigger>
           <TabsTrigger value="body" className="h-7 text-xs">
             Body
           </TabsTrigger>
           <TabsTrigger value="headers" className="h-7 text-xs">
-            Headers
+            Response Headers
           </TabsTrigger>
           <TabsTrigger value="chain" className="h-7 text-xs">
             Dependency Chain
@@ -119,6 +129,26 @@ export function ResponsePanel({ envVars, extractedVars }: ResponsePanelProps) {
             )}
           </TabsTrigger>
         </TabsList>
+        <TabsContent value="sent" className="min-h-0 flex-1 overflow-y-auto">
+          {selectedRequest ? (
+            <SentPreview
+              method={selectedRequest.method}
+              url={previewUrl ?? selectedRequest.url}
+              headers={selectedRequest.headers}
+              body={selectedRequest.body}
+              envVars={envVars}
+              extractedVars={extractedVars}
+              localVars={state.selectedFile?.localVariables}
+            />
+          ) : id ? (
+            <EmptyHint>
+              This step is in a different file — open it from the tree to
+              inspect the sent payload.
+            </EmptyHint>
+          ) : (
+            <EmptyHint>Select a request.</EmptyHint>
+          )}
+        </TabsContent>
         <TabsContent value="body" className="min-h-0 flex-1 overflow-hidden">
           {status?.type === "success" ? (
             <ResponseBody
@@ -146,7 +176,19 @@ export function ResponsePanel({ envVars, extractedVars }: ResponsePanelProps) {
           )}
         </TabsContent>
         <TabsContent value="chain" className="min-h-0 flex-1 overflow-y-auto">
-          <DependencyChain steps={chainSteps} results={state.results} />
+          <DependencyChain
+            steps={chainSteps}
+            results={state.results}
+            selectedId={id}
+            onSelect={(stepId) => {
+              // Switching the active request flips Body / Sent / Response
+              // Headers to that step's data via the existing selection-
+              // driven plumbing.
+              dispatch({ type: "selectRequest", id: stepId });
+              userPickedRef.current = true;
+              setTab("body");
+            }}
+          />
         </TabsContent>
       </Tabs>
     </div>
@@ -247,11 +289,98 @@ function EmptyHint({ children }: { children: React.ReactNode }) {
   );
 }
 
-function pickContentType(headers: Record<string, string>): string | undefined {
-  const key = Object.keys(headers).find(
-    (k) => k.toLowerCase() === "content-type",
+function pickContentType(
+  headers: ReadonlyArray<readonly [string, string]>,
+): string | undefined {
+  const found = headers.find(([k]) => k.toLowerCase() === "content-type");
+  return found?.[1];
+}
+
+/**
+ * "Sent" preview — shows the user exactly what will go on the wire,
+ * with all `{{vars}}` resolved. The Headers panel only displays the
+ * server's *response* headers, so without this view there was no way
+ * to verify that, e.g., `Authorization: Bearer {{token}}` had its
+ * token substituted before sending.
+ */
+function SentPreview({
+  method,
+  url,
+  headers,
+  body,
+  envVars,
+  extractedVars,
+  localVars,
+}: {
+  method: string;
+  url: string;
+  headers: Record<string, string>;
+  body: string | null;
+  envVars: Record<string, string> | undefined;
+  extractedVars: Record<string, string> | undefined;
+  localVars: Record<string, string> | undefined;
+}) {
+  const headerEntries = Object.entries(headers).map<[string, string]>(
+    ([k, v]) => [k, resolveUrl(v, envVars, extractedVars, localVars)],
   );
-  return key ? headers[key] : undefined;
+  const resolvedBody = body
+    ? resolveUrl(body, envVars, extractedVars, localVars)
+    : null;
+  return (
+    <div className="flex h-full flex-col font-mono text-[11px]">
+      <div className="border-b bg-card/40 px-3 py-1.5">
+        <span className="font-bold">{method}</span>{" "}
+        <span
+          className={cn(
+            url.includes("{{") ? "text-amber-500" : "text-foreground",
+          )}
+        >
+          {url}
+        </span>
+      </div>
+      {headerEntries.length > 0 ? (
+        <ul className="divide-y">
+          {headerEntries.map(([k, v], idx) => {
+            const unresolved = v.includes("{{");
+            return (
+              <li
+                key={`${k}-${idx}`}
+                className={cn(
+                  "grid grid-cols-[max-content_1fr] gap-3 px-3 py-1.5",
+                  idx % 2 === 1 && "bg-muted/30",
+                )}
+              >
+                <span className="font-semibold text-muted-foreground">
+                  {k}
+                </span>
+                <span
+                  className={cn(
+                    "break-all",
+                    unresolved && "text-amber-500",
+                  )}
+                  title={unresolved ? "Unresolved variable" : undefined}
+                >
+                  {v}
+                </span>
+              </li>
+            );
+          })}
+        </ul>
+      ) : (
+        <div className="p-3 text-muted-foreground">No request headers.</div>
+      )}
+      {resolvedBody && (
+        <div className="border-t">
+          <div className="bg-muted/30 px-3 py-1 text-[10px] uppercase tracking-wide text-muted-foreground">
+            Body
+          </div>
+          <pre className="whitespace-pre-wrap break-all px-3 py-2">
+            {resolvedBody}
+          </pre>
+        </div>
+      )}
+    </div>
+  );
 }
 
 function statusClass(code: number): string {

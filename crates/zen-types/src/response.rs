@@ -18,8 +18,10 @@ pub struct HttpResponse {
     pub status_code: u16,
     /// Status reason phrase.
     pub status_text: String,
-    /// Header map.
-    pub headers: HashMap<String, String>,
+    /// Response headers as ordered `(name, value)` pairs. A `Vec` (not
+    /// a map) so duplicate-named headers — `Set-Cookie`, `Vary`,
+    /// repeated `Cache-Control`, etc. — survive round-trip to the UI.
+    pub headers: Vec<(String, String)>,
     /// Response body as a UTF-8 string (lossy where needed).
     pub body: String,
     /// End-to-end duration of the request.

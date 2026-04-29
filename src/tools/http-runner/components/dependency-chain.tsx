@@ -5,10 +5,19 @@ import type { ExecutionStatus, RequestResult } from "../lib/tauri";
 interface DependencyChainProps {
   steps: { id: string; name: string }[];
   results: Record<string, RequestResult>;
+  /** Currently-selected request id, used to highlight the active card. */
+  selectedId?: string | null;
+  /** Click a chain step to inspect its response in the panel. */
+  onSelect?: (id: string) => void;
 }
 
 /** Vertical chain of cards for the planned execution order + status per step. */
-export function DependencyChain({ steps, results }: DependencyChainProps) {
+export function DependencyChain({
+  steps,
+  results,
+  selectedId,
+  onSelect,
+}: DependencyChainProps) {
   if (steps.length === 0) {
     return (
       <div className="p-4 text-xs text-muted-foreground">
@@ -23,7 +32,12 @@ export function DependencyChain({ steps, results }: DependencyChainProps) {
         const isLast = idx === steps.length - 1;
         return (
           <li key={step.id} className="flex flex-col items-center">
-            <ChainCard step={step} status={result?.status} />
+            <ChainCard
+              step={step}
+              status={result?.status}
+              selected={step.id === selectedId}
+              onClick={onSelect ? () => onSelect(step.id) : undefined}
+            />
             {!isLast && (
               <ArrowDown className="size-3 my-0.5 text-muted-foreground" />
             )}
@@ -37,24 +51,36 @@ export function DependencyChain({ steps, results }: DependencyChainProps) {
 function ChainCard({
   step,
   status,
+  selected,
+  onClick,
 }: {
   step: { id: string; name: string };
   status?: ExecutionStatus;
+  selected?: boolean;
+  onClick?: () => void;
 }) {
   const tone = statusTone(status);
+  const interactive = onClick != null;
   return (
-    <div
+    <button
+      type="button"
+      disabled={!interactive}
+      onClick={onClick}
       className={cn(
-        "flex w-full items-center gap-2 rounded-md border bg-card px-3 py-1.5",
+        "flex w-full items-center gap-2 rounded-md border bg-card px-3 py-1.5 text-left",
         tone.border,
+        interactive && "cursor-pointer hover:bg-muted/50",
+        selected && "ring-2 ring-primary/50",
+        !interactive && "cursor-default",
       )}
+      title={interactive ? `View ${step.name}'s response` : undefined}
     >
       <StatusIcon status={status} />
       <span className="truncate text-sm font-medium">{step.name}</span>
       <span className="ml-auto font-mono text-[10px] text-muted-foreground">
         {statusLabel(status)}
       </span>
-    </div>
+    </button>
   );
 }
 

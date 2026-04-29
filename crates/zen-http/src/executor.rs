@@ -6,7 +6,7 @@
 
 use crate::error::HttpError;
 use crate::variable::{
-    extract_form_value, extract_header_value_ahash, extract_json_value, parse_extraction_path,
+    extract_form_value, extract_header_from_pairs, extract_json_value, parse_extraction_path,
     substitute_variables, ExtractionSource,
 };
 use ahash::HashMap;
@@ -111,7 +111,9 @@ impl HttpExecutor {
                     .unwrap_or("Unknown")
                     .to_string();
 
-                let mut response_headers: HashMap<String, String> = HashMap::default();
+                // Vec (not a map) so duplicate-named headers — Set-Cookie,
+                // Vary, repeated Cache-Control, etc. — all reach the UI.
+                let mut response_headers: Vec<(String, String)> = Vec::new();
                 let mut new_cookies = Vec::new();
                 for (k, v) in response.headers() {
                     let Ok(value) = v.to_str() else { continue };
@@ -120,7 +122,7 @@ impl HttpExecutor {
                             new_cookies.push(c);
                         }
                     }
-                    response_headers.insert(k.to_string(), value.to_string());
+                    response_headers.push((k.to_string(), value.to_string()));
                 }
 
                 match response.text().await {
@@ -131,7 +133,7 @@ impl HttpExecutor {
                             let value = match parse_extraction_path(path) {
                                 ExtractionSource::Json(p) => extract_json_value(&body, &p),
                                 ExtractionSource::Header(name) => {
-                                    extract_header_value_ahash(&response_headers, &name)
+                                    extract_header_from_pairs(&response_headers, &name)
                                 }
                                 ExtractionSource::Form(field) => extract_form_value(&body, &field),
                             };

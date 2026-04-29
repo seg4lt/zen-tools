@@ -9,12 +9,14 @@ use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 use ahash::HashMap;
 use serde::Serialize;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::Mutex;
 use tracing::debug;
 use zen_http::{
-    has_cross_file_dependencies, resolve_execution_order, CrossFileDependencyResolver, HttpExecutor,
+    has_cross_file_dependencies, resolve_execution_order, CrossFileDependencyResolver,
+    FileRegistry, HttpExecutor,
 };
 use zen_types::prelude::*;
 
@@ -46,8 +48,8 @@ pub async fn run_request(
         executor,
         env_vars,
         extracted,
-        local_vars,
         cookies,
+        registry,
     } = prepare_run(&file_path, &request_id, &state).await?;
 
     spawn_chain_run(
@@ -55,7 +57,8 @@ pub async fn run_request(
         executor,
         env_vars,
         extracted,
-        local_vars,
+        registry,
+        PathBuf::from(&file_path),
         cookies,
         vec![request],
     );
@@ -85,19 +88,27 @@ pub async fn run_request_with_deps(
         .collect();
     let _ = app_handle.emit(REQUEST_CHAIN_EVENT, ChainPayload { steps });
 
-    let (executor, env_vars, extracted, local_vars, cookies) = {
+    let (executor, env_vars, extracted, registry, cookies, target_file) = {
         let s = state.lock().await;
         (
             s.executor.clone(),
             s.current_env_vars(),
             s.current_extracted_vars(),
-            HashMap::default(),
+            s.file_registry.clone(),
             s.current_cookies(),
+            PathBuf::from(&file_path),
         )
     };
 
     spawn_chain_run(
-        app_handle, executor, env_vars, extracted, local_vars, cookies, chain,
+        app_handle,
+        executor,
+        env_vars,
+        extracted,
+        registry,
+        target_file,
+        cookies,
+        chain,
     );
     Ok(())
 }
@@ -114,11 +125,17 @@ pub async fn build_curl_command(
         request,
         env_vars,
         extracted,
-        local_vars,
         cookies,
+        registry,
         ..
     } = prepare_run(&file_path, &request_id, &state).await?;
 
+    // File-local `@var = ...` declarations live with the parsed file in
+    // the registry — fetch them so the curl command resolves them too.
+    let local_vars = registry
+        .get_or_load(Path::new(&file_path))
+        .map(|f| f.local_variables.clone())
+        .unwrap_or_default();
     let url = zen_http::substitute_variables(&request.url, &extracted, &local_vars, &env_vars);
     let mut parts = vec![format!("curl -X {} {:?}", request.method, url)];
 
@@ -150,8 +167,8 @@ struct RunContext {
     executor: HttpExecutor,
     env_vars: HashMap<String, String>,
     extracted: HashMap<String, String>,
-    local_vars: HashMap<String, String>,
     cookies: Vec<(String, String)>,
+    registry: Arc<FileRegistry>,
 }
 
 /// Locate the request inside the registry-cached file and snapshot every
@@ -173,8 +190,8 @@ async fn prepare_run(
         executor: s.executor.clone(),
         env_vars: s.current_env_vars(),
         extracted: s.current_extracted_vars(),
-        local_vars: arc_file.local_variables.clone(),
         cookies: s.current_cookies(),
+        registry: s.file_registry.clone(),
         request,
     })
 }
@@ -229,13 +246,18 @@ async fn build_chain(
 
 /// Spawn a tokio task that runs the chain step-by-step, emitting events
 /// and persisting extracted vars + cookies after the chain completes.
+///
+/// Each step resolves its own file-local `@var = ...` declarations from
+/// the [`FileRegistry`] — for cross-file chains a step from `auth.http`
+/// must see `auth.http`'s locals, not the originating file's.
 #[allow(clippy::too_many_arguments)]
 fn spawn_chain_run(
     app_handle: AppHandle,
     executor: HttpExecutor,
     env_vars: HashMap<String, String>,
     mut extracted: HashMap<String, String>,
-    initial_local: HashMap<String, String>,
+    registry: Arc<FileRegistry>,
+    target_file: PathBuf,
     mut cookies: Vec<(String, String)>,
     chain: Vec<HttpRequest>,
 ) {
@@ -257,7 +279,19 @@ fn spawn_chain_run(
                 RequestResult::running_with_message(stable_id.clone(), running_msg);
             let _ = app_handle.emit(REQUEST_RESULT_EVENT, &running_result);
 
-            let local_vars = initial_local.clone();
+            // Pick the correct file's locals: for cross-file deps the
+            // step's `source_file` points at the originating file, fall
+            // back to the chain-target's own file.
+            let step_file: PathBuf = req
+                .source_file
+                .as_deref()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| target_file.clone());
+            let local_vars = registry
+                .get_or_load(&step_file)
+                .map(|f| f.local_variables.clone())
+                .unwrap_or_default();
+
             let result = executor
                 .execute(req, &extracted, &local_vars, &env_vars, &cookies)
                 .await;

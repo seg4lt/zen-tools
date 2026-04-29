@@ -25,7 +25,11 @@ export default defineConfig(async () => ({
       port: 1421,
     },
     watch: {
-      ignored: ["**/src-tauri/**"],
+      // Don't reload when files inside the Rust crate or the user-facing
+      // `examples/` directory change — examples are runtime fixtures, not
+      // frontend source, and editing them in-app would otherwise trigger
+      // a full HMR refresh on every keystroke.
+      ignored: ["**/src-tauri/**", "**/examples/**"],
     },
   },
 }));

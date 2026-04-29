@@ -1,20 +1,25 @@
 import { cn } from "@/lib/utils";
+import type { HeaderPairs } from "../lib/tauri";
 
 interface HeadersTableProps {
-  headers: Record<string, string>;
+  /**
+   * Ordered list of `[name, value]` pairs. Duplicate names are
+   * preserved (and rendered as separate rows) — important for
+   * `Set-Cookie`, `Vary`, repeated `Cache-Control`, etc.
+   */
+  headers: HeaderPairs;
 }
 
 /** Vertical key/value table for response headers. */
 export function HeadersTable({ headers }: HeadersTableProps) {
-  const entries = Object.entries(headers);
-  if (entries.length === 0) {
+  if (headers.length === 0) {
     return (
       <div className="p-4 text-xs text-muted-foreground">No headers.</div>
     );
   }
   return (
     <ul className="divide-y font-mono text-xs">
-      {entries.map(([k, v], idx) => (
+      {headers.map(([k, v], idx) => (
         <li
           key={`${k}-${idx}`}
           className={cn(

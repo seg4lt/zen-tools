@@ -79,10 +79,17 @@ export interface OpenedHttpFileDto {
   localEnv: EnvironmentFileDto | null;
 }
 
+/** Ordered list of `[name, value]` pairs — duplicate-named headers (Set-Cookie, Vary, etc.) survive. */
+export type HeaderPairs = Array<[string, string]>;
+
 export interface HttpResponse {
   statusCode: number;
   statusText: string;
-  headers: Record<string, string>;
+  /**
+   * Ordered list of header pairs. Use a `Vec` (not a map) on the wire
+   * so duplicates such as `Set-Cookie` aren't collapsed.
+   */
+  headers: HeaderPairs;
   body: string;
   duration: number; // milliseconds
   sizeBytes: number;

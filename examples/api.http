@@ -17,6 +17,7 @@ GET {{host}}/health
 GET {{baseUrl}}/users
 Authorization: Bearer {{token}}
 
+
 ###
 
 ### Get user by ID (with cross-file auth)

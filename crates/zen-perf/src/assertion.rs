@@ -289,13 +289,12 @@ fn extract_json_path(json: &str, path: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ahash::HashMap;
 
     fn mock_response(status: u16, body: &str) -> HttpResponse {
         HttpResponse {
             status_code: status,
             status_text: "OK".into(),
-            headers: HashMap::default(),
+            headers: Vec::new(),
             body: body.into(),
             duration: Duration::from_millis(50),
             size_bytes: body.len(),

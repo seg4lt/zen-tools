@@ -19,6 +19,7 @@ pub use error::{CrossFileDependencyError, DependencyError, FileRegistryError, Ht
 pub use executor::{create_executor, HttpExecutor};
 pub use registry::FileRegistry;
 pub use variable::{
-    extract_form_value, extract_header_value, extract_header_value_ahash, extract_json_value,
-    parse_extraction_path, substitute_variables, ExtractionSource, VariableResolver,
+    extract_form_value, extract_header_from_pairs, extract_header_value,
+    extract_header_value_ahash, extract_json_value, parse_extraction_path, substitute_variables,
+    ExtractionSource, VariableResolver,
 };

@@ -52,6 +52,14 @@ export function RequestsView() {
   const saveTimerRef = useRef<number | null>(null);
   /** Latest editor content captured during typing. */
   const latestEditorRef = useRef<string>("");
+  /**
+   * `true` while we are programmatically pushing content into the editor
+   * (e.g. after `rawContent` loads or a save round-trips). CodeMirror's
+   * `updateListener` fires synchronously inside `setValue`, so without
+   * this flag every file load would schedule a debounced auto-save of
+   * the freshly-loaded file 600ms later — which felt like a "refresh".
+   */
+  const applyingExternalRef = useRef<boolean>(false);
 
   // ── pane layout helpers ────────────────────────────────────────────
   const toggleCollapse = (key: PaneKey) =>
@@ -181,10 +189,23 @@ export function RequestsView() {
 
   useEffect(() => {
     if (rawContent !== undefined && rawContent !== null) {
-      setEditorValue(rawContent);
-      latestEditorRef.current = rawContent;
-      editorRef.current?.setValue(rawContent);
-      setIsDirty(false);
+      // Suppress the change listener while we push the freshly-loaded
+      // content into CodeMirror — otherwise the synchronous
+      // updateListener would schedule a spurious auto-save.
+      applyingExternalRef.current = true;
+      try {
+        setEditorValue(rawContent);
+        latestEditorRef.current = rawContent;
+        editorRef.current?.setValue(rawContent);
+        setIsDirty(false);
+        // Cancel any pending save the previous file may have scheduled.
+        if (saveTimerRef.current !== null) {
+          window.clearTimeout(saveTimerRef.current);
+          saveTimerRef.current = null;
+        }
+      } finally {
+        applyingExternalRef.current = false;
+      }
     }
   }, [rawContent]);
 
@@ -249,6 +270,13 @@ export function RequestsView() {
    */
   const handleEditorChange = useCallback(
     (next: string) => {
+      // Ignore changes that originated from us (loading a file, applying
+      // a save). These are not user edits, so they must not flip the
+      // dirty flag or schedule a save.
+      if (applyingExternalRef.current) {
+        latestEditorRef.current = next;
+        return;
+      }
       latestEditorRef.current = next;
       setIsDirty(next !== editorValue);
       if (saveTimerRef.current !== null) {

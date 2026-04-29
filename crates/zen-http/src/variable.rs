@@ -52,6 +52,19 @@ pub fn extract_header_value_ahash(
         .map(|(_, v)| v.clone())
 }
 
+/// Case-insensitive lookup against an ordered `(name, value)` list.
+/// Returns the first match — appropriate for headers like
+/// `Authorization` where only one value is expected.
+pub fn extract_header_from_pairs(
+    headers: &[(String, String)],
+    header_name: &str,
+) -> Option<String> {
+    headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(header_name))
+        .map(|(_, v)| v.clone())
+}
+
 /// Extract one field from a URL-encoded form body.
 pub fn extract_form_value(body: &str, field_name: &str) -> Option<String> {
     for pair in body.split('&') {
