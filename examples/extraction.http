@@ -24,8 +24,8 @@ Content-Type: application/json
 
 ### Get headers info - extract values from response headers
 # @name GetHeaders
-# @extract requestId = $header.X-Request-Id
 # @extract rateLimit = $header.X-RateLimit-Limit
+# @extract requestId = $header.X-Request-Id
 # @extract remaining = $header.X-RateLimit-Remaining
 # @extract serverVersion = $header.X-Server-Version
 GET {{baseUrl}}/headers
