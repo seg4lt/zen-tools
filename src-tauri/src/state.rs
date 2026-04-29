@@ -6,6 +6,7 @@ use std::sync::Arc;
 use zen_http::{FileRegistry, HttpExecutor};
 use zen_parser::PerfConfig;
 use zen_perf::{MetricsSnapshot, RequestSample, StopHandle};
+use zen_process_monitor::{Sample as PmSample, SamplerHandle, SamplerState, SharedState as PmSharedState};
 use zen_types::prelude::*;
 
 /// Snapshot of everything the Tauri layer manages on behalf of the front-end.
@@ -52,11 +53,30 @@ pub struct AppState {
     pub perf_running: bool,
     /// Stop handle for the current perf run; `None` when idle.
     pub perf_stop: Option<StopHandle>,
+
+    // ──── Process Monitor ────
+    /// Shared sampler state (target PIDs, history ring, prev-sample deltas).
+    /// Held inside the sampler crate's own [`parking_lot::Mutex`] so the
+    /// blocking sampler thread can lock without contending with the Tokio
+    /// runtime.
+    pub pm_state: PmSharedState,
+    /// Handle for subscribing to the live sample broadcast (Tauri event
+    /// bridge holds one subscriber; future consumers can subscribe too).
+    pub pm_handle: SamplerHandle,
+
+    // ──── macOS menu-bar tray ────
+    /// Active tray icon, lazily created when a perf test starts or process
+    /// monitoring becomes active. `None` while no work is in flight.
+    pub tray: Option<tauri::tray::TrayIcon>,
 }
 
 impl AppState {
     /// Build a fresh, "no projects added" state.
     pub fn new() -> Self {
+        // 256 buffered samples covers ~4 min at 1 Hz; subscribers that
+        // fall behind get a `RecvError::Lagged` and rehydrate via
+        // `pm_get_history`.
+        let (tx, _) = tokio::sync::broadcast::channel::<PmSample>(256);
         Self {
             working_dirs: Vec::new(),
             global_env_file: None,
@@ -74,7 +94,16 @@ impl AppState {
             perf_started_at: None,
             perf_running: false,
             perf_stop: None,
+            pm_state: Arc::new(parking_lot::Mutex::new(SamplerState::new())),
+            pm_handle: SamplerHandle { tx },
+            tray: None,
         }
+    }
+
+    /// `true` while at least one process is being monitored (i.e. the
+    /// sampler is producing data this tick).
+    pub fn pm_is_active(&self) -> bool {
+        self.pm_state.lock().is_active()
     }
 
     /// Lookup key for per-env data (extracted vars, cookies). Falls back to

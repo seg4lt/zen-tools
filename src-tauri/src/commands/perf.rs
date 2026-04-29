@@ -5,6 +5,7 @@
 use crate::dto::PerfConfigDto;
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
+use crate::tray;
 use ahash::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -173,6 +174,8 @@ pub async fn run_perf_test(
         s.perf_samples.clear();
         s.perf_started_at = Some(std::time::Instant::now());
     }
+    // Show the tray now that work is in flight.
+    let _ = tray::update_tray(&app_handle);
 
     // Translator: drain PerfUpdate from runner → app_handle.emit + persist.
     let (update_tx, mut update_rx) = mpsc::channel::<PerfUpdate>(1024);
@@ -270,10 +273,14 @@ pub async fn run_perf_test(
                     final_metrics: MetricsSnapshot::default(),
                 })
                 .await;
-            let state = app_handle.state::<Mutex<AppState>>();
-            let mut s = state.lock().await;
-            s.perf_running = false;
-            s.perf_stop = None;
+            {
+                let state = app_handle.state::<Mutex<AppState>>();
+                let mut s = state.lock().await;
+                s.perf_running = false;
+                s.perf_stop = None;
+            }
+            // Tray hides if neither perf nor monitoring is active.
+            let _ = tray::update_tray(&app_handle);
             return;
         }
 
@@ -288,10 +295,14 @@ pub async fn run_perf_test(
                 stop_rx_for_task,
             )
             .await;
-        let state = app_handle.state::<Mutex<AppState>>();
-        let mut s = state.lock().await;
-        s.perf_running = false;
-        s.perf_stop = None;
+        {
+            let state = app_handle.state::<Mutex<AppState>>();
+            let mut s = state.lock().await;
+            s.perf_running = false;
+            s.perf_stop = None;
+        }
+        // Tray hides if neither perf nor monitoring is active.
+        let _ = tray::update_tray(&app_handle);
         debug!("perf test finished");
     });
 

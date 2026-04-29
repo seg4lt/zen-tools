@@ -19,8 +19,9 @@ zen-types = { workspace = true }
 zen-parser = { workspace = true }
 zen-http = { workspace = true }
 zen-perf = { workspace = true }
+zen-process-monitor = { workspace = true }
 
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-shell = "2"
 tauri-plugin-fs = "2"

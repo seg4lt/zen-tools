@@ -9,10 +9,11 @@ pub mod commands;
 pub mod dto;
 pub mod error;
 pub mod state;
+pub mod tray;
 
 use commands::runs::{load_runs, RunHistory};
 use state::AppState;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use tokio::sync::Mutex;
 use tracing_subscriber::EnvFilter;
 
@@ -40,6 +41,44 @@ pub fn run() {
             let store = app.state::<Mutex<RunHistory>>();
             let mut s = store.blocking_lock();
             load_runs(app.handle(), &mut s);
+            drop(s);
+
+            // ── Process Monitor: spawn the sampler thread + the broadcast
+            // → Tauri-event bridge. The sampler skips work whenever no
+            // PIDs are configured, so it's cheap to leave running.
+            let (pm_state, pm_tx) = {
+                let app_state = app.state::<Mutex<AppState>>();
+                let s = app_state.blocking_lock();
+                (s.pm_state.clone(), s.pm_handle.tx.clone())
+            };
+            let sampler_state = pm_state.clone();
+            let sampler_tx = pm_tx.clone();
+            std::thread::Builder::new()
+                .name("zen-process-monitor-sampler".into())
+                .spawn(move || {
+                    zen_process_monitor::run_sampler(sampler_state, sampler_tx);
+                })
+                .expect("spawn sampler thread");
+
+            // Broadcast → Tauri event bridge. Subscribers in the React
+            // frontend listen for `pm:sample`.
+            let app_handle = app.handle().clone();
+            let mut rx = pm_tx.subscribe();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    match rx.recv().await {
+                        Ok(sample) => {
+                            let _ = app_handle.emit("pm:sample", &sample);
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            // Frontend will rehydrate via pm_get_history.
+                            continue;
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            });
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -86,6 +125,15 @@ pub fn run() {
             commands::runs::record_run,
             commands::runs::get_run_history,
             commands::runs::clear_run_history,
+            // process monitor
+            commands::process_monitor::pm_list_processes,
+            commands::process_monitor::pm_add_target,
+            commands::process_monitor::pm_remove_target,
+            commands::process_monitor::pm_set_targets,
+            commands::process_monitor::pm_clear_targets,
+            commands::process_monitor::pm_get_config,
+            commands::process_monitor::pm_get_history,
+            commands::process_monitor::pm_set_poll_interval,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

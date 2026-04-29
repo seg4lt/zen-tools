@@ -1,0 +1,19 @@
+[package]
+name = "zen-process-monitor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Sampler library for monitoring CPU/memory of macOS process trees."
+
+[dependencies]
+serde = { workspace = true }
+parking_lot = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libproc = "0.14"
+libc = "0.2"
+once_cell = { workspace = true }
