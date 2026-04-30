@@ -16,11 +16,12 @@ import { cn } from "@/lib/utils";
 import { VaultSidebar } from "./components/vault-sidebar";
 import { SearchPalette } from "./components/search-palette";
 import { EmptyState } from "./components/empty-state";
+import { TabStrip } from "./components/tab-strip";
 import {
   MarkdownEditor,
   type MarkdownEditorHandle,
 } from "./components/markdown-editor";
-import { useMarkdownStore } from "./store/markdown-store";
+import { activeTab, useMarkdownStore } from "./store/markdown-store";
 import { useOpenFile } from "./hooks/use-open-file";
 import { useVaults } from "./hooks/use-vaults";
 import { useMarkdownKeyboardNav } from "./hooks/use-keyboard-nav";
@@ -37,17 +38,41 @@ export function MarkdownView() {
   const editorRef = useRef<MarkdownEditorHandle | null>(null);
   const queryClient = useQueryClient();
 
-  // Re-sync the editor's buffer whenever the current file changes
-  // (path or doc).  The editor itself never re-mounts.
+  const tab = activeTab(state);
+
+  // Re-sync the editor's buffer whenever the *active tab id* changes
+  // (i.e. user switched files), and consume any pending goto-line
+  // request the search palette dropped in.
+  const lastTabIdRef = useRef<string | null>(null);
   useEffect(() => {
     const handle = editorRef.current;
     if (!handle) return;
-    if (state.currentFile) {
-      handle.setValue(state.currentFile.doc);
-    } else {
+
+    if (!tab) {
       handle.setValue("");
+      lastTabIdRef.current = null;
+      return;
     }
-  }, [state.currentFile?.path, state.currentFile?.doc]);
+
+    const tabSwitched = lastTabIdRef.current !== tab.id;
+    if (tabSwitched) {
+      handle.setValue(tab.doc);
+      lastTabIdRef.current = tab.id;
+    }
+
+    // `requestAnimationFrame` lets CodeMirror's own state settle
+    // first; calling focus() / scrollTo() inline can race the
+    // setValue dispatch above.
+    const goto = state.pendingGotoLine;
+    requestAnimationFrame(() => {
+      if (tabSwitched) handle.focus();
+      if (goto != null) {
+        handle.scrollToLine(goto);
+        handle.focus();
+        dispatch({ type: "clearGotoLine" });
+      }
+    });
+  }, [tab?.id, tab?.doc, state.pendingGotoLine, dispatch]);
 
   // Vim toggle plumbing — same prefs key as http-runner.  Lazy load,
   // default `true` to match the tool's historical behaviour.
@@ -71,13 +96,13 @@ export function MarkdownView() {
   );
 
   const getDocDir = useCallback(
-    () => (state.currentFile ? dirname(state.currentFile.path) : ""),
-    [state.currentFile?.path],
+    () => (tab ? dirname(tab.path) : ""),
+    [tab?.path],
   );
 
   const getCurrentPath = useCallback(
-    () => state.currentFile?.path ?? null,
-    [state.currentFile?.path],
+    () => tab?.path ?? null,
+    [tab?.path],
   );
 
   // Wikilink autocomplete: every `.md` basename across all vaults.
@@ -141,7 +166,7 @@ export function MarkdownView() {
       if (decoded.startsWith("file://")) {
         target = decoded.slice("file://".length);
       } else if (!decoded.startsWith("/")) {
-        const dir = state.currentFile ? dirname(state.currentFile.path) : "";
+        const dir = tab ? dirname(tab.path) : "";
         if (!dir) {
           console.warn(
             "[markdown] relative link with no open document:",
@@ -163,7 +188,7 @@ export function MarkdownView() {
       }
       void openFile(target);
     },
-    [openFile, state.currentFile?.path],
+    [openFile, tab?.path],
   );
 
   // After every paste lands, re-walk the open vaults so the new file
@@ -188,33 +213,32 @@ export function MarkdownView() {
   }, [prefs, queryClient]);
 
   const hasVaults = state.vaults.length > 0;
-  const hasFile = !!state.currentFile;
+  const hasFile = !!tab;
 
   return (
     <div className="flex h-full min-h-0 w-full flex-col">
       <div className="flex h-9 shrink-0 items-center gap-2 border-b bg-card/60 px-3">
         <span className="text-sm font-medium">Markdown</span>
-        {state.currentFile ? (
+        {tab ? (
           <span
             className={cn(
               "inline-flex items-center gap-1 text-[11px] text-muted-foreground/80",
-              state.currentFile.dirty && "text-amber-600 dark:text-amber-300",
+              tab.dirty && "text-amber-600 dark:text-amber-300",
             )}
-            title={state.currentFile.path}
+            title={tab.path}
           >
-            {state.currentFile.dirty ? "●" : ""}{" "}
-            {basenameNoExt(state.currentFile.path)}.md
+            {tab.dirty ? "●" : ""} {basenameNoExt(tab.path)}.md
           </span>
         ) : null}
         <div className="ml-auto flex items-center gap-1">
-          {state.currentFile ? (
+          {tab ? (
             <Button
               size="xs"
               variant="ghost"
               title="Save (Cmd+S / :w)"
               onClick={() => void saveCurrent()}
               className="gap-1"
-              disabled={!state.currentFile?.dirty}
+              disabled={!tab.dirty}
             >
               <Save className="size-3" /> Save
             </Button>
@@ -242,14 +266,15 @@ export function MarkdownView() {
       <div className="flex min-h-0 flex-1">
         <VaultSidebar />
         <div className="flex min-h-0 flex-1 flex-col">
+          <TabStrip />
           {hasFile ? (
-            // The editor stays mounted; we just pump fresh content
-            // through the imperative handle when the active file
-            // switches.  This keeps undo history per-mount, which is
-            // a fair trade-off for a single-tab editor.
+            // The editor stays mounted across tab switches — we pump
+            // fresh content through the imperative handle when
+            // `activeTabId` changes.  Cursor + undo history reset on
+            // switch in v1.
             <MarkdownEditor
               imperativeRef={editorRef}
-              value={state.currentFile?.doc ?? ""}
+              value={tab?.doc ?? ""}
               onChange={onChange}
               onSave={onSave}
               vimMode={vimMode}

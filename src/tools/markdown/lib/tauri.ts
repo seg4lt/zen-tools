@@ -21,6 +21,9 @@ export type MarkdownItemKind = "markdown" | "image" | "directory";
 export interface ContentSearchOptions {
   useRegex: boolean;
   caseSensitive: boolean;
+  /** All-words fuzzy match (case-insensitive, order-free).  Disables
+   *  `useRegex` + `caseSensitive` when on. */
+  useFuzzy: boolean;
   /** Glob patterns to *include*; empty = all. */
   includes: string[];
   /** Glob patterns to *exclude*. */

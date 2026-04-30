@@ -52,6 +52,9 @@ export interface MarkdownEditorHandle {
   setValue: (value: string) => void;
   getValue: () => string;
   focus: () => void;
+  /** Scroll the viewport so 1-based `lineNumber` is centred and place
+   *  the cursor at its start.  No-op when the editor isn't ready. */
+  scrollToLine: (lineNumber: number) => void;
 }
 
 export interface MarkdownEditorProps {
@@ -306,6 +309,18 @@ export function MarkdownEditor({
       },
       getValue: () => viewRef.current?.state.doc.toString() ?? "",
       focus: () => viewRef.current?.focus(),
+      scrollToLine: (lineNumber: number) => {
+        const view = viewRef.current;
+        if (!view) return;
+        const total = view.state.doc.lines;
+        if (total === 0) return;
+        const clamped = Math.max(1, Math.min(lineNumber, total));
+        const line = view.state.doc.line(clamped);
+        view.dispatch({
+          selection: { anchor: line.from, head: line.from },
+          effects: EditorView.scrollIntoView(line.from, { y: "center" }),
+        });
+      },
     }),
     [],
   );

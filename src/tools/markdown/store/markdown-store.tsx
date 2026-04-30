@@ -8,7 +8,8 @@
  *   - `expanded`    — node ids that the user has explicitly toggled
  *                     (default-expanded otherwise; explicit collapses
  *                     are tagged with a `-:` prefix).
- *   - `currentFile` — the open document: path, doc text, dirty flag.
+ *   - `tabs` / `activeTabId` — the open documents, in tab-strip
+ *     order; the active tab is derived through `activeTab(state)`.
  *   - `recents`     — the bounded ring used by the quick switcher.
  *   - `searchOpen` / `searchMode` — drives the unified Cmd+P /
  *     Cmd+Shift+F search palette (file vs content modes).
@@ -38,6 +39,18 @@ export interface OpenFileState {
   dirty: boolean;
 }
 
+/** One entry in the tab strip — own copy of the doc + dirty flag so
+ *  the user can switch away mid-edit and come back to their changes. */
+export interface TabState {
+  /** Stable per-session tab id (used by tab-strip click + close).
+   *  We don't reuse `path` because the user might rename a file (path
+   *  changes) and we want the tab to keep its identity. */
+  id: string;
+  path: string;
+  doc: string;
+  dirty: boolean;
+}
+
 /**
  * Drives the inline editing UI in the sidebar.
  *
@@ -58,7 +71,10 @@ export interface MarkdownState {
   vaults: string[];
   files: Record<string, MarkdownVaultDto>;
   expanded: Set<string>;
-  currentFile: OpenFileState | null;
+  /** Open tabs, in user-visible order. */
+  tabs: TabState[];
+  /** Id of the active tab (or `null` when no tab is open). */
+  activeTabId: string | null;
   recents: string[];
   /** Whether the search palette overlay is open. */
   searchOpen: boolean;
@@ -66,27 +82,61 @@ export interface MarkdownState {
   searchMode: SearchMode;
   bootstrapping: boolean;
   editing: EditingState | null;
+  /**
+   * One-shot scroll target.  When set, the next render of
+   * `MarkdownView` calls `editor.scrollToLine()` and dispatches
+   * `clearGotoLine`.  Used so the search palette can take the user
+   * to the exact match line after opening a file.
+   */
+  pendingGotoLine: number | null;
 }
 
 const initialState: MarkdownState = {
   vaults: [],
   files: {},
   expanded: new Set<string>(),
-  currentFile: null,
+  tabs: [],
+  activeTabId: null,
   recents: [],
   searchOpen: false,
   searchMode: "files",
   bootstrapping: true,
   editing: null,
+  pendingGotoLine: null,
 };
+
+/** Selector — the currently active tab, or `null`. */
+export function activeTab(state: MarkdownState): TabState | null {
+  if (!state.activeTabId) return null;
+  return state.tabs.find((t) => t.id === state.activeTabId) ?? null;
+}
+
+/** Backwards-compatible accessor for callers that just want the
+ *  active doc + path + dirty triple.  Lets us roll out tabs without
+ *  rewriting every consumer at once. */
+export function currentFile(state: MarkdownState): OpenFileState | null {
+  const tab = activeTab(state);
+  if (!tab) return null;
+  return { path: tab.path, doc: tab.doc, dirty: tab.dirty };
+}
+
+let tabIdCounter = 0;
+function nextTabId(): string {
+  tabIdCounter += 1;
+  return `tab-${Date.now()}-${tabIdCounter}`;
+}
 
 export type MarkdownAction =
   | { type: "setVaults"; vaults: string[] }
   | { type: "setFiles"; vaults: MarkdownVaultDto[] }
   | { type: "toggleExpand"; nodeId: string }
   | { type: "setExpanded"; nodeId: string; open: boolean }
-  | { type: "openFile"; path: string; doc: string }
+  | { type: "openFile"; path: string; doc: string; gotoLine?: number }
   | { type: "closeFile" }
+  | { type: "selectTab"; id: string; gotoLine?: number }
+  | { type: "closeTab"; id: string }
+  | { type: "setGotoLine"; line: number }
+  | { type: "clearGotoLine" }
   | { type: "editDoc"; doc: string }
   | { type: "markSaved" }
   | { type: "setRecents"; recents: string[] }
@@ -136,36 +186,94 @@ function reducer(state: MarkdownState, action: MarkdownAction): MarkdownState {
       return { ...state, expanded };
     }
 
-    case "openFile":
+    case "openFile": {
+      // If a tab for this path already exists, just switch to it
+      // (carrying over any dirty edits the user already made).
+      const gotoLine = action.gotoLine ?? null;
+      const existing = state.tabs.find((t) => t.path === action.path);
+      if (existing) {
+        return {
+          ...state,
+          activeTabId: existing.id,
+          searchOpen: false,
+          pendingGotoLine: gotoLine,
+        };
+      }
+      const id = nextTabId();
+      const newTab: TabState = {
+        id,
+        path: action.path,
+        doc: action.doc,
+        dirty: false,
+      };
       return {
         ...state,
-        currentFile: { path: action.path, doc: action.doc, dirty: false },
+        tabs: [...state.tabs, newTab],
+        activeTabId: id,
         searchOpen: false,
+        pendingGotoLine: gotoLine,
       };
+    }
+
+    case "selectTab": {
+      if (!state.tabs.some((t) => t.id === action.id)) return state;
+      return {
+        ...state,
+        activeTabId: action.id,
+        pendingGotoLine: action.gotoLine ?? null,
+      };
+    }
+
+    case "setGotoLine":
+      return { ...state, pendingGotoLine: action.line };
+
+    case "clearGotoLine":
+      return state.pendingGotoLine == null
+        ? state
+        : { ...state, pendingGotoLine: null };
+
+    case "closeTab": {
+      const idx = state.tabs.findIndex((t) => t.id === action.id);
+      if (idx === -1) return state;
+      const tabs = state.tabs.slice(0, idx).concat(state.tabs.slice(idx + 1));
+      // Pick a sensible new active tab: the neighbour to the right
+      // (matches VS Code), or the previous one when we just closed
+      // the last entry.
+      let activeTabId: string | null = state.activeTabId;
+      if (state.activeTabId === action.id) {
+        const fallback = tabs[idx] ?? tabs[idx - 1] ?? null;
+        activeTabId = fallback ? fallback.id : null;
+      }
+      return { ...state, tabs, activeTabId };
+    }
 
     case "closeFile":
-      return { ...state, currentFile: null };
+      // Legacy alias — close the active tab.
+      if (!state.activeTabId) return state;
+      return reducer(state, { type: "closeTab", id: state.activeTabId });
 
-    case "editDoc":
-      if (!state.currentFile) return state;
-      // Skip a re-render when the doc didn't actually change (CodeMirror
-      // dispatches transactions for selection changes too).
-      if (state.currentFile.doc === action.doc) return state;
-      return {
-        ...state,
-        currentFile: {
-          ...state.currentFile,
-          doc: action.doc,
-          dirty: true,
-        },
-      };
+    case "editDoc": {
+      const id = state.activeTabId;
+      if (!id) return state;
+      let changed = false;
+      const tabs = state.tabs.map((t) => {
+        if (t.id !== id) return t;
+        if (t.doc === action.doc) return t;
+        changed = true;
+        return { ...t, doc: action.doc, dirty: true };
+      });
+      if (!changed) return state;
+      return { ...state, tabs };
+    }
 
-    case "markSaved":
-      if (!state.currentFile) return state;
-      return {
-        ...state,
-        currentFile: { ...state.currentFile, dirty: false },
-      };
+    case "markSaved": {
+      const id = state.activeTabId;
+      if (!id) return state;
+      const tabs = state.tabs.map((t) =>
+        t.id === id ? { ...t, dirty: false } : t,
+      );
+      return { ...state, tabs };
+    }
 
     case "setRecents":
       return { ...state, recents: action.recents };
@@ -205,18 +313,27 @@ function reducer(state: MarkdownState, action: MarkdownAction): MarkdownState {
       return { ...state, editing: null };
 
     case "renamedFile": {
-      // If the user renamed the currently-open file, swap its path.
-      // The doc itself is unchanged.
-      if (
-        state.currentFile &&
-        state.currentFile.path === action.oldPath
-      ) {
-        return {
-          ...state,
-          currentFile: { ...state.currentFile, path: action.newPath },
-        };
-      }
-      return state;
+      // Re-target every open tab whose path matches `oldPath` (the
+      // file itself) or whose path lives under `oldPath/` (the user
+      // renamed an ancestor directory).  Doc + dirty flag carry over.
+      let changed = false;
+      const tabs = state.tabs.map((t) => {
+        if (t.path === action.oldPath) {
+          changed = true;
+          return { ...t, path: action.newPath };
+        }
+        const prefix = `${action.oldPath}/`;
+        if (t.path.startsWith(prefix)) {
+          changed = true;
+          return {
+            ...t,
+            path: `${action.newPath}/${t.path.slice(prefix.length)}`,
+          };
+        }
+        return t;
+      });
+      if (!changed) return state;
+      return { ...state, tabs };
     }
   }
 }

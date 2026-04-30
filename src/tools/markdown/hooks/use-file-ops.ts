@@ -68,12 +68,14 @@ export function useFileOps() {
   const deletePath = useCallback(
     async (path: string): Promise<boolean> => {
       try {
-        // If the user is deleting the open file (or one of its
-        // ancestors), close it first so the editor doesn't try to
-        // save back to a now-trashed location.
-        const open = state.currentFile?.path ?? null;
-        if (open && (open === path || open.startsWith(`${path}/`))) {
-          dispatch({ type: "closeFile" });
+        // Close every tab whose path matches the deletion target
+        // (or lives under it, when a directory is being trashed).
+        const prefix = `${path}/`;
+        const doomed = state.tabs.filter(
+          (t) => t.path === path || t.path.startsWith(prefix),
+        );
+        for (const t of doomed) {
+          dispatch({ type: "closeTab", id: t.id });
         }
         await markdownTauri.deleteToTrash(path);
         await refresh();
@@ -83,7 +85,7 @@ export function useFileOps() {
         return false;
       }
     },
-    [dispatch, refresh, state.currentFile?.path],
+    [dispatch, refresh, state.tabs],
   );
 
   return { createFile, createDir, renamePath, deletePath };

@@ -19,11 +19,12 @@ use crate::commands::preferences::{load_preferences, write_preferences};
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 use globset::{Glob, GlobSet, GlobSetBuilder};
+use rayon::prelude::*;
 use regex::{Regex, RegexBuilder};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tauri::AppHandle;
 use tokio::sync::Mutex;
@@ -478,8 +479,16 @@ pub async fn markdown_delete_to_trash(path: String) -> AppResult<()> {
 pub struct ContentSearchOptions {
     /// Treat the query as a regex (vs. a literal substring).
     pub use_regex: bool,
-    /// Case-sensitive matching (literal or regex).
+    /// Case-sensitive matching (literal or regex).  Forced off in
+    /// fuzzy mode.
     pub case_sensitive: bool,
+    /// Fuzzy mode — split the query on whitespace; a line matches
+    /// when *every* word appears anywhere in it (case-insensitive).
+    /// Cheaper and more forgiving than full Smith-Waterman, while
+    /// still much friendlier than literal substring for unordered
+    /// keywords.  Disables `useRegex` and `caseSensitive`.
+    #[serde(default)]
+    pub use_fuzzy: bool,
     /// Glob patterns to *include* (matches any → keep).  Empty = all.
     pub includes: Vec<String>,
     /// Glob patterns to *exclude* (matches any → skip).
@@ -519,7 +528,12 @@ const MAX_CONTENT_FILE_BYTES: u64 = 2 * 1024 * 1024;
 /// Truncate displayed lines to keep payloads bounded.
 const MAX_LINE_CHARS: usize = 240;
 /// Lines of context before/after each match to include in a block.
-const CONTEXT_LINES: usize = 1;
+/// Three lines gives the user enough surrounding text to read a hit
+/// in place without dragging across half the document — and the
+/// `2 * CONTEXT_LINES` greedy-extend threshold (`file_blocks_from`)
+/// merges nearby matches into one block, so dense regions don't
+/// produce a wall of repeated context.
+const CONTEXT_LINES: usize = 3;
 /// Cap on total matches returned per call to keep IPC payload sane.
 const MAX_BLOCKS: usize = 500;
 
@@ -596,53 +610,70 @@ pub async fn markdown_stop_content_search(
     Ok(())
 }
 
-/// Pattern matcher — a literal substring with the right case folding,
-/// or a compiled regex.  Wrapped so the per-file inner loop only has
-/// to call `is_match`.
+/// Pattern matcher — literal substring (with or without case folding),
+/// compiled regex, or all-words fuzzy.  Wrapped so the per-line inner
+/// loop only has to call `is_match` against pre-cased line slices.
 enum Matcher {
-    Literal { needle: String, case_sensitive: bool },
+    /// Case-sensitive literal: match against the raw line.
+    LiteralCase(String),
+    /// Case-insensitive literal: match against a pre-lowercased line.
+    LiteralLower(String),
+    /// Compiled regex (case-insensitivity baked into the regex itself).
     Regex(Regex),
+    /// All-words fuzzy match against a pre-lowercased line.  Lines
+    /// match when *every* word appears anywhere; word order is free.
+    FuzzyAllWords(Vec<String>),
 }
 
 impl Matcher {
-    fn is_match(&self, line: &str) -> bool {
+    /// True when the matcher needs the lowercased copy of each line —
+    /// callers cache that copy once per line to avoid re-allocating.
+    fn needs_lower(&self) -> bool {
+        matches!(
+            self,
+            Matcher::LiteralLower(_) | Matcher::FuzzyAllWords(_),
+        )
+    }
+
+    fn is_match(&self, line: &str, line_lower: &str) -> bool {
         match self {
-            Matcher::Literal {
-                needle,
-                case_sensitive,
-            } => {
-                if *case_sensitive {
-                    line.contains(needle.as_str())
-                } else {
-                    // Allocate-free case-insensitive substring is
-                    // tricky in Rust without an extra crate; for the
-                    // markdown vault sizes we deal with, lowercasing
-                    // each line is fine.
-                    line.to_ascii_lowercase().contains(needle.as_str())
-                }
-            }
+            Matcher::LiteralCase(needle) => line.contains(needle.as_str()),
+            Matcher::LiteralLower(needle) => line_lower.contains(needle.as_str()),
             Matcher::Regex(re) => re.is_match(line),
+            Matcher::FuzzyAllWords(words) => {
+                words.iter().all(|w| line_lower.contains(w.as_str()))
+            }
         }
     }
 }
 
 fn build_matcher(query: &str, options: &ContentSearchOptions) -> AppResult<Matcher> {
+    // Fuzzy wins over the other modes — same precedence as the UI's
+    // "fuzzy ⇒ regex+case toggles disabled" affordance.
+    if options.use_fuzzy {
+        let words: Vec<String> = query
+            .split_whitespace()
+            .map(|w| w.to_ascii_lowercase())
+            .filter(|w| !w.is_empty())
+            .collect();
+        if words.is_empty() {
+            // Nothing to match — fall through to a guaranteed-empty
+            // literal so we don't spin through every file for nothing.
+            return Ok(Matcher::LiteralCase("\0__never__\0".to_string()));
+        }
+        return Ok(Matcher::FuzzyAllWords(words));
+    }
     if options.use_regex {
         let re = RegexBuilder::new(query)
             .case_insensitive(!options.case_sensitive)
             .build()
             .map_err(|e| AppError::BadRequest(format!("invalid regex: {e}")))?;
-        Ok(Matcher::Regex(re))
+        return Ok(Matcher::Regex(re));
+    }
+    if options.case_sensitive {
+        Ok(Matcher::LiteralCase(query.to_string()))
     } else {
-        let needle = if options.case_sensitive {
-            query.to_string()
-        } else {
-            query.to_ascii_lowercase()
-        };
-        Ok(Matcher::Literal {
-            needle,
-            case_sensitive: options.case_sensitive,
-        })
+        Ok(Matcher::LiteralLower(query.to_ascii_lowercase()))
     }
 }
 
@@ -662,6 +693,14 @@ fn build_globset(patterns: &[String]) -> AppResult<Option<GlobSet>> {
     })?))
 }
 
+/// Two-phase search:
+///   1. Walk every vault sequentially to collect the set of candidate
+///      `.md` files (cheap — `fs::read_dir` is fast).  Glob filters
+///      are applied here so the parallel pass doesn't waste work.
+///   2. Process the candidates in parallel via rayon, reading +
+///      scanning each file independently.  An [`AtomicUsize`] tracks
+///      the running match-count so threads can short-circuit once the
+///      `MAX_BLOCKS` cap is reached.
 fn search_contents_blocking(
     vaults: &[String],
     matcher: Matcher,
@@ -669,7 +708,8 @@ fn search_contents_blocking(
     exclude: Option<&GlobSet>,
     cancel: &AtomicBool,
 ) -> Vec<ContentBlock> {
-    let mut blocks: Vec<ContentBlock> = Vec::new();
+    // Phase 1 — gather candidate files.
+    let mut candidates: Vec<PathBuf> = Vec::new();
     'outer: for vault in vaults {
         let root = PathBuf::from(vault);
         let mut stack = vec![root.clone()];
@@ -703,7 +743,6 @@ fn search_contents_blocking(
                 if !is_markdown(name_str) {
                     continue;
                 }
-                // Vault-relative path for glob testing.
                 let rel = path
                     .strip_prefix(&root)
                     .unwrap_or(&path)
@@ -719,38 +758,92 @@ fn search_contents_blocking(
                         continue;
                     }
                 }
-                if cancel.load(Ordering::Relaxed) {
-                    break 'outer;
-                }
-                let Ok(meta) = fs::metadata(&path) else {
-                    continue;
-                };
-                if meta.len() > MAX_CONTENT_FILE_BYTES {
-                    continue;
-                }
-                let Ok(contents) = fs::read_to_string(&path) else {
-                    continue;
-                };
-                let file_blocks = file_blocks_from(&path, &contents, &matcher);
-                blocks.extend(file_blocks);
-                if blocks.len() >= MAX_BLOCKS {
-                    break 'outer;
-                }
+                candidates.push(path);
             }
         }
     }
+    if cancel.load(Ordering::Relaxed) {
+        return Vec::new();
+    }
+
+    // Phase 2 — parallel search.  `block_count` lets each worker
+    // bail as soon as the global cap is reached without coordinating
+    // through a Mutex on the result vec.
+    let block_count = AtomicUsize::new(0);
+    let needs_lower = matcher.needs_lower();
+    let mut blocks: Vec<ContentBlock> = candidates
+        .par_iter()
+        .filter_map(|path| {
+            if cancel.load(Ordering::Relaxed) {
+                return None;
+            }
+            if block_count.load(Ordering::Relaxed) >= MAX_BLOCKS {
+                return None;
+            }
+            let meta = fs::metadata(path).ok()?;
+            if meta.len() > MAX_CONTENT_FILE_BYTES {
+                return None;
+            }
+            let contents = fs::read_to_string(path).ok()?;
+            let file_blocks = file_blocks_from(path, &contents, &matcher, needs_lower);
+            if file_blocks.is_empty() {
+                return None;
+            }
+            block_count.fetch_add(file_blocks.len(), Ordering::Relaxed);
+            Some(file_blocks)
+        })
+        .flatten()
+        .collect();
+
+    // Sort for stable output regardless of rayon's scheduling order.
+    blocks.sort_by(|a, b| {
+        a.path
+            .cmp(&b.path)
+            .then_with(|| a.start_line.cmp(&b.start_line))
+    });
+    if blocks.len() > MAX_BLOCKS {
+        blocks.truncate(MAX_BLOCKS);
+    }
     blocks
+}
+
+/// Truncate `s` to at most `max_chars` Unicode scalar values, appending
+/// an ellipsis when anything was dropped.  Byte-safe — never panics on
+/// multi-byte characters.
+fn truncate_chars(s: &str, max_chars: usize) -> String {
+    let mut iter = s.chars();
+    let mut out: String = iter.by_ref().take(max_chars).collect();
+    if iter.next().is_some() {
+        out.push('…');
+    }
+    out
 }
 
 /// Walk `contents` once per file, emitting one [`ContentBlock`] per
 /// run of consecutive match lines (with [`CONTEXT_LINES`] of context
 /// stitched in).
-fn file_blocks_from(path: &Path, contents: &str, matcher: &Matcher) -> Vec<ContentBlock> {
+///
+/// `needs_lower` lets us skip a per-line `to_ascii_lowercase` allocation
+/// for case-sensitive literal + regex modes — just match against an
+/// empty string when it's unused.
+fn file_blocks_from(
+    path: &Path,
+    contents: &str,
+    matcher: &Matcher,
+    needs_lower: bool,
+) -> Vec<ContentBlock> {
     let lines: Vec<&str> = contents.lines().collect();
     if lines.is_empty() {
         return Vec::new();
     }
-    let match_flags: Vec<bool> = lines.iter().map(|l| matcher.is_match(l)).collect();
+    let match_flags: Vec<bool> = if needs_lower {
+        lines
+            .iter()
+            .map(|l| matcher.is_match(l, &l.to_ascii_lowercase()))
+            .collect()
+    } else {
+        lines.iter().map(|l| matcher.is_match(l, "")).collect()
+    };
     let mut out: Vec<ContentBlock> = Vec::new();
     let mut i = 0usize;
     while i < lines.len() {
@@ -777,11 +870,11 @@ fn file_blocks_from(path: &Path, contents: &str, matcher: &Matcher) -> Vec<Conte
         let mut block_lines = Vec::with_capacity(block_end - block_start + 1);
         for k in block_start..=block_end {
             let raw = lines[k];
-            let mut text = raw.to_string();
-            if text.len() > MAX_LINE_CHARS {
-                text.truncate(MAX_LINE_CHARS);
-                text.push('…');
-            }
+            // `String::truncate` works on byte indices, so naïvely
+            // truncating at `MAX_LINE_CHARS` panics when the boundary
+            // falls mid-UTF-8-codepoint (emoji, accents, CJK …).  Cap
+            // by *character* count instead.
+            let text = truncate_chars(raw, MAX_LINE_CHARS);
             block_lines.push(BlockLine {
                 line: k + 1,
                 text,

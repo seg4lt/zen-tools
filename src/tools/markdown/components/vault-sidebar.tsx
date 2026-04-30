@@ -41,7 +41,11 @@ import {
   ContextMenuTrigger,
 } from "@/components/ui/context-menu";
 import { cn } from "@/lib/utils";
-import { isExpanded, useMarkdownStore } from "../store/markdown-store";
+import {
+  activeTab,
+  isExpanded,
+  useMarkdownStore,
+} from "../store/markdown-store";
 import {
   markdownTauri,
   type MarkdownFileItem,
@@ -275,7 +279,7 @@ function TreeRow({ node }: TreeRowProps) {
   const { item, children } = node;
   const indent = item.depth * 12 + 18;
   const open = item.isDir ? isExpanded(state.expanded, item.path) : false;
-  const active = !item.isDir && state.currentFile?.path === item.path;
+  const active = !item.isDir && activeTab(state)?.path === item.path;
   const isImage = item.kind === "image";
   const isMarkdown = item.kind === "markdown";
 

@@ -8,18 +8,31 @@
 
 import { useCallback } from "react";
 import { markdownTauri, basenameNoExt } from "../lib/tauri";
-import { useMarkdownStore } from "../store/markdown-store";
+import { activeTab, useMarkdownStore } from "../store/markdown-store";
 
 export function useOpenFile() {
   const { state, dispatch } = useMarkdownStore();
 
-  /** Open `path` in the editor.  Reads the file, dispatches
-   *  `openFile`, and pushes onto the recents ring. */
+  /**
+   * Open `path` in the editor.
+   *
+   * `gotoLine` (1-based) tells the editor to scroll to a specific
+   * line after opening — used by the content-search row click flow
+   * so the user lands directly on the matching line instead of the
+   * top of the file.
+   */
   const openFile = useCallback(
-    async (path: string) => {
+    async (path: string, gotoLine?: number) => {
       try {
-        const doc = await markdownTauri.readFile(path);
-        dispatch({ type: "openFile", path, doc });
+        // Avoid re-reading from disk when the file is already open as
+        // a tab — we'd clobber any dirty edits the user has made.
+        const existing = state.tabs.find((t) => t.path === path);
+        if (existing) {
+          dispatch({ type: "selectTab", id: existing.id, gotoLine });
+        } else {
+          const doc = await markdownTauri.readFile(path);
+          dispatch({ type: "openFile", path, doc, gotoLine });
+        }
         markdownTauri
           .pushRecent(path)
           .then((recents) => dispatch({ type: "setRecents", recents }))
@@ -28,22 +41,23 @@ export function useOpenFile() {
         console.error("[markdown] openFile failed", path, err);
       }
     },
-    [dispatch],
+    [dispatch, state.tabs],
   );
 
-  /** Save the current doc to disk.  No-op if nothing is open. */
+  /** Save the active tab's doc to disk.  No-op if nothing is open. */
   const saveCurrent = useCallback(
     async (overrideContent?: string) => {
-      if (!state.currentFile) return;
-      const content = overrideContent ?? state.currentFile.doc;
+      const tab = activeTab(state);
+      if (!tab) return;
+      const content = overrideContent ?? tab.doc;
       try {
-        await markdownTauri.writeFile(state.currentFile.path, content);
+        await markdownTauri.writeFile(tab.path, content);
         dispatch({ type: "markSaved" });
       } catch (err) {
         console.error("[markdown] save failed", err);
       }
     },
-    [dispatch, state.currentFile],
+    [dispatch, state],
   );
 
   /**

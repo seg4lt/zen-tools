@@ -61,6 +61,7 @@ type FlatResult =
       kind: "content";
       path: string;
       line: number;
+      /** First line of the match block — used as the row's preview text. */
       text: string;
       key: string;
     };
@@ -78,6 +79,7 @@ export function SearchPalette() {
   const [useFuzzy, setUseFuzzy] = useState(false); // file-mode toggle
   const [useRegex, setUseRegex] = useState(false); // content toggle
   const [caseSensitive, setCaseSensitive] = useState(true);
+  const [useFuzzyContent, setUseFuzzyContent] = useState(false);
   const [includes, setIncludes] = useState("");
   const [excludes, setExcludes] = useState("");
   const [contentBlocks, setContentBlocks] = useState<ContentBlock[]>([]);
@@ -151,8 +153,9 @@ export function SearchPalette() {
       setErrorMsg(null);
       try {
         const opts: ContentSearchOptions = {
-          useRegex,
-          caseSensitive,
+          useRegex: useFuzzyContent ? false : useRegex,
+          caseSensitive: useFuzzyContent ? false : caseSensitive,
+          useFuzzy: useFuzzyContent,
           includes: splitGlobs(includes),
           excludes: splitGlobs(excludes),
         };
@@ -184,6 +187,7 @@ export function SearchPalette() {
     query,
     useRegex,
     caseSensitive,
+    useFuzzyContent,
     includes,
     excludes,
     state.vaults,
@@ -205,6 +209,9 @@ export function SearchPalette() {
     }
     const out: FlatResult[] = [];
     for (const block of contentBlocks) {
+      // Emit one row per match line.  Surrounding context lives in
+      // the right-hand preview pane, lazy-read from disk, so we only
+      // need the match line's text here for the compact left row.
       for (const ln of block.lines) {
         if (!ln.isMatch) continue;
         out.push({
@@ -247,9 +254,10 @@ export function SearchPalette() {
     (idx: number) => {
       const item = flat[idx];
       if (!item) return;
-      void openFile(item.path);
-      // We don't currently scroll the editor to a specific line —
-      // openFile drops focus there, the line jump can come later.
+      // Content-row hits carry a 1-based line; openFile threads it
+      // through to the editor's scrollToLine after the tab loads.
+      const gotoLine = item.kind === "content" ? item.line : undefined;
+      void openFile(item.path, gotoLine);
       close();
     },
     [flat, openFile, close],
@@ -275,7 +283,11 @@ export function SearchPalette() {
   return (
     <Dialog open={open} onOpenChange={(o) => !o && close()}>
       <DialogContent
-        className="max-w-2xl gap-0 p-0"
+        // Pin the cap via inline style + `overflow-hidden` so the
+        // grid container DialogContent uses can't auto-expand to fit
+        // a runaway-long URL inside one of the rows.
+        style={{ maxWidth: "64rem" }}
+        className="w-full gap-0 overflow-hidden p-0"
         showCloseButton={false}
         onOpenAutoFocus={(e) => {
           // Let our own focus-on-mount effect run first.
@@ -335,16 +347,24 @@ export function SearchPalette() {
           ) : (
             <>
               <OptionToggle
+                icon={Sparkles}
+                label="Fuzzy (all-words)"
+                active={useFuzzyContent}
+                onToggle={() => setUseFuzzyContent((v) => !v)}
+              />
+              <OptionToggle
                 icon={Regex}
                 label="Regex"
                 active={useRegex}
                 onToggle={() => setUseRegex((v) => !v)}
+                disabled={useFuzzyContent}
               />
               <OptionToggle
                 icon={CaseSensitive}
                 label="Case"
                 active={caseSensitive}
                 onToggle={() => setCaseSensitive((v) => !v)}
+                disabled={useFuzzyContent}
               />
               <OptionToggle
                 icon={Filter}
@@ -374,42 +394,54 @@ export function SearchPalette() {
           </div>
         ) : null}
 
-        {/* Results */}
-        <div
-          ref={listRef}
-          className="max-h-[60vh] min-h-[200px] overflow-y-auto p-1"
-        >
-          {mode === "content" && searching ? (
-            <div className="flex items-center gap-2 px-3 py-2 text-xs text-muted-foreground">
-              <Loader2 className="size-3 animate-spin" /> Searching…
-            </div>
-          ) : null}
-          {errorMsg ? (
-            <div className="px-3 py-2 text-xs text-destructive">
-              {errorMsg}
-            </div>
-          ) : null}
-          {flat.length === 0 && !searching && !errorMsg ? (
-            <div className="px-3 py-2 text-xs text-muted-foreground/60">
-              {mode === "files" && query.trim()
-                ? "No matching files."
-                : mode === "content" && query.trim()
-                  ? "No matches."
-                  : mode === "files"
-                    ? "Type to filter files."
-                    : "Type to grep across vaults."}
-            </div>
-          ) : null}
-          {flat.map((item, idx) => (
-            <ResultRow
-              key={item.key}
-              item={item}
-              idx={idx}
-              active={idx === highlightIdx}
-              onHover={() => setHighlightIdx(idx)}
-              onClick={() => commit(idx)}
-            />
-          ))}
+        {/* Split: results list (left) + lazy file preview (right).
+            `min-w-0` on the flex container lets the grid item it's
+            nested under (DialogContent's `display: grid`) shrink
+            against the dialog's max-width — without it, a long row
+            of match text would expand the grid column and push the
+            whole dialog wider than `max-w-5xl`. */}
+        <div className="flex h-[min(60vh,520px)] min-h-[320px] min-w-0 overflow-hidden">
+          <div
+            ref={listRef}
+            className="w-2/5 max-w-[420px] shrink-0 overflow-x-hidden overflow-y-auto border-r p-1"
+          >
+            {mode === "content" && searching ? (
+              <div className="flex items-center gap-2 px-3 py-2 text-xs text-muted-foreground">
+                <Loader2 className="size-3 animate-spin" /> Searching…
+              </div>
+            ) : null}
+            {errorMsg ? (
+              <div className="px-3 py-2 text-xs text-destructive">
+                {errorMsg}
+              </div>
+            ) : null}
+            {flat.length === 0 && !searching && !errorMsg ? (
+              <div className="px-3 py-2 text-xs text-muted-foreground/60">
+                {mode === "files" && query.trim()
+                  ? "No matching files."
+                  : mode === "content" && query.trim()
+                    ? "No matches."
+                    : mode === "files"
+                      ? "Type to filter files."
+                      : "Type to grep across vaults."}
+              </div>
+            ) : null}
+            {flat.map((item, idx) => (
+              <ResultRow
+                key={item.key}
+                item={item}
+                idx={idx}
+                active={idx === highlightIdx}
+                vaults={state.vaults}
+                onHover={() => setHighlightIdx(idx)}
+                onClick={() => commit(idx)}
+              />
+            ))}
+          </div>
+          <PreviewPane
+            selected={flat[highlightIdx] ?? null}
+            vaults={state.vaults}
+          />
         </div>
       </DialogContent>
     </Dialog>
@@ -448,6 +480,7 @@ interface OptionToggleProps {
   label: string;
   active: boolean;
   onToggle: () => void;
+  disabled?: boolean;
 }
 
 function OptionToggle({
@@ -455,18 +488,25 @@ function OptionToggle({
   label,
   active,
   onToggle,
+  disabled,
 }: OptionToggleProps) {
   return (
     <button
       type="button"
       onClick={onToggle}
-      title={`${label}: ${active ? "on" : "off"}`}
+      title={
+        disabled
+          ? `${label}: disabled in fuzzy mode`
+          : `${label}: ${active ? "on" : "off"}`
+      }
       aria-pressed={active}
+      disabled={disabled}
       className={cn(
         "inline-flex size-7 items-center justify-center rounded transition-colors",
-        active
+        active && !disabled
           ? "bg-primary/15 text-primary"
           : "text-muted-foreground hover:bg-muted/50 hover:text-foreground",
+        disabled && "cursor-not-allowed opacity-40 hover:bg-transparent",
       )}
     >
       <Icon className="size-3.5" />
@@ -502,50 +542,130 @@ interface ResultRowProps {
   item: FlatResult;
   idx: number;
   active: boolean;
+  vaults: string[];
   onHover: () => void;
   onClick: () => void;
 }
 
-function ResultRow({ item, idx, active, onHover, onClick }: ResultRowProps) {
+function ResultRow({
+  item,
+  idx,
+  active,
+  vaults,
+  onHover,
+  onClick,
+}: ResultRowProps) {
+  const rel = relToVaultRow(item.path, vaults);
+  const onKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      onClick();
+    }
+  };
+
+  // We use `role="button"` instead of `<button>` so the row body can
+  // contain `<div>`s freely (HTML disallows block elements inside a
+  // `<button>` and some browsers mis-render the flex children when it
+  // happens).  The row is also `overflow-hidden` so a runaway-long
+  // line of match text can't push the pane wider than its container.
+  if (item.kind === "file") {
+    return (
+      <div
+        role="button"
+        tabIndex={0}
+        data-row-index={idx}
+        onMouseMove={onHover}
+        onClick={onClick}
+        onKeyDown={onKeyDown}
+        title={item.path}
+        className={cn(
+          "flex w-full min-w-0 items-start gap-2 overflow-hidden rounded px-2 py-1.5 text-left text-xs",
+          active && "bg-accent text-accent-foreground",
+        )}
+      >
+        <FileText className="mt-[2px] size-3.5 shrink-0 text-primary/70" />
+        <div className="flex min-w-0 flex-1 flex-col gap-0">
+          <div className="block w-full min-w-0 truncate font-medium">
+            {basenameNoExt(item.path)}
+          </div>
+          <FrontTruncated text={rel} />
+        </div>
+      </div>
+    );
+  }
+
+  // Content row — two lines:
+  //   1. basename :line  match-snippet (truncated at the end)
+  //   2. dim vault-relative path (truncated at the *front* so the
+  //      filename + immediate parent dir stay visible)
   return (
-    <button
-      type="button"
+    <div
+      role="button"
+      tabIndex={0}
       data-row-index={idx}
       onMouseMove={onHover}
       onClick={onClick}
+      onKeyDown={onKeyDown}
+      title={item.path}
       className={cn(
-        "flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs",
+        "flex w-full min-w-0 items-start gap-2 overflow-hidden rounded px-2 py-1.5 text-left text-xs",
         active && "bg-accent text-accent-foreground",
       )}
     >
-      {item.kind === "file" ? (
-        <>
-          <FileText className="size-3.5 shrink-0 text-primary/70" />
-          <span className="truncate">
-            <span className="font-medium">{basenameNoExt(item.path)}</span>
-            <span className="ml-2 text-[10px] text-muted-foreground/60">
-              {item.path}
-            </span>
+      <TextSearch className="mt-[2px] size-3.5 shrink-0 text-fuchsia-500/70" />
+      <div className="flex min-w-0 flex-1 flex-col gap-0">
+        <div className="flex w-full min-w-0 items-baseline gap-2 overflow-hidden">
+          <span className="shrink-0 font-mono text-[11px]">
+            {basenameNoExt(item.path)}
           </span>
-        </>
-      ) : (
-        <>
-          <TextSearch className="size-3.5 shrink-0 text-fuchsia-500/70" />
-          <span className="min-w-0 flex-1 truncate">
-            <span className="font-mono text-[11px]">
-              {basenameNoExt(item.path)}
-            </span>
-            <span className="ml-2 text-[10px] text-muted-foreground/60">
-              :{item.line}
-            </span>
-            <span className="ml-2 truncate font-mono text-[11px] text-muted-foreground">
-              {item.text.trim()}
-            </span>
+          <span className="shrink-0 text-[10px] text-muted-foreground/60">
+            :{item.line}
           </span>
-        </>
-      )}
-    </button>
+          <span className="block min-w-0 flex-1 truncate font-mono text-[11px] text-muted-foreground">
+            {item.text.trim()}
+          </span>
+        </div>
+        <FrontTruncated text={rel} />
+      </div>
+    </div>
   );
+}
+
+/**
+ * Render `text` truncated at the *front* with a leading ellipsis, so
+ * the tail (basename + immediate parent dir) stays visible.
+ *
+ * CSS trick: `direction: rtl` flips where overflow happens — `text-
+ * overflow: ellipsis` then renders on the visual left.  A `<bdi>`
+ * wrapper isolates the actual string from the parent's bidi context
+ * so forward slashes / characters keep their natural left-to-right
+ * order regardless.  No JS-side measurement needed; the browser
+ * recomputes on every layout, including dialog resize.
+ */
+function FrontTruncated({ text }: { text: string }) {
+  return (
+    <span
+      className="block min-w-0 overflow-hidden whitespace-nowrap text-[10px] text-muted-foreground/55"
+      style={{ direction: "rtl", textOverflow: "ellipsis" }}
+    >
+      <bdi>{text}</bdi>
+    </span>
+  );
+}
+
+/**
+ * Strip the matching vault prefix off `absPath`.  Used both by rows
+ * (to keep them narrow) and by the preview header.  When no vault
+ * matches we fall back to the trailing path components so the row
+ * never spills the user's full home directory.
+ */
+function relToVaultRow(absPath: string, vaults: string[]): string {
+  for (const v of vaults) {
+    if (absPath === v) return absPath.split("/").slice(-1)[0] ?? absPath;
+    const prefix = v.endsWith("/") ? v : `${v}/`;
+    if (absPath.startsWith(prefix)) return absPath.slice(prefix.length);
+  }
+  return absPath;
 }
 
 /** Split a comma-or-newline-separated glob list into a clean array. */
@@ -554,4 +674,183 @@ function splitGlobs(input: string): string[] {
     .split(/[,\n]/)
     .map((s) => s.trim())
     .filter(Boolean);
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Preview pane — lazy-reads the highlighted file and renders a window
+// of lines centred on the match (content mode) or the file's first
+// chunk (files mode).  Reads are cached in a ref-backed map so
+// arrow-key nav over a list is instant after the first read.
+// ────────────────────────────────────────────────────────────────────────
+
+const PREVIEW_CACHE_LIMIT = 64;
+/** How many lines to show in files mode. */
+const FILES_PREVIEW_LINES = 60;
+/** How many lines on each side of the match line in content mode. */
+const CONTENT_PREVIEW_PADDING = 18;
+
+interface PreviewPaneProps {
+  selected: FlatResult | null;
+  /** Vault roots — used to strip absolute paths down to a tidy
+   *  vault-relative display in the header. */
+  vaults: string[];
+}
+
+function PreviewPane({ selected, vaults }: PreviewPaneProps) {
+  // ── ALL hooks unconditionally at the top ────────────────────────
+  // (React enforces stable hook order — early-returning between
+  // `useState` and `useEffect` calls would crash with "Rendered
+  // fewer hooks than expected".  Hoist + null-guard inside.)
+  const cacheRef = useRef<Map<string, string>>(new Map());
+  const viewportRef = useRef<HTMLDivElement | null>(null);
+  const [content, setContent] = useState<string | null>(null);
+  const [loadingPath, setLoadingPath] = useState<string | null>(null);
+
+  const selectedPath = selected?.path ?? null;
+  const selectedLine =
+    selected?.kind === "content" ? selected.line : null;
+
+  // Lazy file read with FIFO cache.
+  useEffect(() => {
+    if (!selectedPath) {
+      setContent(null);
+      setLoadingPath(null);
+      return;
+    }
+    const cached = cacheRef.current.get(selectedPath);
+    if (cached !== undefined) {
+      setContent(cached);
+      setLoadingPath(null);
+      return;
+    }
+    let cancelled = false;
+    setContent(null);
+    setLoadingPath(selectedPath);
+    void markdownTauri
+      .readFile(selectedPath)
+      .then((text) => {
+        if (cancelled) return;
+        cacheRef.current.set(selectedPath, text);
+        if (cacheRef.current.size > PREVIEW_CACHE_LIMIT) {
+          const first = cacheRef.current.keys().next().value;
+          if (first) cacheRef.current.delete(first);
+        }
+        setContent(text);
+        setLoadingPath(null);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        console.warn("[markdown] preview read failed", selectedPath, err);
+        setContent(null);
+        setLoadingPath(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedPath]);
+
+  // Centre the matched line whenever it changes (content mode only).
+  useEffect(() => {
+    if (selectedLine == null) return;
+    const el = viewportRef.current?.querySelector<HTMLElement>(
+      `[data-preview-line="${selectedLine}"]`,
+    );
+    el?.scrollIntoView({ block: "center", behavior: "auto" });
+  }, [selectedPath, selectedLine, content]);
+
+  // ── Now safe to early-return ────────────────────────────────────
+  if (!selected) {
+    return (
+      <div className="flex flex-1 items-center justify-center p-6 text-xs text-muted-foreground/60">
+        Pick a result to preview.
+      </div>
+    );
+  }
+
+  // Compute the line window.
+  const allLines = (content ?? "").split("\n");
+  const targetLine = selected.kind === "content" ? selected.line : 1;
+  const windowStart =
+    selected.kind === "content"
+      ? Math.max(1, targetLine - CONTENT_PREVIEW_PADDING)
+      : 1;
+  const windowEnd =
+    selected.kind === "content"
+      ? Math.min(allLines.length, targetLine + CONTENT_PREVIEW_PADDING)
+      : Math.min(allLines.length, FILES_PREVIEW_LINES);
+  const windowLines = allLines.slice(windowStart - 1, windowEnd);
+
+  return (
+    <div className="flex min-w-0 flex-1 flex-col">
+      <div className="flex shrink-0 items-center gap-2 border-b bg-muted/30 px-3 py-1 text-[11px] text-muted-foreground/80">
+        <span className="truncate font-mono">
+          {relToVault(selected.path, vaults)}
+        </span>
+        {selected.kind === "content" ? (
+          <span className="ml-auto shrink-0 tabular-nums text-muted-foreground/60">
+            line {selected.line}
+          </span>
+        ) : null}
+      </div>
+      <div
+        ref={viewportRef}
+        className="min-h-0 flex-1 overflow-y-auto bg-background"
+      >
+        {loadingPath === selected.path ? (
+          <div className="px-3 py-2 text-xs text-muted-foreground">
+            <Loader2 className="mr-1 inline size-3 animate-spin" />
+            Loading preview…
+          </div>
+        ) : content == null ? (
+          <div className="px-3 py-2 text-xs text-muted-foreground/60">
+            Couldn't read file.
+          </div>
+        ) : (
+          <pre className="px-2 py-1.5 font-mono text-[11px] leading-relaxed">
+            {windowLines.map((text, i) => {
+              const lineNo = windowStart + i;
+              const isMatch =
+                selected.kind === "content" && lineNo === targetLine;
+              return (
+                <div
+                  key={lineNo}
+                  data-preview-line={lineNo}
+                  className={cn(
+                    "flex gap-2 whitespace-pre",
+                    isMatch
+                      ? "bg-amber-500/20 font-semibold text-foreground"
+                      : "text-muted-foreground/85",
+                  )}
+                >
+                  <span className="w-10 shrink-0 select-none text-right tabular-nums text-muted-foreground/40">
+                    {lineNo}
+                  </span>
+                  <span className="break-words">{text || " "}</span>
+                </div>
+              );
+            })}
+            {selected.kind === "file" && allLines.length > windowEnd ? (
+              <div className="mt-1 px-2 text-[10px] italic text-muted-foreground/50">
+                … {allLines.length - windowEnd} more line
+                {allLines.length - windowEnd === 1 ? "" : "s"}
+              </div>
+            ) : null}
+          </pre>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Strip the matching vault prefix off `absPath`.  When no vault matches
+ * (shouldn't happen but safe) returns the absolute path unchanged.
+ */
+function relToVault(absPath: string, vaults: string[]): string {
+  for (const v of vaults) {
+    if (absPath === v) return absPath.split("/").slice(-1)[0] ?? absPath;
+    const prefix = v.endsWith("/") ? v : `${v}/`;
+    if (absPath.startsWith(prefix)) return absPath.slice(prefix.length);
+  }
+  return absPath;
 }

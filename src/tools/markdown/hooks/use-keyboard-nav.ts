@@ -26,6 +26,10 @@ export function useMarkdownKeyboardNav() {
   // Cmd+P → Files mode.  When already open in any mode, re-pressing
   // closes (so Cmd+P is a true toggle); when open *and* in Content
   // mode it just swaps modes instead of closing.
+  //
+  // `fireInInputs: true` so the shortcut works while the cursor is
+  // parked inside the CodeMirror editor — matches Flowstate's
+  // "always-fire" behaviour for the picker openers.
   useShortcut(
     "mod+p",
     (e) => {
@@ -39,6 +43,7 @@ export function useMarkdownKeyboardNav() {
       }
     },
     true,
+    { fireInInputs: true },
   );
 
   // Cmd+Shift+F → Content mode.  Same toggle/swap logic.
@@ -55,15 +60,32 @@ export function useMarkdownKeyboardNav() {
       }
     },
     true,
+    { fireInInputs: true },
   );
 
   // Legacy: Cmd+Shift+O still opens the native folder picker for
-  // adding a vault.
+  // adding a vault.  Also fire in editor — adding a vault from inside
+  // a doc is reasonable.
   useShortcut(
     "mod+shift+o",
     () => {
       void addVault();
     },
     !state.searchOpen,
+    { fireInInputs: true },
+  );
+
+  // Cmd+W closes the active tab when one is open.  Bound here so the
+  // editor's vim mode doesn't swallow the keystroke.
+  useShortcut(
+    "mod+w",
+    (e) => {
+      e.preventDefault();
+      if (state.activeTabId) {
+        dispatch({ type: "closeTab", id: state.activeTabId });
+      }
+    },
+    true,
+    { fireInInputs: true },
   );
 }
