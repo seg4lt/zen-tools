@@ -20,6 +20,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   ChevronDown,
   ChevronRight,
+  Copy,
   FilePlus,
   FileText,
   Folder,
@@ -248,6 +249,11 @@ function VaultBlock({ root, vault, tree, onRemove }: VaultBlockProps) {
             <span>New folder</span>
           </ContextMenuItem>
           <ContextMenuSeparator />
+          <ContextMenuItem onSelect={() => void copyToClipboard(root)}>
+            <Copy />
+            <span>Copy path</span>
+          </ContextMenuItem>
+          <ContextMenuSeparator />
           <ContextMenuItem onSelect={() => void refresh()}>
             <RefreshCw />
             <span>Refresh</span>
@@ -386,7 +392,7 @@ function TreeRow({ node }: TreeRowProps) {
  * file" on a leaf or "Open" on a directory.
  */
 function RowContextMenu({ node }: { node: TreeNode }) {
-  const { dispatch } = useMarkdownStore();
+  const { state, dispatch } = useMarkdownStore();
   const { deletePath } = useFileOps();
   const { item } = node;
   const isDir = item.isDir;
@@ -394,6 +400,20 @@ function RowContextMenu({ node }: { node: TreeNode }) {
   const onRename = () =>
     dispatch({ type: "startRename", path: item.path, seed: item.name });
   const onDelete = () => void deletePath(item.path);
+
+  // Compute vault-relative path lazily — only used when the user
+  // picks the "Copy relative path" item.  Returns the absolute path
+  // unchanged when no vault matches (defensive).
+  const relativePath = (): string => {
+    for (const vault of state.vaults) {
+      if (item.path === vault) {
+        return item.path.split("/").slice(-1)[0] ?? item.path;
+      }
+      const prefix = vault.endsWith("/") ? vault : `${vault}/`;
+      if (item.path.startsWith(prefix)) return item.path.slice(prefix.length);
+    }
+    return item.path;
+  };
 
   return (
     <ContextMenuContent
@@ -435,6 +455,18 @@ function RowContextMenu({ node }: { node: TreeNode }) {
         <Pencil />
         <span>Rename…</span>
       </ContextMenuItem>
+      <ContextMenuSeparator />
+      <ContextMenuItem onSelect={() => void copyToClipboard(item.path)}>
+        <Copy />
+        <span>Copy path</span>
+      </ContextMenuItem>
+      <ContextMenuItem
+        onSelect={() => void copyToClipboard(relativePath())}
+      >
+        <Copy />
+        <span>Copy relative path</span>
+      </ContextMenuItem>
+      <ContextMenuSeparator />
       <ContextMenuItem variant="destructive" onSelect={onDelete}>
         <Trash2 />
         <span>Move to trash</span>
@@ -598,6 +630,19 @@ function CreatePlaceholder({
       />
     </li>
   );
+}
+
+/**
+ * Best-effort write to the system clipboard.  Used by the "Copy
+ * path" / "Copy relative path" context-menu items.  Failures are
+ * logged and swallowed — the operation is purely user-affordance.
+ */
+async function copyToClipboard(text: string): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch (err) {
+    console.warn("[markdown] clipboard write failed", err);
+  }
 }
 
 /**

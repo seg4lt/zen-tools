@@ -116,8 +116,14 @@ function buildDecorations(
       }
 
       // Fenced code: subtle background per line so the block reads as
-      // a visual unit.  We tag the opening fence + content + closing
-      // fence with the same class so the background is contiguous.
+      // a visual unit.  We tag every line so the background is
+      // contiguous across the opening fence, content, and closing
+      // fence.
+      //
+      // The mermaid-block widget that *replaces* the whole range
+      // when the cursor is outside lives in a separate `StateField`
+      // (`mermaid-field.ts`) — block decorations can't be specified
+      // by ViewPlugins.
       if (type === "FencedCode") {
         let pos = node.from;
         while (pos <= node.to) {

@@ -10,6 +10,7 @@
 import "./style.css";
 import type { Extension } from "@codemirror/state";
 import { livePreviewPlugin } from "./view-plugin";
+import { mermaidField } from "./mermaid-field";
 import { linkClickHandler, wikilinkAutocomplete } from "./wikilink";
 
 export interface LivePreviewOptions {
@@ -34,6 +35,9 @@ export interface LivePreviewOptions {
 export function livePreview(opts: LivePreviewOptions): Extension {
   return [
     livePreviewPlugin(opts.getDocDir),
+    // Block-level decorations (mermaid diagram widget) — must come
+    // from a state field, not a view plugin.
+    mermaidField(),
     wikilinkAutocomplete(opts.getWikilinkCandidates),
     linkClickHandler({
       onWikilinkOpen: opts.onWikilinkOpen,

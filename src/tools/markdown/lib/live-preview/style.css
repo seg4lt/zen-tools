@@ -91,6 +91,41 @@
   text-align: center;
 }
 
+/* Mermaid diagram widget — wraps the SVG that mermaid renders for
+ * a `\`\`\`mermaid` block.  Centred inline-block so the diagram sits
+ * cleanly within the editor flow without flexbox surprises. */
+.cm-md-mermaid {
+  display: block;
+  padding: 0.5rem;
+  margin: 0.25rem 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background-color: color-mix(in oklch, var(--muted) 40%, transparent);
+  text-align: center;
+}
+.cm-md-mermaid svg {
+  max-width: 100%;
+  height: auto;
+}
+.cm-md-mermaid-status {
+  color: var(--muted-foreground);
+  font-size: 0.85em;
+  font-style: italic;
+}
+.cm-md-mermaid-error {
+  display: block;
+  margin: 0;
+  padding: 0.5rem;
+  border-radius: 4px;
+  background-color: color-mix(in oklch, var(--destructive) 12%, transparent);
+  color: var(--destructive);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85em;
+  text-align: left;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 /* Fenced code block lines — subtle background so the block reads as
  * one unit while keeping CodeMirror's per-line model intact. */
 .cm-md-fenced-line {
