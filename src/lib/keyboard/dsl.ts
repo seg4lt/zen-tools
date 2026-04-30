@@ -1,9 +1,19 @@
 /**
  * Tiny DSL for declaring keybindings as strings: `"mod+e"`, `"mod+shift+/"`,
  * `"mod+1"` etc.
+ *
+ * A handful of aliases let callers bind whitespace / punctuation keys
+ * without having to embed the literal character (which `+`-splitting and
+ * trim()ing would otherwise mangle).
  */
 
 import type { KeyChord } from "./platform";
+
+const KEY_ALIASES: Record<string, string> = {
+  space: " ",
+  spc: " ",
+  plus: "+",
+};
 
 /** Parse a DSL string into a KeyChord. Throws on malformed input. */
 export function parseChord(input: string): KeyChord {
@@ -13,7 +23,7 @@ export function parseChord(input: string): KeyChord {
     if (seg === "mod") chord.mod = true;
     else if (seg === "shift") chord.shift = true;
     else if (seg === "alt" || seg === "option") chord.alt = true;
-    else chord.key = seg;
+    else chord.key = KEY_ALIASES[seg] ?? seg;
   }
   if (!chord.key) {
     throw new Error(`Invalid chord: ${input}`);

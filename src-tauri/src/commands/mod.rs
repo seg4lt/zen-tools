@@ -1,5 +1,6 @@
 //! Tauri command modules. Each file groups commands by concern.
 
+pub mod cleaner;
 pub mod environment;
 pub mod execute;
 pub mod files;

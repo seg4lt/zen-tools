@@ -3,11 +3,29 @@
 use ahash::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use zen_cleaner::Tree as CleanerTree;
 use zen_http::{FileRegistry, HttpExecutor};
 use zen_parser::PerfConfig;
 use zen_perf::{MetricsSnapshot, RequestSample, StopHandle};
 use zen_process_monitor::{Sample as PmSample, SamplerHandle, SamplerState, SharedState as PmSharedState};
 use zen_types::prelude::*;
+
+/// Per-tool state for the Cleaner. Held inside [`AppState::cleaner`].
+///
+/// `folders` is the persisted scan-folder list (mirrors the prefs JSON);
+/// `trees` keeps each folder's freshly built [`CleanerTree`] so the
+/// background size-estimation worker can mutate it under a lock as
+/// estimates settle.  `globals` carries the pre-discovered global cache
+/// section.
+#[derive(Default)]
+pub struct CleanerState {
+    /// Persisted scan-folder list (absolute paths in user-defined order).
+    pub folders: Vec<String>,
+    /// Live tree per folder. Key is the absolute folder path.
+    pub trees: HashMap<String, CleanerTree>,
+    /// Global cache section (computed once at startup, refreshed on `R`).
+    pub globals: Option<CleanerTree>,
+}
 
 /// Snapshot of everything the Tauri layer manages on behalf of the front-end.
 ///
@@ -68,6 +86,16 @@ pub struct AppState {
     /// Active tray icon, lazily created when a perf test starts or process
     /// monitoring becomes active. `None` while no work is in flight.
     pub tray: Option<tauri::tray::TrayIcon>,
+
+    // ──── Cleaner ────
+    /// Disk-cleaner per-tool state (folders, trees, globals).
+    ///
+    /// Wrapped in `Arc<parking_lot::Mutex<...>>` rather than a tokio mutex
+    /// so the std::thread workers spawned by `cleaner_scan_folder` can
+    /// lock without needing a Tokio runtime context.  The outer
+    /// `Mutex<AppState>` is held only briefly to clone this `Arc` out;
+    /// every subsequent access goes through the parking_lot mutex.
+    pub cleaner: Arc<parking_lot::Mutex<CleanerState>>,
 }
 
 impl AppState {
@@ -97,6 +125,7 @@ impl AppState {
             pm_state: Arc::new(parking_lot::Mutex::new(SamplerState::new())),
             pm_handle: SamplerHandle { tx },
             tray: None,
+            cleaner: Arc::new(parking_lot::Mutex::new(CleanerState::default())),
         }
     }
 

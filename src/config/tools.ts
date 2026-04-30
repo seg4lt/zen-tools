@@ -3,7 +3,7 @@
  * means appending one entry to this array and creating its route subtree.
  */
 import type { LucideIcon } from "lucide-react";
-import { Activity, Zap } from "lucide-react";
+import { Activity, Sparkles, Zap } from "lucide-react";
 
 export interface Tool {
   /** Stable identifier (used for route segments and persistence keys). */
@@ -32,6 +32,13 @@ export const TOOLS: readonly Tool[] = [
     icon: Activity,
     route: "/process-monitor",
     description: "Monitor CPU and memory of system process trees",
+  },
+  {
+    id: "cleaner",
+    label: "Cleaner",
+    icon: Sparkles,
+    route: "/cleaner",
+    description: "Reclaim disk — clean repos & purge dev caches",
   },
 ] as const;
 

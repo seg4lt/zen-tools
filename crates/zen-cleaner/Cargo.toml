@@ -1,0 +1,13 @@
+[package]
+name = "zen-cleaner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Disk-space cleaner: discovers git repositories and global dev caches and reclaims their space."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+rayon = "1.10"
+tracing = { workspace = true }

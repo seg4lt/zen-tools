@@ -134,6 +134,14 @@ pub fn run() {
             commands::process_monitor::pm_get_config,
             commands::process_monitor::pm_get_history,
             commands::process_monitor::pm_set_poll_interval,
+            // cleaner
+            commands::cleaner::cleaner_list_scan_folders,
+            commands::cleaner::cleaner_add_scan_folder,
+            commands::cleaner::cleaner_remove_scan_folder,
+            commands::cleaner::cleaner_scan_folder,
+            commands::cleaner::cleaner_discover_globals,
+            commands::cleaner::cleaner_run_actions,
+            commands::cleaner::cleaner_get_cached_tree,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

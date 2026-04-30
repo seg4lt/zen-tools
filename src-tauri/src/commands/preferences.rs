@@ -33,6 +33,30 @@ pub struct Preferences {
     /// to `false` for plain editing.
     #[serde(default = "default_vim_mode")]
     pub vim_mode: bool,
+    /// Folders the user has added to the **Cleaner** tool's scan list,
+    /// in user-defined order. Persists across launches so each opened
+    /// folder re-scans automatically.
+    #[serde(default)]
+    pub cleaner_scan_folders: Vec<String>,
+    /// Cached cleaner trees, keyed by folder path (or the literal
+    /// `"globals"` for the global cache section). Saved at scan
+    /// completion so the UI can render instantly on app restart while
+    /// a fresh scan runs in the background.
+    #[serde(default)]
+    pub cleaner_scan_cache: Vec<CleanerScanCacheEntry>,
+}
+
+/// One entry in the persisted cleaner scan cache.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanerScanCacheEntry {
+    /// Folder path (or `"globals"` for the global cache section).
+    pub key: String,
+    /// JSON-serialised `Vec<TreeNodeDto>` for that key. Storing the raw
+    /// JSON keeps `Preferences` independent of `zen-cleaner`'s internal
+    /// types, so adding/removing fields on `TreeNodeDto` doesn't risk
+    /// breaking older preferences files.
+    pub tree_json: String,
 }
 
 fn default_vim_mode() -> bool {
@@ -45,6 +69,8 @@ impl Default for Preferences {
             working_dirs: Vec::new(),
             expanded_paths: Vec::new(),
             vim_mode: default_vim_mode(),
+            cleaner_scan_folders: Vec::new(),
+            cleaner_scan_cache: Vec::new(),
         }
     }
 }

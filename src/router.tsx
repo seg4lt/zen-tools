@@ -9,6 +9,7 @@ import { TitleBar } from "@/components/app-shell/title-bar";
 import { HTTPRunnerShell } from "@/tools/http-runner/HTTPRunnerShell";
 import { RequestsView } from "@/tools/http-runner/RequestsView";
 import { ProcessMonitorShell } from "@/tools/process-monitor/ProcessMonitorShell";
+import { CleanerShell } from "@/tools/cleaner/CleanerShell";
 
 const rootRoute = createRootRoute({
   component: () => (
@@ -66,6 +67,12 @@ const processMonitorRoute = createRoute({
   component: ProcessMonitorShell,
 });
 
+const cleanerRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/cleaner",
+  component: CleanerShell,
+});
+
 const routeTree = rootRoute.addChildren([
   indexRoute,
   httpRunnerRoute.addChildren([
@@ -74,6 +81,7 @@ const routeTree = rootRoute.addChildren([
     performanceRoute,
   ]),
   processMonitorRoute,
+  cleanerRoute,
 ]);
 
 export const router = createRouter({
