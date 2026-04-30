@@ -10,7 +10,8 @@
  *                     are tagged with a `-:` prefix).
  *   - `currentFile` — the open document: path, doc text, dirty flag.
  *   - `recents`     — the bounded ring used by the quick switcher.
- *   - `quickSwitcherOpen` — overlay flag.
+ *   - `searchOpen` / `searchMode` — drives the unified Cmd+P /
+ *     Cmd+Shift+F search palette (file vs content modes).
  *   - `bootstrapping` — `true` until the first discovery completes.
  *
  * Bootstrap (vault list fetch + discover + recent files) lives **inside
@@ -50,13 +51,19 @@ export type EditingState =
   | { kind: "rename"; path: string; seed: string }
   | { kind: "create"; parentDir: string; childKind: "file" | "folder" };
 
+/** Which kind of search the unified palette is showing. */
+export type SearchMode = "files" | "content";
+
 export interface MarkdownState {
   vaults: string[];
   files: Record<string, MarkdownVaultDto>;
   expanded: Set<string>;
   currentFile: OpenFileState | null;
   recents: string[];
-  quickSwitcherOpen: boolean;
+  /** Whether the search palette overlay is open. */
+  searchOpen: boolean;
+  /** Which mode the palette is currently in. */
+  searchMode: SearchMode;
   bootstrapping: boolean;
   editing: EditingState | null;
 }
@@ -67,7 +74,8 @@ const initialState: MarkdownState = {
   expanded: new Set<string>(),
   currentFile: null,
   recents: [],
-  quickSwitcherOpen: false,
+  searchOpen: false,
+  searchMode: "files",
   bootstrapping: true,
   editing: null,
 };
@@ -82,7 +90,8 @@ export type MarkdownAction =
   | { type: "editDoc"; doc: string }
   | { type: "markSaved" }
   | { type: "setRecents"; recents: string[] }
-  | { type: "setQuickSwitcher"; open: boolean }
+  | { type: "setSearchPalette"; open: boolean; mode?: SearchMode }
+  | { type: "setSearchMode"; mode: SearchMode }
   | { type: "bootstrapped" }
   | { type: "startRename"; path: string; seed: string }
   | { type: "startCreate"; parentDir: string; childKind: "file" | "folder" }
@@ -131,7 +140,7 @@ function reducer(state: MarkdownState, action: MarkdownAction): MarkdownState {
       return {
         ...state,
         currentFile: { path: action.path, doc: action.doc, dirty: false },
-        quickSwitcherOpen: false,
+        searchOpen: false,
       };
 
     case "closeFile":
@@ -161,8 +170,15 @@ function reducer(state: MarkdownState, action: MarkdownAction): MarkdownState {
     case "setRecents":
       return { ...state, recents: action.recents };
 
-    case "setQuickSwitcher":
-      return { ...state, quickSwitcherOpen: action.open };
+    case "setSearchPalette":
+      return {
+        ...state,
+        searchOpen: action.open,
+        searchMode: action.mode ?? state.searchMode,
+      };
+
+    case "setSearchMode":
+      return { ...state, searchMode: action.mode };
 
     case "bootstrapped":
       return { ...state, bootstrapping: false };

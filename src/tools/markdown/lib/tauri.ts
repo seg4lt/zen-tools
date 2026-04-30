@@ -16,6 +16,37 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 /** What sort of leaf this item is — drives icon + click behaviour. */
 export type MarkdownItemKind = "markdown" | "image" | "directory";
 
+/** Flowstate-style content-search options.  Field names match the
+ *  camelCase the Rust DTO expects (`#[serde(rename_all = "camelCase")]`). */
+export interface ContentSearchOptions {
+  useRegex: boolean;
+  caseSensitive: boolean;
+  /** Glob patterns to *include*; empty = all. */
+  includes: string[];
+  /** Glob patterns to *exclude*. */
+  excludes: string[];
+}
+
+/** One row inside a content-search match block. */
+export interface BlockLine {
+  /** 1-based line number. */
+  line: number;
+  /** Line text (capped at 240 chars + ellipsis). */
+  text: string;
+  /** `true` for a match line, `false` for surrounding context. */
+  isMatch: boolean;
+}
+
+/** Contiguous run of matching + context lines from a single file. */
+export interface ContentBlock {
+  /** Absolute filesystem path. */
+  path: string;
+  /** 1-based line of the first row in `lines`. */
+  startLine: number;
+  /** Match + context lines, in document order. */
+  lines: BlockLine[];
+}
+
 /** One file/dir entry in a vault's pre-order DFS list. */
 export interface MarkdownFileItem {
   /** Display name (basename — `notes.md`, `Daily Notes`, …). */
@@ -107,6 +138,28 @@ export const markdownTauri = {
   /** Move to the OS trash (recoverable). */
   deleteToTrash: (path: string) =>
     invoke<void>("markdown_delete_to_trash", { path }),
+
+  /**
+   * Grep across every `.md` in `vaults`.  `token` is a frontend-minted
+   * monotonic id; pass it back to `stopContentSearch` to abort an
+   * in-flight call.
+   */
+  searchContents: (
+    vaults: string[],
+    query: string,
+    options: ContentSearchOptions,
+    token: number,
+  ) =>
+    invoke<ContentBlock[]>("markdown_search_contents", {
+      vaults,
+      query,
+      options,
+      token,
+    }),
+
+  /** Cancel the content search identified by `token`. */
+  stopContentSearch: (token: number) =>
+    invoke<void>("markdown_stop_content_search", { token }),
 };
 
 // ────────────────────────────────────────────────────────────────────────

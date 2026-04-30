@@ -14,7 +14,7 @@ import { Button } from "@/components/ui/button";
 import { tauri as httpTauri } from "@/tools/http-runner/lib/tauri";
 import { cn } from "@/lib/utils";
 import { VaultSidebar } from "./components/vault-sidebar";
-import { QuickSwitcher } from "./components/quick-switcher";
+import { SearchPalette } from "./components/search-palette";
 import { EmptyState } from "./components/empty-state";
 import {
   MarkdownEditor,
@@ -99,8 +99,13 @@ export function MarkdownView() {
       if (path) {
         void openFile(path);
       } else {
-        // Ambiguous or missing — open the quick switcher pre-filled.
-        dispatch({ type: "setQuickSwitcher", open: true });
+        // Ambiguous or missing — fall back to the search palette in
+        // file mode so the user can pick from candidates.
+        dispatch({
+          type: "setSearchPalette",
+          open: true,
+          mode: "files",
+        });
       }
     },
     [openFile, resolveWikilink, dispatch],
@@ -263,7 +268,7 @@ export function MarkdownView() {
           )}
         </div>
       </div>
-      <QuickSwitcher />
+      <SearchPalette />
     </div>
   );
 }

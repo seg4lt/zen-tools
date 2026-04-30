@@ -17,10 +17,16 @@
 
 use crate::commands::preferences::{load_preferences, write_preferences};
 use crate::error::{AppError, AppResult};
-use serde::Serialize;
+use crate::state::AppState;
+use globset::{Glob, GlobSet, GlobSetBuilder};
+use regex::{Regex, RegexBuilder};
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tauri::AppHandle;
+use tokio::sync::Mutex;
 use tracing::warn;
 
 /// Maximum number of entries kept in the recent-files ring.  Anything
@@ -459,6 +465,337 @@ pub async fn markdown_delete_to_trash(path: String) -> AppResult<()> {
         .map_err(|e| AppError::Other(format!("join trash worker: {e}")))?
         .map_err(|e| AppError::Other(format!("move to trash: {e}")))?;
     Ok(())
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Content search (mirrors flowstate's fff `search_file_contents`)
+// ────────────────────────────────────────────────────────────────────────
+
+/// User-facing knobs for [`markdown_search_contents`].  Field names
+/// match the camelCase the frontend sends.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContentSearchOptions {
+    /// Treat the query as a regex (vs. a literal substring).
+    pub use_regex: bool,
+    /// Case-sensitive matching (literal or regex).
+    pub case_sensitive: bool,
+    /// Glob patterns to *include* (matches any → keep).  Empty = all.
+    pub includes: Vec<String>,
+    /// Glob patterns to *exclude* (matches any → skip).
+    pub excludes: Vec<String>,
+}
+
+/// One contiguous run of matching + context lines inside a file.
+/// Mirrors flowstate's `ContentBlock` byte-for-byte so the frontend
+/// can render the same shape.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContentBlock {
+    /// Absolute filesystem path of the matched file.
+    pub path: String,
+    /// 1-based line number of the first line in `lines`.
+    pub start_line: usize,
+    /// Match + context lines, in document order.
+    pub lines: Vec<BlockLine>,
+}
+
+/// One row inside a [`ContentBlock`].
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlockLine {
+    /// 1-based line number.
+    pub line: usize,
+    /// Trimmed line text (CR/LF stripped, capped at 240 chars).
+    pub text: String,
+    /// `true` when this line itself contains a match; `false` when
+    /// it's surrounding context.
+    pub is_match: bool,
+}
+
+/// Maximum file size we'll read for content search.  Bigger files are
+/// almost always binary or generated and slow to scan.
+const MAX_CONTENT_FILE_BYTES: u64 = 2 * 1024 * 1024;
+/// Truncate displayed lines to keep payloads bounded.
+const MAX_LINE_CHARS: usize = 240;
+/// Lines of context before/after each match to include in a block.
+const CONTEXT_LINES: usize = 1;
+/// Cap on total matches returned per call to keep IPC payload sane.
+const MAX_BLOCKS: usize = 500;
+
+/// Streaming-style content search across every `.md` / `.markdown`
+/// file under the supplied vault roots.  Returns one [`ContentBlock`]
+/// per contiguous run of matches in a single file.
+///
+/// Cancellation: callers mint a monotonic `token` and pass it in.
+/// Concurrent invocations register their own [`AtomicBool`] flag in
+/// `AppState::markdown_search_tokens`; calling
+/// [`markdown_stop_content_search`] flips that flag, which is checked
+/// at every per-file boundary so the worker drops out fast.
+#[tauri::command]
+pub async fn markdown_search_contents(
+    vaults: Vec<String>,
+    query: String,
+    options: ContentSearchOptions,
+    token: u64,
+    state: tauri::State<'_, Mutex<AppState>>,
+) -> AppResult<Vec<ContentBlock>> {
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Build the matcher up-front so each per-file iteration just
+    // consults a `Regex`/literal pattern with no extra setup.
+    let matcher = build_matcher(trimmed, &options)?;
+    let include_set = build_globset(&options.includes)?;
+    let exclude_set = build_globset(&options.excludes)?;
+
+    // Register a fresh cancellation flag against the user's token.
+    let cancel: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+    let cancel_arc = {
+        let s = state.lock().await;
+        s.markdown_search_tokens.lock().insert(token, cancel.clone());
+        s.markdown_search_tokens.clone()
+    };
+
+    // Hop the actual filesystem walk + regex pass off to a blocking
+    // pool so the runtime stays responsive on big vaults.
+    let vaults_clone = vaults.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        search_contents_blocking(
+            &vaults_clone,
+            matcher,
+            include_set.as_ref(),
+            exclude_set.as_ref(),
+            cancel.as_ref(),
+        )
+    })
+    .await
+    .map_err(|e| AppError::Other(format!("join content-search worker: {e}")))?;
+
+    // Always tear down the cancel slot, even on success — bad hygiene
+    // otherwise; the map would grow unbounded across sessions.
+    cancel_arc.lock().remove(&token);
+    Ok(result)
+}
+
+/// Mark the in-flight content search identified by `token` as
+/// cancelled.  No-op when the token is unknown — typical when the
+/// frontend re-fires the command after the previous run already
+/// returned naturally.
+#[tauri::command]
+pub async fn markdown_stop_content_search(
+    token: u64,
+    state: tauri::State<'_, Mutex<AppState>>,
+) -> AppResult<()> {
+    let s = state.lock().await;
+    if let Some(flag) = s.markdown_search_tokens.lock().remove(&token) {
+        flag.store(true, Ordering::SeqCst);
+    }
+    Ok(())
+}
+
+/// Pattern matcher — a literal substring with the right case folding,
+/// or a compiled regex.  Wrapped so the per-file inner loop only has
+/// to call `is_match`.
+enum Matcher {
+    Literal { needle: String, case_sensitive: bool },
+    Regex(Regex),
+}
+
+impl Matcher {
+    fn is_match(&self, line: &str) -> bool {
+        match self {
+            Matcher::Literal {
+                needle,
+                case_sensitive,
+            } => {
+                if *case_sensitive {
+                    line.contains(needle.as_str())
+                } else {
+                    // Allocate-free case-insensitive substring is
+                    // tricky in Rust without an extra crate; for the
+                    // markdown vault sizes we deal with, lowercasing
+                    // each line is fine.
+                    line.to_ascii_lowercase().contains(needle.as_str())
+                }
+            }
+            Matcher::Regex(re) => re.is_match(line),
+        }
+    }
+}
+
+fn build_matcher(query: &str, options: &ContentSearchOptions) -> AppResult<Matcher> {
+    if options.use_regex {
+        let re = RegexBuilder::new(query)
+            .case_insensitive(!options.case_sensitive)
+            .build()
+            .map_err(|e| AppError::BadRequest(format!("invalid regex: {e}")))?;
+        Ok(Matcher::Regex(re))
+    } else {
+        let needle = if options.case_sensitive {
+            query.to_string()
+        } else {
+            query.to_ascii_lowercase()
+        };
+        Ok(Matcher::Literal {
+            needle,
+            case_sensitive: options.case_sensitive,
+        })
+    }
+}
+
+fn build_globset(patterns: &[String]) -> AppResult<Option<GlobSet>> {
+    let live: Vec<&String> = patterns.iter().filter(|p| !p.trim().is_empty()).collect();
+    if live.is_empty() {
+        return Ok(None);
+    }
+    let mut builder = GlobSetBuilder::new();
+    for pat in live {
+        builder.add(
+            Glob::new(pat).map_err(|e| AppError::BadRequest(format!("bad glob `{pat}`: {e}")))?,
+        );
+    }
+    Ok(Some(builder.build().map_err(|e| {
+        AppError::Other(format!("compile glob set: {e}"))
+    })?))
+}
+
+fn search_contents_blocking(
+    vaults: &[String],
+    matcher: Matcher,
+    include: Option<&GlobSet>,
+    exclude: Option<&GlobSet>,
+    cancel: &AtomicBool,
+) -> Vec<ContentBlock> {
+    let mut blocks: Vec<ContentBlock> = Vec::new();
+    'outer: for vault in vaults {
+        let root = PathBuf::from(vault);
+        let mut stack = vec![root.clone()];
+        while let Some(dir) = stack.pop() {
+            if cancel.load(Ordering::Relaxed) {
+                break 'outer;
+            }
+            let Ok(entries) = fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let name = path.file_name().map(|s| s.to_string_lossy().to_string());
+                if let Some(n) = name.as_deref() {
+                    if n.starts_with('.')
+                        || n == "node_modules"
+                        || n == "target"
+                        || n == "dist"
+                        || n == "build"
+                    {
+                        continue;
+                    }
+                }
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                let Some(name_str) = name.as_deref() else {
+                    continue;
+                };
+                if !is_markdown(name_str) {
+                    continue;
+                }
+                // Vault-relative path for glob testing.
+                let rel = path
+                    .strip_prefix(&root)
+                    .unwrap_or(&path)
+                    .to_string_lossy()
+                    .to_string();
+                if let Some(set) = include {
+                    if !set.is_match(&rel) {
+                        continue;
+                    }
+                }
+                if let Some(set) = exclude {
+                    if set.is_match(&rel) {
+                        continue;
+                    }
+                }
+                if cancel.load(Ordering::Relaxed) {
+                    break 'outer;
+                }
+                let Ok(meta) = fs::metadata(&path) else {
+                    continue;
+                };
+                if meta.len() > MAX_CONTENT_FILE_BYTES {
+                    continue;
+                }
+                let Ok(contents) = fs::read_to_string(&path) else {
+                    continue;
+                };
+                let file_blocks = file_blocks_from(&path, &contents, &matcher);
+                blocks.extend(file_blocks);
+                if blocks.len() >= MAX_BLOCKS {
+                    break 'outer;
+                }
+            }
+        }
+    }
+    blocks
+}
+
+/// Walk `contents` once per file, emitting one [`ContentBlock`] per
+/// run of consecutive match lines (with [`CONTEXT_LINES`] of context
+/// stitched in).
+fn file_blocks_from(path: &Path, contents: &str, matcher: &Matcher) -> Vec<ContentBlock> {
+    let lines: Vec<&str> = contents.lines().collect();
+    if lines.is_empty() {
+        return Vec::new();
+    }
+    let match_flags: Vec<bool> = lines.iter().map(|l| matcher.is_match(l)).collect();
+    let mut out: Vec<ContentBlock> = Vec::new();
+    let mut i = 0usize;
+    while i < lines.len() {
+        if !match_flags[i] {
+            i += 1;
+            continue;
+        }
+        // Found a match; greedy-extend through any tightly-grouped
+        // matches (within 2*CONTEXT_LINES of the previous match).
+        let block_start = i.saturating_sub(CONTEXT_LINES);
+        let mut last_match = i;
+        let mut j = i + 1;
+        while j < lines.len() {
+            if match_flags[j] {
+                last_match = j;
+                j += 1;
+            } else if j - last_match <= CONTEXT_LINES * 2 {
+                j += 1;
+            } else {
+                break;
+            }
+        }
+        let block_end = (last_match + CONTEXT_LINES).min(lines.len() - 1);
+        let mut block_lines = Vec::with_capacity(block_end - block_start + 1);
+        for k in block_start..=block_end {
+            let raw = lines[k];
+            let mut text = raw.to_string();
+            if text.len() > MAX_LINE_CHARS {
+                text.truncate(MAX_LINE_CHARS);
+                text.push('…');
+            }
+            block_lines.push(BlockLine {
+                line: k + 1,
+                text,
+                is_match: match_flags[k],
+            });
+        }
+        out.push(ContentBlock {
+            path: path.to_string_lossy().to_string(),
+            start_line: block_start + 1,
+            lines: block_lines,
+        });
+        i = block_end + 1;
+    }
+    out
 }
 
 /// Find a sibling name that doesn't yet exist.  Returns the resolved

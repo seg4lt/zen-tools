@@ -96,6 +96,15 @@ pub struct AppState {
     /// `Mutex<AppState>` is held only briefly to clone this `Arc` out;
     /// every subsequent access goes through the parking_lot mutex.
     pub cleaner: Arc<parking_lot::Mutex<CleanerState>>,
+
+    // ──── Markdown ────
+    /// Cancellation flags for in-flight content-search invocations,
+    /// keyed by the frontend-minted token. Mirrors flowstate's fff
+    /// pattern: every `markdown_search_contents` call registers an
+    /// `AtomicBool`; `markdown_stop_content_search(token)` flips it
+    /// and the worker drops out at the next per-file checkpoint.
+    pub markdown_search_tokens:
+        Arc<parking_lot::Mutex<HashMap<u64, Arc<std::sync::atomic::AtomicBool>>>>,
 }
 
 impl AppState {
@@ -126,6 +135,7 @@ impl AppState {
             pm_handle: SamplerHandle { tx },
             tray: None,
             cleaner: Arc::new(parking_lot::Mutex::new(CleanerState::default())),
+            markdown_search_tokens: Arc::new(parking_lot::Mutex::new(HashMap::default())),
         }
     }
 
