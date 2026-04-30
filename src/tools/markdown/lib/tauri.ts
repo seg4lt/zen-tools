@@ -90,6 +90,23 @@ export const markdownTauri = {
 
   /** Native folder picker (re-uses the http-runner backend command). */
   pickDirectory: () => invoke<string | null>("pick_directory"),
+
+  /** Create an empty markdown file in `parentDir`.  `name` may include
+   *  or omit the `.md` extension; the backend ensures it's there. */
+  createFile: (parentDir: string, name: string) =>
+    invoke<string>("markdown_create_file", { parentDir, name }),
+
+  /** Create an empty directory under `parentDir`. */
+  createDir: (parentDir: string, name: string) =>
+    invoke<string>("markdown_create_dir", { parentDir, name }),
+
+  /** Rename a file or directory in place.  `newName` is a basename. */
+  rename: (oldPath: string, newName: string) =>
+    invoke<string>("markdown_rename", { oldPath, newName }),
+
+  /** Move to the OS trash (recoverable). */
+  deleteToTrash: (path: string) =>
+    invoke<void>("markdown_delete_to_trash", { path }),
 };
 
 // ────────────────────────────────────────────────────────────────────────

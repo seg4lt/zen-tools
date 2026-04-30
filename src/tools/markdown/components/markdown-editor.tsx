@@ -41,6 +41,7 @@ import {
   indentOnInput,
 } from "@codemirror/language";
 import { markdown } from "@codemirror/lang-markdown";
+import { syntaxTree } from "@codemirror/language";
 import { vim, Vim } from "@replit/codemirror-vim";
 import { makeEditorTheme } from "@/tools/http-runner/lib/cm-theme";
 import { useTheme } from "@/hooks/use-theme";
@@ -74,6 +75,9 @@ export interface MarkdownEditorProps {
   getWikilinkCandidates: () => string[];
   /** Called on `Mod+click` of a wikilink — caller resolves + opens. */
   onWikilinkOpen: (label: string) => void;
+  /** Called on `Mod+click` of a regular `[label](url)` link, or when
+   *  the user presses `gf` / `gd` over one in vim normal mode. */
+  onLinkOpen: (url: string) => void;
   /** Fired after a clipboard image is successfully saved + linked. */
   onImageSaved?: (relPath: string) => void;
   /** Forwarded ref for imperative control. */
@@ -90,6 +94,7 @@ export function MarkdownEditor({
   getCurrentPath,
   getWikilinkCandidates,
   onWikilinkOpen,
+  onLinkOpen,
   onImageSaved,
   imperativeRef,
 }: MarkdownEditorProps) {
@@ -101,6 +106,7 @@ export function MarkdownEditor({
   const getCurrentPathRef = useRef(getCurrentPath);
   const getCandidatesRef = useRef(getWikilinkCandidates);
   const onWikilinkOpenRef = useRef(onWikilinkOpen);
+  const onLinkOpenRef = useRef(onLinkOpen);
   const onImageSavedRef = useRef(onImageSaved);
   const { theme } = useTheme();
 
@@ -115,6 +121,7 @@ export function MarkdownEditor({
     getCurrentPathRef.current = getCurrentPath;
     getCandidatesRef.current = getWikilinkCandidates;
     onWikilinkOpenRef.current = onWikilinkOpen;
+    onLinkOpenRef.current = onLinkOpen;
     onImageSavedRef.current = onImageSaved;
   }, [
     onChange,
@@ -123,11 +130,14 @@ export function MarkdownEditor({
     getCurrentPath,
     getWikilinkCandidates,
     onWikilinkOpen,
+    onLinkOpen,
     onImageSaved,
   ]);
 
   // Vim ex commands — register once.  `:w` / `:wq` / `:x` save through
-  // `onSave` so muscle memory works inside vim mode.
+  // `onSave` so muscle memory works inside vim mode.  `gf` / `gd`
+  // follow whatever link the cursor is sitting on (wikilink first,
+  // fall back to a standard `[label](url)` link).
   useEffect(() => {
     const save = () => {
       const view = viewRef.current;
@@ -137,6 +147,64 @@ export function MarkdownEditor({
     Vim.defineEx("write", "w", save);
     Vim.defineEx("wq", "wq", save);
     Vim.defineEx("x", "x", save);
+
+    const followLink = () => {
+      const view = viewRef.current;
+      if (!view) return;
+      const pos = view.state.selection.main.head;
+
+      // 1. Wikilink at cursor?  Cheaper to test first — a simple
+      //    regex over the cursor's line beats walking the lezer tree.
+      const line = view.state.doc.lineAt(pos);
+      const lineText = view.state.doc.sliceString(line.from, line.to);
+      const cursorOffset = pos - line.from;
+      const wikiRe = /\[\[([^\[\]\n]+?)\]\]/g;
+      let wm: RegExpExecArray | null;
+      while ((wm = wikiRe.exec(lineText)) !== null) {
+        const start = wm.index;
+        const end = start + wm[0].length;
+        if (cursorOffset >= start && cursorOffset <= end) {
+          onWikilinkOpenRef.current?.(wm[1].trim());
+          return;
+        }
+      }
+
+      // 2. Otherwise look for a `Link` node containing the cursor.
+      let foundUrl: string | null = null;
+      const tree = syntaxTree(view.state);
+      tree.iterate({
+        from: line.from,
+        to: line.to,
+        enter: (node) => {
+          if (foundUrl) return false;
+          if (
+            node.type.name === "Link" &&
+            node.from <= pos &&
+            pos <= node.to
+          ) {
+            const cur = node.node.cursor();
+            if (cur.firstChild()) {
+              do {
+                if (cur.type.name === "URL") {
+                  foundUrl = view.state.doc
+                    .sliceString(cur.from, cur.to)
+                    .trim();
+                  break;
+                }
+              } while (cur.nextSibling());
+            }
+            return false;
+          }
+        },
+      });
+      if (foundUrl) {
+        onLinkOpenRef.current?.(foundUrl);
+      }
+    };
+
+    Vim.defineAction("followLink", followLink);
+    Vim.mapCommand("gf", "action", "followLink", {}, { context: "normal" });
+    Vim.mapCommand("gd", "action", "followLink", {}, { context: "normal" });
   }, []);
 
   const buildExtensions = (isDark: boolean): Extension[] => [
@@ -154,6 +222,7 @@ export function MarkdownEditor({
       getDocDir: () => getDocDirRef.current(),
       getWikilinkCandidates: () => getCandidatesRef.current(),
       onWikilinkOpen: (label) => onWikilinkOpenRef.current(label),
+      onLinkOpen: (url) => onLinkOpenRef.current(url),
     }),
     imagePasteHandler({
       getCurrentPath: () => getCurrentPathRef.current(),

@@ -305,6 +305,189 @@ pub async fn markdown_push_recent(
 /// every screenshot would clutter the same folder as the notes.
 pub const PASTED_SUBDIR: &str = "pasted";
 
+// ────────────────────────────────────────────────────────────────────────
+// File-tree mutations: create / rename / delete-to-trash
+// ────────────────────────────────────────────────────────────────────────
+
+/// Create an empty markdown file inside `parent_dir`.  Adds a `.md`
+/// extension if `name` doesn't already end in one.  Dedupes by
+/// appending ` 2`, ` 3`, … to the stem when a sibling already owns
+/// the chosen name.  Returns the resolved absolute path.
+#[tauri::command]
+pub async fn markdown_create_file(
+    parent_dir: String,
+    name: String,
+) -> AppResult<String> {
+    let parent = PathBuf::from(&parent_dir);
+    if !parent.is_dir() {
+        return Err(AppError::BadRequest(format!(
+            "parent is not a directory: {}",
+            parent.display()
+        )));
+    }
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::BadRequest("name cannot be empty".into()));
+    }
+    if trimmed.contains('/') || trimmed.contains('\\') {
+        return Err(AppError::BadRequest(
+            "name must not contain path separators".into(),
+        ));
+    }
+    let needs_ext = !is_markdown(trimmed);
+    let with_ext = if needs_ext {
+        format!("{trimmed}.md")
+    } else {
+        trimmed.to_string()
+    };
+    let resolved = unique_sibling(&parent, &with_ext);
+    tokio::fs::write(&resolved, b"")
+        .await
+        .map_err(|e| AppError::Other(format!("create markdown file: {e}")))?;
+    Ok(resolved.to_string_lossy().to_string())
+}
+
+/// Create an empty directory inside `parent_dir`.  Same name-dedup
+/// rules as `markdown_create_file`.  Returns the absolute path.
+#[tauri::command]
+pub async fn markdown_create_dir(
+    parent_dir: String,
+    name: String,
+) -> AppResult<String> {
+    let parent = PathBuf::from(&parent_dir);
+    if !parent.is_dir() {
+        return Err(AppError::BadRequest(format!(
+            "parent is not a directory: {}",
+            parent.display()
+        )));
+    }
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::BadRequest("name cannot be empty".into()));
+    }
+    if trimmed.contains('/') || trimmed.contains('\\') {
+        return Err(AppError::BadRequest(
+            "name must not contain path separators".into(),
+        ));
+    }
+    let resolved = unique_sibling(&parent, trimmed);
+    tokio::fs::create_dir(&resolved)
+        .await
+        .map_err(|e| AppError::Other(format!("create directory: {e}")))?;
+    Ok(resolved.to_string_lossy().to_string())
+}
+
+/// Rename a file or directory in place.  `new_name` is the **basename
+/// only** — callers pass `Untitled.md` or `Daily Notes`, not a full
+/// path.  Files keep their original extension when one isn't supplied
+/// (so renaming `foo.md` → `bar` produces `bar.md`).
+#[tauri::command]
+pub async fn markdown_rename(
+    old_path: String,
+    new_name: String,
+) -> AppResult<String> {
+    let old = PathBuf::from(&old_path);
+    if !old.exists() {
+        return Err(AppError::BadRequest(format!(
+            "path does not exist: {}",
+            old.display()
+        )));
+    }
+    let trimmed = new_name.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::BadRequest("name cannot be empty".into()));
+    }
+    if trimmed.contains('/') || trimmed.contains('\\') {
+        return Err(AppError::BadRequest(
+            "name must not contain path separators".into(),
+        ));
+    }
+    let parent = old
+        .parent()
+        .ok_or_else(|| AppError::Other("path has no parent".into()))?
+        .to_path_buf();
+
+    // Files: preserve extension if the user didn't supply one.
+    let final_name = if old.is_file() {
+        let has_ext = Path::new(trimmed).extension().is_some();
+        if has_ext {
+            trimmed.to_string()
+        } else {
+            match old.extension().and_then(|e| e.to_str()) {
+                Some(ext) => format!("{trimmed}.{ext}"),
+                None => trimmed.to_string(),
+            }
+        }
+    } else {
+        trimmed.to_string()
+    };
+
+    let new_path = parent.join(&final_name);
+    if new_path == old {
+        // No-op rename — return the same path so callers don't have to
+        // special-case it.
+        return Ok(old.to_string_lossy().to_string());
+    }
+    if new_path.exists() {
+        return Err(AppError::BadRequest(format!(
+            "a sibling named `{}` already exists",
+            final_name
+        )));
+    }
+    tokio::fs::rename(&old, &new_path)
+        .await
+        .map_err(|e| AppError::Other(format!("rename: {e}")))?;
+    Ok(new_path.to_string_lossy().to_string())
+}
+
+/// Move a file or directory to the OS trash.  Uses the `trash` crate
+/// rather than `fs::remove_*` so the user can recover from a misclick
+/// — the same semantics as Finder's "Move to Trash".
+#[tauri::command]
+pub async fn markdown_delete_to_trash(path: String) -> AppResult<()> {
+    let pb = PathBuf::from(&path);
+    if !pb.exists() {
+        return Err(AppError::BadRequest(format!(
+            "path does not exist: {}",
+            pb.display()
+        )));
+    }
+    // `trash::delete` is synchronous; spawn-blocking keeps the runtime
+    // responsive on big directories.
+    tokio::task::spawn_blocking(move || trash::delete(&pb))
+        .await
+        .map_err(|e| AppError::Other(format!("join trash worker: {e}")))?
+        .map_err(|e| AppError::Other(format!("move to trash: {e}")))?;
+    Ok(())
+}
+
+/// Find a sibling name that doesn't yet exist.  Returns the resolved
+/// path.  Strategy: try `name`, then `stem 2.ext`, `stem 3.ext`, …
+fn unique_sibling(parent: &Path, name: &str) -> PathBuf {
+    let candidate = parent.join(name);
+    if !candidate.exists() {
+        return candidate;
+    }
+    let stem = Path::new(name)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("untitled")
+        .to_string();
+    let ext = Path::new(name)
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|s| format!(".{s}"))
+        .unwrap_or_default();
+    for n in 2..=9999 {
+        let c = parent.join(format!("{stem} {n}{ext}"));
+        if !c.exists() {
+            return c;
+        }
+    }
+    // Astronomically unlikely fallback; better than panicking.
+    parent.join(format!("{stem}-{}{ext}", chrono::Utc::now().timestamp_millis()))
+}
+
 /// Save a clipboard-pasted image into a `pasted/` subfolder of the
 /// document the user is editing.  Creates the subfolder if missing.
 ///

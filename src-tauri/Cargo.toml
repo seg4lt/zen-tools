@@ -34,6 +34,7 @@ serde_json = { workspace = true }
 parking_lot = { workspace = true }
 ahash = { workspace = true }
 rayon = "1.10"
+trash = "5"
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }

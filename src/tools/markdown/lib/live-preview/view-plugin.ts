@@ -153,9 +153,25 @@ function buildDecorations(
       }
 
       // Standard markdown links — style the body, hide brackets.
+      // We also pull the URL out of the lezer subtree and stash it on
+      // the decoration as `data-link-url`; the click handler below
+      // reads that attribute to navigate without re-walking the tree.
       if (type === "Link") {
+        let url = "";
+        const cur = node.node.cursor();
+        if (cur.firstChild()) {
+          do {
+            if (cur.type.name === "URL") {
+              url = state.doc.sliceString(cur.from, cur.to).trim();
+              break;
+            }
+          } while (cur.nextSibling());
+        }
         decorations.push(
-          Decoration.mark({ class: "cm-md-link" }).range(node.from, node.to),
+          Decoration.mark({
+            class: "cm-md-link",
+            attributes: url ? { "data-link-url": url } : {},
+          }).range(node.from, node.to),
         );
         return;
       }

@@ -1,36 +1,54 @@
 /**
- * Multi-vault file tree sidebar.
+ * Multi-vault file tree sidebar with context menus + inline editing.
  *
- * One collapsible section per vault root.  Each leaf is a `.md` file
- * the user can click to open in the editor.  Top toolbar has an
- * "Add vault" button that opens the native folder picker.
+ *   - Right-click a row to get a context menu.  File rows offer
+ *     Rename + Delete (to trash); folders also offer New file / New
+ *     folder; vault headers offer the same plus Refresh + Remove.
+ *   - "Rename" swaps the row's label with an `<input>` pre-filled
+ *     with the current name.  Enter commits, Esc / blur cancels (an
+ *     empty value also cancels).
+ *   - "New file" / "New folder" inserts a focused placeholder row
+ *     inside the chosen parent.  Same Enter/Esc UX.
+ *   - Delete uses the OS trash so a misclick is recoverable.
  *
- * Adapted from `src/tools/http-runner/components/http-file-tree.tsx`
- * — same DFS-list-to-tree pattern (`buildTree`), same default-expand
- * + explicit-collapse semantics — but the queries call markdown
- * commands and rows are simpler (no file-type icons).
+ * Inline-edit state lives in the Markdown store (`editing`) so the
+ * sidebar stays declarative — components just check the slice and
+ * render an input where appropriate.
  */
 
-import { useMemo } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ChevronDown,
   ChevronRight,
+  FilePlus,
   FileText,
   Folder,
   FolderOpen,
   FolderPlus,
+  FolderTree,
   Image as ImageIcon,
   Loader2,
+  Pencil,
+  RefreshCw,
   Trash2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { cn } from "@/lib/utils";
 import {
-  isExpanded,
-  useMarkdownStore,
-} from "../store/markdown-store";
-import { markdownTauri, type MarkdownFileItem, type MarkdownVaultDto } from "../lib/tauri";
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuTrigger,
+} from "@/components/ui/context-menu";
+import { cn } from "@/lib/utils";
+import { isExpanded, useMarkdownStore } from "../store/markdown-store";
+import {
+  markdownTauri,
+  type MarkdownFileItem,
+  type MarkdownVaultDto,
+} from "../lib/tauri";
 import { useVaults } from "../hooks/use-vaults";
+import { useFileOps } from "../hooks/use-file-ops";
 
 interface TreeNode {
   item: MarkdownFileItem;
@@ -59,7 +77,7 @@ function buildTree(items: MarkdownFileItem[]): TreeNode[] {
 
 export function VaultSidebar() {
   const { state } = useMarkdownStore();
-  const { addVault, removeVault } = useVaults();
+  const { addVault, removeVault, refresh } = useVaults();
 
   const trees = useMemo(
     () =>
@@ -85,15 +103,25 @@ export function VaultSidebar() {
         <span className="text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
           Vaults
         </span>
-        <Button
-          size="xs"
-          variant="ghost"
-          onClick={onAddClick}
-          title="Add vault folder"
-          className="gap-1"
-        >
-          <FolderPlus className="size-3" /> Add
-        </Button>
+        <div className="flex items-center gap-0.5">
+          <Button
+            size="icon-xs"
+            variant="ghost"
+            onClick={() => void refresh()}
+            title="Refresh file tree"
+          >
+            <RefreshCw className="size-3" />
+          </Button>
+          <Button
+            size="xs"
+            variant="ghost"
+            onClick={onAddClick}
+            title="Add vault folder"
+            className="gap-1"
+          >
+            <FolderPlus className="size-3" /> Add
+          </Button>
+        </div>
       </div>
 
       {state.bootstrapping ? (
@@ -136,47 +164,96 @@ interface VaultBlockProps {
 
 function VaultBlock({ root, vault, tree, onRemove }: VaultBlockProps) {
   const { state, dispatch } = useMarkdownStore();
+  const { refresh } = useVaults();
   const open = isExpanded(state.expanded, `vault:${root}`);
   const name = vault?.name ?? root.split("/").filter(Boolean).slice(-1)[0] ?? root;
 
+  // Render a placeholder row for the create-editing case when its
+  // parentDir matches this vault's root.
+  const showCreateRowAtRoot =
+    state.editing?.kind === "create" && state.editing.parentDir === root;
+
   return (
     <li>
-      <div
-        className="group flex items-center gap-1 px-2 py-1 hover:bg-muted/50"
-        title={root}
-      >
-        <button
-          type="button"
-          onClick={() =>
-            dispatch({ type: "toggleExpand", nodeId: `vault:${root}` })
-          }
-          className="flex flex-1 items-center gap-1 truncate text-left"
-        >
-          {open ? (
-            <ChevronDown className="size-3 shrink-0 text-muted-foreground" />
-          ) : (
-            <ChevronRight className="size-3 shrink-0 text-muted-foreground" />
-          )}
-          <FolderOpen className="size-3.5 shrink-0 text-primary" />
-          <span className="truncate text-xs font-semibold">{name}</span>
-        </button>
-        <button
-          type="button"
-          onClick={onRemove}
-          aria-label={`Remove ${name}`}
-          title={`Remove ${name}`}
-          className={cn(
-            "rounded-sm p-0.5 opacity-0 transition-opacity",
-            "hover:bg-destructive/15 hover:text-destructive",
-            "group-hover:opacity-100 focus:opacity-100",
-          )}
-        >
-          <Trash2 className="size-3" />
-        </button>
-      </div>
+      <ContextMenu>
+        <ContextMenuTrigger asChild>
+          <div
+            className="group flex items-center gap-1 px-2 py-1 hover:bg-muted/50"
+            title={root}
+          >
+            <button
+              type="button"
+              onClick={() =>
+                dispatch({ type: "toggleExpand", nodeId: `vault:${root}` })
+              }
+              className="flex flex-1 items-center gap-1 truncate text-left"
+            >
+              {open ? (
+                <ChevronDown className="size-3 shrink-0 text-muted-foreground" />
+              ) : (
+                <ChevronRight className="size-3 shrink-0 text-muted-foreground" />
+              )}
+              <FolderOpen className="size-3.5 shrink-0 text-primary" />
+              <span className="truncate text-xs font-semibold">{name}</span>
+            </button>
+            <button
+              type="button"
+              onClick={onRemove}
+              aria-label={`Remove ${name}`}
+              title={`Remove ${name}`}
+              className={cn(
+                "rounded-sm p-0.5 opacity-0 transition-opacity",
+                "hover:bg-destructive/15 hover:text-destructive",
+                "group-hover:opacity-100 focus:opacity-100",
+              )}
+            >
+              <Trash2 className="size-3" />
+            </button>
+          </div>
+        </ContextMenuTrigger>
+        <ContextMenuContent>
+          <ContextMenuItem
+            onSelect={() =>
+              dispatch({
+                type: "startCreate",
+                parentDir: root,
+                childKind: "file",
+              })
+            }
+          >
+            <FilePlus />
+            <span>New file</span>
+          </ContextMenuItem>
+          <ContextMenuItem
+            onSelect={() =>
+              dispatch({
+                type: "startCreate",
+                parentDir: root,
+                childKind: "folder",
+              })
+            }
+          >
+            <FolderPlus />
+            <span>New folder</span>
+          </ContextMenuItem>
+          <ContextMenuSeparator />
+          <ContextMenuItem onSelect={() => void refresh()}>
+            <RefreshCw />
+            <span>Refresh</span>
+          </ContextMenuItem>
+          <ContextMenuSeparator />
+          <ContextMenuItem variant="destructive" onSelect={onRemove}>
+            <FolderTree />
+            <span>Remove vault</span>
+          </ContextMenuItem>
+        </ContextMenuContent>
+      </ContextMenu>
       {open && (
         <ul role="group" className="text-sm">
-          {tree.length === 0 ? (
+          {showCreateRowAtRoot ? (
+            <CreatePlaceholder parentDir={root} indentDepth={0} />
+          ) : null}
+          {tree.length === 0 && !showCreateRowAtRoot ? (
             <li className="py-1 pl-9 pr-2 text-[10px] italic text-muted-foreground">
               No markdown files yet.
             </li>
@@ -200,54 +277,78 @@ function TreeRow({ node }: TreeRowProps) {
   const open = item.isDir ? isExpanded(state.expanded, item.path) : false;
   const active = !item.isDir && state.currentFile?.path === item.path;
   const isImage = item.kind === "image";
+  const isMarkdown = item.kind === "markdown";
+
+  const isRenaming =
+    state.editing?.kind === "rename" && state.editing.path === item.path;
+  const showCreateChild =
+    item.isDir &&
+    state.editing?.kind === "create" &&
+    state.editing.parentDir === item.path;
 
   const onClick = () => {
+    if (isRenaming) return;
     if (item.isDir) {
       dispatch({ type: "toggleExpand", nodeId: item.path });
       return;
     }
-    // Only markdown rows open in the editor.  Image rows are visual
-    // — clicking does nothing today (intentional; double-click in
-    // Finder works for now).
-    if (item.kind === "markdown") {
+    if (isMarkdown) {
       void openFile(item.path, dispatch);
     }
   };
 
   return (
     <li role="treeitem" aria-expanded={item.isDir ? open : undefined}>
-      <button
-        type="button"
-        onClick={onClick}
-        style={{ paddingLeft: `${indent}px` }}
-        className={cn(
-          "flex w-full items-center gap-1.5 py-1 pr-2 text-left",
-          "hover:bg-muted/50",
-          active && "bg-muted text-foreground",
-          isImage && "cursor-default opacity-70",
-        )}
-        title={isImage ? item.path : undefined}
-      >
-        {item.isDir ? (
-          open ? (
-            <ChevronDown className="size-3 shrink-0 text-muted-foreground" />
-          ) : (
-            <ChevronRight className="size-3 shrink-0 text-muted-foreground" />
-          )
-        ) : (
-          <span className="size-3 shrink-0" />
-        )}
-        {item.isDir ? (
-          <Folder className="size-3.5 shrink-0 text-muted-foreground" />
-        ) : isImage ? (
-          <ImageIcon className="size-3.5 shrink-0 text-fuchsia-500/70" />
-        ) : (
-          <FileText className="size-3.5 shrink-0 text-primary/70" />
-        )}
-        <span className="truncate font-mono text-xs">{item.name}</span>
-      </button>
-      {item.isDir && open && children.length > 0 && (
+      <ContextMenu>
+        <ContextMenuTrigger asChild>
+          <button
+            type="button"
+            onClick={onClick}
+            style={{ paddingLeft: `${indent}px` }}
+            className={cn(
+              "flex w-full items-center gap-1.5 py-1 pr-2 text-left",
+              "hover:bg-muted/50",
+              active && "bg-muted text-foreground",
+              isImage && "cursor-default opacity-70",
+            )}
+            title={isImage ? item.path : undefined}
+          >
+            {item.isDir ? (
+              open ? (
+                <ChevronDown className="size-3 shrink-0 text-muted-foreground" />
+              ) : (
+                <ChevronRight className="size-3 shrink-0 text-muted-foreground" />
+              )
+            ) : (
+              <span className="size-3 shrink-0" />
+            )}
+            {item.isDir ? (
+              <Folder className="size-3.5 shrink-0 text-muted-foreground" />
+            ) : isImage ? (
+              <ImageIcon className="size-3.5 shrink-0 text-fuchsia-500/70" />
+            ) : (
+              <FileText className="size-3.5 shrink-0 text-primary/70" />
+            )}
+            {isRenaming ? (
+              <RenameInput
+                seed={state.editing!.kind === "rename" ? state.editing!.seed : ""}
+                path={item.path}
+              />
+            ) : (
+              <span className="truncate font-mono text-xs">{item.name}</span>
+            )}
+          </button>
+        </ContextMenuTrigger>
+        <RowContextMenu node={node} />
+      </ContextMenu>
+      {item.isDir && open && (
         <ul role="group">
+          {showCreateChild ? (
+            <CreatePlaceholder
+              parentDir={item.path}
+              indentDepth={item.depth + 1}
+            />
+          ) : null}
           {children.map((child) => (
             <TreeRow key={child.item.path} node={child} />
           ))}
@@ -258,11 +359,208 @@ function TreeRow({ node }: TreeRowProps) {
 }
 
 /**
+ * Per-row context menu.  Branches on `kind` so we don't show "New
+ * file" on a leaf or "Open" on a directory.
+ */
+function RowContextMenu({ node }: { node: TreeNode }) {
+  const { dispatch } = useMarkdownStore();
+  const { deletePath } = useFileOps();
+  const { item } = node;
+  const isDir = item.isDir;
+
+  const onRename = () =>
+    dispatch({ type: "startRename", path: item.path, seed: item.name });
+  const onDelete = () => void deletePath(item.path);
+
+  return (
+    <ContextMenuContent>
+      {isDir ? (
+        <>
+          <ContextMenuItem
+            onSelect={() =>
+              dispatch({
+                type: "startCreate",
+                parentDir: item.path,
+                childKind: "file",
+              })
+            }
+          >
+            <FilePlus />
+            <span>New file</span>
+          </ContextMenuItem>
+          <ContextMenuItem
+            onSelect={() =>
+              dispatch({
+                type: "startCreate",
+                parentDir: item.path,
+                childKind: "folder",
+              })
+            }
+          >
+            <FolderPlus />
+            <span>New folder</span>
+          </ContextMenuItem>
+          <ContextMenuSeparator />
+        </>
+      ) : null}
+      <ContextMenuItem onSelect={onRename}>
+        <Pencil />
+        <span>Rename…</span>
+      </ContextMenuItem>
+      <ContextMenuItem variant="destructive" onSelect={onDelete}>
+        <Trash2 />
+        <span>Move to trash</span>
+      </ContextMenuItem>
+    </ContextMenuContent>
+  );
+}
+
+/**
+ * Inline rename input.  Mounts focused with the seed pre-selected so
+ * the user can either type a fresh name or tweak the existing one.
+ */
+function RenameInput({ seed, path }: { seed: string; path: string }) {
+  const { renamePath } = useFileOps();
+  const { dispatch } = useMarkdownStore();
+  const ref = useRef<HTMLInputElement | null>(null);
+  const [value, setValue] = useState(seed);
+  const committedRef = useRef(false);
+
+  useEffect(() => {
+    if (!ref.current) return;
+    ref.current.focus();
+    ref.current.select();
+  }, []);
+
+  const commit = async () => {
+    if (committedRef.current) return;
+    committedRef.current = true;
+    const trimmed = value.trim();
+    if (!trimmed || trimmed === seed) {
+      dispatch({ type: "cancelEditing" });
+      return;
+    }
+    await renamePath(path, trimmed);
+    dispatch({ type: "cancelEditing" });
+  };
+
+  const cancel = () => {
+    if (committedRef.current) return;
+    committedRef.current = true;
+    dispatch({ type: "cancelEditing" });
+  };
+
+  return (
+    <input
+      ref={ref}
+      type="text"
+      value={value}
+      onChange={(e) => setValue(e.target.value)}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          void commit();
+        } else if (e.key === "Escape") {
+          e.preventDefault();
+          cancel();
+        }
+      }}
+      onBlur={() => void commit()}
+      onClick={(e) => e.stopPropagation()}
+      className="flex-1 truncate rounded-sm border border-primary/40 bg-background px-1 font-mono text-xs outline-none focus:border-primary"
+    />
+  );
+}
+
+/**
+ * Placeholder row for "New file" / "New folder".  Renders an input
+ * inline at the requested indent level.  Same Enter/Esc UX as
+ * `RenameInput`; on commit invokes `createFile` / `createDir`.
+ */
+function CreatePlaceholder({
+  parentDir,
+  indentDepth,
+}: {
+  parentDir: string;
+  indentDepth: number;
+}) {
+  const { state, dispatch } = useMarkdownStore();
+  const { createFile, createDir } = useFileOps();
+  const childKind =
+    state.editing?.kind === "create" ? state.editing.childKind : "file";
+  const indent = indentDepth * 12 + 18;
+  const ref = useRef<HTMLInputElement | null>(null);
+  const [value, setValue] = useState("");
+  const committedRef = useRef(false);
+
+  useEffect(() => {
+    ref.current?.focus();
+  }, []);
+
+  const commit = async () => {
+    if (committedRef.current) return;
+    committedRef.current = true;
+    const trimmed = value.trim();
+    if (!trimmed) {
+      dispatch({ type: "cancelEditing" });
+      return;
+    }
+    let createdPath: string | null = null;
+    if (childKind === "file") {
+      createdPath = await createFile(parentDir, trimmed);
+    } else {
+      createdPath = await createDir(parentDir, trimmed);
+    }
+    dispatch({ type: "cancelEditing" });
+    // Newly created markdown files: open them straight away.  Newly
+    // created folders: leave the cursor wherever it was.
+    if (createdPath && childKind === "file") {
+      void openFile(createdPath, dispatch);
+    }
+  };
+
+  const cancel = () => {
+    if (committedRef.current) return;
+    committedRef.current = true;
+    dispatch({ type: "cancelEditing" });
+  };
+
+  return (
+    <li
+      style={{ paddingLeft: `${indent}px` }}
+      className="flex items-center gap-1.5 py-1 pr-2"
+    >
+      <span className="size-3 shrink-0" />
+      {childKind === "file" ? (
+        <FilePlus className="size-3.5 shrink-0 text-muted-foreground" />
+      ) : (
+        <FolderPlus className="size-3.5 shrink-0 text-muted-foreground" />
+      )}
+      <input
+        ref={ref}
+        type="text"
+        value={value}
+        placeholder={childKind === "file" ? "Untitled.md" : "New folder"}
+        onChange={(e) => setValue(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            void commit();
+          } else if (e.key === "Escape") {
+            e.preventDefault();
+            cancel();
+          }
+        }}
+        onBlur={() => void commit()}
+        onClick={(e) => e.stopPropagation()}
+        className="flex-1 truncate rounded-sm border border-primary/40 bg-background px-1 font-mono text-xs outline-none focus:border-primary"
+      />
+    </li>
+  );
+}
+
+/**
  * Open a file from disk and push it into the store + recents ring.
- *
- * Lives at module scope (rather than a hook) because the tree row's
- * onClick already has access to dispatch and we don't want to bloat
- * a component that's mounted hundreds of times.
  */
 async function openFile(
   path: string,
@@ -271,7 +569,6 @@ async function openFile(
   try {
     const doc = await markdownTauri.readFile(path);
     dispatch({ type: "openFile", path, doc });
-    // Fire-and-forget update of the recents ring.
     markdownTauri
       .pushRecent(path)
       .then((recents) => dispatch({ type: "setRecents", recents }))

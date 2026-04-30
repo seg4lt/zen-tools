@@ -57,26 +57,43 @@ export function wikilinkAutocomplete(getCandidates: () => string[]) {
 }
 
 /**
- * Click handler — bind `Mod+click` on a `.cm-md-wikilink` span to a
- * navigation callback.  We attach via `EditorView.domEventHandlers`
- * so the listener lifecycles with the editor.
+ * Click handler — `Mod+click` on either a `.cm-md-wikilink` span (the
+ * `[[…]]` flavour) or a `.cm-md-link` span (the standard
+ * `[label](url)` flavour) routes the click to the matching callback.
+ * Bare clicks still place the cursor.  Attached via
+ * `EditorView.domEventHandlers` so the listener lifecycles with the
+ * editor.
  */
-export function wikilinkClickHandler(onOpen: (label: string) => void) {
+export function linkClickHandler(opts: {
+  onWikilinkOpen: (label: string) => void;
+  onLinkOpen: (url: string) => void;
+}) {
   return EditorView.domEventHandlers({
     mousedown(event) {
       // Mod-click only — bare clicks let the user place the cursor.
-      const isMod =
-        navigator.platform.toLowerCase().includes("mac")
-          ? event.metaKey
-          : event.ctrlKey;
+      const isMod = navigator.platform.toLowerCase().includes("mac")
+        ? event.metaKey
+        : event.ctrlKey;
       if (!isMod) return;
       const target = event.target as HTMLElement | null;
-      const link = target?.closest<HTMLElement>(".cm-md-wikilink");
-      if (!link) return;
-      const label = link.dataset.wikilink ?? link.textContent ?? "";
-      if (!label) return;
-      event.preventDefault();
-      onOpen(label.trim());
+      // Wikilinks first — they're inside the same DOM tree as links
+      // can nest in (rare but possible), so the more-specific class
+      // wins.
+      const wikilink = target?.closest<HTMLElement>(".cm-md-wikilink");
+      if (wikilink) {
+        const label = wikilink.dataset.wikilink ?? wikilink.textContent ?? "";
+        if (!label) return;
+        event.preventDefault();
+        opts.onWikilinkOpen(label.trim());
+        return;
+      }
+      const link = target?.closest<HTMLElement>(".cm-md-link");
+      if (link) {
+        const url = link.dataset.linkUrl ?? "";
+        if (!url) return;
+        event.preventDefault();
+        opts.onLinkOpen(url);
+      }
     },
   });
 }

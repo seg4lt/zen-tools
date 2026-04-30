@@ -106,6 +106,61 @@ export function MarkdownView() {
     [openFile, resolveWikilink, dispatch],
   );
 
+  /**
+   * Resolve + dispatch a `[label](url)` link.  Local relative `.md`
+   * paths open in the editor; everything else (external URLs,
+   * non-markdown attachments) is left for a future iteration — we
+   * just log so the user can see we received the click.
+   */
+  const onLinkOpen = useCallback(
+    (rawUrl: string) => {
+      // Strip any anchor hash; `foo.md#heading` should still resolve
+      // to `foo.md`.
+      const url = rawUrl.split("#")[0]?.trim() ?? "";
+      if (!url) return;
+      // External URLs — let the user know we don't open them yet.
+      if (/^(https?:|mailto:|tel:|ftp:)/i.test(url)) {
+        console.info("[markdown] external link click ignored:", url);
+        return;
+      }
+      // Decode `%20` and friends so a path like `My%20Notes/foo.md`
+      // resolves correctly against the filesystem.
+      let decoded = url;
+      try {
+        decoded = decodeURIComponent(url);
+      } catch {
+        // Leave as-is on malformed encoding.
+      }
+      // Resolve to an absolute path.
+      let target = decoded;
+      if (decoded.startsWith("file://")) {
+        target = decoded.slice("file://".length);
+      } else if (!decoded.startsWith("/")) {
+        const dir = state.currentFile ? dirname(state.currentFile.path) : "";
+        if (!dir) {
+          console.warn(
+            "[markdown] relative link with no open document:",
+            url,
+          );
+          return;
+        }
+        target = `${dir}/${decoded}`;
+      }
+      // Only markdown gets the editor treatment; other files would
+      // render as garbage in CodeMirror.
+      const isMarkdown = /\.(md|markdown|mdown|mkd)$/i.test(target);
+      if (!isMarkdown) {
+        console.info(
+          "[markdown] non-markdown link click ignored (no app handler yet):",
+          target,
+        );
+        return;
+      }
+      void openFile(target);
+    },
+    [openFile, state.currentFile?.path],
+  );
+
   // After every paste lands, re-walk the open vaults so the new file
   // surfaces in the sidebar without requiring a manual refresh.
   // Fire-and-forget — the user already sees the inserted markdown
@@ -197,6 +252,7 @@ export function MarkdownView() {
               getCurrentPath={getCurrentPath}
               getWikilinkCandidates={getCandidates}
               onWikilinkOpen={onWikilinkOpen}
+              onLinkOpen={onLinkOpen}
               onImageSaved={onImageSaved}
             />
           ) : (

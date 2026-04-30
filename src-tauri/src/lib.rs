@@ -150,6 +150,10 @@ pub fn run() {
             commands::markdown::markdown_recent_files,
             commands::markdown::markdown_push_recent,
             commands::markdown::markdown_save_pasted_image,
+            commands::markdown::markdown_create_file,
+            commands::markdown::markdown_create_dir,
+            commands::markdown::markdown_rename,
+            commands::markdown::markdown_delete_to_trash,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

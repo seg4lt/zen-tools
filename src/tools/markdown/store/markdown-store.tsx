@@ -37,6 +37,19 @@ export interface OpenFileState {
   dirty: boolean;
 }
 
+/**
+ * Drives the inline editing UI in the sidebar.
+ *
+ *  - `kind: "rename"` swaps a tree row's label with an `<input>`
+ *    pre-filled with `seed`.  Path identifies which row.
+ *  - `kind: "create"` inserts an empty placeholder row inside
+ *    `parentDir` at the requested kind ("file" or "folder") with a
+ *    focused input.  Used by "New file" / "New folder" menu items.
+ */
+export type EditingState =
+  | { kind: "rename"; path: string; seed: string }
+  | { kind: "create"; parentDir: string; childKind: "file" | "folder" };
+
 export interface MarkdownState {
   vaults: string[];
   files: Record<string, MarkdownVaultDto>;
@@ -45,6 +58,7 @@ export interface MarkdownState {
   recents: string[];
   quickSwitcherOpen: boolean;
   bootstrapping: boolean;
+  editing: EditingState | null;
 }
 
 const initialState: MarkdownState = {
@@ -55,6 +69,7 @@ const initialState: MarkdownState = {
   recents: [],
   quickSwitcherOpen: false,
   bootstrapping: true,
+  editing: null,
 };
 
 export type MarkdownAction =
@@ -68,7 +83,11 @@ export type MarkdownAction =
   | { type: "markSaved" }
   | { type: "setRecents"; recents: string[] }
   | { type: "setQuickSwitcher"; open: boolean }
-  | { type: "bootstrapped" };
+  | { type: "bootstrapped" }
+  | { type: "startRename"; path: string; seed: string }
+  | { type: "startCreate"; parentDir: string; childKind: "file" | "folder" }
+  | { type: "cancelEditing" }
+  | { type: "renamedFile"; oldPath: string; newPath: string };
 
 function reducer(state: MarkdownState, action: MarkdownAction): MarkdownState {
   switch (action.type) {
@@ -147,6 +166,42 @@ function reducer(state: MarkdownState, action: MarkdownAction): MarkdownState {
 
     case "bootstrapped":
       return { ...state, bootstrapping: false };
+
+    case "startRename":
+      return {
+        ...state,
+        editing: { kind: "rename", path: action.path, seed: action.seed },
+      };
+
+    case "startCreate":
+      return {
+        ...state,
+        editing: {
+          kind: "create",
+          parentDir: action.parentDir,
+          childKind: action.childKind,
+        },
+        // Auto-expand the parent so the placeholder row is visible.
+        expanded: new Set(state.expanded).add(action.parentDir),
+      };
+
+    case "cancelEditing":
+      return { ...state, editing: null };
+
+    case "renamedFile": {
+      // If the user renamed the currently-open file, swap its path.
+      // The doc itself is unchanged.
+      if (
+        state.currentFile &&
+        state.currentFile.path === action.oldPath
+      ) {
+        return {
+          ...state,
+          currentFile: { ...state.currentFile, path: action.newPath },
+        };
+      }
+      return state;
+    }
   }
 }
 
