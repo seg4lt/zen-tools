@@ -28,8 +28,34 @@ import {
   type EditorView,
   ViewPlugin,
   type ViewUpdate,
+  WidgetType,
 } from "@codemirror/view";
 import { ImageWidget, resolveImageSrc } from "./image-widget";
+
+/**
+ * Replacement widget for bullet-list markers.  When the user's cursor
+ * isn't on the line, we swap the raw `-` / `*` / `+` for a real `•`
+ * glyph styled via CSS.  Cursor-on-line keeps the raw character so
+ * editing stays predictable.
+ */
+class BulletWidget extends WidgetType {
+  toDOM(): HTMLElement {
+    const span = document.createElement("span");
+    span.className = "cm-md-bullet";
+    span.textContent = "•";
+    return span;
+  }
+  // Bullets never differ — let CodeMirror reuse the same DOM node.
+  eq(): boolean {
+    return true;
+  }
+  // Trivial; ignoreEvent stops mouse interactions from surprising the
+  // user (clicking the bullet shouldn't position the cursor inside
+  // the widget itself).
+  ignoreEvent(): boolean {
+    return false;
+  }
+}
 
 /** Wikilink `[[Note Name]]` — basic regex, doesn't support escapes. */
 const WIKILINK_RE = /\[\[([^\[\]\n]+?)\]\]/g;
@@ -87,6 +113,24 @@ function buildDecorations(
           pos = line.to + 1;
         }
         return;
+      }
+
+      // Fenced code: subtle background per line so the block reads as
+      // a visual unit.  We tag the opening fence + content + closing
+      // fence with the same class so the background is contiguous.
+      if (type === "FencedCode") {
+        let pos = node.from;
+        while (pos <= node.to) {
+          const line = state.doc.lineAt(pos);
+          lineDecorations.push(
+            Decoration.line({ class: "cm-md-fenced-line" }).range(line.from),
+          );
+          if (line.to >= node.to) break;
+          pos = line.to + 1;
+        }
+        // Don't `return` — let nested children (CodeInfo, CodeMark,
+        // CodeText, the inner-language tokens) still emit their own
+        // decorations.
       }
 
       // Image: replace the entire `![alt](path)` with the widget when
@@ -176,6 +220,27 @@ function buildDecorations(
         return;
       }
 
+      // List markers — bullet (`-`/`*`/`+`) gets swapped for a real
+      // `•` glyph; ordered markers (`1.`, `2.`, …) stay visible as
+      // text so the user can see the numbering.  Cursor-on-line keeps
+      // the raw character either way.
+      if (type === "ListMark") {
+        const line = state.doc.lineAt(node.from);
+        if (line.number === cursorLine) return; // editable
+        if (node.to === node.from) return;
+        const text = state.doc.sliceString(node.from, node.to);
+        if (/^[-*+]$/.test(text)) {
+          decorations.push(
+            Decoration.replace({ widget: new BulletWidget() }).range(
+              node.from,
+              node.to,
+            ),
+          );
+        }
+        // Numbered markers fall through with no decoration.
+        return;
+      }
+
       // Mark-character hiding.  Any of these node types represents a
       // run of literal markup chars that we want to vanish on lines
       // where the cursor isn't.
@@ -184,9 +249,17 @@ function buildDecorations(
         type === "EmphasisMark" ||
         type === "CodeMark" ||
         type === "LinkMark" ||
-        type === "QuoteMark" ||
-        type === "ListMark";
+        type === "QuoteMark";
       if (isMarkup) {
+        // `CodeMark` covers both inline-code backticks AND fenced-code
+        // fences (` ``` `).  Hiding the inline backticks is fine; hiding
+        // the fences is *not* — they're on their own line and dropping
+        // them leaves a stray `language` / empty line that looks
+        // broken.  Always keep fenced-code fences visible.
+        if (type === "CodeMark") {
+          const parent = node.node.parent;
+          if (parent && parent.type.name === "FencedCode") return;
+        }
         const line = state.doc.lineAt(node.from);
         if (line.number === cursorLine) return; // leave visible while editing
         // Skip empty markers (defensive — lezer can produce zero-width

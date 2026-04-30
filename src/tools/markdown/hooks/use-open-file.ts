@@ -7,7 +7,7 @@
  */
 
 import { useCallback } from "react";
-import { markdownTauri, basenameNoExt } from "../lib/tauri";
+import { basenameNoExt, markdownTauri, normalizePath } from "../lib/tauri";
 import { activeTab, useMarkdownStore } from "../store/markdown-store";
 
 export function useOpenFile() {
@@ -22,7 +22,13 @@ export function useOpenFile() {
    * top of the file.
    */
   const openFile = useCallback(
-    async (path: string, gotoLine?: number) => {
+    async (rawPath: string, gotoLine?: number) => {
+      // Normalise so `./foo.md` from a relative-link resolution and
+      // `foo.md` from the file tree compare equal in the tab dedup.
+      // Without this, Cmd+clicking a `[label](./foo.md)` link would
+      // open a duplicate tab even when `foo.md` is already open via
+      // the sidebar.
+      const path = normalizePath(rawPath);
       try {
         // Avoid re-reading from disk when the file is already open as
         // a tab — we'd clobber any dirty edits the user has made.
@@ -42,7 +48,7 @@ export function useOpenFile() {
           .then((recents) => dispatch({ type: "setRecents", recents }))
           .catch(() => {});
       } catch (err) {
-        console.error("[markdown] openFile failed", path, err);
+        console.error("[markdown] openFile failed", rawPath, err);
       }
     },
     [dispatch, state.tabs],

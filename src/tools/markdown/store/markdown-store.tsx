@@ -135,6 +135,7 @@ export type MarkdownAction =
   | { type: "closeFile" }
   | { type: "selectTab"; id: string; gotoLine?: number }
   | { type: "closeTab"; id: string }
+  | { type: "closeOtherTabs" }
   | { type: "setGotoLine"; line: number }
   | { type: "clearGotoLine" }
   | { type: "revealPath"; path: string }
@@ -283,6 +284,15 @@ function reducer(state: MarkdownState, action: MarkdownAction): MarkdownState {
         activeTabId = fallback ? fallback.id : null;
       }
       return { ...state, tabs, activeTabId };
+    }
+
+    case "closeOtherTabs": {
+      // Keep only the active tab.  No-op when there are 0 or 1 tabs.
+      const id = state.activeTabId;
+      if (!id) return state;
+      const active = state.tabs.find((t) => t.id === id);
+      if (!active || state.tabs.length <= 1) return state;
+      return { ...state, tabs: [active], activeTabId: id };
     }
 
     case "closeFile":

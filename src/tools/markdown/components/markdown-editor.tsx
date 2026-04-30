@@ -41,12 +41,14 @@ import {
   indentOnInput,
 } from "@codemirror/language";
 import { markdown } from "@codemirror/lang-markdown";
-import { syntaxTree } from "@codemirror/language";
+import { languages } from "@codemirror/language-data";
+import { syntaxHighlighting, syntaxTree } from "@codemirror/language";
 import { vim, Vim } from "@replit/codemirror-vim";
 import { makeEditorTheme } from "@/tools/http-runner/lib/cm-theme";
 import { useTheme } from "@/hooks/use-theme";
 import { livePreview } from "../lib/live-preview";
 import { imagePasteHandler } from "../lib/image-paste";
+import { markdownHighlightStyle } from "../lib/markdown-highlight";
 
 export interface MarkdownEditorHandle {
   setValue: (value: string) => void;
@@ -220,7 +222,14 @@ export function MarkdownEditor({
     bracketMatching(),
     history(),
     highlightActiveLine(),
-    markdown({ addKeymap: false }),
+    // `codeLanguages` from `@codemirror/language-data` is the set of
+    // every language CodeMirror ships a parser for.  Each is a
+    // `LanguageDescription` that *lazy-loads* its actual language
+    // module on first use — so a doc with no fenced code costs
+    // nothing, and a `\`\`\`ts` block triggers a one-time dynamic
+    // import.  Markdown's own parser tags the tokens, then our
+    // `cm-theme` `HighlightStyle` colours them.
+    markdown({ addKeymap: false, codeLanguages: languages }),
     livePreview({
       getDocDir: () => getDocDirRef.current(),
       getWikilinkCandidates: () => getCandidatesRef.current(),
@@ -232,6 +241,11 @@ export function MarkdownEditor({
       onImageSaved: (rel) => onImageSavedRef.current?.(rel),
     }),
     makeEditorTheme(isDark),
+    // Layered after `makeEditorTheme` so its `syntaxHighlighting` is
+    // already in scope; the markdown-specific rules win on tag
+    // conflicts (multiple `syntaxHighlighting` extensions stack and
+    // the *last* one declared takes priority).
+    syntaxHighlighting(markdownHighlightStyle),
     EditorView.lineWrapping,
     EditorState.readOnly.of(readOnly),
     keymap.of([

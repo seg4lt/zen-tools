@@ -192,6 +192,43 @@ export function dirname(path: string): string {
   return idx > 0 ? path.slice(0, idx) : "";
 }
 
+/**
+ * Collapse `.` / `..` segments and double-slashes in a POSIX-style
+ * absolute path.  Used by every code path that opens a file so the
+ * "is this already a tab?" identity check does string-equality on
+ * canonical paths — otherwise `[foo](./foo.md)` resolved against
+ * `/dir/bar.md` would produce `/dir/./foo.md`, miss the existing tab
+ * for `/dir/foo.md`, and open a duplicate.
+ *
+ * Behaviour mirrors `path.posix.normalize`:
+ *   - Repeated separators collapsed (`a//b` → `a/b`).
+ *   - `.` segments dropped.
+ *   - `..` segments pop the previous segment when possible (won't
+ *     ascend past root).
+ *   - Trailing slash stripped except for the root itself.
+ */
+export function normalizePath(input: string): string {
+  if (!input) return input;
+  const isAbs = input.startsWith("/");
+  const segs = input.split("/");
+  const out: string[] = [];
+  for (const seg of segs) {
+    if (seg === "" || seg === ".") continue;
+    if (seg === "..") {
+      if (out.length > 0 && out[out.length - 1] !== "..") {
+        out.pop();
+      } else if (!isAbs) {
+        out.push("..");
+      }
+      continue;
+    }
+    out.push(seg);
+  }
+  const joined = out.join("/");
+  if (isAbs) return `/${joined}`;
+  return joined || ".";
+}
+
 /** A loose slug: lowercase, ascii letters/digits/dash, collapsed. */
 export function slugify(input: string): string {
   return input

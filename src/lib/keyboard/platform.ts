@@ -38,5 +38,23 @@ export function matches(e: KeyboardEvent, chord: KeyChord): boolean {
   if ((chord.mod ?? false) !== modPressed(e)) return false;
   if ((chord.shift ?? false) !== e.shiftKey) return false;
   if ((chord.alt ?? false) !== e.altKey) return false;
-  return e.key.toLowerCase() === chord.key.toLowerCase();
+
+  // Direct match — works for the common case (no Option held).
+  if (e.key.toLowerCase() === chord.key.toLowerCase()) return true;
+
+  // macOS rewrites `e.key` when Option (Alt) is held: `Opt+T` reports
+  // `"†"` instead of `"t"`.  Fall back to the physical `e.code` for
+  // single ASCII letters / digits so chords like `mod+alt+t` still
+  // resolve.  `e.code` is layout-independent, so this also makes
+  // chords work on Dvorak / Colemak users typing on a QWERTY chord.
+  if (chord.alt && chord.key.length === 1) {
+    const ch = chord.key.toLowerCase();
+    if (ch >= "a" && ch <= "z") {
+      return e.code === `Key${ch.toUpperCase()}`;
+    }
+    if (ch >= "0" && ch <= "9") {
+      return e.code === `Digit${ch}`;
+    }
+  }
+  return false;
 }

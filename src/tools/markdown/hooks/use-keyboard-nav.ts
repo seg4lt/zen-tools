@@ -88,4 +88,65 @@ export function useMarkdownKeyboardNav() {
     true,
     { fireInInputs: true },
   );
+
+  // Cmd+Opt+T → "close all other tabs", keeping just the active one.
+  // Mirrors browsers / VS Code's "Close Others" command.
+  useShortcut(
+    "mod+alt+t",
+    (e) => {
+      e.preventDefault();
+      dispatch({ type: "closeOtherTabs" });
+    },
+    true,
+    { fireInInputs: true },
+  );
+
+  // Cmd+1..9 → switch to the Nth tab.  Cmd+9 jumps to the *last*
+  // tab (browser convention).
+  for (let i = 1; i <= 9; i++) {
+    // eslint-disable-next-line react-hooks/rules-of-hooks
+    useShortcut(
+      `mod+${i}`,
+      (e) => {
+        e.preventDefault();
+        if (state.tabs.length === 0) return;
+        const target =
+          i === 9 ? state.tabs[state.tabs.length - 1] : state.tabs[i - 1];
+        if (target) {
+          dispatch({ type: "selectTab", id: target.id });
+        }
+      },
+      true,
+      { fireInInputs: true },
+    );
+  }
+
+  // Cmd+Alt+] / [ → cycle tabs.  We use Alt because Cmd+] / Cmd+[
+  // are already taken by macOS browser conventions and by the OS for
+  // window management in some setups.
+  useShortcut(
+    "mod+alt+]",
+    (e) => {
+      e.preventDefault();
+      const idx = state.tabs.findIndex((t) => t.id === state.activeTabId);
+      if (idx === -1 || state.tabs.length < 2) return;
+      const next = state.tabs[(idx + 1) % state.tabs.length];
+      dispatch({ type: "selectTab", id: next.id });
+    },
+    true,
+    { fireInInputs: true },
+  );
+  useShortcut(
+    "mod+alt+[",
+    (e) => {
+      e.preventDefault();
+      const idx = state.tabs.findIndex((t) => t.id === state.activeTabId);
+      if (idx === -1 || state.tabs.length < 2) return;
+      const prev =
+        state.tabs[(idx - 1 + state.tabs.length) % state.tabs.length];
+      dispatch({ type: "selectTab", id: prev.id });
+    },
+    true,
+    { fireInInputs: true },
+  );
 }

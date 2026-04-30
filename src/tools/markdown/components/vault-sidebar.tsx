@@ -48,6 +48,7 @@ import {
 } from "../store/markdown-store";
 import {
   markdownTauri,
+  normalizePath,
   type MarkdownFileItem,
   type MarkdownVaultDto,
 } from "../lib/tauri";
@@ -215,7 +216,13 @@ function VaultBlock({ root, vault, tree, onRemove }: VaultBlockProps) {
             </button>
           </div>
         </ContextMenuTrigger>
-        <ContextMenuContent>
+        <ContextMenuContent
+          // Radix restores focus to the trigger element by default
+          // when the menu closes; that fires *after* our inline input
+          // mounts and steals focus away.  Cancel the restore so the
+          // input keeps focus.
+          onCloseAutoFocus={(e) => e.preventDefault()}
+        >
           <ContextMenuItem
             onSelect={() =>
               dispatch({
@@ -389,7 +396,12 @@ function RowContextMenu({ node }: { node: TreeNode }) {
   const onDelete = () => void deletePath(item.path);
 
   return (
-    <ContextMenuContent>
+    <ContextMenuContent
+      // Same fix as the vault-block menu: stop Radix from restoring
+      // focus to the trigger so our inline rename / new-file input
+      // can keep it.
+      onCloseAutoFocus={(e) => e.preventDefault()}
+    >
       {isDir ? (
         <>
           <ContextMenuItem
@@ -443,9 +455,17 @@ function RenameInput({ seed, path }: { seed: string; path: string }) {
   const committedRef = useRef(false);
 
   useEffect(() => {
-    if (!ref.current) return;
-    ref.current.focus();
-    ref.current.select();
+    // Schedule both an immediate attempt AND a deferred one — the
+    // immediate call usually wins, and the `setTimeout(0)` covers
+    // the case where Radix's portal teardown happens after our
+    // mount and would otherwise steal focus back.
+    ref.current?.focus();
+    ref.current?.select();
+    const id = window.setTimeout(() => {
+      ref.current?.focus();
+      ref.current?.select();
+    }, 0);
+    return () => window.clearTimeout(id);
   }, []);
 
   const commit = async () => {
@@ -510,7 +530,12 @@ function CreatePlaceholder({
   const committedRef = useRef(false);
 
   useEffect(() => {
+    // Same belt-and-suspenders as `RenameInput`: focus immediately
+    // *and* via a 0ms timeout so we win the race against Radix's
+    // close-time focus restoration.
     ref.current?.focus();
+    const id = window.setTimeout(() => ref.current?.focus(), 0);
+    return () => window.clearTimeout(id);
   }, []);
 
   const commit = async () => {
@@ -579,9 +604,13 @@ function CreatePlaceholder({
  * Open a file from disk and push it into the store + recents ring.
  */
 async function openFile(
-  path: string,
+  rawPath: string,
   dispatch: ReturnType<typeof useMarkdownStore>["dispatch"],
 ) {
+  // Normalise so the same canonical form is dispatched regardless of
+  // whether the caller hands us a tree-walker path or a manually-
+  // constructed one — keeps tab dedup honest.
+  const path = normalizePath(rawPath);
   try {
     const doc = await markdownTauri.readFile(path);
     dispatch({ type: "openFile", path, doc });
@@ -593,6 +622,6 @@ async function openFile(
       .then((recents) => dispatch({ type: "setRecents", recents }))
       .catch(() => {});
   } catch (err) {
-    console.error("[markdown] open file failed", path, err);
+    console.error("[markdown] open file failed", rawPath, err);
   }
 }
