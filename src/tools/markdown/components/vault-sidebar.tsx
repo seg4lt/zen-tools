@@ -16,7 +16,7 @@
  * render an input where appropriate.
  */
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   ChevronDown,
   ChevronRight,
@@ -290,6 +290,17 @@ function TreeRow({ node }: TreeRowProps) {
     state.editing?.kind === "create" &&
     state.editing.parentDir === item.path;
 
+  // When this row becomes the active one (via search-palette open,
+  // wikilink jump, etc.) scroll it into view so the user can see
+  // where the open file lives in the tree.  `useLayoutEffect` so the
+  // scroll happens before paint and avoids a visible jump.
+  const buttonRef = useRef<HTMLButtonElement | null>(null);
+  useLayoutEffect(() => {
+    if (active) {
+      buttonRef.current?.scrollIntoView({ block: "nearest" });
+    }
+  }, [active]);
+
   const onClick = () => {
     if (isRenaming) return;
     if (item.isDir) {
@@ -306,6 +317,7 @@ function TreeRow({ node }: TreeRowProps) {
       <ContextMenu>
         <ContextMenuTrigger asChild>
           <button
+            ref={buttonRef}
             type="button"
             onClick={onClick}
             style={{ paddingLeft: `${indent}px` }}
@@ -573,6 +585,9 @@ async function openFile(
   try {
     const doc = await markdownTauri.readFile(path);
     dispatch({ type: "openFile", path, doc });
+    // Reveal in tree — keeps the sidebar in sync when the user
+    // double-clicks a deeply-nested file or follows a wikilink.
+    dispatch({ type: "revealPath", path });
     markdownTauri
       .pushRecent(path)
       .then((recents) => dispatch({ type: "setRecents", recents }))

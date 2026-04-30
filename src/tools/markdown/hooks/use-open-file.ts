@@ -33,6 +33,10 @@ export function useOpenFile() {
           const doc = await markdownTauri.readFile(path);
           dispatch({ type: "openFile", path, doc, gotoLine });
         }
+        // Expand the sidebar tree so the user can see where the file
+        // they just opened lives — same affordance as Obsidian /
+        // VS Code's "Reveal in Explorer" but automatic on every open.
+        dispatch({ type: "revealPath", path });
         markdownTauri
           .pushRecent(path)
           .then((recents) => dispatch({ type: "setRecents", recents }))

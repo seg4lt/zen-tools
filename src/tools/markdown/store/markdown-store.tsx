@@ -137,6 +137,7 @@ export type MarkdownAction =
   | { type: "closeTab"; id: string }
   | { type: "setGotoLine"; line: number }
   | { type: "clearGotoLine" }
+  | { type: "revealPath"; path: string }
   | { type: "editDoc"; doc: string }
   | { type: "markSaved" }
   | { type: "setRecents"; recents: string[] }
@@ -231,6 +232,43 @@ function reducer(state: MarkdownState, action: MarkdownAction): MarkdownState {
       return state.pendingGotoLine == null
         ? state
         : { ...state, pendingGotoLine: null };
+
+    case "revealPath": {
+      // Mark every ancestor of `path` as expanded so the file is
+      // visible in the sidebar tree.  Vault roots use the `vault:`
+      // prefix in the expanded set — see `VaultBlock` in the
+      // sidebar — so we expand both the matching vault and every
+      // parent directory between the vault and the file.
+      const next = new Set(state.expanded);
+      let changed = false;
+      for (const vault of state.vaults) {
+        if (action.path === vault) continue;
+        const prefix = vault.endsWith("/") ? vault : `${vault}/`;
+        if (!action.path.startsWith(prefix)) continue;
+        // Expand the vault block itself.
+        const vaultKey = `vault:${vault}`;
+        if (!next.has(vaultKey)) {
+          next.add(vaultKey);
+          changed = true;
+        }
+        // Expand every intermediate directory.  We walk the relative
+        // path segment-by-segment, building the absolute prefix the
+        // tree uses as its expansion key.
+        const rel = action.path.slice(prefix.length);
+        const parts = rel.split("/");
+        let cursor = vault;
+        // Skip the last segment — it's the file itself.
+        for (let i = 0; i < parts.length - 1; i++) {
+          cursor = `${cursor}/${parts[i]}`;
+          if (!next.has(cursor)) {
+            next.add(cursor);
+            changed = true;
+          }
+        }
+        break;
+      }
+      return changed ? { ...state, expanded: next } : state;
+    }
 
     case "closeTab": {
       const idx = state.tabs.findIndex((t) => t.id === action.id);
