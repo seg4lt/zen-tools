@@ -4,6 +4,7 @@ pub mod cleaner;
 pub mod environment;
 pub mod execute;
 pub mod files;
+pub mod markdown;
 pub mod misc;
 pub mod parse;
 pub mod perf;

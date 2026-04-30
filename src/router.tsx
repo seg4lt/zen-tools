@@ -10,6 +10,7 @@ import { HTTPRunnerShell } from "@/tools/http-runner/HTTPRunnerShell";
 import { RequestsView } from "@/tools/http-runner/RequestsView";
 import { ProcessMonitorShell } from "@/tools/process-monitor/ProcessMonitorShell";
 import { CleanerShell } from "@/tools/cleaner/CleanerShell";
+import { MarkdownShell } from "@/tools/markdown/MarkdownShell";
 
 const rootRoute = createRootRoute({
   component: () => (
@@ -73,6 +74,12 @@ const cleanerRoute = createRoute({
   component: CleanerShell,
 });
 
+const markdownRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/markdown",
+  component: MarkdownShell,
+});
+
 const routeTree = rootRoute.addChildren([
   indexRoute,
   httpRunnerRoute.addChildren([
@@ -82,6 +89,7 @@ const routeTree = rootRoute.addChildren([
   ]),
   processMonitorRoute,
   cleanerRoute,
+  markdownRoute,
 ]);
 
 export const router = createRouter({

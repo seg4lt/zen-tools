@@ -22,7 +22,7 @@ zen-perf = { workspace = true }
 zen-process-monitor = { workspace = true }
 zen-cleaner = { workspace = true }
 
-tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri = { version = "2", features = ["tray-icon", "image-png", "protocol-asset"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-shell = "2"
 tauri-plugin-fs = "2"

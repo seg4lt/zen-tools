@@ -142,6 +142,14 @@ pub fn run() {
             commands::cleaner::cleaner_discover_globals,
             commands::cleaner::cleaner_run_actions,
             commands::cleaner::cleaner_get_cached_tree,
+            // markdown
+            commands::markdown::markdown_list_vaults,
+            commands::markdown::markdown_add_vault,
+            commands::markdown::markdown_remove_vault,
+            commands::markdown::markdown_discover_files,
+            commands::markdown::markdown_recent_files,
+            commands::markdown::markdown_push_recent,
+            commands::markdown::markdown_save_pasted_image,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -1,0 +1,103 @@
+/* Live-preview styles for the markdown editor.
+ *
+ * The CodeMirror ViewPlugin in `view-plugin.ts` attaches these classes
+ * via line + mark decorations. Everything is keyed off the `cm-md-*`
+ * prefix so the rules only ever apply inside our editor instance.
+ *
+ * Sizes deliberately match Obsidian's defaults so users coming from
+ * there feel at home. */
+
+.cm-md-h1 {
+  font-size: 1.6rem;
+  font-weight: 700;
+  line-height: 1.25;
+  color: var(--foreground);
+}
+.cm-md-h2 {
+  font-size: 1.35rem;
+  font-weight: 700;
+  line-height: 1.3;
+  color: var(--foreground);
+}
+.cm-md-h3 {
+  font-size: 1.15rem;
+  font-weight: 600;
+  color: var(--foreground);
+}
+.cm-md-h4 {
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: var(--foreground);
+}
+.cm-md-h5,
+.cm-md-h6 {
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--muted-foreground);
+}
+
+.cm-md-bold {
+  font-weight: 700;
+}
+.cm-md-italic {
+  font-style: italic;
+}
+.cm-md-strikethrough {
+  text-decoration: line-through;
+  color: var(--muted-foreground);
+}
+
+.cm-md-inline-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  background-color: var(--muted);
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-size: 0.9em;
+}
+
+.cm-md-link {
+  color: var(--primary);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+/* Wikilink: rendered as a clickable underlined chip when not on the
+ * cursor's line; falls back to raw `[[…]]` text when editing. */
+.cm-md-wikilink {
+  color: var(--primary);
+  background-color: color-mix(in oklch, var(--primary) 10%, transparent);
+  padding: 0 4px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+.cm-md-wikilink:hover {
+  background-color: color-mix(in oklch, var(--primary) 18%, transparent);
+}
+
+.cm-md-blockquote {
+  border-left: 3px solid var(--border);
+  padding-left: 0.5rem;
+  color: var(--muted-foreground);
+}
+
+/* Inline image widget.  We use an inline `<span>` and switch its
+ * display to block via CSS so CodeMirror keeps the range inline (no
+ * `block: true` decoration) but the visual is still a stand-alone
+ * picture box, like Obsidian's reading view. */
+.cm-md-image-block {
+  display: block;
+  padding: 0.25rem 0;
+  text-align: center;
+}
+.cm-md-image-block img {
+  max-width: 100%;
+  max-height: 360px;
+  border-radius: 4px;
+  box-shadow: 0 1px 4px rgb(0 0 0 / 0.1);
+}
+.cm-md-image-fallback {
+  display: inline-block;
+  color: var(--muted-foreground);
+  font-size: 0.8rem;
+  font-style: italic;
+}

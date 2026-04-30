@@ -44,6 +44,16 @@ pub struct Preferences {
     /// a fresh scan runs in the background.
     #[serde(default)]
     pub cleaner_scan_cache: Vec<CleanerScanCacheEntry>,
+    /// Vault root folders the user has opened in the **Markdown** tool,
+    /// in user-defined order.  Persists so opened vaults re-mount on
+    /// every launch.
+    #[serde(default)]
+    pub markdown_vault_dirs: Vec<String>,
+    /// Bounded ring (most recent first) of `.md` files the user has
+    /// opened in the Markdown tool.  Powers the quick-switcher's
+    /// "Recent" group.
+    #[serde(default)]
+    pub markdown_recent_files: Vec<String>,
 }
 
 /// One entry in the persisted cleaner scan cache.
@@ -71,6 +81,8 @@ impl Default for Preferences {
             vim_mode: default_vim_mode(),
             cleaner_scan_folders: Vec::new(),
             cleaner_scan_cache: Vec::new(),
+            markdown_vault_dirs: Vec::new(),
+            markdown_recent_files: Vec::new(),
         }
     }
 }
