@@ -125,6 +125,12 @@ export function MarkdownView() {
     [tab?.path],
   );
 
+  // The link autocomplete in the live-preview pane needs the open
+  // vaults so it can fan out an fff-search query across them.  Stable
+  // callback keyed on `state.vaults` — fff itself owns the warm
+  // index, so this only affects which vault list the source asks.
+  const getVaults = useCallback(() => state.vaults, [state.vaults]);
+
   // Wikilink autocomplete: every `.md` basename across all vaults.
   // Memoised to avoid rebuilding on each keystroke.
   const getCandidates = useCallback(() => {
@@ -341,6 +347,7 @@ export function MarkdownView() {
                 vimMode={vimMode}
                 getDocDir={getDocDir}
                 getCurrentPath={getCurrentPath}
+                getVaults={getVaults}
                 getWikilinkCandidates={getCandidates}
                 onWikilinkOpen={onWikilinkOpen}
                 onLinkOpen={onLinkOpen}

@@ -230,6 +230,35 @@ export function dirname(path: string): string {
 }
 
 /**
+ * Compute the POSIX-style path of `target` relative to `from`
+ * (a directory).  Used by the markdown link autocomplete so a
+ * suggested file gets inserted as `path/to/file.md` rather than its
+ * absolute path.  Falls back to `target` unchanged when the inputs
+ * aren't both absolute (preserves Windows / non-rooted paths
+ * harmlessly).
+ *
+ * Behaviour mirrors `path.posix.relative`:
+ *   - Same dir → `file.md`
+ *   - Subdir   → `subdir/file.md`
+ *   - Parent   → `../file.md`
+ *   - No common prefix → returns `target` unchanged.
+ */
+export function posixRelative(from: string, target: string): string {
+  if (!from.startsWith("/") || !target.startsWith("/")) return target;
+  const a = normalizePath(from).split("/").filter(Boolean);
+  const b = normalizePath(target).split("/").filter(Boolean);
+  let i = 0;
+  while (i < a.length && i < b.length && a[i] === b[i]) i++;
+  const ups = a.length - i;
+  const rest = b.slice(i);
+  if (ups === 0 && rest.length === 0) return ".";
+  const parts: string[] = [];
+  for (let k = 0; k < ups; k++) parts.push("..");
+  parts.push(...rest);
+  return parts.join("/");
+}
+
+/**
  * Collapse `.` / `..` segments and double-slashes in a POSIX-style
  * absolute path.  Used by every code path that opens a file so the
  * "is this already a tab?" identity check does string-equality on
