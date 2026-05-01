@@ -1,0 +1,230 @@
+name: Build
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+# Releases publish to this repo (github.repository). No cross-repo
+# auth needed — default GITHUB_TOKEN is enough because softprops/
+# action-gh-release defaults `repository` to the current repo.
+#
+# Mirrors the flowstate build pipeline: a `build` matrix job assembles
+# the Tauri bundle on each runner, a separate `release` job downloads
+# the artifacts and publishes a GitHub Release.  Mac-only for now —
+# adding Windows / Linux is a matrix-row addition; the scaffolding is
+# kept (matrix.include style, runner.os branches in the asset-stage
+# step) so reinstating them is a localised diff.
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos-arm
+            runner: macos-14
+            target: aarch64-apple-darwin
+            tauri-args: --target aarch64-apple-darwin
+            bundle-subpath: aarch64-apple-darwin/release/bundle
+
+          # - name: windows-x64
+          #   runner: windows-latest
+          #   target: x86_64-pc-windows-msvc
+          #   tauri-args: ""
+          #   bundle-subpath: release/bundle
+
+          # - name: linux-x64
+          #   runner: ubuntu-22.04
+          #   target: x86_64-unknown-linux-gnu
+          #   tauri-args: ""
+          #   bundle-subpath: release/bundle
+
+    name: build (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Rust target
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Single workspace at the repo root — `target/` lives here.
+          workspaces: . -> target
+
+      - name: Install bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        env:
+          # Minisign key for the Tauri updater.  Built bundles are
+          # signed with this; the matching pubkey would be embedded
+          # in `tauri.conf.json` (`plugins.updater.pubkey`) once the
+          # updater plugin is enabled.  Today no updater is wired up,
+          # so this env var is a harmless pass-through unless the
+          # user ships an updater later — leaving it set up means
+          # turning on auto-updates is a config-only change, no CI
+          # rewrite.  The CI key was generated with
+          # `tauri signer generate --ci` (no password), so PASSWORD
+          # stays empty.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+        # `env -u CI`: some Rust deps' build.rs scripts misbehave when
+        # the `CI` env var is set (e.g. fff-search 0.5.2 hard-panics
+        # whenever `env::var("CI").is_ok()` regardless of value).
+        # GitHub Actions exports CI=true runner-wide; stripping it for
+        # this single command picks the same path local dev uses.
+        # `shell: bash` is required because `env -u` isn't recognised
+        # by the default pwsh on Windows runners — Git Bash ships on
+        # every GitHub runner image so this works once Windows comes
+        # back online in the matrix.
+        shell: bash
+        run: env -u CI pnpm tauri build ${{ matrix.tauri-args }}
+
+      - name: Stage release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          TAG="${{ github.ref_name }}"
+
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            # Tauri produces a .dmg per build; the .app.tar.gz +
+            # .sig pair only appears once the updater is enabled
+            # (`createUpdaterArtifacts: true` in tauri.conf.json
+            # plus a signing key).  We copy whichever artifacts
+            # exist and leave a missing-updater-bundle as a
+            # non-fatal warning so the release still happens.
+            DMG=$(find . -name "*.dmg" -path "*/release/bundle/dmg/*" | head -1)
+            cp "$DMG" "release-assets/Zen-Tools-${TAG}-macos-arm64.dmg"
+
+            APP_TAR=$(find . -name "*.app.tar.gz" -path "*/release/bundle/macos/*" | head -1 || true)
+            APP_SIG=$(find . -name "*.app.tar.gz.sig" -path "*/release/bundle/macos/*" | head -1 || true)
+            if [ -n "$APP_TAR" ] && [ -n "$APP_SIG" ]; then
+              cp "$APP_TAR" "release-assets/Zen-Tools-${TAG}-macos-arm64.app.tar.gz"
+              cp "$APP_SIG" "release-assets/Zen-Tools-${TAG}-macos-arm64.app.tar.gz.sig"
+            else
+              echo "::notice::No updater artifacts produced — turn on createUpdaterArtifacts in tauri.conf.json to enable auto-update."
+            fi
+          fi
+
+          # Windows row reinstated later — kept for symmetry with the
+          # commented matrix row above.
+          # if [ "${{ runner.os }}" = "Windows" ]; then
+          #   MSI=$(find . -name "*.msi" -path "*/release/bundle/msi/*" | head -1)
+          #   EXE=$(find . -name "*-setup.exe" -path "*/release/bundle/nsis/*" | head -1)
+          #   cp "$MSI" "release-assets/Zen-Tools-${TAG}-windows-x64.msi"
+          #   cp "$EXE" "release-assets/Zen-Tools-${TAG}-windows-x64-setup.exe"
+          # fi
+
+      - name: Upload release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-assets-${{ matrix.name }}
+          path: release-assets/
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      # Required so the default GITHUB_TOKEN can create releases.
+      contents: write
+
+    steps:
+      - name: Download all release assets
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-assets-*
+          merge-multiple: true
+          path: release-assets
+
+      - name: List release assets
+        run: ls -la release-assets/
+
+      - name: Generate updater manifest (latest.json)
+        # Only emitted when the matching .sig exists — see the
+        # "Stage release assets" step.  Without a signed bundle the
+        # Tauri updater can't verify the artifact, so shipping a
+        # latest.json with a missing signature would be worse than
+        # not shipping one at all.
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ github.ref_name }}"
+          REPO="${{ github.repository }}"
+          PUB_DATE="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+          MAC_SIG_FILE="release-assets/Zen-Tools-${TAG}-macos-arm64.app.tar.gz.sig"
+          if [ ! -f "$MAC_SIG_FILE" ]; then
+            echo "::notice::Skipping latest.json — no .sig produced (updater not enabled)."
+            exit 0
+          fi
+          MAC_SIG="$(cat "$MAC_SIG_FILE")"
+          cat > release-assets/latest.json <<EOF
+          {
+            "version": "${TAG}",
+            "notes": "See the release page for details.",
+            "pub_date": "${PUB_DATE}",
+            "platforms": {
+              "darwin-aarch64": {
+                "signature": "${MAC_SIG}",
+                "url": "https://github.com/${REPO}/releases/download/${TAG}/Zen-Tools-${TAG}-macos-arm64.app.tar.gz"
+              }
+            }
+          }
+          EOF
+          echo "--- latest.json ---"
+          cat release-assets/latest.json
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          # No `repository:` override — defaults to github.repository
+          # (this repo).  No `token:` override — default GITHUB_TOKEN
+          # has `contents: write` from the permissions block above.
+          tag_name: ${{ github.ref_name }}
+          name: Zen Tools ${{ github.ref_name }}
+          body: |
+            ## Zen Tools ${{ github.ref_name }}
+
+            ### Downloads
+            | Platform | File |
+            |----------|------|
+            | macOS (Apple Silicon) | `Zen-Tools-${{ github.ref_name }}-macos-arm64.dmg` |
+
+            ### macOS Installation
+            1. Download the `.dmg`, open it, drag the app to `/Applications`.
+            2. The app is unsigned, so first launch may be quarantined by Gatekeeper.  Clear it with:
+               ```sh
+               xattr -dr com.apple.quarantine "/Applications/Zen Tools.app"
+               ```
+          draft: false
+          prerelease: false
+          files: release-assets/*

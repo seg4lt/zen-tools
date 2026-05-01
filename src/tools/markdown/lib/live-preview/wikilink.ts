@@ -12,48 +12,50 @@
 import {
   type CompletionContext,
   type CompletionResult,
-  autocompletion,
+  type CompletionSource,
 } from "@codemirror/autocomplete";
 import { EditorView } from "@codemirror/view";
 
 /**
- * `getCandidates` returns the universe of completion candidates each
- * time the user types `[[`.  It's a callback so the editor doesn't
- * need to know about the store directly — the markdown editor wires
+ * Wikilink completion source — fires when the cursor sits inside an
+ * unmatched `[[`.  Exported as a bare [`CompletionSource`] (not a
+ * full `autocompletion({…})` extension) so the live-preview index
+ * can merge it with the markdown-link source under a *single*
+ * `autocompletion()` call; two parallel ones would shadow each
+ * other's `override` arrays.
+ *
+ * `getCandidates` returns the universe of suggestions each time the
+ * user types `[[`.  It's a callback so the live-preview module
+ * doesn't have to know about the store — the markdown editor wires
  * it up.
  */
-export function wikilinkAutocomplete(getCandidates: () => string[]) {
-  return autocompletion({
-    override: [
-      (ctx: CompletionContext): CompletionResult | null => {
-        // Find the unmatched `[[` to the left of the cursor.
-        const line = ctx.state.doc.lineAt(ctx.pos);
-        const before = ctx.state.doc.sliceString(line.from, ctx.pos);
-        const open = before.lastIndexOf("[[");
-        if (open === -1) return null;
-        // If a closing `]]` already follows on the same line we're not
-        // inside an open wikilink — bail out.
-        const between = before.slice(open + 2);
-        if (between.includes("]]") || between.includes("\n")) return null;
-        const from = line.from + open + 2;
-        const candidates = getCandidates();
-        if (candidates.length === 0) return null;
-        return {
-          from,
-          to: ctx.pos,
-          options: candidates.map((name) => ({
-            label: name,
-            apply: `${name}]]`,
-            type: "text",
-          })),
-          // Tell CodeMirror to validate against this regex on each
-          // keystroke; saves us recomputing options character-by-character.
-          validFor: /^[^\[\]\n]*$/,
-        };
-      },
-    ],
-    activateOnTyping: true,
-  });
+export function wikilinkSource(getCandidates: () => string[]): CompletionSource {
+  return (ctx: CompletionContext): CompletionResult | null => {
+    // Find the unmatched `[[` to the left of the cursor.
+    const line = ctx.state.doc.lineAt(ctx.pos);
+    const before = ctx.state.doc.sliceString(line.from, ctx.pos);
+    const open = before.lastIndexOf("[[");
+    if (open === -1) return null;
+    // If a closing `]]` already follows on the same line we're not
+    // inside an open wikilink — bail out.
+    const between = before.slice(open + 2);
+    if (between.includes("]]") || between.includes("\n")) return null;
+    const from = line.from + open + 2;
+    const candidates = getCandidates();
+    if (candidates.length === 0) return null;
+    return {
+      from,
+      to: ctx.pos,
+      options: candidates.map((name) => ({
+        label: name,
+        apply: `${name}]]`,
+        type: "text",
+      })),
+      // Tell CodeMirror to validate against this regex on each
+      // keystroke; saves us recomputing options character-by-character.
+      validFor: /^[^\[\]\n]*$/,
+    };
+  };
 }
 
 /**

@@ -43,16 +43,21 @@ import {
   type ContentBlock,
   type ContentSearchOptions,
 } from "../lib/tauri";
+import { PICKER_RESULT_LIMIT } from "../lib/file-rank";
 import {
-  PICKER_RESULT_LIMIT,
-  rankFuzzy,
-  rankSubstring,
-} from "../lib/file-rank";
-import { useMarkdownStore, type SearchMode } from "../store/markdown-store";
+  activeTab,
+  useMarkdownStore,
+  type SearchMode,
+} from "../store/markdown-store";
 import { useOpenFile } from "../hooks/use-open-file";
 
 /** Match Flowstate's debounce so type-and-wait feels identical. */
 const CONTENT_SEARCH_DEBOUNCE_MS = 600;
+
+/** File search debounces faster — fff-search returns from a warm
+ *  in-memory index in single-digit ms, so the only reason to wait
+ *  at all is to coalesce bursty keystrokes. */
+const FILE_SEARCH_DEBOUNCE_MS = 80;
 
 /** Flat result row used by the keyboard-nav code below. */
 type FlatResult =
@@ -115,22 +120,72 @@ export function SearchPalette() {
     return out;
   }, [state.files]);
 
-  // ── File-mode results (synchronous, client-side) ───────────────
-  const fileResults = useMemo(() => {
-    if (mode !== "files") return [];
-    if (!query.trim()) {
-      // Empty query: surface recents first, then everything else.
+  // ── File-mode results ──────────────────────────────────────────
+  //
+  // Empty query: surface recents first, then everything else
+  // (synchronous, client-side — no point hitting fff-search just to
+  // get the file list back unranked).
+  //
+  // Non-empty query: debounced Tauri call into
+  // `markdown_search_files`, which delegates to fff-search's
+  // `FilePicker::fuzzy_search`.  Backend ranking is more accurate
+  // than the pure-TS subsequence scorer we used to ship and uses
+  // the same warm in-memory index that backs grep.  We post-filter
+  // the ranked result against `allMarkdownPaths` so non-`.md`
+  // hits (images, drawings, configs that happen to live in the
+  // vault) don't surface in the palette — keeps today's UX while
+  // letting the engine see every file for ranking purposes.
+  const tabPath = activeTab(state)?.path ?? null;
+  const [fileResults, setFileResults] = useState<string[]>([]);
+  const fileSearchAbortRef = useRef(0);
+  useEffect(() => {
+    if (mode !== "files") return;
+    const trimmed = query.trim();
+    if (!trimmed) {
       const recentSet = new Set(state.recents);
       const recentsHere = state.recents.filter((p) =>
         recentSet.has(p) ? allMarkdownPaths.includes(p) : false,
       );
       const rest = allMarkdownPaths.filter((p) => !recentSet.has(p));
-      return [...recentsHere, ...rest].slice(0, PICKER_RESULT_LIMIT);
+      setFileResults(
+        [...recentsHere, ...rest].slice(0, PICKER_RESULT_LIMIT),
+      );
+      return;
     }
-    return useFuzzy
-      ? rankFuzzy(allMarkdownPaths, query)
-      : rankSubstring(allMarkdownPaths, query);
-  }, [mode, query, useFuzzy, allMarkdownPaths, state.recents]);
+    // Bump an abort counter so a slower in-flight call's result
+    // can't clobber a newer one when the user types fast.
+    const myToken = ++fileSearchAbortRef.current;
+    const timer = window.setTimeout(() => {
+      void markdownTauri
+        .searchFiles(state.vaults, trimmed, tabPath)
+        .then((results) => {
+          if (myToken !== fileSearchAbortRef.current) return;
+          const mdSet = new Set(allMarkdownPaths);
+          setFileResults(
+            results
+              .filter((p) => mdSet.has(p))
+              .slice(0, PICKER_RESULT_LIMIT),
+          );
+        })
+        .catch((err) => {
+          if (myToken !== fileSearchAbortRef.current) return;
+          console.warn("[markdown] searchFiles failed:", err);
+          setFileResults([]);
+        });
+    }, FILE_SEARCH_DEBOUNCE_MS);
+    return () => window.clearTimeout(timer);
+    // `useFuzzy` intentionally omitted — fff-search's fuzzy_search
+    // is always Smith-Waterman; the toggle remains meaningful for
+    // content mode only.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    mode,
+    query,
+    state.vaults,
+    state.recents,
+    allMarkdownPaths,
+    tabPath,
+  ]);
 
   // ── Content-mode debounced search ──────────────────────────────
   useEffect(() => {

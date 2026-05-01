@@ -7,6 +7,7 @@ pub mod environment;
 pub mod execute;
 pub mod files;
 pub mod markdown;
+pub mod markdown_index;
 pub mod misc;
 pub mod parse;
 pub mod perf;

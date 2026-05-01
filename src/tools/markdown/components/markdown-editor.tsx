@@ -76,6 +76,10 @@ export interface MarkdownEditorProps {
   getDocDir: () => string;
   /** Returns the absolute path of the open `.md`, or `null` if none. */
   getCurrentPath: () => string | null;
+  /** Returns every open vault root.  Used by the markdown link
+   *  autocomplete (`[label](query)`) to feed fff-search across the
+   *  full set of vaults the user has open. */
+  getVaults: () => string[];
   /** Returns wikilink autocomplete candidates (basenames, no ext). */
   getWikilinkCandidates: () => string[];
   /** Called on `Mod+click` of a wikilink — caller resolves + opens. */
@@ -97,6 +101,7 @@ export function MarkdownEditor({
   vimMode = true,
   getDocDir,
   getCurrentPath,
+  getVaults,
   getWikilinkCandidates,
   onWikilinkOpen,
   onLinkOpen,
@@ -109,6 +114,7 @@ export function MarkdownEditor({
   const onSaveRef = useRef(onSave);
   const getDocDirRef = useRef(getDocDir);
   const getCurrentPathRef = useRef(getCurrentPath);
+  const getVaultsRef = useRef(getVaults);
   const getCandidatesRef = useRef(getWikilinkCandidates);
   const onWikilinkOpenRef = useRef(onWikilinkOpen);
   const onLinkOpenRef = useRef(onLinkOpen);
@@ -124,6 +130,7 @@ export function MarkdownEditor({
     onSaveRef.current = onSave;
     getDocDirRef.current = getDocDir;
     getCurrentPathRef.current = getCurrentPath;
+    getVaultsRef.current = getVaults;
     getCandidatesRef.current = getWikilinkCandidates;
     onWikilinkOpenRef.current = onWikilinkOpen;
     onLinkOpenRef.current = onLinkOpen;
@@ -133,6 +140,7 @@ export function MarkdownEditor({
     onSave,
     getDocDir,
     getCurrentPath,
+    getVaults,
     getWikilinkCandidates,
     onWikilinkOpen,
     onLinkOpen,
@@ -232,6 +240,8 @@ export function MarkdownEditor({
     markdown({ addKeymap: false, codeLanguages: languages }),
     livePreview({
       getDocDir: () => getDocDirRef.current(),
+      getCurrentPath: () => getCurrentPathRef.current(),
+      getVaults: () => getVaultsRef.current(),
       getWikilinkCandidates: () => getCandidatesRef.current(),
       onWikilinkOpen: (label) => onWikilinkOpenRef.current(label),
       onLinkOpen: (url) => onLinkOpenRef.current(url),

@@ -172,6 +172,27 @@ export const markdownTauri = {
   /** Cancel the content search identified by `token`. */
   stopContentSearch: (token: number) =>
     invoke<void>("markdown_stop_content_search", { token }),
+
+  /**
+   * File fuzzy search across every supplied vault, backed by
+   * `fff-search`'s `FilePicker::fuzzy_search`.  Returns up to ~200
+   * ranked **absolute paths**.  Empty query → every indexed path
+   * (frontend orders by recents); non-empty query → ranked.
+   *
+   * `currentFile` is an optional ranking boost: paths near the
+   * active document score higher.  Pass the active tab's path; the
+   * backend tolerates `null` for fire-and-forget calls.
+   */
+  searchFiles: (
+    vaults: string[],
+    query: string,
+    currentFile: string | null,
+  ) =>
+    invoke<string[]>("markdown_search_files", {
+      vaults,
+      query,
+      currentFile,
+    }),
 };
 
 // ────────────────────────────────────────────────────────────────────────
@@ -206,6 +227,35 @@ export function basename(path: string): string {
 export function dirname(path: string): string {
   const idx = path.lastIndexOf("/");
   return idx > 0 ? path.slice(0, idx) : "";
+}
+
+/**
+ * Compute the POSIX-style path of `target` relative to `from`
+ * (a directory).  Used by the markdown link autocomplete so a
+ * suggested file gets inserted as `path/to/file.md` rather than its
+ * absolute path.  Falls back to `target` unchanged when the inputs
+ * aren't both absolute (preserves Windows / non-rooted paths
+ * harmlessly).
+ *
+ * Behaviour mirrors `path.posix.relative`:
+ *   - Same dir → `file.md`
+ *   - Subdir   → `subdir/file.md`
+ *   - Parent   → `../file.md`
+ *   - No common prefix → returns `target` unchanged.
+ */
+export function posixRelative(from: string, target: string): string {
+  if (!from.startsWith("/") || !target.startsWith("/")) return target;
+  const a = normalizePath(from).split("/").filter(Boolean);
+  const b = normalizePath(target).split("/").filter(Boolean);
+  let i = 0;
+  while (i < a.length && i < b.length && a[i] === b[i]) i++;
+  const ups = a.length - i;
+  const rest = b.slice(i);
+  if (ups === 0 && rest.length === 0) return ".";
+  const parts: string[] = [];
+  for (let k = 0; k < ups; k++) parts.push("..");
+  parts.push(...rest);
+  return parts.join("/");
 }
 
 /**

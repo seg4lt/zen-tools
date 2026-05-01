@@ -11,8 +11,10 @@ pub mod error;
 pub mod state;
 pub mod tray;
 
+use commands::markdown_index::MarkdownIndexRegistry;
 use commands::runs::{load_runs, RunHistory};
 use state::AppState;
+use std::sync::Arc;
 use tauri::{Emitter, Manager};
 use tokio::sync::Mutex;
 use tracing_subscriber::EnvFilter;
@@ -35,6 +37,11 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .manage(Mutex::new(AppState::new()))
         .manage(Mutex::new(RunHistory::default()))
+        // fff-search per-vault file pickers.  Lazily populated on
+        // the first search call; `markdown_remove_vault` drops the
+        // entry so the bg watcher / fs handles get released.
+        // Wrapped in `Arc` so command handlers can clone cheaply.
+        .manage(Arc::new(MarkdownIndexRegistry::default()))
         .setup(|app| {
             // Hydrate run history from disk so previous-session runs
             // are immediately available in the History tab.
@@ -155,6 +162,7 @@ pub fn run() {
             commands::markdown::markdown_rename,
             commands::markdown::markdown_delete_to_trash,
             commands::markdown::markdown_search_contents,
+            commands::markdown::markdown_search_files,
             commands::markdown::markdown_stop_content_search,
             commands::markdown::markdown_copy_svg_as_png,
             // database explorer

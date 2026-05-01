@@ -4,19 +4,29 @@
  * Exposes a single `livePreview()` factory that the editor mounts as
  * an Extension array.  Keeping the wiring in one place means the
  * editor component doesn't need to know about every internal bit
- * (view plugin, autocomplete source, click handler).
+ * (view plugin, autocomplete sources, click handler).
  */
 
 import "./style.css";
+import { autocompletion } from "@codemirror/autocomplete";
 import type { Extension } from "@codemirror/state";
 import { livePreviewPlugin } from "./view-plugin";
 import { mermaidField } from "./mermaid-field";
-import { linkClickHandler, wikilinkAutocomplete } from "./wikilink";
+import { linkAutocompleteSource } from "./link-autocomplete";
+import { linkClickHandler, wikilinkSource } from "./wikilink";
 
 export interface LivePreviewOptions {
   /** Returns the directory of the currently-open `.md` file.  Used to
-   *  resolve relative `![…](…)` paths into asset-protocol URLs. */
+   *  resolve relative `![…](…)` paths into asset-protocol URLs and to
+   *  shape link autocomplete suggestions as relative paths. */
   getDocDir: () => string;
+  /** Returns the absolute path of the open document, or `null`. Used
+   *  by the link autocomplete to give fff-search a ranking boost
+   *  toward files near the open doc. */
+  getCurrentPath: () => string | null;
+  /** Returns every open vault root.  Forwarded to fff-search via
+   *  `markdownTauri.searchFiles` for the link autocomplete. */
+  getVaults: () => string[];
   /** Returns every basename (no extension) the wikilink autocomplete
    *  should propose. */
   getWikilinkCandidates: () => string[];
@@ -31,6 +41,13 @@ export interface LivePreviewOptions {
 
 /**
  * Build the Live-Preview extension array.
+ *
+ * Both autocomplete sources (wikilink + link path) are merged into a
+ * **single** `autocompletion({ override: […] })` call.  Two parallel
+ * `autocompletion()` extensions don't compose cleanly when each uses
+ * `override`: CodeMirror picks one and shadows the other.  Combining
+ * them here means each source returns `null` when its trigger
+ * doesn't match and we get clean dispatch.
  */
 export function livePreview(opts: LivePreviewOptions): Extension {
   return [
@@ -38,7 +55,17 @@ export function livePreview(opts: LivePreviewOptions): Extension {
     // Block-level decorations (mermaid diagram widget) — must come
     // from a state field, not a view plugin.
     mermaidField(),
-    wikilinkAutocomplete(opts.getWikilinkCandidates),
+    autocompletion({
+      override: [
+        wikilinkSource(opts.getWikilinkCandidates),
+        linkAutocompleteSource(
+          opts.getDocDir,
+          opts.getVaults,
+          opts.getCurrentPath,
+        ),
+      ],
+      activateOnTyping: true,
+    }),
     linkClickHandler({
       onWikilinkOpen: opts.onWikilinkOpen,
       onLinkOpen: opts.onLinkOpen,
