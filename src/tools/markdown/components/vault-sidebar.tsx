@@ -30,6 +30,7 @@ import {
   Image as ImageIcon,
   Loader2,
   Pencil,
+  PenLine,
   RefreshCw,
   Trash2,
 } from "lucide-react";
@@ -295,6 +296,7 @@ function TreeRow({ node }: TreeRowProps) {
   const active = !item.isDir && activeTab(state)?.path === item.path;
   const isImage = item.kind === "image";
   const isMarkdown = item.kind === "markdown";
+  const isExcalidraw = item.kind === "excalidraw";
 
   const isRenaming =
     state.editing?.kind === "rename" && state.editing.path === item.path;
@@ -320,7 +322,7 @@ function TreeRow({ node }: TreeRowProps) {
       dispatch({ type: "toggleExpand", nodeId: item.path });
       return;
     }
-    if (isMarkdown) {
+    if (isMarkdown || isExcalidraw) {
       void openFile(item.path, dispatch);
     }
   };
@@ -338,9 +340,13 @@ function TreeRow({ node }: TreeRowProps) {
               "flex w-full items-center gap-1.5 py-1 pr-2 text-left",
               "hover:bg-muted/50",
               active && "bg-muted text-foreground",
+              // Plain images are display-only — dim them to signal
+              // they aren't openable.  Excalidraw drawings ARE
+              // openable, so they keep full opacity even though they
+              // share the `.svg` extension.
               isImage && "cursor-default opacity-70",
             )}
-            title={isImage ? item.path : undefined}
+            title={isImage || isExcalidraw ? item.path : undefined}
           >
             {item.isDir ? (
               open ? (
@@ -353,6 +359,8 @@ function TreeRow({ node }: TreeRowProps) {
             )}
             {item.isDir ? (
               <Folder className="size-3.5 shrink-0 text-muted-foreground" />
+            ) : isExcalidraw ? (
+              <PenLine className="size-3.5 shrink-0 text-violet-500/80" />
             ) : isImage ? (
               <ImageIcon className="size-3.5 shrink-0 text-fuchsia-500/70" />
             ) : (
@@ -656,9 +664,19 @@ async function openFile(
   // whether the caller hands us a tree-walker path or a manually-
   // constructed one — keeps tab dedup honest.
   const path = normalizePath(rawPath);
+  // Drawings shouldn't load through `readFile` — the SVG can be
+  // multi-MB and we don't want it sitting in `tab.doc` for the
+  // reducer to churn over.  The Excalidraw editor reads the file
+  // straight from disk on mount; we just open the tab with an empty
+  // doc and the right kind.
+  const isExcalidraw = path.toLowerCase().endsWith(".excalidraw.svg");
   try {
-    const doc = await markdownTauri.readFile(path);
-    dispatch({ type: "openFile", path, doc });
+    if (isExcalidraw) {
+      dispatch({ type: "openFile", path, doc: "", kind: "excalidraw" });
+    } else {
+      const doc = await markdownTauri.readFile(path);
+      dispatch({ type: "openFile", path, doc });
+    }
     // Reveal in tree — keeps the sidebar in sync when the user
     // double-clicks a deeply-nested file or follows a wikilink.
     dispatch({ type: "revealPath", path });

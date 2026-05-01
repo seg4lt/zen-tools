@@ -39,6 +39,10 @@ export interface OpenFileState {
   dirty: boolean;
 }
 
+/** What sort of editor a tab needs.  Drives both the icon in the
+ *  tab strip and the component the view layer mounts in the body. */
+export type TabKind = "markdown" | "excalidraw";
+
 /** One entry in the tab strip — own copy of the doc + dirty flag so
  *  the user can switch away mid-edit and come back to their changes. */
 export interface TabState {
@@ -47,8 +51,17 @@ export interface TabState {
    *  changes) and we want the tab to keep its identity. */
   id: string;
   path: string;
+  /** For markdown tabs: the file's text contents.  For excalidraw
+   *  tabs: always `""` — the drawing is megabytes of SVG that we
+   *  refuse to thread through the reducer; the editor reads it
+   *  straight from disk on mount and serialises a fresh SVG only at
+   *  save time.  `dirty` is still flipped via a sentinel `editDoc`. */
   doc: string;
   dirty: boolean;
+  /** Markdown by default; `"excalidraw"` for `*.excalidraw.svg`
+   *  tabs.  Set once at `openFile` time — the path doesn't change
+   *  the tab kind even if the file is later renamed. */
+  kind: TabKind;
 }
 
 /**
@@ -131,7 +144,14 @@ export type MarkdownAction =
   | { type: "setFiles"; vaults: MarkdownVaultDto[] }
   | { type: "toggleExpand"; nodeId: string }
   | { type: "setExpanded"; nodeId: string; open: boolean }
-  | { type: "openFile"; path: string; doc: string; gotoLine?: number }
+  | {
+      type: "openFile";
+      path: string;
+      doc: string;
+      gotoLine?: number;
+      /** Defaults to `"markdown"`; pass `"excalidraw"` for drawings. */
+      kind?: TabKind;
+    }
   | { type: "closeFile" }
   | { type: "selectTab"; id: string; gotoLine?: number }
   | { type: "closeTab"; id: string }
@@ -207,6 +227,7 @@ function reducer(state: MarkdownState, action: MarkdownAction): MarkdownState {
         path: action.path,
         doc: action.doc,
         dirty: false,
+        kind: action.kind ?? "markdown",
       };
       return {
         ...state,

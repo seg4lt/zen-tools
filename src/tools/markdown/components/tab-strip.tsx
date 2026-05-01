@@ -26,7 +26,7 @@
  */
 
 import { useLayoutEffect, useMemo, useRef } from "react";
-import { FileText, X } from "lucide-react";
+import { FileText, PenLine, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useMarkdownStore, type TabState } from "../store/markdown-store";
 import { basenameNoExt } from "../lib/tauri";
@@ -97,6 +97,7 @@ interface TabProps {
 
 function Tab({ tab, active, subtitle, onSelect, onClose }: TabProps) {
   const name = basenameNoExt(tab.path);
+  const Icon = tab.kind === "excalidraw" ? PenLine : FileText;
   return (
     <div
       role="tab"
@@ -129,10 +130,14 @@ function Tab({ tab, active, subtitle, onSelect, onClose }: TabProps) {
         )}
       />
 
-      <FileText
+      <Icon
         className={cn(
           "size-3.5 shrink-0",
-          active ? "text-primary/80" : "text-muted-foreground/60",
+          active
+            ? tab.kind === "excalidraw"
+              ? "text-violet-500/90"
+              : "text-primary/80"
+            : "text-muted-foreground/60",
         )}
       />
 

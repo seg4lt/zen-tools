@@ -29,12 +29,26 @@ export function useOpenFile() {
       // open a duplicate tab even when `foo.md` is already open via
       // the sidebar.
       const path = normalizePath(rawPath);
+      // Drawings get their own tab kind so the view layer mounts the
+      // Excalidraw pane instead of CodeMirror.  We don't read the SVG
+      // here — it can be megabytes and shouldn't sit in `tab.doc`
+      // bouncing through reducer churn on every keystroke; the
+      // Excalidraw editor reads it directly from disk on mount.
+      const isExcalidraw = path.toLowerCase().endsWith(".excalidraw.svg");
       try {
         // Avoid re-reading from disk when the file is already open as
         // a tab — we'd clobber any dirty edits the user has made.
         const existing = state.tabs.find((t) => t.path === path);
         if (existing) {
           dispatch({ type: "selectTab", id: existing.id, gotoLine });
+        } else if (isExcalidraw) {
+          dispatch({
+            type: "openFile",
+            path,
+            doc: "",
+            gotoLine,
+            kind: "excalidraw",
+          });
         } else {
           const doc = await markdownTauri.readFile(path);
           dispatch({ type: "openFile", path, doc, gotoLine });

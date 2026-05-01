@@ -14,7 +14,16 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 // ────────────────────────────────────────────────────────────────────────
 
 /** What sort of leaf this item is — drives icon + click behaviour. */
-export type MarkdownItemKind = "markdown" | "image" | "directory";
+export type MarkdownItemKind =
+  | "markdown"
+  | "image"
+  | "directory"
+  // Excalidraw drawings — files named `*.excalidraw.svg` carry an
+  // embedded scene we can re-open in the drawing pane.  The Rust
+  // walker emits this kind explicitly; the matching branch sits
+  // *before* the generic `image` branch so plain SVGs still get
+  // `kind: "image"`.
+  | "excalidraw";
 
 /** Flowstate-style content-search options.  Field names match the
  *  camelCase the Rust DTO expects (`#[serde(rename_all = "camelCase")]`). */
@@ -184,6 +193,13 @@ export function basenameNoExt(path: string): string {
   const last = path.split("/").pop() ?? path;
   const dot = last.lastIndexOf(".");
   return dot > 0 ? last.slice(0, dot) : last;
+}
+
+/** Full basename — used by the header label for non-`.md` tabs (e.g.
+ *  `Sketch.excalidraw.svg`) where stripping the extension would lose
+ *  meaningful information. */
+export function basename(path: string): string {
+  return path.split("/").pop() ?? path;
 }
 
 /** Parent directory of an absolute path. Returns `""` when none. */

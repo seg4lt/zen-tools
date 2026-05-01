@@ -209,6 +209,17 @@ fn collect_markdown(dir: &Path, items: &mut Vec<MarkdownFileItem>, depth: usize)
                 depth,
                 kind: "markdown".to_string(),
             });
+        } else if is_excalidraw(&name) {
+            // Must come BEFORE `is_image` — excalidraw drawings end in
+            // `.svg` and would otherwise get the generic image kind,
+            // making them unclickable in the sidebar.
+            items.push(MarkdownFileItem {
+                name,
+                path: path.to_string_lossy().to_string(),
+                is_dir: false,
+                depth,
+                kind: "excalidraw".to_string(),
+            });
         } else if is_image(&name) {
             items.push(MarkdownFileItem {
                 name,
@@ -240,6 +251,14 @@ fn is_image(name: &str) -> bool {
         || lower.ends_with(".avif")
 }
 
+/// Excalidraw drawings.  We only treat the *double-extension* form as
+/// editable drawings — a plain `.svg` is just an image, but anything
+/// suffixed `.excalidraw.svg` carries an embedded scene we know how to
+/// open in the drawing pane.
+fn is_excalidraw(name: &str) -> bool {
+    name.to_ascii_lowercase().ends_with(".excalidraw.svg")
+}
+
 fn has_included_descendant(dir: &Path) -> bool {
     let Ok(entries) = fs::read_dir(dir) else {
         return false;
@@ -249,7 +268,7 @@ fn has_included_descendant(dir: &Path) -> bool {
         if path.is_file() {
             if let Some(name) = path.file_name() {
                 let n = name.to_string_lossy();
-                if is_markdown(&n) || is_image(&n) {
+                if is_markdown(&n) || is_excalidraw(&n) || is_image(&n) {
                     return true;
                 }
             }
@@ -343,8 +362,14 @@ pub async fn markdown_create_file(
             "name must not contain path separators".into(),
         ));
     }
-    let needs_ext = !is_markdown(trimmed);
-    let with_ext = if needs_ext {
+    // Preserve any extension the user typed verbatim (so
+    // `Foo.excalidraw.svg`, `notes.txt`, etc. stay as-is).  Only when
+    // the user supplies a bare name with NO extension at all do we
+    // append `.md` — that's the common-case "New file → Untitled"
+    // shortcut.  `Path::new(...).extension()` is `None` for `"Foo"`
+    // but `Some("svg")` for `"Foo.excalidraw.svg"`, which is exactly
+    // the partition we want.
+    let with_ext = if Path::new(trimmed).extension().is_none() {
         format!("{trimmed}.md")
     } else {
         trimmed.to_string()

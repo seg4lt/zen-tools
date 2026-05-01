@@ -7,9 +7,9 @@
  * store's `currentFile.path` changes.
  */
 
-import { useCallback, useEffect, useRef } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Keyboard, Save } from "lucide-react";
+import { Keyboard, Loader2, Save } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { tauri as httpTauri } from "@/tools/http-runner/lib/tauri";
 import { cn } from "@/lib/utils";
@@ -21,11 +21,18 @@ import {
   MarkdownEditor,
   type MarkdownEditorHandle,
 } from "./components/markdown-editor";
+// Excalidraw is ~3 MB worth of canvas + utility code.  Lazy-load it
+// behind a Suspense boundary so users who never open a drawing don't
+// pay the bundle cost.
+const ExcalidrawEditor = lazy(
+  () => import("./components/excalidraw-editor"),
+);
 import { activeTab, useMarkdownStore } from "./store/markdown-store";
 import { useOpenFile } from "./hooks/use-open-file";
 import { useVaults } from "./hooks/use-vaults";
 import { useMarkdownKeyboardNav } from "./hooks/use-keyboard-nav";
-import { basenameNoExt, dirname } from "./lib/tauri";
+import { basename, basenameNoExt, dirname } from "./lib/tauri";
+import { useTheme } from "@/hooks/use-theme";
 
 export function MarkdownView() {
   // Wire up Cmd+O / Cmd+Shift+O at this level so the listener
@@ -39,12 +46,25 @@ export function MarkdownView() {
   const queryClient = useQueryClient();
 
   const tab = activeTab(state);
+  const isExcalidraw = tab?.kind === "excalidraw";
+  const { theme } = useTheme();
 
   // Re-sync the editor's buffer whenever the *active tab id* changes
   // (i.e. user switched files), and consume any pending goto-line
   // request the search palette dropped in.
+  //
+  // Skipped entirely for Excalidraw tabs: the CodeMirror editor isn't
+  // mounted, the imperative ref is null, and `tab.doc` is an empty
+  // sentinel.  The drawing pane manages its own load/save lifecycle.
   const lastTabIdRef = useRef<string | null>(null);
   useEffect(() => {
+    if (isExcalidraw) {
+      // Track the active tab id even when CodeMirror is unmounted so
+      // a switch back to a markdown tab still triggers a `setValue`
+      // sync rather than thinking nothing has changed.
+      lastTabIdRef.current = tab?.id ?? null;
+      return;
+    }
     const handle = editorRef.current;
     if (!handle) return;
 
@@ -72,7 +92,7 @@ export function MarkdownView() {
         dispatch({ type: "clearGotoLine" });
       }
     });
-  }, [tab?.id, tab?.doc, state.pendingGotoLine, dispatch]);
+  }, [tab?.id, tab?.doc, isExcalidraw, state.pendingGotoLine, dispatch]);
 
   // Vim toggle plumbing — same prefs key as http-runner.  Lazy load,
   // default `true` to match the tool's historical behaviour.
@@ -176,12 +196,15 @@ export function MarkdownView() {
         }
         target = `${dir}/${decoded}`;
       }
-      // Only markdown gets the editor treatment; other files would
-      // render as garbage in CodeMirror.
-      const isMarkdown = /\.(md|markdown|mdown|mkd)$/i.test(target);
-      if (!isMarkdown) {
+      // Markdown OR Excalidraw drawings open in the editor — the
+      // tab kind determines which pane mounts (CodeMirror vs the
+      // drawing canvas).  Plain images would render as garbage in
+      // CodeMirror, so they remain ignored.
+      const isMarkdownLike = /\.(md|markdown|mdown|mkd)$/i.test(target);
+      const isExcalidrawLink = /\.excalidraw\.svg$/i.test(target);
+      if (!isMarkdownLike && !isExcalidrawLink) {
         console.info(
-          "[markdown] non-markdown link click ignored (no app handler yet):",
+          "[markdown] non-text link click ignored (no app handler yet):",
           target,
         );
         return;
@@ -227,7 +250,13 @@ export function MarkdownView() {
             )}
             title={tab.path}
           >
-            {tab.dirty ? "●" : ""} {basenameNoExt(tab.path)}.md
+            {tab.dirty ? "●" : ""}{" "}
+            {/* Excalidraw + non-`.md` markdown variants need the full
+             *  basename so the suffix is visible.  Pre-existing
+             *  behaviour for `*.md` was `<stem>.md`, preserved. */}
+            {isExcalidraw
+              ? basename(tab.path)
+              : `${basenameNoExt(tab.path)}.md`}
           </span>
         ) : null}
         <div className="ml-auto flex items-center gap-1">
@@ -243,24 +272,30 @@ export function MarkdownView() {
               <Save className="size-3" /> Save
             </Button>
           ) : null}
-          <Button
-            size="xs"
-            variant="ghost"
-            onClick={() => void onToggleVim()}
-            title={
-              prefs?.vimMode
-                ? "Vim mode is ON — click to disable globally"
-                : "Vim mode is OFF — click to enable globally"
-            }
-            className={cn(
-              "gap-1 font-mono uppercase tracking-wider",
-              prefs?.vimMode
-                ? "text-emerald-600 dark:text-emerald-400"
-                : "text-muted-foreground",
-            )}
-          >
-            <Keyboard className="size-3" /> vim {prefs?.vimMode ? "on" : "off"}
-          </Button>
+          {/* Vim mode applies only to the CodeMirror text editor —
+           *  hide the toggle in the Excalidraw drawing pane where
+           *  the chrome would just be confusing. */}
+          {!isExcalidraw && (
+            <Button
+              size="xs"
+              variant="ghost"
+              onClick={() => void onToggleVim()}
+              title={
+                prefs?.vimMode
+                  ? "Vim mode is ON — click to disable globally"
+                  : "Vim mode is OFF — click to enable globally"
+              }
+              className={cn(
+                "gap-1 font-mono uppercase tracking-wider",
+                prefs?.vimMode
+                  ? "text-emerald-600 dark:text-emerald-400"
+                  : "text-muted-foreground",
+              )}
+            >
+              <Keyboard className="size-3" /> vim{" "}
+              {prefs?.vimMode ? "on" : "off"}
+            </Button>
+          )}
         </div>
       </div>
       <div className="flex min-h-0 flex-1">
@@ -268,23 +303,50 @@ export function MarkdownView() {
         <div className="flex min-h-0 flex-1 flex-col">
           <TabStrip />
           {hasFile ? (
-            // The editor stays mounted across tab switches — we pump
-            // fresh content through the imperative handle when
-            // `activeTabId` changes.  Cursor + undo history reset on
-            // switch in v1.
-            <MarkdownEditor
-              imperativeRef={editorRef}
-              value={tab?.doc ?? ""}
-              onChange={onChange}
-              onSave={onSave}
-              vimMode={vimMode}
-              getDocDir={getDocDir}
-              getCurrentPath={getCurrentPath}
-              getWikilinkCandidates={getCandidates}
-              onWikilinkOpen={onWikilinkOpen}
-              onLinkOpen={onLinkOpen}
-              onImageSaved={onImageSaved}
-            />
+            isExcalidraw ? (
+              // Drawings get a remount per tab id so the lazy
+              // import + initial-data load run once per file.
+              // The fallback shows while the ~3 MB chunk loads.
+              <Suspense
+                fallback={
+                  <div className="flex h-full w-full items-center justify-center text-xs text-muted-foreground">
+                    <Loader2 className="mr-2 size-4 animate-spin" /> loading
+                    drawing…
+                  </div>
+                }
+              >
+                <ExcalidrawEditor
+                  key={tab!.id}
+                  path={tab!.path}
+                  theme={theme}
+                  onDirty={() =>
+                    dispatch({
+                      type: "editDoc",
+                      doc: "__excalidraw_dirty__",
+                    })
+                  }
+                  onSave={(svg) => void saveCurrent(svg)}
+                />
+              </Suspense>
+            ) : (
+              // The editor stays mounted across tab switches — we
+              // pump fresh content through the imperative handle
+              // when `activeTabId` changes.  Cursor + undo history
+              // reset on switch in v1.
+              <MarkdownEditor
+                imperativeRef={editorRef}
+                value={tab?.doc ?? ""}
+                onChange={onChange}
+                onSave={onSave}
+                vimMode={vimMode}
+                getDocDir={getDocDir}
+                getCurrentPath={getCurrentPath}
+                getWikilinkCandidates={getCandidates}
+                onWikilinkOpen={onWikilinkOpen}
+                onLinkOpen={onLinkOpen}
+                onImageSaved={onImageSaved}
+              />
+            )
           ) : (
             <EmptyState
               hasVaults={hasVaults}
