@@ -380,6 +380,7 @@ export function DatabaseExplorerView() {
             <ResultsPane
               connectionId={activeId}
               results={results}
+              error={error}
               maximized={resultsMaximized}
               onToggleMaximize={() => setResultsMaximized((m) => !m)}
             />

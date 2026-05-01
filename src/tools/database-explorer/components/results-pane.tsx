@@ -4,9 +4,14 @@
  * Each statement in a Run produces one tab. Click a tab to view its
  * grid; click the X to close it (the rest stay). New runs replace the
  * tab set.
+ *
+ * Errors take over the pane completely — the run-toolbar still shows a
+ * truncated red one-liner, but the actual diagnostic surface is here:
+ * full-text monospaced, scrollable, never clipped.
  */
 
-import { Maximize2, Minimize2, X } from "lucide-react";
+import { useState } from "react";
+import { AlertCircle, Copy, Maximize2, Minimize2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { ResultsGrid } from "./results-grid";
@@ -16,6 +21,12 @@ import type { DbQueryResult } from "../lib/tauri";
 interface ResultsPaneProps {
   connectionId: string | null;
   results: DbQueryResult[] | null;
+  /**
+   * Latest error for the active connection, or `null` when the last
+   * run succeeded. When set, the pane renders a full-text error card
+   * instead of (or above) the result tabs.
+   */
+  error: string | null;
   /** True when the pane has taken over the centre column. */
   maximized: boolean;
   /** Flip `maximized`. The icon on each tab calls this. */
@@ -25,10 +36,19 @@ interface ResultsPaneProps {
 export function ResultsPane({
   connectionId,
   results,
+  error,
   maximized,
   onToggleMaximize,
 }: ResultsPaneProps) {
   const { state, dispatch } = useDbExplorerStore();
+
+  // Error card takes precedence over an empty-state. If there are
+  // also previous results, we still surface the error on top so the
+  // user can read it without scrolling/clicking — running a bad
+  // query right after a good one shouldn't bury the diagnostic.
+  if (error) {
+    return <ErrorCard message={error} hasPriorResults={!!results?.length} />;
+  }
 
   if (!connectionId || !results || results.length === 0) {
     return (
@@ -160,6 +180,71 @@ function TabStrip({
           )}
         </Button>
       </div>
+    </div>
+  );
+}
+
+/**
+ * Full-fidelity error display. The toolbar shows a one-liner; this is
+ * the place where the user actually reads the message.
+ *
+ * Renders the entire error message in a monospaced block with scroll
+ * (long Postgres `syntax error … near "blah"` traces stay legible).
+ * A copy button lifts the message to the clipboard for pasting into
+ * a bug report or asking for help — losing the error to a re-run is
+ * a frequent annoyance worth one button.
+ */
+function ErrorCard({
+  message,
+  hasPriorResults,
+}: {
+  message: string;
+  hasPriorResults: boolean;
+}) {
+  const [copied, setCopied] = useState(false);
+
+  const onCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(message);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1_500);
+    } catch {
+      // Soft-fail — clipboard access can be denied; the message is
+      // still selectable in the rendered <pre>.
+    }
+  };
+
+  return (
+    <div className="flex h-full min-h-0 flex-col bg-destructive/5">
+      <div className="flex shrink-0 items-center gap-2 border-b border-destructive/40 bg-destructive/10 px-3 py-2">
+        <AlertCircle className="size-4 shrink-0 text-destructive" />
+        <span className="font-semibold text-destructive">Query error</span>
+        {hasPriorResults ? (
+          <span className="ml-1 text-[11px] text-muted-foreground">
+            (previous results discarded)
+          </span>
+        ) : null}
+        <span className="flex-1" />
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={onCopy}
+          className="h-6 gap-1 px-2 text-[11px]"
+          title="Copy full error to clipboard"
+        >
+          <Copy className="size-3" />
+          {copied ? "Copied" : "Copy"}
+        </Button>
+      </div>
+      <pre
+        // Selectable, wraps long lines, scrolls vertically when the
+        // message is taller than the pane. Monospace + slightly
+        // larger leading so multi-line stack-trace-like errors
+        // stay readable.
+        className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-words px-4 py-3 font-mono text-xs leading-5 text-destructive"
+      >
+        {message}
+      </pre>
     </div>
   );
 }
