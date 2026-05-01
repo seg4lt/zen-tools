@@ -236,14 +236,21 @@ export interface RunHistoryEntry {
 }
 
 /**
- * Persisted UI state — open project list, folder expansion, and the
- * Vim-mode toggle. Mirrors the Rust `Preferences` struct.
+ * Persisted UI state — mirrors a *subset* of the Rust `Preferences`
+ * struct. The Rust side has more fields (cleaner, markdown, database
+ * explorer, …) but the http-runner only consumes / writes these.
+ * Other tools that round-trip prefs do `{ ...prefs, myField: ... }`
+ * so unknown fields survive untouched.
  */
 export interface Preferences {
   workingDirs: string[];
   expandedPaths: string[];
   /** `true` when the editor's Vim keybindings should be active. */
   vimMode: boolean;
+  /** Whole-app CSS zoom level on `<html>`. Default 1.0. */
+  appZoom?: number;
+  /** User-defined tool ordering for the title-bar pills. */
+  toolOrder?: string[];
 }
 
 // ────────────────────────────────────────────────────────────────────────────

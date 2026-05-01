@@ -12,6 +12,8 @@ import { ProcessMonitorShell } from "@/tools/process-monitor/ProcessMonitorShell
 import { CleanerShell } from "@/tools/cleaner/CleanerShell";
 import { MarkdownShell } from "@/tools/markdown/MarkdownShell";
 import { DatabaseExplorerShell } from "@/tools/database-explorer/DatabaseExplorerShell";
+import { SettingsShell } from "@/tools/settings/SettingsShell";
+import { readLastRoute } from "@/hooks/use-last-route";
 
 const rootRoute = createRootRoute({
   component: () => (
@@ -28,7 +30,12 @@ const indexRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/",
   beforeLoad: () => {
-    throw redirect({ to: "/http-runner/requests" });
+    // Resume on the last route the user was viewing (sync read from
+    // localStorage; see use-last-route.tsx). Falls back to the HTTP
+    // runner's requests view on first launch / cleared storage / when
+    // the saved string fails the simple `/`-prefix sanity check.
+    const target = readLastRoute() ?? "/http-runner/requests";
+    throw redirect({ to: target });
   },
 });
 
@@ -87,6 +94,12 @@ const databaseExplorerRoute = createRoute({
   component: DatabaseExplorerShell,
 });
 
+const settingsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/settings",
+  component: SettingsShell,
+});
+
 const routeTree = rootRoute.addChildren([
   indexRoute,
   httpRunnerRoute.addChildren([
@@ -98,6 +111,7 @@ const routeTree = rootRoute.addChildren([
   cleanerRoute,
   markdownRoute,
   databaseExplorerRoute,
+  settingsRoute,
 ]);
 
 export const router = createRouter({

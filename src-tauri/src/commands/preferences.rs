@@ -62,6 +62,16 @@ pub struct Preferences {
     /// workspace, in user-defined order. Persists across launches.
     #[serde(default)]
     pub sql_workspace_dirs: Vec<String>,
+    /// Whole-app zoom level (CSS `zoom` on the root document).
+    /// Default `1.0`. Bound to ⌘= / ⌘− / ⌘0 in the UI.
+    #[serde(default = "default_app_zoom")]
+    pub app_zoom: f64,
+    /// User-defined order of tool ids (matches `Tool.id` in
+    /// `src/config/tools.ts`). Empty/missing falls back to the
+    /// canonical TOOLS order; ids removed from TOOLS are dropped at
+    /// read time; tools missing from the saved list get appended.
+    #[serde(default)]
+    pub tool_order: Vec<String>,
 }
 
 /// One persisted Database Explorer connection. Mirrors
@@ -106,6 +116,10 @@ fn default_vim_mode() -> bool {
     true
 }
 
+fn default_app_zoom() -> f64 {
+    1.0
+}
+
 impl Default for Preferences {
     fn default() -> Self {
         Self {
@@ -118,6 +132,8 @@ impl Default for Preferences {
             markdown_recent_files: Vec::new(),
             db_connections: Vec::new(),
             sql_workspace_dirs: Vec::new(),
+            app_zoom: default_app_zoom(),
+            tool_order: Vec::new(),
         }
     }
 }

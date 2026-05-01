@@ -1,18 +1,17 @@
 /**
  * Right-rail list of saved connections. Single-row design: name +
- * status are always visible; Connect/Disconnect + Edit appear on hover.
- * Delete moved into the edit dialog (a destructive button in the
- * dialog footer) so the row itself stays clean.
+ * status are always visible; only Edit appears on hover.
+ * Delete moved into the edit dialog. Connect / disconnect are not
+ * buttons — double-click the row to toggle.
  *
- * Click row → make active. Double-click → connect.
+ * Click row       → make active
+ * Double-click    → connect (if disconnected) or disconnect (if connected)
  */
 
 import {
   Database,
   Plus,
   Pencil,
-  Plug,
-  Unplug,
   Loader2,
   CheckCircle2,
   AlertCircle,
@@ -90,64 +89,43 @@ export function ConnectionList({ onCollapse }: ConnectionListProps = {}) {
                 isActive ? "bg-muted" : "hover:bg-muted/50",
               )}
             >
-              {/* Title — fills the row, click = select, dblclick = connect. */}
+              {/* Title — fills the row. Click = select, dblclick =
+                  toggle connect/disconnect. The buttons are gone; the
+                  row IS the action surface. */}
               <button
                 type="button"
                 className="flex min-w-0 flex-1 items-center gap-2 text-left"
                 onClick={() =>
                   dispatch({ type: "set-active-connection", id: c.id })
                 }
-                onDoubleClick={() => handleConnect(c)}
-                title={`${c.name} — double-click to connect`}
+                onDoubleClick={() => {
+                  if (connected) void disconnect(c.id);
+                  else void handleConnect(c);
+                }}
+                title={
+                  connected
+                    ? `${c.name} — double-click to disconnect`
+                    : `${c.name} — double-click to connect`
+                }
               >
                 <Database className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                 <span className="flex-1 truncate text-sm">{c.name}</span>
               </button>
 
-              {/* Hover-revealed actions on the same row. */}
-              <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition group-hover:opacity-100">
-                {connected ? (
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    className="h-5 gap-1 px-1.5 text-[10px]"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      void disconnect(c.id);
-                    }}
-                    title="Disconnect"
-                  >
-                    <Unplug className="size-3" />
-                    Disconnect
-                  </Button>
-                ) : (
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    className="h-5 gap-1 px-1.5 text-[10px]"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      void handleConnect(c);
-                    }}
-                    title="Connect"
-                  >
-                    <Plug className="size-3" />
-                    Connect
-                  </Button>
-                )}
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  className="h-5 w-5 p-0"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    dispatch({ type: "open-form", mode: { editId: c.id } });
-                  }}
-                  title="Edit (Delete lives inside the edit dialog)"
-                >
-                  <Pencil className="size-3" />
-                </Button>
-              </div>
+              {/* Edit is the only hover-revealed action — Delete lives
+                  inside the edit dialog, Connect/Disconnect via dblclick. */}
+              <Button
+                size="sm"
+                variant="ghost"
+                className="h-5 w-5 shrink-0 p-0 opacity-0 transition group-hover:opacity-100"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  dispatch({ type: "open-form", mode: { editId: c.id } });
+                }}
+                title="Edit (Delete lives inside the edit dialog)"
+              >
+                <Pencil className="size-3" />
+              </Button>
 
               {/* Status indicator pinned at the right edge. */}
               <StatusBadge status={status} />
