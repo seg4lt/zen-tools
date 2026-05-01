@@ -509,6 +509,12 @@ function routineKey(
 const routineCache: Map<RoutineKey, DbRoutineDescription[]> = new Map();
 const routineInflight: Map<RoutineKey, Promise<DbRoutineDescription[]>> =
   new Map();
+/**
+ * Per-`(conn, db, schema)` unix-ms timestamp of the most recent
+ * routine fetch. The DB-tree exposes it as a "Cached X ago" tooltip
+ * on each routine leaf — same affordance the table rows carry.
+ */
+const routineFetchedAt: Map<RoutineKey, number> = new Map();
 
 /** Routine subscribers fire when a `(conn, db, schema)` bucket
  * changes (loaded for the first time, or refreshed). */
@@ -551,6 +557,7 @@ export async function ensureRoutines(
     .listRoutines(connectionId, database, schema)
     .then((rows) => {
       routineCache.set(key, rows);
+      routineFetchedAt.set(key, Date.now());
       routineInflight.delete(key);
       for (const fn of routineListeners) {
         fn({ connectionId, database, schema, routines: rows });
@@ -565,6 +572,17 @@ export async function ensureRoutines(
   return promise;
 }
 
+/** Unix-ms timestamp of the last routine fetch for `(conn, db,
+ * schema)`, or `undefined` if never fetched. Used by the DB-tree
+ * tooltip — same "Cached X ago" affordance the table rows carry. */
+export function readRoutinesFetchedAt(
+  connectionId: string,
+  database: string,
+  schema: string,
+): number | undefined {
+  return routineFetchedAt.get(routineKey(connectionId, database, schema));
+}
+
 /** Force-refresh after the user (or external migration) might have
  * created new routines. Drops the cached list, then re-ensures. */
 export async function refreshRoutines(
@@ -575,6 +593,7 @@ export async function refreshRoutines(
   const key = routineKey(connectionId, database, schema);
   routineCache.delete(key);
   routineInflight.delete(key);
+  routineFetchedAt.delete(key);
   return ensureRoutines(connectionId, database, schema);
 }
 
