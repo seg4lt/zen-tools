@@ -74,6 +74,45 @@ export interface DbForeignKeyDescription {
   referencedColumns: string[];
 }
 
+/** PRIMARY KEY or UNIQUE constraint surfaced under a table's "Keys"
+ * folder. Mirrors `zen_db::KeyDescription`. */
+export interface DbKeyDescription {
+  name: string;
+  columns: string[];
+  isPrimary: boolean;
+}
+
+/** CHECK constraint. Mirrors `zen_db::CheckDescription`. */
+export interface DbCheckDescription {
+  name: string;
+  expression: string;
+}
+
+/** Trigger metadata. Mirrors `zen_db::TriggerDescription`. */
+export interface DbTriggerDescription {
+  name: string;
+  /** "BEFORE" | "AFTER" | "INSTEAD OF". */
+  timing: string;
+  /** Any combination of "INSERT" / "UPDATE" / "DELETE" / "TRUNCATE". */
+  events: string[];
+  /** `CREATE TRIGGER` body when the driver exposes it cheaply. */
+  definition: string | null;
+}
+
+/** Whether a routine is a function or a stored procedure. */
+export type DbRoutineKind = "function" | "procedure";
+
+/** Stored procedure / function. Schema-scoped. Mirrors
+ * `zen_db::RoutineDescription`. */
+export interface DbRoutineDescription {
+  schema: string;
+  name: string;
+  kind: DbRoutineKind;
+  language: string | null;
+  returnType: string | null;
+  argumentTypes: string[];
+}
+
 /**
  * Mirrors `zen_db::TableSummary`. Lightweight — used to seed the SQL
  * editor's autocomplete catalog (schemas + qualified tables) cold,
@@ -94,6 +133,12 @@ export interface DbTableDescription {
   columns: DbColumnDescription[];
   indexes: DbIndexDescription[];
   foreignKeys: DbForeignKeyDescription[];
+  /** PRIMARY KEY + UNIQUE constraints. */
+  keys: DbKeyDescription[];
+  /** CHECK constraints. */
+  checks: DbCheckDescription[];
+  /** Trigger metadata. */
+  triggers: DbTriggerDescription[];
 }
 
 /** Lightweight cache-listing row — used for freshness badges. */
@@ -217,6 +262,20 @@ export const dbTauri = {
    */
   listAllTables: (id: string, database: string) =>
     invoke<DbTableSummary[]>("db_list_all_tables", { id, database }),
+
+  /**
+   * Stored procedures + functions in `database.schema`. Drives the
+   * per-schema "Routines" folder in the DB tree. Front-end caches
+   * results for the session — no SQLite persistence, since the
+   * query is one round-trip and routine churn often aligns with
+   * migrations the user is actively iterating on.
+   */
+  listRoutines: (id: string, database: string, schema: string) =>
+    invoke<DbRoutineDescription[]>("db_list_routines", {
+      id,
+      database,
+      schema,
+    }),
 
   // ── Query ─────────────────────────────────────────────────────────────
 

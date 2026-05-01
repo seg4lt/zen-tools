@@ -129,9 +129,82 @@ pub struct ForeignKeyDescription {
     pub referenced_columns: Vec<String>,
 }
 
-/// Full description of a single table, suitable for both autocomplete
-/// (columns) and a future "table details" pane (indexes, FKs). Drivers
-/// fill in what they cheaply can; everything else stays empty.
+/// PRIMARY KEY or UNIQUE constraint surfaced under the table's "Keys"
+/// folder. `is_primary` distinguishes the two so the UI can show
+/// `🔑 PRIMARY` vs `UNIQUE` consistently.
+///
+/// The column-level `ColumnDescription::is_primary_key` flag remains
+/// the cheap-to-render answer to "is this column a PK"; this struct
+/// is the catalogue-level view the tree uses.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeyDescription {
+    /// Constraint name (driver-native).
+    pub name: String,
+    /// Columns that participate in the key, ordered.
+    pub columns: Vec<String>,
+    /// `true` for the table's PRIMARY KEY; `false` for UNIQUE keys.
+    #[serde(default)]
+    pub is_primary: bool,
+}
+
+/// CHECK constraint. The expression is the driver-native source —
+/// `pg_get_constraintdef(oid)` on Postgres, the `definition` column
+/// on MSSQL.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckDescription {
+    pub name: String,
+    pub expression: String,
+}
+
+/// Trigger metadata. `timing` ("BEFORE", "AFTER", "INSTEAD OF") and
+/// `events` (any combination of "INSERT", "UPDATE", "DELETE",
+/// "TRUNCATE") come straight from the catalogue; `definition` is the
+/// `CREATE TRIGGER` body when the driver exposes it cheaply.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TriggerDescription {
+    pub name: String,
+    pub timing: String,
+    pub events: Vec<String>,
+    pub definition: Option<String>,
+}
+
+/// Whether a routine is a function or a stored procedure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RoutineKind {
+    Function,
+    Procedure,
+}
+
+/// Stored procedure or function. Schema-scoped, returned by
+/// [`crate::DbConnection::list_routines`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoutineDescription {
+    /// Schema (Postgres) / owner (MSSQL) the routine belongs to.
+    pub schema: String,
+    /// Routine name.
+    pub name: String,
+    pub kind: RoutineKind,
+    /// Postgres: `plpgsql`, `sql`, `c`, … MSSQL: `Some("sql")` for all
+    /// T-SQL routines, `None` for CLR.
+    pub language: Option<String>,
+    /// Formatted return type for functions; `None` for procedures.
+    pub return_type: Option<String>,
+    /// Formatted argument types in declaration order. Empty for
+    /// zero-argument routines.
+    pub argument_types: Vec<String>,
+}
+
+/// Full description of a single table. Drivers fill in what they
+/// cheaply can; everything else stays empty. Backwards-compatible
+/// fields (`indexes`, `foreign_keys`, `keys`, `checks`, `triggers`)
+/// use `#[serde(default)]` so old `schema_cache.db` payloads
+/// deserialise cleanly into the current shape — they re-fill on the
+/// next describe.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TableDescription {
@@ -144,6 +217,15 @@ pub struct TableDescription {
     pub indexes: Vec<IndexDescription>,
     #[serde(default)]
     pub foreign_keys: Vec<ForeignKeyDescription>,
+    /// PRIMARY KEY + UNIQUE constraints.
+    #[serde(default)]
+    pub keys: Vec<KeyDescription>,
+    /// CHECK constraints.
+    #[serde(default)]
+    pub checks: Vec<CheckDescription>,
+    /// Trigger metadata.
+    #[serde(default)]
+    pub triggers: Vec<TriggerDescription>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use thiserror::Error;
 
-use crate::types::{QueryResult, TableDescription, TableSummary};
+use crate::types::{QueryResult, RoutineDescription, TableDescription, TableSummary};
 
 #[derive(Debug, Error)]
 pub enum DbError {
@@ -52,15 +52,27 @@ pub trait DbConnection: Send + Sync {
     /// `list_tables` call per schema.
     async fn list_all_tables(&mut self, database: &str) -> DbResult<Vec<TableSummary>>;
 
-    /// Describe a single table: columns now, indexes/FKs in a future
-    /// revision. Drivers fill the cheap fields and leave the rest empty;
-    /// the shape is stable so the cache payload survives later upgrades.
+    /// Describe a single table: columns + keys + foreign keys +
+    /// indexes + checks + triggers. Drivers fill what they cheaply can;
+    /// the shape is stable so the cache payload survives later
+    /// upgrades.
     async fn describe_table(
         &mut self,
         database: &str,
         schema: &str,
         table: &str,
     ) -> DbResult<TableDescription>;
+
+    /// List stored procedures + functions in `database.schema`. Used
+    /// by the DB-tree's per-schema "Routines" folder. Session-only on
+    /// the front-end (not persisted in `schema_cache.db`) since the
+    /// query is one round-trip and the results churn alongside
+    /// migrations.
+    async fn list_routines(
+        &mut self,
+        database: &str,
+        schema: &str,
+    ) -> DbResult<Vec<RoutineDescription>>;
 
     /// Execute a single SQL statement and materialise the result.
     async fn execute(&mut self, sql: &str) -> DbResult<QueryResult>;

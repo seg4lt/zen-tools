@@ -354,6 +354,9 @@ mod tests {
             }],
             indexes: Vec::new(),
             foreign_keys: Vec::new(),
+            keys: Vec::new(),
+            checks: Vec::new(),
+            triggers: Vec::new(),
         }
     }
 
@@ -411,6 +414,53 @@ mod tests {
         cache.invalidate("c1", "db", "public", &[]).unwrap();
         let listed = cache.list_cached("c1", "db", "public").unwrap();
         assert!(listed.is_empty());
+    }
+
+    #[test]
+    fn legacy_payload_without_new_fields_still_decodes() {
+        // Simulates a `schema_cache.db` row written by an older build
+        // where `TableDescription` only had columns/indexes/FKs. New
+        // fields must default to `Vec::new()` so we don't blow up.
+        let cache = SchemaCache::open_at(":memory:").unwrap();
+        let legacy_payload = serde_json::json!({
+            "database": "db",
+            "schema": "public",
+            "name": "users",
+            "kind": "table",
+            "columns": [{
+                "name": "id",
+                "dataType": "integer",
+                "nullable": false,
+                "default": null,
+                "ordinal": 1,
+                "isPrimaryKey": true,
+            }],
+            // intentionally omit `keys`, `checks`, `triggers`
+        });
+        // Insert directly via raw upsert path; the cache layer
+        // treats the payload as opaque JSON, so this models exactly
+        // what an older binary would have written.
+        let conn = cache.inner.lock();
+        conn.execute(
+            "INSERT INTO table_schema (connection_id, database, schema, table_name, indexed_at, payload) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                "c1",
+                "db",
+                "public",
+                "users",
+                1_000_i64,
+                legacy_payload.to_string()
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let row = cache.get("c1", "db", "public", "users").unwrap().unwrap();
+        assert_eq!(row.description.columns.len(), 1);
+        assert!(row.description.keys.is_empty());
+        assert!(row.description.checks.is_empty());
+        assert!(row.description.triggers.is_empty());
     }
 
     #[test]

@@ -12,7 +12,9 @@ use tokio::sync::Mutex;
 use crate::driver::{DbConnection, DbError, DbResult};
 use crate::mssql::MsSqlConnection;
 use crate::postgres::PostgresConnection;
-use crate::types::{ConnectionConfig, DbDriver, QueryResult, TableDescription, TableSummary};
+use crate::types::{
+    ConnectionConfig, DbDriver, QueryResult, RoutineDescription, TableDescription, TableSummary,
+};
 
 type Slot = Arc<Mutex<Box<dyn DbConnection>>>;
 
@@ -109,6 +111,20 @@ impl ConnectionRegistry {
         let slot = self.slot(id)?;
         let mut conn = slot.lock().await;
         conn.describe_table(database, schema, table).await
+    }
+
+    /// Stored procedures + functions in `database.schema`. Single
+    /// round-trip; not cached at the registry level (front-end keeps
+    /// a session-scoped Map).
+    pub async fn list_routines(
+        &self,
+        id: &str,
+        database: &str,
+        schema: &str,
+    ) -> DbResult<Vec<RoutineDescription>> {
+        let slot = self.slot(id)?;
+        let mut conn = slot.lock().await;
+        conn.list_routines(database, schema).await
     }
 
     pub async fn execute(&self, id: &str, sql: &str) -> DbResult<QueryResult> {

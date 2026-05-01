@@ -14,8 +14,9 @@ use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 
 use crate::driver::{DbConnection, DbError, DbResult};
 use crate::types::{
-    Cell, Column, ColumnDescription, ConnectionConfig, QueryResult, TableDescription, TableKind,
-    TableSummary,
+    Cell, CheckDescription, Column, ColumnDescription, ConnectionConfig, ForeignKeyDescription,
+    IndexDescription, KeyDescription, QueryResult, RoutineDescription, RoutineKind,
+    TableDescription, TableKind, TableSummary, TriggerDescription,
 };
 
 type MsClient = Client<Compat<TcpStream>>;
@@ -266,56 +267,350 @@ impl DbConnection for MsSqlConnection {
         );
 
         let mut columns: Vec<ColumnDescription> = Vec::new();
-        let mut stream = self
-            .client
-            .simple_query(q)
-            .await
-            .map_err(|e| DbError::Query(e.to_string()))?;
-        while let Some(item) = stream
-            .try_next()
-            .await
-            .map_err(|e| DbError::Query(e.to_string()))?
+        // Wrap the columns stream in a block so it's dropped before
+        // the next `simple_query` borrows `self.client` mutably again.
+        // tiberius's `Client` is `!Sync` and the stream holds a
+        // `&mut Client` for its whole lifetime; sequential queries
+        // need scoped streams.
         {
-            if let QueryItem::Row(row) = item {
-                let name: String = row
-                    .try_get::<&str, _>("column_name")
-                    .ok()
-                    .flatten()
-                    .unwrap_or_default()
-                    .to_string();
-                let base_type: String = row
-                    .try_get::<&str, _>("data_type")
-                    .ok()
-                    .flatten()
-                    .unwrap_or_default()
-                    .to_string();
-                let char_max: Option<i32> = row.try_get::<i32, _>("char_max").ok().flatten();
-                let num_prec: Option<u8> = row.try_get::<u8, _>("num_prec").ok().flatten();
-                let num_scale: Option<i32> = row.try_get::<i32, _>("num_scale").ok().flatten();
-                let is_nullable: String = row
-                    .try_get::<&str, _>("is_nullable")
-                    .ok()
-                    .flatten()
-                    .unwrap_or("YES")
-                    .to_string();
-                let default: Option<String> = row
-                    .try_get::<&str, _>("column_default")
-                    .ok()
-                    .flatten()
-                    .map(|s| s.to_string());
-                let ordinal: i32 = row.try_get::<i32, _>("ordinal_position").ok().flatten().unwrap_or(0);
-                let is_pk_raw: i32 = row.try_get::<i32, _>("is_pk").ok().flatten().unwrap_or(0);
+            let mut stream = self
+                .client
+                .simple_query(q)
+                .await
+                .map_err(|e| DbError::Query(e.to_string()))?;
+            while let Some(item) = stream
+                .try_next()
+                .await
+                .map_err(|e| DbError::Query(e.to_string()))?
+            {
+                if let QueryItem::Row(row) = item {
+                    let name: String = row
+                        .try_get::<&str, _>("column_name")
+                        .ok()
+                        .flatten()
+                        .unwrap_or_default()
+                        .to_string();
+                    let base_type: String = row
+                        .try_get::<&str, _>("data_type")
+                        .ok()
+                        .flatten()
+                        .unwrap_or_default()
+                        .to_string();
+                    let char_max: Option<i32> = row.try_get::<i32, _>("char_max").ok().flatten();
+                    let num_prec: Option<u8> = row.try_get::<u8, _>("num_prec").ok().flatten();
+                    let num_scale: Option<i32> = row.try_get::<i32, _>("num_scale").ok().flatten();
+                    let is_nullable: String = row
+                        .try_get::<&str, _>("is_nullable")
+                        .ok()
+                        .flatten()
+                        .unwrap_or("YES")
+                        .to_string();
+                    let default: Option<String> = row
+                        .try_get::<&str, _>("column_default")
+                        .ok()
+                        .flatten()
+                        .map(|s| s.to_string());
+                    let ordinal: i32 =
+                        row.try_get::<i32, _>("ordinal_position").ok().flatten().unwrap_or(0);
+                    let is_pk_raw: i32 = row.try_get::<i32, _>("is_pk").ok().flatten().unwrap_or(0);
 
-                let data_type = format_mssql_type(&base_type, char_max, num_prec, num_scale);
+                    let data_type = format_mssql_type(&base_type, char_max, num_prec, num_scale);
 
-                columns.push(ColumnDescription {
-                    name,
-                    data_type,
-                    nullable: is_nullable.eq_ignore_ascii_case("YES"),
-                    default,
-                    ordinal,
-                    is_primary_key: is_pk_raw != 0,
-                });
+                    columns.push(ColumnDescription {
+                        name,
+                        data_type,
+                        nullable: is_nullable.eq_ignore_ascii_case("YES"),
+                        default,
+                        ordinal,
+                        is_primary_key: is_pk_raw != 0,
+                    });
+                }
+            }
+        }
+
+        // ── Keys (PRIMARY KEY + UNIQUE) ──────────────────────────────
+        // `sys.key_constraints` stores the PK/UQ catalogue; the
+        // associated `sys.indexes` row gives us the column ordering
+        // via `sys.index_columns`. One row per (constraint, column)
+        // pair — collapsed into the `KeyDescription` Vec in Rust.
+        let q_keys = format!(
+            "SELECT \
+                kc.name AS name, \
+                kc.type AS kc_type, \
+                COL_NAME(ic.object_id, ic.column_id) AS col_name, \
+                ic.key_ordinal AS key_ordinal \
+             FROM sys.key_constraints kc \
+             JOIN sys.indexes i \
+               ON i.object_id = kc.parent_object_id AND i.index_id = kc.unique_index_id \
+             JOIN sys.index_columns ic \
+               ON ic.object_id = i.object_id AND ic.index_id = i.index_id \
+             WHERE kc.parent_object_id = OBJECT_ID('{}.{}') \
+               AND ic.is_included_column = 0 \
+             ORDER BY kc.name, ic.key_ordinal",
+            schema.replace('\'', "''"),
+            table.replace('\'', "''"),
+        );
+        let mut keys_acc: Vec<(String, String, String, i32)> = Vec::new();
+        {
+            let mut stream = self
+                .client
+                .simple_query(q_keys)
+                .await
+                .map_err(|e| DbError::Query(e.to_string()))?;
+            while let Some(item) = stream
+                .try_next()
+                .await
+                .map_err(|e| DbError::Query(e.to_string()))?
+            {
+                if let QueryItem::Row(row) = item {
+                    let n = row
+                        .try_get::<&str, _>("name")
+                        .ok()
+                        .flatten()
+                        .unwrap_or("")
+                        .to_string();
+                    let t = row
+                        .try_get::<&str, _>("kc_type")
+                        .ok()
+                        .flatten()
+                        .unwrap_or("")
+                        .to_string();
+                    let c = row
+                        .try_get::<&str, _>("col_name")
+                        .ok()
+                        .flatten()
+                        .unwrap_or("")
+                        .to_string();
+                    let o = row.try_get::<i32, _>("key_ordinal").ok().flatten().unwrap_or(0);
+                    keys_acc.push((n, t, c, o));
+                }
+            }
+        }
+        let keys = collapse_keys(keys_acc);
+
+        // ── Foreign keys ─────────────────────────────────────────────
+        let q_fks = format!(
+            "SELECT \
+                fk.name AS name, \
+                COL_NAME(fkc.parent_object_id, fkc.parent_column_id) AS col, \
+                rs.name AS ref_schema, \
+                rt.name AS ref_table, \
+                COL_NAME(fkc.referenced_object_id, fkc.referenced_column_id) AS ref_col, \
+                fkc.constraint_column_id AS col_ord \
+             FROM sys.foreign_keys fk \
+             JOIN sys.foreign_key_columns fkc ON fkc.constraint_object_id = fk.object_id \
+             JOIN sys.tables rt ON rt.object_id = fk.referenced_object_id \
+             JOIN sys.schemas rs ON rs.schema_id = rt.schema_id \
+             WHERE fk.parent_object_id = OBJECT_ID('{}.{}') \
+             ORDER BY fk.name, fkc.constraint_column_id",
+            schema.replace('\'', "''"),
+            table.replace('\'', "''"),
+        );
+        let mut fk_acc: Vec<(String, String, String, String, String, i32)> = Vec::new();
+        {
+            let mut stream = self
+                .client
+                .simple_query(q_fks)
+                .await
+                .map_err(|e| DbError::Query(e.to_string()))?;
+            while let Some(item) = stream
+                .try_next()
+                .await
+                .map_err(|e| DbError::Query(e.to_string()))?
+            {
+                if let QueryItem::Row(row) = item {
+                    let n = row
+                        .try_get::<&str, _>("name")
+                        .ok()
+                        .flatten()
+                        .unwrap_or("")
+                        .to_string();
+                    let c = row
+                        .try_get::<&str, _>("col")
+                        .ok()
+                        .flatten()
+                        .unwrap_or("")
+                        .to_string();
+                    let rs = row
+                        .try_get::<&str, _>("ref_schema")
+                        .ok()
+                        .flatten()
+                        .unwrap_or("")
+                        .to_string();
+                    let rt = row
+                        .try_get::<&str, _>("ref_table")
+                        .ok()
+                        .flatten()
+                        .unwrap_or("")
+                        .to_string();
+                    let rc = row
+                        .try_get::<&str, _>("ref_col")
+                        .ok()
+                        .flatten()
+                        .unwrap_or("")
+                        .to_string();
+                    let o = row.try_get::<i32, _>("col_ord").ok().flatten().unwrap_or(0);
+                    fk_acc.push((n, c, rs, rt, rc, o));
+                }
+            }
+        }
+        let foreign_keys = collapse_foreign_keys(fk_acc);
+
+        // ── Checks ───────────────────────────────────────────────────
+        let q_checks = format!(
+            "SELECT cc.name AS name, cc.definition AS definition \
+             FROM sys.check_constraints cc \
+             WHERE cc.parent_object_id = OBJECT_ID('{}.{}') \
+             ORDER BY cc.name",
+            schema.replace('\'', "''"),
+            table.replace('\'', "''"),
+        );
+        let mut checks: Vec<CheckDescription> = Vec::new();
+        {
+            let mut stream = self
+                .client
+                .simple_query(q_checks)
+                .await
+                .map_err(|e| DbError::Query(e.to_string()))?;
+            while let Some(item) = stream
+                .try_next()
+                .await
+                .map_err(|e| DbError::Query(e.to_string()))?
+            {
+                if let QueryItem::Row(row) = item {
+                    let name = row
+                        .try_get::<&str, _>("name")
+                        .ok()
+                        .flatten()
+                        .unwrap_or("")
+                        .to_string();
+                    let expr = row
+                        .try_get::<&str, _>("definition")
+                        .ok()
+                        .flatten()
+                        .unwrap_or("")
+                        .to_string();
+                    checks.push(CheckDescription {
+                        name,
+                        expression: expr,
+                    });
+                }
+            }
+        }
+
+        // ── Indexes (excluding PK/UQ — those live under Keys) ───────
+        let q_indexes = format!(
+            "SELECT \
+                i.name AS name, \
+                CAST(i.is_unique AS int) AS is_unique, \
+                COL_NAME(ic.object_id, ic.column_id) AS col, \
+                ic.key_ordinal AS key_ordinal \
+             FROM sys.indexes i \
+             JOIN sys.index_columns ic \
+               ON ic.object_id = i.object_id AND ic.index_id = i.index_id \
+             WHERE i.object_id = OBJECT_ID('{}.{}') \
+               AND i.is_primary_key = 0 \
+               AND i.is_unique_constraint = 0 \
+               AND ic.is_included_column = 0 \
+               AND i.name IS NOT NULL \
+             ORDER BY i.name, ic.key_ordinal",
+            schema.replace('\'', "''"),
+            table.replace('\'', "''"),
+        );
+        let mut idx_acc: Vec<(String, bool, String, i32)> = Vec::new();
+        {
+            let mut stream = self
+                .client
+                .simple_query(q_indexes)
+                .await
+                .map_err(|e| DbError::Query(e.to_string()))?;
+            while let Some(item) = stream
+                .try_next()
+                .await
+                .map_err(|e| DbError::Query(e.to_string()))?
+            {
+                if let QueryItem::Row(row) = item {
+                    let n = row
+                        .try_get::<&str, _>("name")
+                        .ok()
+                        .flatten()
+                        .unwrap_or("")
+                        .to_string();
+                    let u = row.try_get::<i32, _>("is_unique").ok().flatten().unwrap_or(0) != 0;
+                    let c = row
+                        .try_get::<&str, _>("col")
+                        .ok()
+                        .flatten()
+                        .unwrap_or("")
+                        .to_string();
+                    let o = row.try_get::<i32, _>("key_ordinal").ok().flatten().unwrap_or(0);
+                    idx_acc.push((n, u, c, o));
+                }
+            }
+        }
+        let indexes = collapse_indexes(idx_acc);
+
+        // ── Triggers ─────────────────────────────────────────────────
+        let q_triggers = format!(
+            "SELECT \
+                t.name AS name, \
+                CAST(OBJECTPROPERTY(t.object_id, 'ExecIsInsteadOfTrigger') AS int) AS instead_of, \
+                CAST(OBJECTPROPERTY(t.object_id, 'ExecIsInsertTrigger') AS int) AS on_insert, \
+                CAST(OBJECTPROPERTY(t.object_id, 'ExecIsUpdateTrigger') AS int) AS on_update, \
+                CAST(OBJECTPROPERTY(t.object_id, 'ExecIsDeleteTrigger') AS int) AS on_delete, \
+                OBJECT_DEFINITION(t.object_id) AS definition \
+             FROM sys.triggers t \
+             WHERE t.parent_id = OBJECT_ID('{}.{}') \
+             ORDER BY t.name",
+            schema.replace('\'', "''"),
+            table.replace('\'', "''"),
+        );
+        let mut triggers: Vec<TriggerDescription> = Vec::new();
+        {
+            let mut stream = self
+                .client
+                .simple_query(q_triggers)
+                .await
+                .map_err(|e| DbError::Query(e.to_string()))?;
+            while let Some(item) = stream
+                .try_next()
+                .await
+                .map_err(|e| DbError::Query(e.to_string()))?
+            {
+                if let QueryItem::Row(row) = item {
+                    let name = row
+                        .try_get::<&str, _>("name")
+                        .ok()
+                        .flatten()
+                        .unwrap_or("")
+                        .to_string();
+                    let instead = row.try_get::<i32, _>("instead_of").ok().flatten().unwrap_or(0) != 0;
+                    let on_ins = row.try_get::<i32, _>("on_insert").ok().flatten().unwrap_or(0) != 0;
+                    let on_upd = row.try_get::<i32, _>("on_update").ok().flatten().unwrap_or(0) != 0;
+                    let on_del = row.try_get::<i32, _>("on_delete").ok().flatten().unwrap_or(0) != 0;
+                    let definition = row
+                        .try_get::<&str, _>("definition")
+                        .ok()
+                        .flatten()
+                        .map(|s| s.to_string());
+                    let timing = if instead { "INSTEAD OF" } else { "AFTER" }.to_string();
+                    let mut events = Vec::new();
+                    if on_ins {
+                        events.push("INSERT".to_string());
+                    }
+                    if on_upd {
+                        events.push("UPDATE".to_string());
+                    }
+                    if on_del {
+                        events.push("DELETE".to_string());
+                    }
+                    triggers.push(TriggerDescription {
+                        name,
+                        timing,
+                        events,
+                        definition,
+                    });
+                }
             }
         }
 
@@ -325,9 +620,144 @@ impl DbConnection for MsSqlConnection {
             name: table.to_string(),
             kind,
             columns,
-            indexes: Vec::new(),
-            foreign_keys: Vec::new(),
+            indexes,
+            foreign_keys,
+            keys,
+            checks,
+            triggers,
         })
+    }
+
+    async fn list_routines(
+        &mut self,
+        database: &str,
+        schema: &str,
+    ) -> DbResult<Vec<RoutineDescription>> {
+        let use_stmt = format!("USE [{}]", escape_ident(database));
+        self.client
+            .simple_query(use_stmt)
+            .await
+            .map_err(|e| DbError::Query(e.to_string()))?;
+
+        // Object types: 'P' = stored procedure, 'PC' = CLR procedure,
+        // 'FN' = scalar function, 'IF' = inline TVF, 'TF' = TVF,
+        // 'AF' = aggregate function. We surface all of them.
+        // Return type: only relevant for FN; for TVFs we report
+        // "TABLE", and for procedures/aggregates we leave it None.
+        let q_objs = format!(
+            "SELECT \
+                o.object_id AS object_id, \
+                o.name AS name, \
+                RTRIM(o.type) AS obj_type, \
+                CASE \
+                  WHEN o.type = 'FN' THEN TYPE_NAME(p_ret.user_type_id) \
+                  WHEN o.type IN ('IF', 'TF') THEN 'TABLE' \
+                  ELSE NULL END AS return_type \
+             FROM sys.objects o \
+             JOIN sys.schemas s ON s.schema_id = o.schema_id \
+             LEFT JOIN sys.parameters p_ret \
+               ON p_ret.object_id = o.object_id AND p_ret.parameter_id = 0 \
+             WHERE s.name = '{}' \
+               AND o.type IN ('P','PC','FN','IF','TF','AF') \
+             ORDER BY o.name",
+            schema.replace('\'', "''"),
+        );
+
+        // (object_id, name, kind, return_type)
+        let mut objs: Vec<(i32, String, String, Option<String>)> = Vec::new();
+        {
+            let mut stream = self
+                .client
+                .simple_query(q_objs)
+                .await
+                .map_err(|e| DbError::Query(e.to_string()))?;
+            while let Some(item) = stream
+                .try_next()
+                .await
+                .map_err(|e| DbError::Query(e.to_string()))?
+            {
+                if let QueryItem::Row(row) = item {
+                    let id = row.try_get::<i32, _>("object_id").ok().flatten().unwrap_or(0);
+                    let name = row
+                        .try_get::<&str, _>("name")
+                        .ok()
+                        .flatten()
+                        .unwrap_or("")
+                        .to_string();
+                    let kind_raw = row
+                        .try_get::<&str, _>("obj_type")
+                        .ok()
+                        .flatten()
+                        .unwrap_or("")
+                        .to_string();
+                    let ret = row
+                        .try_get::<&str, _>("return_type")
+                        .ok()
+                        .flatten()
+                        .map(|s| s.to_string());
+                    objs.push((id, name, kind_raw, ret));
+                }
+            }
+        }
+
+        // Argument types per object_id, excluding the return-type
+        // pseudo-parameter (parameter_id = 0).
+        let q_args = format!(
+            "SELECT \
+                p.object_id AS object_id, \
+                p.parameter_id AS parameter_id, \
+                TYPE_NAME(p.user_type_id) AS type_name \
+             FROM sys.parameters p \
+             JOIN sys.objects o ON o.object_id = p.object_id \
+             JOIN sys.schemas s ON s.schema_id = o.schema_id \
+             WHERE s.name = '{}' \
+               AND o.type IN ('P','PC','FN','IF','TF','AF') \
+               AND p.parameter_id > 0 \
+             ORDER BY p.object_id, p.parameter_id",
+            schema.replace('\'', "''"),
+        );
+        let mut args: std::collections::HashMap<i32, Vec<String>> = std::collections::HashMap::new();
+        {
+            let mut stream = self
+                .client
+                .simple_query(q_args)
+                .await
+                .map_err(|e| DbError::Query(e.to_string()))?;
+            while let Some(item) = stream
+                .try_next()
+                .await
+                .map_err(|e| DbError::Query(e.to_string()))?
+            {
+                if let QueryItem::Row(row) = item {
+                    let id = row.try_get::<i32, _>("object_id").ok().flatten().unwrap_or(0);
+                    let ty = row
+                        .try_get::<&str, _>("type_name")
+                        .ok()
+                        .flatten()
+                        .unwrap_or("")
+                        .to_string();
+                    args.entry(id).or_default().push(ty);
+                }
+            }
+        }
+
+        Ok(objs
+            .into_iter()
+            .map(|(id, name, kind_raw, ret)| {
+                let kind = match kind_raw.as_str() {
+                    "P" | "PC" => RoutineKind::Procedure,
+                    _ => RoutineKind::Function,
+                };
+                RoutineDescription {
+                    schema: schema.to_string(),
+                    name,
+                    kind,
+                    language: Some("sql".to_string()),
+                    return_type: ret,
+                    argument_types: args.remove(&id).unwrap_or_default(),
+                }
+            })
+            .collect())
     }
 
     async fn execute_batch(
@@ -536,3 +966,73 @@ fn short_hex(bytes: &[u8]) -> String {
 // tiberius's QueryStream doesn't implement futures::TryStreamExt directly
 // in the public re-exports; pull it in via the futures crate.
 use futures::TryStreamExt;
+
+/// Group a flat `(name, kc_type, column, ordinal)` row stream into
+/// `KeyDescription`s. `kc_type` is the trimmed `sys.key_constraints.type`
+/// — `"PK"` for primary keys, `"UQ"` for unique constraints. Within a
+/// group, ordinal is monotonic so ordering is preserved.
+fn collapse_keys(rows: Vec<(String, String, String, i32)>) -> Vec<KeyDescription> {
+    let mut out: Vec<KeyDescription> = Vec::new();
+    for (name, kc_type, col, _ord) in rows {
+        if let Some(last) = out.last_mut() {
+            if last.name == name {
+                last.columns.push(col);
+                continue;
+            }
+        }
+        out.push(KeyDescription {
+            name,
+            columns: vec![col],
+            is_primary: kc_type.trim().eq_ignore_ascii_case("PK"),
+        });
+    }
+    out
+}
+
+/// Group a flat FK row stream
+/// `(name, col, ref_schema, ref_table, ref_col, ord)` into
+/// `ForeignKeyDescription`s. Multi-column FKs naturally consolidate
+/// because the query orders by `(name, ord)`.
+fn collapse_foreign_keys(
+    rows: Vec<(String, String, String, String, String, i32)>,
+) -> Vec<ForeignKeyDescription> {
+    let mut out: Vec<ForeignKeyDescription> = Vec::new();
+    for (name, col, ref_schema, ref_table, ref_col, _ord) in rows {
+        if let Some(last) = out.last_mut() {
+            if last.name == name {
+                last.columns.push(col);
+                last.referenced_columns.push(ref_col);
+                continue;
+            }
+        }
+        out.push(ForeignKeyDescription {
+            name,
+            columns: vec![col],
+            referenced_schema: ref_schema,
+            referenced_table: ref_table,
+            referenced_columns: vec![ref_col],
+        });
+    }
+    out
+}
+
+/// Group a flat index row stream `(name, is_unique, column, ordinal)`
+/// into `IndexDescription`s.
+fn collapse_indexes(rows: Vec<(String, bool, String, i32)>) -> Vec<IndexDescription> {
+    let mut out: Vec<IndexDescription> = Vec::new();
+    for (name, is_unique, col, _ord) in rows {
+        if let Some(last) = out.last_mut() {
+            if last.name == name {
+                last.columns.push(col);
+                continue;
+            }
+        }
+        out.push(IndexDescription {
+            name,
+            columns: vec![col],
+            is_unique,
+            is_primary: false,
+        });
+    }
+    out
+}

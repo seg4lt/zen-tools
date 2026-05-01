@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::Mutex;
 use zen_db::{
-    secrets, ConnectionConfig, ConnectionRegistry, DbDriver, QueryResult, TableDescription,
-    TableSummary,
+    secrets, ConnectionConfig, ConnectionRegistry, DbDriver, QueryResult, RoutineDescription,
+    TableDescription, TableSummary,
 };
 
 use crate::commands::preferences::{
@@ -274,6 +274,24 @@ pub async fn db_list_tables(
         registry(&s)
     };
     Ok(registry.list_tables(&id, &database, &schema).await?)
+}
+
+/// Stored procedures + functions in `database.schema`. Drives the
+/// per-schema "Routines" folder in the DB tree. Single round-trip;
+/// front-end caches the result for the session (no SQLite
+/// persistence).
+#[tauri::command]
+pub async fn db_list_routines(
+    id: String,
+    database: String,
+    schema: String,
+    state: tauri::State<'_, Mutex<AppState>>,
+) -> AppResult<Vec<RoutineDescription>> {
+    let registry = {
+        let s = state.lock().await;
+        registry(&s)
+    };
+    Ok(registry.list_routines(&id, &database, &schema).await?)
 }
 
 /// Every relation in `database` — used by the SQL editor's autocomplete

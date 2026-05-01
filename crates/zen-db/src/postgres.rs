@@ -11,8 +11,9 @@ use sqlx::{Column as _, Postgres, Row, TypeInfo, ValueRef};
 
 use crate::driver::{DbConnection, DbError, DbResult};
 use crate::types::{
-    Cell, Column, ColumnDescription, ConnectionConfig, QueryResult, TableDescription, TableKind,
-    TableSummary,
+    Cell, CheckDescription, Column, ColumnDescription, ConnectionConfig, ForeignKeyDescription,
+    IndexDescription, KeyDescription, QueryResult, RoutineDescription, RoutineKind,
+    TableDescription, TableKind, TableSummary, TriggerDescription,
 };
 
 pub struct PostgresConnection {
@@ -202,15 +203,278 @@ impl DbConnection for PostgresConnection {
             )
             .collect();
 
+        // ── Keys (PRIMARY KEY + UNIQUE) ──────────────────────────────
+        // `pg_constraint.contype` = 'p' (primary) or 'u' (unique).
+        // `unnest(conkey) WITH ORDINALITY` preserves declaration order
+        // so multi-column keys round-trip cleanly.
+        let key_rows: Vec<(String, bool, Vec<String>)> = sqlx::query_as(
+            "SELECT \
+                co.conname::text AS name, \
+                (co.contype = 'p') AS is_primary, \
+                ARRAY( \
+                  SELECT a.attname::text \
+                  FROM unnest(co.conkey) WITH ORDINALITY AS k(attnum, ord) \
+                  JOIN pg_attribute a ON a.attrelid = co.conrelid AND a.attnum = k.attnum \
+                  ORDER BY k.ord \
+                ) AS columns \
+             FROM pg_constraint co \
+             JOIN pg_class c ON c.oid = co.conrelid \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = $1 AND c.relname = $2 \
+               AND co.contype IN ('p', 'u') \
+             ORDER BY (co.contype = 'p') DESC, co.conname",
+        )
+        .bind(schema)
+        .bind(table)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| DbError::Query(e.to_string()))?;
+
+        let keys = key_rows
+            .into_iter()
+            .map(|(name, is_primary, columns)| KeyDescription {
+                name,
+                columns,
+                is_primary,
+            })
+            .collect();
+
+        // ── Foreign keys ─────────────────────────────────────────────
+        // Outgoing FKs only (the table's own `contype = 'f'`); the
+        // tree's "Foreign keys" folder is per-table, so showing
+        // who-points-at-us would just confuse the row meaning.
+        let fk_rows: Vec<(String, Vec<String>, String, String, Vec<String>)> = sqlx::query_as(
+            "SELECT \
+                co.conname::text AS name, \
+                ARRAY( \
+                  SELECT a.attname::text \
+                  FROM unnest(co.conkey) WITH ORDINALITY AS k(attnum, ord) \
+                  JOIN pg_attribute a ON a.attrelid = co.conrelid AND a.attnum = k.attnum \
+                  ORDER BY k.ord \
+                ) AS columns, \
+                refn.nspname::text AS ref_schema, \
+                refc.relname::text AS ref_table, \
+                ARRAY( \
+                  SELECT a.attname::text \
+                  FROM unnest(co.confkey) WITH ORDINALITY AS k(attnum, ord) \
+                  JOIN pg_attribute a ON a.attrelid = co.confrelid AND a.attnum = k.attnum \
+                  ORDER BY k.ord \
+                ) AS ref_columns \
+             FROM pg_constraint co \
+             JOIN pg_class c ON c.oid = co.conrelid \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+             JOIN pg_class refc ON refc.oid = co.confrelid \
+             JOIN pg_namespace refn ON refn.oid = refc.relnamespace \
+             WHERE n.nspname = $1 AND c.relname = $2 AND co.contype = 'f' \
+             ORDER BY co.conname",
+        )
+        .bind(schema)
+        .bind(table)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| DbError::Query(e.to_string()))?;
+
+        let foreign_keys = fk_rows
+            .into_iter()
+            .map(
+                |(name, columns, referenced_schema, referenced_table, referenced_columns)| {
+                    ForeignKeyDescription {
+                        name,
+                        columns,
+                        referenced_schema,
+                        referenced_table,
+                        referenced_columns,
+                    }
+                },
+            )
+            .collect();
+
+        // ── Checks ───────────────────────────────────────────────────
+        let check_rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT \
+                co.conname::text AS name, \
+                pg_get_constraintdef(co.oid, true) AS expression \
+             FROM pg_constraint co \
+             JOIN pg_class c ON c.oid = co.conrelid \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = $1 AND c.relname = $2 AND co.contype = 'c' \
+             ORDER BY co.conname",
+        )
+        .bind(schema)
+        .bind(table)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| DbError::Query(e.to_string()))?;
+
+        let checks = check_rows
+            .into_iter()
+            .map(|(name, expression)| CheckDescription { name, expression })
+            .collect();
+
+        // ── Indexes (excluding PK indexes — those live under Keys) ──
+        let index_rows: Vec<(String, Vec<String>, bool, bool)> = sqlx::query_as(
+            "SELECT \
+                ic.relname::text AS name, \
+                ARRAY( \
+                  SELECT a.attname::text \
+                  FROM unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord) \
+                  JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum \
+                  ORDER BY k.ord \
+                ) AS columns, \
+                i.indisunique AS is_unique, \
+                i.indisprimary AS is_primary \
+             FROM pg_index i \
+             JOIN pg_class c ON c.oid = i.indrelid \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+             JOIN pg_class ic ON ic.oid = i.indexrelid \
+             WHERE n.nspname = $1 AND c.relname = $2 \
+               AND NOT i.indisprimary \
+             ORDER BY ic.relname",
+        )
+        .bind(schema)
+        .bind(table)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| DbError::Query(e.to_string()))?;
+
+        let indexes = index_rows
+            .into_iter()
+            .map(|(name, columns, is_unique, is_primary)| IndexDescription {
+                name,
+                columns,
+                is_unique,
+                is_primary,
+            })
+            .collect();
+
+        // ── Triggers ─────────────────────────────────────────────────
+        // `tgtype` is a bitmask:
+        //   0x02 = BEFORE, 0x40 = INSTEAD OF (else AFTER)
+        //   0x04 = INSERT, 0x08 = DELETE, 0x10 = UPDATE, 0x20 = TRUNCATE
+        // We decode it here so the catalog stays driver-agnostic.
+        let trigger_rows: Vec<(String, i16, Option<String>)> = sqlx::query_as(
+            "SELECT \
+                t.tgname::text AS name, \
+                t.tgtype::int2 AS tgtype, \
+                pg_get_triggerdef(t.oid, true) AS definition \
+             FROM pg_trigger t \
+             JOIN pg_class c ON c.oid = t.tgrelid \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = $1 AND c.relname = $2 \
+               AND NOT t.tgisinternal \
+             ORDER BY t.tgname",
+        )
+        .bind(schema)
+        .bind(table)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| DbError::Query(e.to_string()))?;
+
+        let triggers = trigger_rows
+            .into_iter()
+            .map(|(name, tgtype, definition)| {
+                let timing = if tgtype & 0x40 != 0 {
+                    "INSTEAD OF"
+                } else if tgtype & 0x02 != 0 {
+                    "BEFORE"
+                } else {
+                    "AFTER"
+                }
+                .to_string();
+                let mut events = Vec::new();
+                if tgtype & 0x04 != 0 {
+                    events.push("INSERT".to_string());
+                }
+                if tgtype & 0x08 != 0 {
+                    events.push("DELETE".to_string());
+                }
+                if tgtype & 0x10 != 0 {
+                    events.push("UPDATE".to_string());
+                }
+                if tgtype & 0x20 != 0 {
+                    events.push("TRUNCATE".to_string());
+                }
+                TriggerDescription {
+                    name,
+                    timing,
+                    events,
+                    definition,
+                }
+            })
+            .collect();
+
         Ok(TableDescription {
             database: database.to_string(),
             schema: schema.to_string(),
             name: table.to_string(),
             kind,
             columns,
-            indexes: Vec::new(),
-            foreign_keys: Vec::new(),
+            indexes,
+            foreign_keys,
+            keys,
+            checks,
+            triggers,
         })
+    }
+
+    async fn list_routines(
+        &mut self,
+        _database: &str,
+        schema: &str,
+    ) -> DbResult<Vec<RoutineDescription>> {
+        // `prokind`: 'f' = function, 'p' = procedure, 'a' = aggregate,
+        // 'w' = window. We surface the first two only — aggregates and
+        // window functions clutter the tree without much value.
+        // `pg_get_function_arguments` returns the formatted argument
+        // list ("a integer, b text"); we split on commas to fit the
+        // `argument_types` Vec.
+        let rows: Vec<(String, String, String, Option<String>, String)> = sqlx::query_as(
+            "SELECT \
+                p.proname::text AS name, \
+                p.prokind::text AS prokind, \
+                pg_get_function_arguments(p.oid) AS arguments, \
+                CASE WHEN p.prokind = 'p' THEN NULL \
+                     ELSE pg_get_function_result(p.oid) END AS return_type, \
+                l.lanname::text AS language \
+             FROM pg_proc p \
+             JOIN pg_namespace n ON n.oid = p.pronamespace \
+             JOIN pg_language l ON l.oid = p.prolang \
+             WHERE n.nspname = $1 \
+               AND p.prokind IN ('f', 'p') \
+             ORDER BY p.proname",
+        )
+        .bind(schema)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| DbError::Query(e.to_string()))?;
+
+        Ok(rows
+            .into_iter()
+            .map(|(name, prokind, arguments, return_type, language)| {
+                let kind = if prokind == "p" {
+                    RoutineKind::Procedure
+                } else {
+                    RoutineKind::Function
+                };
+                let argument_types = if arguments.trim().is_empty() {
+                    Vec::new()
+                } else {
+                    arguments
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect()
+                };
+                RoutineDescription {
+                    schema: schema.to_string(),
+                    name,
+                    kind,
+                    language: Some(language),
+                    return_type,
+                    argument_types,
+                }
+            })
+            .collect())
     }
 
     async fn execute(&mut self, sql: &str) -> DbResult<QueryResult> {

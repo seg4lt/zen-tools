@@ -26,6 +26,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   dbTauri,
   SCHEMA_CACHE_EVENT,
+  type DbRoutineDescription,
   type DbTableDescription,
   type DbTableSummary,
   type SchemaCacheUpdatedEvent,
@@ -478,4 +479,107 @@ export function ensureTablesForSql(
     if (!needsFetch) continue;
     void ensureTables(connectionId, database, schema, namesArr).catch(() => {});
   }
+}
+
+// ─── Routines (per-schema, session-only) ────────────────────────────
+
+/**
+ * Routines (stored procedures + functions) live under the per-schema
+ * "Routines" folder of the DB tree. Unlike `TableDescription`, they
+ * are **session-only** — no `schema_cache.db` persistence:
+ *
+ *   - One backend round-trip per `(conn, db, schema)`, cheap.
+ *   - Routine churn often aligns with active schema migrations the
+ *     user is iterating on; stale persisted entries would cause more
+ *     confusion than they save typing latency.
+ *
+ * The cache lives in module scope, mirrors the catalog's pattern,
+ * and de-dupes concurrent callers via `inflight`.
+ */
+type RoutineKey = string;
+
+function routineKey(
+  connectionId: string,
+  database: string,
+  schema: string,
+): RoutineKey {
+  return `${connectionId}/${database}/${schema}`;
+}
+
+const routineCache: Map<RoutineKey, DbRoutineDescription[]> = new Map();
+const routineInflight: Map<RoutineKey, Promise<DbRoutineDescription[]>> =
+  new Map();
+
+/** Routine subscribers fire when a `(conn, db, schema)` bucket
+ * changes (loaded for the first time, or refreshed). */
+export type RoutineListener = (event: {
+  connectionId: string;
+  database: string;
+  schema: string;
+  routines: DbRoutineDescription[];
+}) => void;
+
+const routineListeners: Set<RoutineListener> = new Set();
+
+/** Synchronous read for the currently-known routines under a
+ * schema. Returns `[]` until `ensureRoutines` resolves. */
+export function readRoutines(
+  connectionId: string,
+  database: string,
+  schema: string,
+): DbRoutineDescription[] {
+  return routineCache.get(routineKey(connectionId, database, schema)) ?? [];
+}
+
+/**
+ * Make sure the routine list for `(conn, db, schema)` is loaded.
+ * Concurrent callers share one in-flight promise. Re-call after
+ * `refreshRoutines` to re-fetch.
+ */
+export async function ensureRoutines(
+  connectionId: string,
+  database: string,
+  schema: string,
+): Promise<DbRoutineDescription[]> {
+  const key = routineKey(connectionId, database, schema);
+  const existing = routineCache.get(key);
+  if (existing) return existing;
+  const inflight = routineInflight.get(key);
+  if (inflight) return inflight;
+
+  const promise = dbTauri
+    .listRoutines(connectionId, database, schema)
+    .then((rows) => {
+      routineCache.set(key, rows);
+      routineInflight.delete(key);
+      for (const fn of routineListeners) {
+        fn({ connectionId, database, schema, routines: rows });
+      }
+      return rows;
+    })
+    .catch((err) => {
+      routineInflight.delete(key);
+      throw err;
+    });
+  routineInflight.set(key, promise);
+  return promise;
+}
+
+/** Force-refresh after the user (or external migration) might have
+ * created new routines. Drops the cached list, then re-ensures. */
+export async function refreshRoutines(
+  connectionId: string,
+  database: string,
+  schema: string,
+): Promise<DbRoutineDescription[]> {
+  const key = routineKey(connectionId, database, schema);
+  routineCache.delete(key);
+  routineInflight.delete(key);
+  return ensureRoutines(connectionId, database, schema);
+}
+
+/** Subscribe to routine-cache updates. */
+export function subscribeRoutines(listener: RoutineListener): () => void {
+  routineListeners.add(listener);
+  return () => routineListeners.delete(listener);
 }

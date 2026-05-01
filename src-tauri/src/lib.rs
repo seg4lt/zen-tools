@@ -210,6 +210,7 @@ pub fn run() {
             commands::database::db_list_schemas,
             commands::database::db_list_tables,
             commands::database::db_list_all_tables,
+            commands::database::db_list_routines,
             commands::database::db_query,
             commands::database::db_describe_table,
             commands::database::db_describe_tables_bulk,

@@ -20,6 +20,7 @@ import {
   dbTauri,
   type DbConnectionPrefs,
   type DbQueryResult,
+  type DbRoutineDescription,
 } from "../lib/tauri";
 
 export type ConnectionStatus = "disconnected" | "connecting" | "connected" | "error";
@@ -31,6 +32,13 @@ export interface ConnectionTreeData {
   schemasByDb: Record<string, string[]>;
   /** `database/schema` → tables. */
   tablesBySchema: Record<string, string[]>;
+  /**
+   * `database/schema` → routines. Mirrors `tablesBySchema`; populated
+   * lazily when the user expands the per-schema "Routines" folder.
+   * Session-only — see `schema-cache.ts::ensureRoutines` for the
+   * source of truth and persistence rationale.
+   */
+  routinesBySchema: Record<string, DbRoutineDescription[]>;
 }
 
 export interface DbExplorerState {
@@ -126,6 +134,13 @@ type Action =
   | { type: "set-databases"; id: string; databases: string[] }
   | { type: "set-schemas"; id: string; database: string; schemas: string[] }
   | { type: "set-tables"; id: string; database: string; schema: string; tables: string[] }
+  | {
+      type: "set-routines";
+      id: string;
+      database: string;
+      schema: string;
+      routines: DbRoutineDescription[];
+    }
   | {
       type: "set-schema-indexed-at";
       entries: { id: string; database: string; schema: string; table: string; indexedAt: number }[];
@@ -256,6 +271,7 @@ function reducer(state: DbExplorerState, action: Action): DbExplorerState {
       const tree = state.trees[action.id] ?? {
         schemasByDb: {},
         tablesBySchema: {},
+        routinesBySchema: {},
       };
       return {
         ...state,
@@ -270,6 +286,7 @@ function reducer(state: DbExplorerState, action: Action): DbExplorerState {
       const tree = state.trees[action.id] ?? {
         schemasByDb: {},
         tablesBySchema: {},
+        routinesBySchema: {},
       };
       return {
         ...state,
@@ -290,6 +307,7 @@ function reducer(state: DbExplorerState, action: Action): DbExplorerState {
       const tree = state.trees[action.id] ?? {
         schemasByDb: {},
         tablesBySchema: {},
+        routinesBySchema: {},
       };
       const key = `${action.database}/${action.schema}`;
       return {
@@ -301,6 +319,28 @@ function reducer(state: DbExplorerState, action: Action): DbExplorerState {
             tablesBySchema: {
               ...tree.tablesBySchema,
               [key]: action.tables,
+            },
+          },
+        },
+      };
+    }
+
+    case "set-routines": {
+      const tree = state.trees[action.id] ?? {
+        schemasByDb: {},
+        tablesBySchema: {},
+        routinesBySchema: {},
+      };
+      const key = `${action.database}/${action.schema}`;
+      return {
+        ...state,
+        trees: {
+          ...state.trees,
+          [action.id]: {
+            ...tree,
+            routinesBySchema: {
+              ...tree.routinesBySchema,
+              [key]: action.routines,
             },
           },
         },
