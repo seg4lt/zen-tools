@@ -11,6 +11,7 @@ import { RequestsView } from "@/tools/http-runner/RequestsView";
 import { ProcessMonitorShell } from "@/tools/process-monitor/ProcessMonitorShell";
 import { CleanerShell } from "@/tools/cleaner/CleanerShell";
 import { MarkdownShell } from "@/tools/markdown/MarkdownShell";
+import { DatabaseExplorerShell } from "@/tools/database-explorer/DatabaseExplorerShell";
 
 const rootRoute = createRootRoute({
   component: () => (
@@ -80,6 +81,12 @@ const markdownRoute = createRoute({
   component: MarkdownShell,
 });
 
+const databaseExplorerRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/database-explorer",
+  component: DatabaseExplorerShell,
+});
+
 const routeTree = rootRoute.addChildren([
   indexRoute,
   httpRunnerRoute.addChildren([
@@ -90,6 +97,7 @@ const routeTree = rootRoute.addChildren([
   processMonitorRoute,
   cleanerRoute,
   markdownRoute,
+  databaseExplorerRoute,
 ]);
 
 export const router = createRouter({

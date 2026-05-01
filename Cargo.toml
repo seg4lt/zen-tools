@@ -7,6 +7,7 @@ members = [
     "crates/zen-perf",
     "crates/zen-process-monitor",
     "crates/zen-cleaner",
+    "crates/zen-db",
     "crates/zen-test-server",
     "src-tauri",
 ]
@@ -67,6 +68,7 @@ zen-http = { path = "crates/zen-http" }
 zen-perf = { path = "crates/zen-perf" }
 zen-process-monitor = { path = "crates/zen-process-monitor" }
 zen-cleaner = { path = "crates/zen-cleaner" }
+zen-db = { path = "crates/zen-db" }
 
 [profile.release]
 opt-level = 3

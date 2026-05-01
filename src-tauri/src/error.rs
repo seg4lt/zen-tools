@@ -3,6 +3,7 @@
 
 use serde::{Serialize, Serializer};
 use thiserror::Error;
+use zen_db::DbError;
 use zen_http::{CrossFileDependencyError, DependencyError, FileRegistryError, HttpError};
 use zen_parser::ParserError;
 use zen_perf::PerfError;
@@ -38,6 +39,10 @@ pub enum AppError {
     #[error("perf: {0}")]
     Perf(#[from] PerfError),
 
+    /// Database driver failure (Database Explorer tool).
+    #[error("db: {0}")]
+    Db(#[from] DbError),
+
     /// Tauri framework error.
     #[error("tauri: {0}")]
     Tauri(#[from] tauri::Error),
@@ -67,6 +72,7 @@ impl AppError {
             AppError::CrossFileDependency(_) => "crossFileDependency",
             AppError::FileRegistry(_) => "fileRegistry",
             AppError::Perf(_) => "perf",
+            AppError::Db(_) => "db",
             AppError::Tauri(_) => "tauri",
             AppError::Other(_) => "other",
             AppError::BadRequest(_) => "badRequest",

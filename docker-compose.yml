@@ -1,0 +1,69 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: zen-postgres
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: zen
+      POSTGRES_PASSWORD: zen
+      POSTGRES_DB: zen_dev
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      # Anything in this folder is executed by the postgres entrypoint on
+      # first start (i.e. when pg_data is empty). To re-seed: `docker
+      # compose down -v` then `docker compose up`.
+      - ./docker/postgres:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U zen -d zen_dev"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  mssql:
+    # Default image is amd64-only.
+    # Apple Silicon: copy .env.example to .env to switch to azure-sql-edge (multi-arch).
+    image: ${MSSQL_IMAGE:-mcr.microsoft.com/mssql/server:2022-latest}
+    platform: ${DOCKER_PLATFORM:-linux/amd64}
+    container_name: zen-mssql
+    restart: unless-stopped
+    ports:
+      - "1433:1433"
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: "Zen_Dev_P@ss1"
+      MSSQL_PID: "Developer"
+    volumes:
+      - mssql_data:/var/opt/mssql
+    healthcheck:
+      # mssql-tools18 ships in the official image; -C trusts the self-signed cert
+      test:
+        - "CMD-SHELL"
+        - "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P \"$$MSSQL_SA_PASSWORD\" -Q 'SELECT 1' || /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P \"$$MSSQL_SA_PASSWORD\" -Q 'SELECT 1'"
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 30s
+
+  # MSSQL has no /docker-entrypoint-initdb.d/ equivalent, so we run a
+  # one-shot sidecar that waits for `mssql` to be healthy and then
+  # applies docker/mssql/01-init.sql via sqlcmd. It exits 0 on success
+  # and is not restarted (`restart: "no"`).
+  mssql-init:
+    image: ${MSSQL_IMAGE:-mcr.microsoft.com/mssql/server:2022-latest}
+    platform: ${DOCKER_PLATFORM:-linux/amd64}
+    container_name: zen-mssql-init
+    restart: "no"
+    depends_on:
+      mssql:
+        condition: service_healthy
+    environment:
+      MSSQL_SA_PASSWORD: "Zen_Dev_P@ss1"
+    volumes:
+      - ./docker/mssql:/work:ro
+    entrypoint: ["/bin/bash", "/work/init.sh"]
+
+volumes:
+  pg_data:
+  mssql_data:

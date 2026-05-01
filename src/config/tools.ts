@@ -3,7 +3,7 @@
  * means appending one entry to this array and creating its route subtree.
  */
 import type { LucideIcon } from "lucide-react";
-import { Activity, FileText, Sparkles, Zap } from "lucide-react";
+import { Activity, Database, FileText, Sparkles, Zap } from "lucide-react";
 
 export interface Tool {
   /** Stable identifier (used for route segments and persistence keys). */
@@ -46,6 +46,13 @@ export const TOOLS: readonly Tool[] = [
     icon: FileText,
     route: "/markdown",
     description: "Obsidian-lite vault editor with vim, paste-to-image, wikilinks",
+  },
+  {
+    id: "database-explorer",
+    label: "Database",
+    icon: Database,
+    route: "/database-explorer",
+    description: "DataGrip-lite — query Postgres & MSSQL with syntax highlighting",
   },
 ] as const;
 

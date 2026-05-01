@@ -54,6 +54,35 @@ pub struct Preferences {
     /// "Recent" group.
     #[serde(default)]
     pub markdown_recent_files: Vec<String>,
+    /// Saved Database Explorer connections. Passwords are NEVER stored
+    /// here — they live in the OS keychain (see `zen_db::secrets`).
+    #[serde(default)]
+    pub db_connections: Vec<DbConnectionPrefs>,
+}
+
+/// One persisted Database Explorer connection. Mirrors
+/// `zen_db::ConnectionConfig` minus the password (which is keychain-only).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DbConnectionPrefs {
+    /// Stable UUID minted by the front-end.
+    pub id: String,
+    /// User-facing display name.
+    pub name: String,
+    /// `"postgres"` or `"mssql"`.
+    pub driver: String,
+    /// Host or IP address.
+    pub host: String,
+    /// TCP port (5432 / 1433 by default).
+    pub port: u16,
+    /// Initial database / catalogue.
+    pub database: String,
+    /// SQL-auth username.
+    pub username: String,
+    /// Trust a self-signed server cert (mainly for the bundled MSSQL
+    /// developer image).
+    #[serde(default)]
+    pub trust_server_certificate: bool,
 }
 
 /// One entry in the persisted cleaner scan cache.
@@ -83,6 +112,7 @@ impl Default for Preferences {
             cleaner_scan_cache: Vec::new(),
             markdown_vault_dirs: Vec::new(),
             markdown_recent_files: Vec::new(),
+            db_connections: Vec::new(),
         }
     }
 }

@@ -157,6 +157,17 @@ pub fn run() {
             commands::markdown::markdown_search_contents,
             commands::markdown::markdown_stop_content_search,
             commands::markdown::markdown_copy_svg_as_png,
+            // database explorer
+            commands::database::db_test_connection,
+            commands::database::db_save_connection,
+            commands::database::db_delete_connection,
+            commands::database::db_list_saved_connections,
+            commands::database::db_connect,
+            commands::database::db_disconnect,
+            commands::database::db_list_databases,
+            commands::database::db_list_schemas,
+            commands::database::db_list_tables,
+            commands::database::db_query,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

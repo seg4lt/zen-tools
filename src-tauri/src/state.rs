@@ -4,6 +4,7 @@ use ahash::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use zen_cleaner::Tree as CleanerTree;
+use zen_db::ConnectionRegistry;
 use zen_http::{FileRegistry, HttpExecutor};
 use zen_parser::PerfConfig;
 use zen_perf::{MetricsSnapshot, RequestSample, StopHandle};
@@ -105,6 +106,12 @@ pub struct AppState {
     /// and the worker drops out at the next per-file checkpoint.
     pub markdown_search_tokens:
         Arc<parking_lot::Mutex<HashMap<u64, Arc<std::sync::atomic::AtomicBool>>>>,
+
+    // ──── Database Explorer ────
+    /// Live database connections for the Database Explorer tool.
+    /// `Arc` so a slow query holds only the per-connection lock inside
+    /// the registry, never the outer `Mutex<AppState>`.
+    pub db: Arc<ConnectionRegistry>,
 }
 
 impl AppState {
@@ -136,6 +143,7 @@ impl AppState {
             tray: None,
             cleaner: Arc::new(parking_lot::Mutex::new(CleanerState::default())),
             markdown_search_tokens: Arc::new(parking_lot::Mutex::new(HashMap::default())),
+            db: Arc::new(ConnectionRegistry::new()),
         }
     }
 

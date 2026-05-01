@@ -21,6 +21,7 @@ zen-http = { workspace = true }
 zen-perf = { workspace = true }
 zen-process-monitor = { workspace = true }
 zen-cleaner = { workspace = true }
+zen-db = { workspace = true }
 
 tauri = { version = "2", features = ["tray-icon", "image-png", "protocol-asset"] }
 tauri-plugin-dialog = "2"

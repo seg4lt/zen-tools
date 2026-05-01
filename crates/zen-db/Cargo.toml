@@ -1,0 +1,32 @@
+[package]
+name = "zen-db"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Cross-database driver abstraction (Postgres + MSSQL) for the Database Explorer tool."
+
+[dependencies]
+# Async runtime + traits
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "fs", "net", "io-util"] }
+async-trait = { workspace = true }
+futures = { workspace = true }
+
+# Drivers
+sqlx = { version = "0.8", default-features = false, features = ["postgres", "runtime-tokio-rustls", "chrono", "uuid", "macros"] }
+tiberius = { version = "0.12", default-features = false, features = ["rustls", "chrono", "tds73"] }
+tokio-util = { version = "0.7", features = ["compat"] }
+
+# Secrets
+keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native"] }
+
+# State
+dashmap = "6"
+
+# Serde / errors / utility
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
