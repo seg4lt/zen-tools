@@ -278,6 +278,81 @@ BEGIN
 END
 GO
 
+IF OBJECT_ID('shop.bump_prices', 'P') IS NOT NULL DROP PROCEDURE shop.bump_prices;
+GO
+CREATE PROCEDURE shop.bump_prices
+    @pct DECIMAL(5,2)
+AS
+BEGIN
+    SET NOCOUNT ON;
+    IF @pct < 0 OR @pct > 100
+    BEGIN
+        RAISERROR('pct must be between 0 and 100, got %.2f', 16, 1, @pct);
+        RETURN;
+    END
+    UPDATE shop.products
+       SET price_cents = CAST(price_cents * (1 + @pct / 100.0) AS INT);
+END
+GO
+
+IF OBJECT_ID('shop.restock_product', 'P') IS NOT NULL DROP PROCEDURE shop.restock_product;
+GO
+CREATE PROCEDURE shop.restock_product
+    @sku NVARCHAR(64)
+AS
+BEGIN
+    SET NOCOUNT ON;
+    UPDATE shop.products SET in_stock = 1 WHERE sku = @sku;
+    PRINT 'restock_product: ' + CAST(@@ROWCOUNT AS NVARCHAR(10)) + ' row(s) for ' + @sku;
+END
+GO
+
+-- Inline TVF — appears as a function with a TABLE return type.
+IF OBJECT_ID('shop.order_summary', 'IF') IS NOT NULL DROP FUNCTION shop.order_summary;
+GO
+CREATE FUNCTION shop.order_summary(@since DATETIME2)
+RETURNS TABLE
+AS
+RETURN
+(
+    SELECT
+        o.status,
+        COUNT(*)              AS order_count,
+        SUM(o.total_cents)    AS total_cents,
+        AVG(CAST(o.total_cents AS DECIMAL(12,2))) AS avg_cents
+    FROM shop.orders o
+    WHERE o.placed_at >= @since
+    GROUP BY o.status
+);
+GO
+
+-- Scalar function — count of customers with at least one paid
+-- order. Multiple FN entries under Routines.
+IF OBJECT_ID('shop.active_customer_count', 'FN') IS NOT NULL DROP FUNCTION shop.active_customer_count;
+GO
+CREATE FUNCTION shop.active_customer_count()
+RETURNS BIGINT
+AS
+BEGIN
+    DECLARE @n BIGINT;
+    SELECT @n = COUNT(DISTINCT customer_id)
+    FROM shop.orders
+    WHERE status IN ('paid','shipped','delivered');
+    RETURN @n;
+END
+GO
+
+-- Pretty-print cents → "$1,234.56" — scalar fn.
+IF OBJECT_ID('shop.format_price', 'FN') IS NOT NULL DROP FUNCTION shop.format_price;
+GO
+CREATE FUNCTION shop.format_price(@cents INT)
+RETURNS NVARCHAR(32)
+AS
+BEGIN
+    RETURN '$' + FORMAT(@cents / 100.0, 'N2');
+END
+GO
+
 -- ────────────────────────────────────────────────────────────────────
 -- shop seed data.
 -- ────────────────────────────────────────────────────────────────────

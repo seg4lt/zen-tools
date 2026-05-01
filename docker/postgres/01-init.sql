@@ -272,6 +272,76 @@ BEGIN
 END;
 $$;
 
+-- Bulk price update — also a procedure, so the Routines folder
+-- shows two procedures side by side. Returns nothing; the audit
+-- trigger on shop.orders fires for each touched row through the
+-- updated_at trigger chain.
+CREATE OR REPLACE PROCEDURE shop.bump_prices(p_pct numeric)
+LANGUAGE plpgsql AS $$
+BEGIN
+    IF p_pct < 0 OR p_pct > 100 THEN
+        RAISE EXCEPTION 'pct must be between 0 and 100, got %', p_pct;
+    END IF;
+    UPDATE shop.products
+       SET price_cents = floor(price_cents * (1 + p_pct / 100.0))::int;
+END;
+$$;
+
+-- Restock a product back to in_stock. Demonstrates an INOUT-style
+-- procedure (returns rows-affected via RAISE NOTICE so it lives
+-- under "Procedures" in the tree).
+CREATE OR REPLACE PROCEDURE shop.restock_product(p_sku text)
+LANGUAGE plpgsql AS $$
+DECLARE
+    affected int;
+BEGIN
+    UPDATE shop.products
+       SET in_stock = true
+     WHERE sku = p_sku;
+    GET DIAGNOSTICS affected = ROW_COUNT;
+    RAISE NOTICE 'restock_product: % rows affected for sku %', affected, p_sku;
+END;
+$$;
+
+-- Order summary as a function returning a SETOF — appears under
+-- Routines as a function with a tabular return type.
+CREATE OR REPLACE FUNCTION shop.order_summary(p_since timestamptz DEFAULT now() - interval '30 days')
+RETURNS TABLE (
+    status      text,
+    order_count bigint,
+    total_cents bigint,
+    avg_cents   numeric
+)
+LANGUAGE sql STABLE AS $$
+    SELECT o.status,
+           count(*)::bigint                        AS order_count,
+           sum(o.total_cents)::bigint              AS total_cents,
+           avg(o.total_cents)::numeric(12, 2)      AS avg_cents
+    FROM shop.orders o
+    WHERE o.placed_at >= p_since
+    GROUP BY o.status
+    ORDER BY order_count DESC;
+$$;
+
+-- Scalar function — count of customers with at least one paid
+-- order. A trivial demo function so the tree shows multiple FN
+-- entries.
+CREATE OR REPLACE FUNCTION shop.active_customer_count()
+RETURNS bigint
+LANGUAGE sql STABLE AS $$
+    SELECT count(DISTINCT o.customer_id)::bigint
+    FROM shop.orders o
+    WHERE o.status IN ('paid','shipped','delivered');
+$$;
+
+-- Format a price in USD cents → "$1,234.56" string. Appears as
+-- a scalar fn under Routines.
+CREATE OR REPLACE FUNCTION shop.format_price(p_cents integer)
+RETURNS text
+LANGUAGE sql IMMUTABLE AS $$
+    SELECT to_char(p_cents / 100.0, 'FM$999,999,990.00');
+$$;
+
 -- ────────────────────────────────────────────────────────────────────
 -- shop seed data.
 -- ────────────────────────────────────────────────────────────────────
