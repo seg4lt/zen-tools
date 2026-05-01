@@ -112,6 +112,10 @@ pub struct AppState {
     /// `Arc` so a slow query holds only the per-connection lock inside
     /// the registry, never the outer `Mutex<AppState>`.
     pub db: Arc<ConnectionRegistry>,
+    /// Open project roots for the Database Explorer's SQL-file
+    /// workspace. Separate from `working_dirs` (which is the http-runner
+    /// project list) so the two tools don't bleed into each other.
+    pub sql_workspace_dirs: Vec<PathBuf>,
 }
 
 impl AppState {
@@ -144,6 +148,7 @@ impl AppState {
             cleaner: Arc::new(parking_lot::Mutex::new(CleanerState::default())),
             markdown_search_tokens: Arc::new(parking_lot::Mutex::new(HashMap::default())),
             db: Arc::new(ConnectionRegistry::new()),
+            sql_workspace_dirs: Vec::new(),
         }
     }
 

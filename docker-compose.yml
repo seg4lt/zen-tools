@@ -37,22 +37,27 @@ services:
     volumes:
       - mssql_data:/var/opt/mssql
     healthcheck:
-      # mssql-tools18 ships in the official image; -C trusts the self-signed cert
-      test:
-        - "CMD-SHELL"
-        - "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P \"$$MSSQL_SA_PASSWORD\" -Q 'SELECT 1' || /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P \"$$MSSQL_SA_PASSWORD\" -Q 'SELECT 1'"
-      interval: 10s
-      timeout: 10s
-      retries: 12
+      # azure-sql-edge ships no sqlcmd, and mssql/server's sqlcmd path
+      # differs between releases. A bash TCP probe is image-agnostic; the
+      # init sidecar still verifies a real login before applying SQL.
+      test: ["CMD-SHELL", "timeout 3 bash -c '</dev/tcp/localhost/1433'"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
       start_period: 30s
 
   # MSSQL has no /docker-entrypoint-initdb.d/ equivalent, so we run a
   # one-shot sidecar that waits for `mssql` to be healthy and then
   # applies docker/mssql/01-init.sql via sqlcmd. It exits 0 on success
   # and is not restarted (`restart: "no"`).
+  #
+  # Uses mssql-tools (always ships sqlcmd) rather than the server image,
+  # because azure-sql-edge — the arm64-friendly server image — does not
+  # include sqlcmd. mssql-tools is amd64-only and runs under emulation on
+  # Apple Silicon for this one-shot, which is fine.
   mssql-init:
-    image: ${MSSQL_IMAGE:-mcr.microsoft.com/mssql/server:2022-latest}
-    platform: ${DOCKER_PLATFORM:-linux/amd64}
+    image: ${MSSQL_TOOLS_IMAGE:-mcr.microsoft.com/mssql-tools:latest}
+    platform: linux/amd64
     container_name: zen-mssql-init
     restart: "no"
     depends_on:

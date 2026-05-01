@@ -251,6 +251,8 @@ pub enum FileType {
     PerfFile,
     /// `perf.variable*.yaml`.
     PerfVariableFile,
+    /// `.sql` file (Database Explorer).
+    SqlFile,
     /// Directory.
     Directory,
 }

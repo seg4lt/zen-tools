@@ -168,6 +168,15 @@ pub fn run() {
             commands::database::db_list_schemas,
             commands::database::db_list_tables,
             commands::database::db_query,
+            // sql workspace (database explorer file tree)
+            commands::sql_workspace::sql_workspace_list,
+            commands::sql_workspace::sql_workspace_add,
+            commands::sql_workspace::sql_workspace_remove,
+            commands::sql_workspace::sql_workspace_discover,
+            commands::sql_workspace::sql_workspace_create_file,
+            commands::sql_workspace::sql_workspace_create_dir,
+            commands::sql_workspace::sql_workspace_rename,
+            commands::sql_workspace::sql_workspace_delete_to_trash,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

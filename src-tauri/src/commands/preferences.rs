@@ -58,6 +58,10 @@ pub struct Preferences {
     /// here — they live in the OS keychain (see `zen_db::secrets`).
     #[serde(default)]
     pub db_connections: Vec<DbConnectionPrefs>,
+    /// Project roots opened in the Database Explorer's SQL-file
+    /// workspace, in user-defined order. Persists across launches.
+    #[serde(default)]
+    pub sql_workspace_dirs: Vec<String>,
 }
 
 /// One persisted Database Explorer connection. Mirrors
@@ -113,6 +117,7 @@ impl Default for Preferences {
             markdown_vault_dirs: Vec::new(),
             markdown_recent_files: Vec::new(),
             db_connections: Vec::new(),
+            sql_workspace_dirs: Vec::new(),
         }
     }
 }

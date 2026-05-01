@@ -60,7 +60,23 @@ export interface DbExplorerState {
   activeSchemaByConnection: Record<string, string>;
   /** Whether the connection-form modal is open. If a string, edit mode. */
   formOpen: false | "new" | { editId: string };
+  /** Currently-open SQL file (absolute path) — drives the editor. */
+  selectedFilePath: string | null;
+  /** Buffer per file path. Survives file-tree navigation. */
+  bufferByPath: Record<string, string>;
+  /** Per-file "buffer differs from disk" flag. */
+  dirtyByPath: Record<string, boolean>;
+  /**
+   * Inline-edit state. `null` when no row is being renamed and no
+   * placeholder is being typed into.
+   */
+  editing: EditingState | null;
 }
+
+/** Discriminated union for the inline-edit state machine. */
+export type EditingState =
+  | { kind: "rename"; path: string; seed: string }
+  | { kind: "create"; parentDir: string; childKind: "file" | "folder" };
 
 type Action =
   | { type: "set-connections"; connections: DbConnectionPrefs[] }
@@ -76,7 +92,18 @@ type Action =
   | { type: "set-active-database"; id: string; database: string }
   | { type: "set-active-schema"; id: string; schema: string }
   | { type: "open-form"; mode: "new" | { editId: string } }
-  | { type: "close-form" };
+  | { type: "close-form" }
+  | { type: "select-file"; path: string | null }
+  | { type: "set-buffer"; path: string; content: string; dirty: boolean }
+  | { type: "mark-clean"; path: string }
+  | { type: "drop-buffer"; path: string }
+  | { type: "start-rename"; path: string; seed: string }
+  | {
+      type: "start-create";
+      parentDir: string;
+      childKind: "file" | "folder";
+    }
+  | { type: "cancel-editing" };
 
 const initial: DbExplorerState = {
   connections: [],
@@ -90,6 +117,10 @@ const initial: DbExplorerState = {
   activeDbByConnection: {},
   activeSchemaByConnection: {},
   formOpen: false,
+  selectedFilePath: null,
+  bufferByPath: {},
+  dirtyByPath: {},
+  editing: null,
 };
 
 function reducer(state: DbExplorerState, action: Action): DbExplorerState {
@@ -220,6 +251,55 @@ function reducer(state: DbExplorerState, action: Action): DbExplorerState {
 
     case "close-form":
       return { ...state, formOpen: false };
+
+    case "select-file":
+      return { ...state, selectedFilePath: action.path };
+
+    case "set-buffer":
+      return {
+        ...state,
+        bufferByPath: { ...state.bufferByPath, [action.path]: action.content },
+        dirtyByPath: { ...state.dirtyByPath, [action.path]: action.dirty },
+      };
+
+    case "mark-clean":
+      return {
+        ...state,
+        dirtyByPath: { ...state.dirtyByPath, [action.path]: false },
+      };
+
+    case "drop-buffer": {
+      const { [action.path]: _drop, ...buffers } = state.bufferByPath;
+      const { [action.path]: _drop2, ...dirty } = state.dirtyByPath;
+      return {
+        ...state,
+        bufferByPath: buffers,
+        dirtyByPath: dirty,
+        selectedFilePath:
+          state.selectedFilePath === action.path
+            ? null
+            : state.selectedFilePath,
+      };
+    }
+
+    case "start-rename":
+      return {
+        ...state,
+        editing: { kind: "rename", path: action.path, seed: action.seed },
+      };
+
+    case "start-create":
+      return {
+        ...state,
+        editing: {
+          kind: "create",
+          parentDir: action.parentDir,
+          childKind: action.childKind,
+        },
+      };
+
+    case "cancel-editing":
+      return { ...state, editing: null };
   }
 }
 

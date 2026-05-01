@@ -102,6 +102,46 @@ export const dbTauri = {
     }),
 };
 
+// ── SQL workspace (project files) ──────────────────────────────────────
+
+export type SqlFileType = "sqlFile" | "directory";
+
+export interface SqlFileTreeItem {
+  name: string;
+  path: string;
+  isDir: boolean;
+  depth: number;
+  expanded: boolean;
+  fileType: SqlFileType;
+}
+
+export interface DiscoveredSqlProject {
+  root: string;
+  name: string;
+  items: SqlFileTreeItem[];
+}
+
+export const sqlWorkspaceTauri = {
+  list: () => invoke<string[]>("sql_workspace_list"),
+  add: (path: string) => invoke<string[]>("sql_workspace_add", { path }),
+  remove: (path: string) => invoke<string[]>("sql_workspace_remove", { path }),
+  discover: () => invoke<DiscoveredSqlProject[]>("sql_workspace_discover"),
+  createFile: (parentDir: string, name: string) =>
+    invoke<string>("sql_workspace_create_file", { parentDir, name }),
+  createDir: (parentDir: string, name: string) =>
+    invoke<string>("sql_workspace_create_dir", { parentDir, name }),
+  rename: (oldPath: string, newName: string) =>
+    invoke<string>("sql_workspace_rename", { oldPath, newName }),
+  deleteToTrash: (path: string) =>
+    invoke<void>("sql_workspace_delete_to_trash", { path }),
+  /** Native folder picker — reuses the http-runner command. */
+  pickDirectory: () => invoke<string | null>("pick_directory"),
+  readFile: (path: string) =>
+    invoke<string>("read_file_content", { path }),
+  writeFile: (path: string, content: string) =>
+    invoke<void>("write_file_content", { path, content }),
+};
+
 /** Render a `DbCell` to a human-friendly string. */
 export function cellToString(cell: DbCell): string {
   switch (cell.kind) {
