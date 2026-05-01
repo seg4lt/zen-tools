@@ -20,7 +20,7 @@
  *   (read-only schema browser).
  */
 
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ConnectionList } from "./components/connection-list";
 import { ConnectionForm } from "./components/connection-form";
 import { ConnectionTabs } from "./components/connection-tabs";
@@ -31,12 +31,13 @@ import {
   type SqlEditorHandle,
 } from "./components/sql-editor";
 import { RunToolbar } from "./components/run-toolbar";
-import { ResultsGrid } from "./components/results-grid";
+import { ResultsPane } from "./components/results-pane";
 import { useDbExplorerStore } from "./store/db-explorer-store";
 import { useDbQuery } from "./hooks/use-db-query";
 import { useSqlProjectsBootstrap } from "./hooks/use-sql-workspace";
 import { sqlWorkspaceTauri, type SqlFileTreeItem } from "./lib/tauri";
 import { formatError } from "./lib/format-error";
+import { statementAtCursor } from "./lib/sql-statements";
 import { useVimMode } from "@/tools/http-runner/hooks/use-vim-mode";
 
 export function DatabaseExplorerView() {
@@ -55,6 +56,11 @@ export function DatabaseExplorerView() {
   const status = activeId ? state.status[activeId] : undefined;
   const isConnected = status === "connected";
   const isRunning = activeId ? !!state.running[activeId] : false;
+  // UI-only — maximize the results pane to fill the centre column,
+  // hiding the editor + footer. Click the icon on any result tab to
+  // toggle. Reset when the user switches files (so a fresh file
+  // doesn't open in a hidden editor).
+  const [resultsMaximized, setResultsMaximized] = useState(false);
   const results = activeId ? state.resultsByConnection[activeId] ?? null : null;
   const error = activeId ? state.errors[activeId] ?? null : null;
 
@@ -121,6 +127,36 @@ export function DatabaseExplorerView() {
     [dispatch],
   );
 
+  // ── Auto-save (1 s trailing-edge debounce) ────────────────────────
+  //
+  // `pendingRef` holds the file path + last-typed content waiting to
+  // hit disk. `timerRef` holds the active setTimeout handle. Each
+  // keystroke clears the previous timer and re-arms — only the LAST
+  // version inside a quiet 1 s window actually writes, mirroring
+  // VS Code / IntelliJ. Manual ⌘S, file-switch, and unmount all
+  // call `flushAutoSave()` which writes immediately.
+  const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const autoSavePendingRef = useRef<{ path: string; content: string } | null>(
+    null,
+  );
+
+  const flushAutoSave = useCallback(async () => {
+    if (autoSaveTimerRef.current) {
+      clearTimeout(autoSaveTimerRef.current);
+      autoSaveTimerRef.current = null;
+    }
+    const pending = autoSavePendingRef.current;
+    autoSavePendingRef.current = null;
+    if (!pending) return;
+    try {
+      await sqlWorkspaceTauri.writeFile(pending.path, pending.content);
+      dispatch({ type: "mark-clean", path: pending.path });
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error("auto-save failed", formatError(err));
+    }
+  }, [dispatch]);
+
   const handleEditorChange = useCallback(
     (next: string) => {
       if (!selectedPath) return;
@@ -130,13 +166,32 @@ export function DatabaseExplorerView() {
         content: next,
         dirty: true,
       });
+      // Re-arm the trailing-edge debounce. The pending ref always
+      // holds the freshest content, so when the timer eventually
+      // fires (or `flushAutoSave` is called), the latest typed
+      // bytes hit disk.
+      if (autoSaveTimerRef.current) {
+        clearTimeout(autoSaveTimerRef.current);
+      }
+      autoSavePendingRef.current = { path: selectedPath, content: next };
+      autoSaveTimerRef.current = setTimeout(() => {
+        autoSaveTimerRef.current = null;
+        void flushAutoSave();
+      }, 1000);
     },
-    [selectedPath, dispatch],
+    [selectedPath, dispatch, flushAutoSave],
   );
 
   const handleSave = useCallback(
     async (next: string) => {
       if (!selectedPath) return;
+      // Manual ⌘S beats the timer to the punch — cancel anything
+      // pending so we don't double-write.
+      if (autoSaveTimerRef.current) {
+        clearTimeout(autoSaveTimerRef.current);
+        autoSaveTimerRef.current = null;
+      }
+      autoSavePendingRef.current = null;
       try {
         await sqlWorkspaceTauri.writeFile(selectedPath, next);
         dispatch({ type: "mark-clean", path: selectedPath });
@@ -148,23 +203,68 @@ export function DatabaseExplorerView() {
     [selectedPath, dispatch],
   );
 
+  // Force-flush pending save when the user switches files or the
+  // pane unmounts — otherwise the last edits to file A would be
+  // discarded the moment the user clicks file B.
+  useEffect(() => {
+    return () => {
+      void flushAutoSave();
+    };
+  }, [selectedPath, flushAutoSave]);
+
+  const ctxOpts = useMemo(
+    () => ({
+      database:
+        active?.driver === "mssql" && activeDatabase ? activeDatabase : null,
+      schema:
+        active?.driver === "postgres" && activeSchema ? activeSchema : null,
+    }),
+    [active?.driver, activeDatabase, activeSchema],
+  );
+
+  /**
+   * DataGrip-style Run:
+   *   - selection?  run the selection (may span multiple statements)
+   *   - else        run the statement under the cursor
+   *
+   * Bound to Cmd+Enter via the editor keymap and to the Run button.
+   */
   const handleRun = useCallback(() => {
     if (!activeId) return;
     const editor = editorRef.current;
     if (!editor) return;
     const selection = editor.getSelection();
-    const sqlToRun = selection.trim().length > 0 ? selection : editor.getValue();
-    runQuery(activeId, sqlToRun, {
-      database:
-        active?.driver === "mssql" && activeDatabase ? activeDatabase : null,
-      schema:
-        active?.driver === "postgres" && activeSchema ? activeSchema : null,
-    });
-  }, [activeId, runQuery, active?.driver, activeDatabase, activeSchema]);
+    if (selection.trim().length > 0) {
+      runQuery(activeId, selection, ctxOpts);
+      return;
+    }
+    const buffer = editor.getValue();
+    const cursor = editor.getCursorOffset();
+    const stmt = statementAtCursor(buffer, cursor);
+    if (!stmt) return;
+    runQuery(activeId, stmt.sql, ctxOpts);
+  }, [activeId, runQuery, ctxOpts]);
+
+  /** Explicit "run every statement in the buffer". */
+  const handleRunAll = useCallback(() => {
+    if (!activeId) return;
+    const editor = editorRef.current;
+    if (!editor) return;
+    const buffer = editor.getValue();
+    if (buffer.trim().length === 0) return;
+    runQuery(activeId, buffer, ctxOpts);
+  }, [activeId, runQuery, ctxOpts]);
 
   return (
-    <div className="flex h-full min-h-0 flex-1">
-      {/* Left: SQL file tree */}
+    <div className="flex h-full min-h-0 w-full min-w-0 flex-1 overflow-hidden">
+      {/* Left: SQL file tree.
+          Note: the row root has `min-w-0 overflow-hidden` because flex
+          children default to `min-width: auto` (intrinsic content). A
+          wide results grid would otherwise propagate its min-content
+          width up the tree and slide the whole layout off-screen,
+          since the asides are `shrink-0`. With this clip, only the
+          inner scroll container grows past its parent and engages its
+          own scrollbar. */}
       <aside className="flex w-64 shrink-0 flex-col border-r border-border/60">
         <SqlFileTree
           selectedPath={selectedPath}
@@ -182,27 +282,43 @@ export function DatabaseExplorerView() {
           results={results}
           error={error}
           onRun={handleRun}
+          onRunAll={handleRunAll}
         />
-        <div className="flex min-h-0 flex-1 flex-col">
-          <div className="min-h-[200px] flex-1 border-b border-border/60">
-            {selectedPath ? (
-              <SqlEditor
-                key={selectedPath}
-                imperativeRef={editorRef}
-                driver={active?.driver ?? "postgres"}
-                value={buffer}
-                onChange={handleEditorChange}
-                onSave={handleSave}
-                onRun={handleRun}
-                vimMode={vimMode}
-              />
-            ) : (
-              <EmptyEditor />
-            )}
-          </div>
-          <FileFooter path={selectedPath} dirty={isDirty} />
-          <div className="min-h-[200px] flex-1">
-            <ResultsGrid results={results} />
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+          {!resultsMaximized && (
+            <>
+              <div className="min-h-[200px] min-w-0 flex-1 overflow-hidden border-b border-border/60">
+                {selectedPath ? (
+                  <SqlEditor
+                    key={selectedPath}
+                    imperativeRef={editorRef}
+                    driver={active?.driver ?? "postgres"}
+                    value={buffer}
+                    onChange={handleEditorChange}
+                    onSave={handleSave}
+                    onRun={handleRun}
+                    vimMode={vimMode}
+                  />
+                ) : (
+                  <EmptyEditor />
+                )}
+              </div>
+              <FileFooter path={selectedPath} dirty={isDirty} />
+            </>
+          )}
+          {/* Wrap the results pane in `overflow-hidden` so a wide
+              result set can NEVER push the layout — the inner scroll
+              container is then the only thing that grows horizontally,
+              and its own `overflow-auto` engages a scrollbar. Without
+              this clip, intermediate flex items inherit the grid's
+              intrinsic min-content width and the whole UI gets shoved. */}
+          <div className="min-h-[200px] min-w-0 flex-1 overflow-hidden">
+            <ResultsPane
+              connectionId={activeId}
+              results={results}
+              maximized={resultsMaximized}
+              onToggleMaximize={() => setResultsMaximized((m) => !m)}
+            />
           </div>
         </div>
       </section>

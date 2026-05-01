@@ -15,7 +15,7 @@
  */
 
 import { useEffect, useImperativeHandle, useRef, type Ref } from "react";
-import { EditorState, type Extension } from "@codemirror/state";
+import { EditorState, Prec, type Extension } from "@codemirror/state";
 import {
   EditorView,
   drawSelection,
@@ -51,6 +51,8 @@ export interface CodeEditorHandle {
   scrollToLine: (lineNumber: number) => void;
   /** Return the currently selected text, or `""` if no selection. */
   getSelection: () => string;
+  /** Primary cursor offset into the document (0-based). */
+  getCursorOffset: () => number;
 }
 
 export interface CodeEditorProps {
@@ -138,40 +140,49 @@ export function CodeEditor({
     makeEditorTheme(isDark),
     EditorView.lineWrapping,
     EditorState.readOnly.of(readOnly),
+    // Action shortcuts at highest precedence so vim's keymap doesn't
+    // swallow them in normal/insert/visual mode. Without `Prec.highest`,
+    // @replit/codemirror-vim handles Mod-Enter/Mod-Shift-Enter/Mod-s
+    // before our keymap fires (Enter falls through as a plain newline,
+    // ⌘S triggers the browser save dialog).
+    Prec.highest(
+      keymap.of([
+        {
+          key: "Mod-s",
+          preventDefault: true,
+          run: (view) => {
+            onSaveRef.current?.(view.state.doc.toString());
+            return true;
+          },
+        },
+        {
+          key: "Mod-Enter",
+          preventDefault: true,
+          run: (view) => {
+            const pos = view.state.selection.main.head;
+            const line = view.state.doc.lineAt(pos).number;
+            onRunLineRef.current?.(line);
+            return true;
+          },
+        },
+        {
+          key: "Mod-Shift-Enter",
+          preventDefault: true,
+          run: (view) => {
+            const pos = view.state.selection.main.head;
+            const line = view.state.doc.lineAt(pos).number;
+            onRunLineWithDepsRef.current?.(line);
+            return true;
+          },
+        },
+      ]),
+    ),
     keymap.of([
       ...defaultKeymap,
       ...historyKeymap,
       ...searchKeymap,
       ...foldKeymap,
       indentWithTab,
-      {
-        key: "Mod-s",
-        preventDefault: true,
-        run: (view) => {
-          onSaveRef.current?.(view.state.doc.toString());
-          return true;
-        },
-      },
-      {
-        key: "Mod-Enter",
-        preventDefault: true,
-        run: (view) => {
-          const pos = view.state.selection.main.head;
-          const line = view.state.doc.lineAt(pos).number;
-          onRunLineRef.current?.(line);
-          return true;
-        },
-      },
-      {
-        key: "Mod-Shift-Enter",
-        preventDefault: true,
-        run: (view) => {
-          const pos = view.state.selection.main.head;
-          const line = view.state.doc.lineAt(pos).number;
-          onRunLineWithDepsRef.current?.(line);
-          return true;
-        },
-      },
     ]),
     EditorView.updateListener.of((update) => {
       if (update.docChanged) {
@@ -248,6 +259,11 @@ export function CodeEditor({
         if (!view) return "";
         const { from, to } = view.state.selection.main;
         return view.state.sliceDoc(from, to);
+      },
+      getCursorOffset: () => {
+        const view = viewRef.current;
+        if (!view) return 0;
+        return view.state.selection.main.head;
       },
     }),
     [],

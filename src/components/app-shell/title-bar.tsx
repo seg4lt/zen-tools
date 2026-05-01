@@ -2,6 +2,7 @@ import { useRouterState } from "@tanstack/react-router";
 import { TOOLS } from "@/config/tools";
 import { ToolPill } from "./tool-pill";
 import { ThemeToggle } from "@/components/theme-toggle";
+import { VimToggle } from "@/components/vim-toggle";
 import { isMac } from "@/lib/keyboard";
 
 /**
@@ -42,6 +43,7 @@ export function TitleBar() {
         // Stop the drag region from swallowing pointer events on this group.
         data-tauri-drag-region={false}
       >
+        <VimToggle />
         <ThemeToggle />
       </div>
     </header>

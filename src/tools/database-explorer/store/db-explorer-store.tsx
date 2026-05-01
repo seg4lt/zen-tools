@@ -40,6 +40,8 @@ export interface DbExplorerState {
   sqlByConnection: Record<string, string>;
   /** Latest run results per-connection. */
   resultsByConnection: Record<string, DbQueryResult[] | null>;
+  /** Index of the active result tab per-connection. */
+  activeResultIndexByConnection: Record<string, number>;
   /** Connection status per-connection. */
   status: Record<string, ConnectionStatus>;
   /** Last error message per-connection. */
@@ -71,12 +73,39 @@ export interface DbExplorerState {
    * placeholder is being typed into.
    */
   editing: EditingState | null;
+  /**
+   * Append-only-ish query log shared across connections. Capped at
+   * `LOG_MAX` entries — oldest dropped first.
+   */
+  logs: QueryLogEntry[];
 }
+
+/** Cap to keep the log panel responsive and bound memory use. */
+export const LOG_MAX = 500;
 
 /** Discriminated union for the inline-edit state machine. */
 export type EditingState =
   | { kind: "rename"; path: string; seed: string }
   | { kind: "create"; parentDir: string; childKind: "file" | "folder" };
+
+/** One entry in the persistent query log (append-only ring). */
+export interface QueryLogEntry {
+  id: string;
+  /** Wall-clock ms — `Date.now()` at run dispatch. */
+  ts: number;
+  connectionId: string;
+  connectionName: string;
+  driver: string;
+  /** The SQL that was sent. Long statements get truncated for display. */
+  sql: string;
+  status: "ok" | "error";
+  /** Number of rowsful + rowsless statements in the result. */
+  statementCount: number;
+  /** Total wall-clock ms across all statements. `null` on error. */
+  durationMs: number | null;
+  /** Error message; only set when `status === "error"`. */
+  message: string | null;
+}
 
 type Action =
   | { type: "set-connections"; connections: DbConnectionPrefs[] }
@@ -85,6 +114,8 @@ type Action =
   | { type: "set-status"; id: string; status: ConnectionStatus; error?: string | null }
   | { type: "set-running"; id: string; running: boolean }
   | { type: "set-results"; id: string; results: DbQueryResult[] | null }
+  | { type: "set-active-result-index"; id: string; index: number }
+  | { type: "close-result-tab"; id: string; index: number }
   | { type: "set-error"; id: string; error: string | null }
   | { type: "set-databases"; id: string; databases: string[] }
   | { type: "set-schemas"; id: string; database: string; schemas: string[] }
@@ -103,7 +134,9 @@ type Action =
       parentDir: string;
       childKind: "file" | "folder";
     }
-  | { type: "cancel-editing" };
+  | { type: "cancel-editing" }
+  | { type: "append-log"; entry: QueryLogEntry }
+  | { type: "clear-logs" };
 
 const initial: DbExplorerState = {
   connections: [],
@@ -114,6 +147,7 @@ const initial: DbExplorerState = {
   errors: {},
   running: {},
   trees: {},
+  activeResultIndexByConnection: {},
   activeDbByConnection: {},
   activeSchemaByConnection: {},
   formOpen: false,
@@ -121,6 +155,7 @@ const initial: DbExplorerState = {
   bufferByPath: {},
   dirtyByPath: {},
   editing: null,
+  logs: [],
 };
 
 function reducer(state: DbExplorerState, action: Action): DbExplorerState {
@@ -160,7 +195,44 @@ function reducer(state: DbExplorerState, action: Action): DbExplorerState {
           ...state.resultsByConnection,
           [action.id]: action.results,
         },
+        // New result set always opens on tab 0.
+        activeResultIndexByConnection: {
+          ...state.activeResultIndexByConnection,
+          [action.id]: 0,
+        },
       };
+
+    case "set-active-result-index":
+      return {
+        ...state,
+        activeResultIndexByConnection: {
+          ...state.activeResultIndexByConnection,
+          [action.id]: action.index,
+        },
+      };
+
+    case "close-result-tab": {
+      const current = state.resultsByConnection[action.id] ?? null;
+      if (!current) return state;
+      const next = current.filter((_, idx) => idx !== action.index);
+      const prevActive = state.activeResultIndexByConnection[action.id] ?? 0;
+      // Keep the same tab where possible; if we closed it, fall back
+      // to the one before. Clamp to 0 when nothing's left.
+      let nextActive = prevActive;
+      if (action.index < prevActive) nextActive = prevActive - 1;
+      if (nextActive >= next.length) nextActive = Math.max(0, next.length - 1);
+      return {
+        ...state,
+        resultsByConnection: {
+          ...state.resultsByConnection,
+          [action.id]: next.length === 0 ? null : next,
+        },
+        activeResultIndexByConnection: {
+          ...state.activeResultIndexByConnection,
+          [action.id]: nextActive,
+        },
+      };
+    }
 
     case "set-error":
       return {
@@ -300,6 +372,16 @@ function reducer(state: DbExplorerState, action: Action): DbExplorerState {
 
     case "cancel-editing":
       return { ...state, editing: null };
+
+    case "append-log": {
+      // Newest-first so the log panel reads top-down.
+      const next = [action.entry, ...state.logs];
+      if (next.length > LOG_MAX) next.length = LOG_MAX;
+      return { ...state, logs: next };
+    }
+
+    case "clear-logs":
+      return { ...state, logs: [] };
   }
 }
 

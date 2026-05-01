@@ -103,21 +103,18 @@ CREATE TABLE metrics.events (
 );
 GO
 
-;WITH actors(name) AS (
-    SELECT v FROM (VALUES ('ada'),('grace'),('alan'),('linus'),('barbara')) AS x(v)
-),
-actions(name) AS (
-    SELECT v FROM (VALUES ('login'),('search'),('purchase'),('logout'),('refund'),('signup')) AS x(v)
-),
-nums AS (
-    SELECT TOP (500) ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS n
+-- 20k rows to exercise virtualised grid scroll performance.
+;WITH nums AS (
+    SELECT TOP (20000) ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS n
     FROM sys.all_objects a CROSS JOIN sys.all_objects b
 )
 INSERT INTO metrics.events (happened, actor, action, duration_ms)
 SELECT
     DATEADD(MINUTE, -CAST(ABS(CHECKSUM(NEWID())) % (60 * 24 * 14) AS INT), SYSUTCDATETIME()),
-    (SELECT TOP 1 name FROM actors  ORDER BY NEWID()),
-    (SELECT TOP 1 name FROM actions ORDER BY NEWID()),
+    CHOOSE(ABS(CHECKSUM(NEWID())) % 5 + 1,
+           N'ada', N'grace', N'alan', N'linus', N'barbara'),
+    CHOOSE(ABS(CHECKSUM(NEWID())) % 6 + 1,
+           N'login', N'search', N'purchase', N'logout', N'refund', N'signup'),
     20 + ABS(CHECKSUM(NEWID())) % 800
 FROM nums;
 GO
@@ -135,4 +132,119 @@ SELECT
     COUNT(*) AS n
 FROM metrics.events
 GROUP BY CAST(happened AS DATE), action;
+GO
+
+-- ────────────────────────────────────────────────────────────────────────
+-- "metrics" : a wide telemetry table — 32 columns of mixed types so we
+-- can exercise the results grid's *horizontal* scroll. 500 rows is
+-- plenty since the focus here is column count, not row count.
+-- ────────────────────────────────────────────────────────────────────────
+IF OBJECT_ID('metrics.wide_records', 'U') IS NOT NULL
+    DROP TABLE metrics.wide_records;
+GO
+
+CREATE TABLE metrics.wide_records (
+    id              BIGINT IDENTITY(1,1) PRIMARY KEY,
+    recorded_at     DATETIME2         NOT NULL,
+    source          NVARCHAR(32)      NOT NULL,
+    environment     NVARCHAR(16)      NOT NULL,
+    service         NVARCHAR(32)      NOT NULL,
+    region          NVARCHAR(32)      NOT NULL,
+    host            NVARCHAR(64)      NOT NULL,
+    pid             INT               NOT NULL,
+    thread_id       INT               NOT NULL,
+    user_id         NVARCHAR(64)      NOT NULL,
+    session_id      UNIQUEIDENTIFIER  NOT NULL,
+    request_id      UNIQUEIDENTIFIER  NOT NULL,
+    trace_id        NVARCHAR(64)      NOT NULL,
+    span_id         NVARCHAR(32)      NOT NULL,
+    http_method     NVARCHAR(8)       NOT NULL,
+    http_status     INT               NOT NULL,
+    http_path       NVARCHAR(128)     NOT NULL,
+    duration_ms     INT               NOT NULL,
+    bytes_in        BIGINT            NOT NULL,
+    bytes_out       BIGINT            NOT NULL,
+    cpu_pct         FLOAT             NOT NULL,
+    mem_mb          FLOAT             NOT NULL,
+    queue_depth     INT               NOT NULL,
+    retry_count     INT               NOT NULL,
+    success         BIT               NOT NULL,
+    error_kind      NVARCHAR(32)      NULL,
+    error_message   NVARCHAR(256)     NULL,
+    tag_a           NVARCHAR(32)      NULL,
+    tag_b           NVARCHAR(32)      NULL,
+    tag_c           NVARCHAR(32)      NULL,
+    cost_cents      INT               NOT NULL,
+    note            NVARCHAR(256)     NULL
+);
+GO
+
+;WITH nums AS (
+    SELECT TOP (500) ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS n
+    FROM sys.all_objects a CROSS JOIN sys.all_objects b
+)
+INSERT INTO metrics.wide_records (
+    recorded_at, source, environment, service, region, host, pid, thread_id,
+    user_id, session_id, request_id, trace_id, span_id, http_method,
+    http_status, http_path, duration_ms, bytes_in, bytes_out, cpu_pct,
+    mem_mb, queue_depth, retry_count, success, error_kind, error_message,
+    tag_a, tag_b, tag_c, cost_cents, note
+)
+SELECT
+    DATEADD(MINUTE, -CAST(ABS(CHECKSUM(NEWID())) % (60 * 24 * 7) AS INT), SYSUTCDATETIME()),
+    CHOOSE(ABS(CHECKSUM(NEWID())) % 5 + 1,
+           N'api', N'worker', N'cron', N'sidecar', N'batch'),
+    CHOOSE(ABS(CHECKSUM(NEWID())) % 3 + 1, N'prod', N'staging', N'dev'),
+    CHOOSE(ABS(CHECKSUM(NEWID())) % 6 + 1,
+           N'orders', N'catalog', N'billing', N'search', N'auth', N'notifications'),
+    CHOOSE(ABS(CHECKSUM(NEWID())) % 4 + 1,
+           N'us-east-1', N'us-west-2', N'eu-west-1', N'ap-south-1'),
+    N'host-' + RIGHT('00' + CAST(ABS(CHECKSUM(NEWID())) % 99 + 1 AS NVARCHAR(2)), 2),
+    ABS(CHECKSUM(NEWID())) % 30000 + 1000,
+    ABS(CHECKSUM(NEWID())) % 32 + 1,
+    N'user_' + CAST(ABS(CHECKSUM(NEWID())) % 5000 + 1 AS NVARCHAR(8)),
+    NEWID(),
+    NEWID(),
+    LOWER(CONVERT(NVARCHAR(32), HASHBYTES('MD5', CAST(NEWID() AS NVARCHAR(36))), 2)),
+    LOWER(CONVERT(NVARCHAR(16), CAST(NEWID() AS BINARY(8)), 2)),
+    CHOOSE(ABS(CHECKSUM(NEWID())) % 5 + 1,
+           N'GET', N'POST', N'PUT', N'DELETE', N'PATCH'),
+    CHOOSE(ABS(CHECKSUM(NEWID())) % 14 + 1,
+           200, 200, 200, 201, 204, 301, 304, 400, 401, 403, 404, 500, 502, 503),
+    CHOOSE(ABS(CHECKSUM(NEWID())) % 9 + 1,
+           N'/api/orders', N'/api/orders/:id', N'/api/users/me',
+           N'/api/products', N'/api/products/:sku', N'/api/checkout',
+           N'/api/billing/invoices', N'/healthz', N'/api/search'),
+    ABS(CHECKSUM(NEWID())) % 1500 + 5,
+    CAST(ABS(CHECKSUM(NEWID())) % 65536 AS BIGINT),
+    CAST(ABS(CHECKSUM(NEWID())) % 524288 AS BIGINT),
+    CAST(ABS(CHECKSUM(NEWID())) % 10000 AS FLOAT) / 100.0,
+    CAST(ABS(CHECKSUM(NEWID())) % 40960 AS FLOAT) / 10.0,
+    ABS(CHECKSUM(NEWID())) % 64,
+    ABS(CHECKSUM(NEWID())) % 4,
+    CASE WHEN ABS(CHECKSUM(NEWID())) % 100 < 85 THEN 1 ELSE 0 END,
+    CASE WHEN ABS(CHECKSUM(NEWID())) % 100 < 15
+         THEN CHOOSE(ABS(CHECKSUM(NEWID())) % 5 + 1,
+                     N'Timeout', N'UpstreamError', N'ValidationError',
+                     N'NotFound', N'RateLimited')
+         ELSE NULL END,
+    CASE WHEN ABS(CHECKSUM(NEWID())) % 100 < 15
+         THEN N'unhandled exception at ' +
+              LOWER(CONVERT(NVARCHAR(32), HASHBYTES('MD5', CAST(NEWID() AS NVARCHAR(36))), 2))
+         ELSE NULL END,
+    N'tier:' + CHOOSE(ABS(CHECKSUM(NEWID())) % 3 + 1,
+                      N'free', N'pro', N'enterprise'),
+    N'team:' + CHOOSE(ABS(CHECKSUM(NEWID())) % 4 + 1,
+                      N'alpha', N'beta', N'gamma', N'delta'),
+    N'feature:' + CHOOSE(ABS(CHECKSUM(NEWID())) % 4 + 1,
+                         N'v1', N'v2', N'beta', N'dark'),
+    ABS(CHECKSUM(NEWID())) % 5000,
+    CASE WHEN ABS(CHECKSUM(NEWID())) % 100 < 30
+         THEN N'arbitrary descriptive note ' +
+              LOWER(CONVERT(NVARCHAR(32), HASHBYTES('MD5', CAST(NEWID() AS NVARCHAR(36))), 2))
+         ELSE NULL END
+FROM nums;
+GO
+
+CREATE INDEX wide_recorded_at_idx ON metrics.wide_records (recorded_at DESC);
 GO

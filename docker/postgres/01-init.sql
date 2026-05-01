@@ -81,13 +81,16 @@ CREATE TABLE metrics.events (
     duration_ms integer   NOT NULL
 );
 
+-- 20k rows to exercise virtualised grid scroll performance.  Bump this
+-- to 200k+ if you want to really stress-test — generation takes a few
+-- seconds either way.
 INSERT INTO metrics.events (happened, actor, action, duration_ms)
 SELECT
     now() - (random() * interval '14 days'),
     (ARRAY['ada','grace','alan','linus','barbara'])[floor(random() * 5 + 1)],
     (ARRAY['login','search','purchase','logout','refund','signup'])[floor(random() * 6 + 1)],
     floor(random() * 800 + 20)::int
-FROM generate_series(1, 500);
+FROM generate_series(1, 20000);
 
 CREATE INDEX events_happened_idx ON metrics.events (happened DESC);
 
@@ -100,3 +103,98 @@ SELECT
 FROM metrics.events
 GROUP BY 1, 2
 ORDER BY 1 DESC, 2;
+
+-- ────────────────────────────────────────────────────────────────────────
+-- "metrics" : a wide telemetry table — 32 columns of mixed types so we
+-- can exercise the results grid's *horizontal* scroll. 500 rows is
+-- plenty since the focus here is column count, not row count.
+-- ────────────────────────────────────────────────────────────────────────
+CREATE TABLE metrics.wide_records (
+    id              bigserial PRIMARY KEY,
+    recorded_at     timestamptz NOT NULL,
+    source          text        NOT NULL,
+    environment     text        NOT NULL,
+    service         text        NOT NULL,
+    region          text        NOT NULL,
+    host            text        NOT NULL,
+    pid             integer     NOT NULL,
+    thread_id       integer     NOT NULL,
+    user_id         text        NOT NULL,
+    session_id      uuid        NOT NULL,
+    request_id      uuid        NOT NULL,
+    trace_id        text        NOT NULL,
+    span_id         text        NOT NULL,
+    http_method     text        NOT NULL,
+    http_status     integer     NOT NULL,
+    http_path       text        NOT NULL,
+    duration_ms     integer     NOT NULL,
+    bytes_in        bigint      NOT NULL,
+    bytes_out       bigint      NOT NULL,
+    cpu_pct         double precision NOT NULL,
+    mem_mb          double precision NOT NULL,
+    queue_depth     integer     NOT NULL,
+    retry_count     integer     NOT NULL,
+    success         boolean     NOT NULL,
+    error_kind      text,
+    error_message   text,
+    tag_a           text,
+    tag_b           text,
+    tag_c           text,
+    cost_cents      integer     NOT NULL,
+    note            text
+);
+
+INSERT INTO metrics.wide_records (
+    recorded_at, source, environment, service, region, host, pid, thread_id,
+    user_id, session_id, request_id, trace_id, span_id, http_method,
+    http_status, http_path, duration_ms, bytes_in, bytes_out, cpu_pct,
+    mem_mb, queue_depth, retry_count, success, error_kind, error_message,
+    tag_a, tag_b, tag_c, cost_cents, note
+)
+SELECT
+    now() - (random() * interval '7 days'),
+    (ARRAY['api','worker','cron','sidecar','batch'])[floor(random() * 5 + 1)],
+    (ARRAY['prod','staging','dev'])[floor(random() * 3 + 1)],
+    (ARRAY['orders','catalog','billing','search','auth','notifications'])[floor(random() * 6 + 1)],
+    (ARRAY['us-east-1','us-west-2','eu-west-1','ap-south-1'])[floor(random() * 4 + 1)],
+    'host-' || lpad(floor(random() * 99 + 1)::text, 2, '0'),
+    floor(random() * 30000 + 1000)::int,
+    floor(random() * 32 + 1)::int,
+    'user_' || floor(random() * 5000 + 1)::text,
+    gen_random_uuid(),
+    gen_random_uuid(),
+    md5(random()::text),
+    substring(md5(random()::text), 1, 16),
+    (ARRAY['GET','POST','PUT','DELETE','PATCH'])[floor(random() * 5 + 1)],
+    (ARRAY[200, 200, 200, 201, 204, 301, 304, 400, 401, 403, 404, 500, 502, 503])
+        [floor(random() * 14 + 1)],
+    (ARRAY[
+        '/api/orders', '/api/orders/:id', '/api/users/me',
+        '/api/products', '/api/products/:sku', '/api/checkout',
+        '/api/billing/invoices', '/healthz', '/api/search'
+    ])[floor(random() * 9 + 1)],
+    floor(random() * 1500 + 5)::int,
+    floor(random() * 65536)::bigint,
+    floor(random() * 524288)::bigint,
+    round((random() * 100)::numeric, 2)::double precision,
+    round((random() * 4096)::numeric, 1)::double precision,
+    floor(random() * 64)::int,
+    floor(random() * 4)::int,
+    random() > 0.15,
+    CASE WHEN random() > 0.85
+         THEN (ARRAY['Timeout','UpstreamError','ValidationError','NotFound','RateLimited'])
+              [floor(random() * 5 + 1)]
+         ELSE NULL END,
+    CASE WHEN random() > 0.85
+         THEN 'unhandled exception at ' || md5(random()::text)
+         ELSE NULL END,
+    'tier:' || (ARRAY['free','pro','enterprise'])[floor(random() * 3 + 1)],
+    'team:' || (ARRAY['alpha','beta','gamma','delta'])[floor(random() * 4 + 1)],
+    'feature:' || (ARRAY['v1','v2','beta','dark'])[floor(random() * 4 + 1)],
+    floor(random() * 5000)::int,
+    CASE WHEN random() > 0.7
+         THEN 'arbitrary descriptive note ' || md5(random()::text)
+         ELSE NULL END
+FROM generate_series(1, 500);
+
+CREATE INDEX wide_recorded_at_idx ON metrics.wide_records (recorded_at DESC);

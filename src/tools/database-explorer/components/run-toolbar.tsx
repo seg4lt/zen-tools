@@ -2,9 +2,10 @@
  * Toolbar with the Run button + dialect badge + last-query timing.
  */
 
-import { Loader2, Play } from "lucide-react";
+import { Loader2, Play, PlaySquare } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ContextPicker } from "./context-picker";
+import { LogsButton } from "./logs-button";
 import type { DbConnectionPrefs, DbQueryResult } from "../lib/tauri";
 
 interface RunToolbarProps {
@@ -13,7 +14,10 @@ interface RunToolbarProps {
   isRunning: boolean;
   results: DbQueryResult[] | null;
   error: string | null;
+  /** Run statement at cursor (or selection if there is one). */
   onRun: () => void;
+  /** Run every statement in the buffer. */
+  onRunAll: () => void;
 }
 
 export function RunToolbar({
@@ -23,6 +27,7 @@ export function RunToolbar({
   results,
   error,
   onRun,
+  onRunAll,
 }: RunToolbarProps) {
   const totalMs =
     results?.reduce((acc, r) => acc + (r.durationMs ?? 0), 0) ?? null;
@@ -36,7 +41,7 @@ export function RunToolbar({
         onClick={onRun}
         disabled={!isConnected || isRunning}
         className="h-6 gap-1 px-1.5 text-[11px]"
-        title="Run (⌘↵)"
+        title="Run statement at cursor (or selection)"
       >
         {isRunning ? (
           <Loader2 className="size-3 animate-spin" />
@@ -45,6 +50,17 @@ export function RunToolbar({
         )}
         Run
         <span className="ml-1 text-[10px] text-muted-foreground/70">⌘↵</span>
+      </Button>
+      <Button
+        variant="ghost"
+        size="sm"
+        onClick={onRunAll}
+        disabled={!isConnected || isRunning}
+        className="h-6 gap-1 px-1.5 text-[11px]"
+        title="Run every statement in the file"
+      >
+        <PlaySquare className="size-3" />
+        Run all
       </Button>
 
       {connection && (
@@ -74,6 +90,8 @@ export function RunToolbar({
           )}
         </span>
       )}
+
+      <LogsButton />
     </div>
   );
 }
