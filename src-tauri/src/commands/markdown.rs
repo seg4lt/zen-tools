@@ -26,7 +26,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use tauri::image::Image as TauriImage;
 use tauri::AppHandle;
+use tauri_plugin_clipboard_manager::ClipboardExt;
 use tokio::sync::Mutex;
 use tracing::warn;
 
@@ -985,4 +987,79 @@ pub async fn markdown_save_pasted_image(
             ));
         }
     }
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Mermaid: copy diagram as PNG
+// ────────────────────────────────────────────────────────────────────────
+//
+// We can't rasterise on the JS side: WKWebView taints any canvas an SVG
+// `<img>` is drawn into, so `getImageData` / `toBlob` both throw a
+// `SecurityError` even for self-contained mermaid SVGs.  Instead we
+// ship the SVG XML over to Rust, render it with `resvg` + `tiny-skia`
+// to RGBA pixels, and push those straight into the OS clipboard via
+// the plugin we already have wired up.
+//
+// The frontend computes the source size from the SVG's viewBox and
+// passes a `scale` factor (typically 2) so the result is hi-DPI.
+
+/// Rasterise `svg` to RGBA at `scale`× and put the resulting bitmap on
+/// the OS clipboard.  Errors are surfaced as plain strings so the
+/// frontend can display them in a failure flash.
+#[tauri::command]
+pub async fn markdown_copy_svg_as_png(
+    app: AppHandle,
+    svg: String,
+    scale: f32,
+) -> Result<(), String> {
+    // Heavy CPU work — hop off the async runtime so we don't block
+    // other Tauri commands from making progress while resvg works.
+    let rgba_image = tokio::task::spawn_blocking(move || rasterise_svg(&svg, scale))
+        .await
+        .map_err(|e| format!("rasterise task panicked: {e}"))??;
+
+    let image = TauriImage::new(&rgba_image.rgba, rgba_image.width, rgba_image.height);
+    app.clipboard()
+        .write_image(&image)
+        .map_err(|e| format!("clipboard write_image: {e}"))?;
+    Ok(())
+}
+
+struct RgbaImage {
+    rgba: Vec<u8>,
+    width: u32,
+    height: u32,
+}
+
+fn rasterise_svg(svg: &str, scale: f32) -> Result<RgbaImage, String> {
+    // Use the default usvg options + the system font database so any
+    // text in the diagram renders with whatever fonts mermaid asked
+    // for.  `text` + `system-fonts` features on resvg pull this in.
+    let mut opts = resvg::usvg::Options::default();
+    let mut fontdb = resvg::usvg::fontdb::Database::new();
+    fontdb.load_system_fonts();
+    opts.fontdb = std::sync::Arc::new(fontdb);
+
+    let tree = resvg::usvg::Tree::from_str(svg, &opts)
+        .map_err(|e| format!("parse svg: {e}"))?;
+
+    let size = tree.size();
+    let scale = scale.max(0.1);
+    let width = ((size.width() as f32) * scale).ceil().max(1.0) as u32;
+    let height = ((size.height() as f32) * scale).ceil().max(1.0) as u32;
+
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(width, height)
+        .ok_or_else(|| format!("tiny_skia pixmap {width}x{height} alloc failed"))?;
+    // Fill white so the diagram survives a paste into apps that
+    // composite against a dark background (Slack, Linear, …).
+    pixmap.fill(resvg::tiny_skia::Color::WHITE);
+
+    let transform = resvg::tiny_skia::Transform::from_scale(scale, scale);
+    resvg::render(&tree, transform, &mut pixmap.as_mut());
+
+    Ok(RgbaImage {
+        rgba: pixmap.take(),
+        width,
+        height,
+    })
 }

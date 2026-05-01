@@ -37,6 +37,10 @@ rayon = "1.10"
 trash = "5"
 regex = { workspace = true }
 globset = "0.4"
+# Server-side SVG rasterisation for "Copy as PNG" on mermaid widgets —
+# WKWebView taints any canvas an SVG <img> is drawn into, so we keep
+# the raster path entirely on the Rust side.
+resvg = { version = "0.45", default-features = false, features = ["text", "system-fonts"] }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }

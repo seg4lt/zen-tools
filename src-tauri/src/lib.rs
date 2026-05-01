@@ -156,6 +156,7 @@ pub fn run() {
             commands::markdown::markdown_delete_to_trash,
             commands::markdown::markdown_search_contents,
             commands::markdown::markdown_stop_content_search,
+            commands::markdown::markdown_copy_svg_as_png,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
