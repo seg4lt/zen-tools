@@ -29,6 +29,8 @@ const ExcalidrawEditor = lazy(
 );
 import { activeTab, useMarkdownStore } from "./store/markdown-store";
 import { useOpenFile } from "./hooks/use-open-file";
+import { useAutoSave } from "@/hooks/use-auto-save";
+import { markdownTauri } from "./lib/tauri";
 import { useVaults } from "./hooks/use-vaults";
 import { useMarkdownKeyboardNav } from "./hooks/use-keyboard-nav";
 import { basename, basenameNoExt, dirname } from "./lib/tauri";
@@ -108,11 +110,29 @@ export function MarkdownView() {
     [dispatch],
   );
 
+  // Shared trailing-edge autosave — same hook the SQL + http editors
+  // use. Hits disk directly (path-aware) so tab-switching mid-save
+  // doesn't clobber the wrong tab's dirty flag.
+  const autoSave = useAutoSave({
+    key: !isExcalidraw && tab ? tab.path : null,
+    content: tab?.doc ?? "",
+    dirty: tab?.dirty ?? false,
+    save: useCallback(
+      async (path: string, content: string) => {
+        await markdownTauri.writeFile(path, content);
+        dispatch({ type: "markSaved", path });
+      },
+      [dispatch],
+    ),
+  });
+
   const onSave = useCallback(
     (doc: string) => {
+      // ⌘S beats the autosave timer to it — collapse the debounce.
+      autoSave.cancel();
       void saveCurrent(doc);
     },
-    [saveCurrent],
+    [autoSave, saveCurrent],
   );
 
   const getDocDir = useCallback(

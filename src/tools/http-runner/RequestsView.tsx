@@ -23,6 +23,7 @@ import { PaneFrame, type PaneState } from "./components/pane-frame";
 import { PerfTestList } from "./components/perf-test-list";
 import { PerfDashboard } from "./components/perf-dashboard";
 import { PerfSchemaSheet } from "./components/perf-schema-sheet";
+import { useAutoSave } from "@/hooks/use-auto-save";
 import { useVimMode } from "./hooks/use-vim-mode";
 import { usePerfRunner } from "./hooks/use-perf-runner";
 import { onRequestChain, onRequestResult, tauri } from "./lib/tauri";
@@ -83,18 +84,18 @@ export function RequestsView() {
   const [maximizedPane, setMaximizedPane] = useState<PaneKey | null>(null);
   const queryClient = useQueryClient();
   const editorRef = useRef<HttpEditorHandle>(null);
+  /** Disk-baseline — last known on-disk content for the active file. */
   const [editorValue, setEditorValue] = useState("");
-  const [isDirty, setIsDirty] = useState(false);
-  /** Pending debounced-save timer. */
-  const saveTimerRef = useRef<number | null>(null);
-  /** Latest editor content captured during typing. */
-  const latestEditorRef = useRef<string>("");
+  /** Live editor buffer. Updated on every keystroke; drives the
+   *  shared {@link useAutoSave} hook below. */
+  const [liveValue, setLiveValue] = useState("");
+  const isDirty = liveValue !== editorValue;
   /**
    * `true` while we are programmatically pushing content into the editor
    * (e.g. after `rawContent` loads or a save round-trips). CodeMirror's
    * `updateListener` fires synchronously inside `setValue`, so without
    * this flag every file load would schedule a debounced auto-save of
-   * the freshly-loaded file 600ms later — which felt like a "refresh".
+   * the freshly-loaded file ~1s later — which felt like a "refresh".
    */
   const applyingExternalRef = useRef<boolean>(false);
 
@@ -313,29 +314,13 @@ export function RequestsView() {
       applyingExternalRef.current = true;
       try {
         setEditorValue(rawContent);
-        latestEditorRef.current = rawContent;
+        setLiveValue(rawContent);
         editorRef.current?.setValue(rawContent);
-        setIsDirty(false);
-        // Cancel any pending save the previous file may have scheduled.
-        if (saveTimerRef.current !== null) {
-          window.clearTimeout(saveTimerRef.current);
-          saveTimerRef.current = null;
-        }
       } finally {
         applyingExternalRef.current = false;
       }
     }
   }, [rawContent]);
-
-  // Cancel any pending debounced save when the file or component changes.
-  useEffect(() => {
-    return () => {
-      if (saveTimerRef.current !== null) {
-        window.clearTimeout(saveTimerRef.current);
-        saveTimerRef.current = null;
-      }
-    };
-  }, [state.selectedFilePath]);
 
   useEffect(() => {
     if (!state.selectedRequestId || !state.selectedFile) return;
@@ -347,36 +332,55 @@ export function RequestsView() {
     }
   }, [state.selectedRequestId, state.selectedFile]);
 
+  /**
+   * Disk-write + reparse. Used both by the shared autosave debounce
+   * and by the explicit ⌘S handler.
+   */
+  const doSave = useCallback(
+    async (path: string, value: string) => {
+      await tauri.writeFileContent(path, value);
+      // Only `.http`/`.rest` files go through the http parser. For
+      // perf YAMLs we just invalidate the perf-config query so the
+      // test list re-parses on the next render.
+      if (isPerf) {
+        await queryClient.invalidateQueries({
+          queryKey: ["perf-config", path],
+        });
+      } else {
+        const fresh = await tauri.reloadHttpFile(path);
+        // Use updateParsedFile (not selectFile) so the editor cursor +
+        // selected request are preserved across the save.
+        dispatch({ type: "updateParsedFile", file: fresh.file });
+      }
+      // Bump the disk baseline (the dirty flag derives from
+      // `liveValue !== editorValue`) without pushing back into
+      // CodeMirror — that would clobber the user's cursor.
+      setEditorValue(value);
+      // Keep the React Query cache in sync so other consumers
+      // (re-mounts, refresh) get the new content on next access.
+      queryClient.setQueryData(["http-file-content", path], value);
+    },
+    [dispatch, isPerf, queryClient],
+  );
+
+  // Shared trailing-edge debounce — same hook the SQL + markdown
+  // editors use. 1 s is the consensus across all three.
+  const autoSave = useAutoSave({
+    key: state.selectedFilePath ?? null,
+    content: liveValue,
+    dirty: isDirty,
+    save: doSave,
+  });
+
   const handleSave = useCallback(
     async (value: string) => {
       if (!state.selectedFilePath) return;
+      // ⌘S beats the autosave timer to it — cancel the pending write
+      // so we don't double-save with potentially-stale content from
+      // the debounce closure.
+      autoSave.cancel();
       try {
-        await tauri.writeFileContent(state.selectedFilePath, value);
-        // Only `.http`/`.rest` files go through the http parser. For
-        // perf YAMLs we just invalidate the perf-config query so the
-        // test list re-parses on the next render.
-        if (isPerf) {
-          await queryClient.invalidateQueries({
-            queryKey: ["perf-config", state.selectedFilePath],
-          });
-        } else {
-          const fresh = await tauri.reloadHttpFile(state.selectedFilePath);
-          // Use updateParsedFile (not selectFile) so the editor cursor +
-          // selected request are preserved across the save.
-          dispatch({ type: "updateParsedFile", file: fresh.file });
-        }
-        // The editor is the source of truth for the live buffer, so we
-        // bump editorValue (used as the dirty baseline) without pushing
-        // the value back into CodeMirror — that would clobber the
-        // user's cursor.
-        setEditorValue(value);
-        setIsDirty(false);
-        // Keep the React Query cache in sync so other consumers
-        // (re-mounts, refresh) get the new content on next access.
-        queryClient.setQueryData(
-          ["http-file-content", state.selectedFilePath],
-          value,
-        );
+        await doSave(state.selectedFilePath, value);
       } catch (err) {
         dispatch({
           type: "log",
@@ -385,38 +389,21 @@ export function RequestsView() {
         });
       }
     },
-    [dispatch, isPerf, queryClient, state.selectedFilePath],
+    [autoSave, doSave, dispatch, state.selectedFilePath],
   );
 
   /**
-   * Called on every keystroke from the editor. Updates the dirty flag
-   * for the title indicator and schedules a debounced auto-save 600ms
-   * after the user stops typing. The save handler reparses + dispatches
-   * `updateParsedFile`, so the request list and run-gutter stay in sync
-   * with what's on screen.
+   * Called on every keystroke from the editor. Tracks the live buffer
+   * for the dirty indicator and the shared autosave hook. The
+   * `applyingExternalRef` flag suppresses tracking when we're
+   * programmatically pushing content (file load, save round-trip).
    */
   const handleEditorChange = useCallback(
     (next: string) => {
-      // Ignore changes that originated from us (loading a file, applying
-      // a save). These are not user edits, so they must not flip the
-      // dirty flag or schedule a save.
-      if (applyingExternalRef.current) {
-        latestEditorRef.current = next;
-        return;
-      }
-      latestEditorRef.current = next;
-      setIsDirty(next !== editorValue);
-      if (saveTimerRef.current !== null) {
-        window.clearTimeout(saveTimerRef.current);
-      }
-      saveTimerRef.current = window.setTimeout(() => {
-        saveTimerRef.current = null;
-        if (latestEditorRef.current !== editorValue) {
-          void handleSave(latestEditorRef.current);
-        }
-      }, 600);
+      if (applyingExternalRef.current) return;
+      setLiveValue(next);
     },
-    [editorValue, handleSave],
+    [],
   );
 
   const runRequest = useCallback(

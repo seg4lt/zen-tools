@@ -160,7 +160,14 @@ export type MarkdownAction =
   | { type: "clearGotoLine" }
   | { type: "revealPath"; path: string }
   | { type: "editDoc"; doc: string }
-  | { type: "markSaved" }
+  /**
+   * Clear the dirty flag. With no `path` it clears the active tab
+   * (back-compat with the old binary action). With `path` it clears
+   * that specific tab — used by autosave, where a write may complete
+   * after the user has switched tabs and we mustn't clobber the new
+   * tab's state.
+   */
+  | { type: "markSaved"; path?: string }
   | { type: "setRecents"; recents: string[] }
   | { type: "setSearchPalette"; open: boolean; mode?: SearchMode }
   | { type: "setSearchMode"; mode: SearchMode }
@@ -336,6 +343,16 @@ function reducer(state: MarkdownState, action: MarkdownAction): MarkdownState {
     }
 
     case "markSaved": {
+      // Path-targeted variant — used by the autosave hook so a write
+      // that completes after the user switched tabs clears the right
+      // tab. Falls back to the active tab for back-compat callers.
+      if (action.path) {
+        const target = action.path;
+        const tabs = state.tabs.map((t) =>
+          t.path === target ? { ...t, dirty: false } : t,
+        );
+        return { ...state, tabs };
+      }
       const id = state.activeTabId;
       if (!id) return state;
       const tabs = state.tabs.map((t) =>

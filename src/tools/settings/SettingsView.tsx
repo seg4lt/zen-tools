@@ -8,9 +8,9 @@
  *  4. App order — drag-reorder of the tool pills.
  */
 import type { ReactNode } from "react";
-import { ThemeToggle } from "@/components/theme-toggle";
 import { VimToggle } from "@/components/vim-toggle";
 import { AppOrderList } from "./components/app-order-list";
+import { ThemeModePicker } from "./components/theme-mode-picker";
 import { ZoomControl } from "./components/zoom-control";
 
 export function SettingsView() {
@@ -27,8 +27,8 @@ export function SettingsView() {
 
         <Section
           title="Appearance"
-          description="Switch between light and dark themes."
-          control={<ThemeToggle />}
+          description="Light, dark, or follow the OS preference live."
+          control={<ThemeModePicker />}
         />
 
         <Section
