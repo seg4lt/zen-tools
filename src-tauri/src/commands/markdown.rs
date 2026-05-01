@@ -18,13 +18,10 @@
 use crate::commands::preferences::{load_preferences, write_preferences};
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
-use globset::{Glob, GlobSet, GlobSetBuilder};
-use rayon::prelude::*;
-use regex::{Regex, RegexBuilder};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::image::Image as TauriImage;
 use tauri::AppHandle;
@@ -114,6 +111,7 @@ pub async fn markdown_add_vault(
 pub async fn markdown_remove_vault(
     path: String,
     app: AppHandle,
+    registry: tauri::State<'_, Arc<crate::commands::markdown_index::MarkdownIndexRegistry>>,
 ) -> AppResult<Vec<String>> {
     let mut prefs = load_preferences(&app).unwrap_or_default();
     prefs.markdown_vault_dirs.retain(|p| p != &path);
@@ -121,6 +119,10 @@ pub async fn markdown_remove_vault(
     if let Err(e) = write_preferences(&app, &prefs) {
         warn!(?e, "failed to persist markdown vault list");
     }
+    // Release the fff-search picker for this vault — its bg watcher
+    // is no longer useful.  Silently no-ops when the user removes a
+    // vault they never searched.
+    registry.drop_vault(Path::new(&path));
     Ok(out)
 }
 
@@ -522,57 +524,21 @@ pub struct ContentSearchOptions {
     pub excludes: Vec<String>,
 }
 
-/// One contiguous run of matching + context lines inside a file.
-/// Mirrors flowstate's `ContentBlock` byte-for-byte so the frontend
-/// can render the same shape.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ContentBlock {
-    /// Absolute filesystem path of the matched file.
-    pub path: String,
-    /// 1-based line number of the first line in `lines`.
-    pub start_line: usize,
-    /// Match + context lines, in document order.
-    pub lines: Vec<BlockLine>,
-}
-
-/// One row inside a [`ContentBlock`].
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BlockLine {
-    /// 1-based line number.
-    pub line: usize,
-    /// Trimmed line text (CR/LF stripped, capped at 240 chars).
-    pub text: String,
-    /// `true` when this line itself contains a match; `false` when
-    /// it's surrounding context.
-    pub is_match: bool,
-}
-
-/// Maximum file size we'll read for content search.  Bigger files are
-/// almost always binary or generated and slow to scan.
-const MAX_CONTENT_FILE_BYTES: u64 = 2 * 1024 * 1024;
-/// Truncate displayed lines to keep payloads bounded.
-const MAX_LINE_CHARS: usize = 240;
-/// Lines of context before/after each match to include in a block.
-/// Three lines gives the user enough surrounding text to read a hit
-/// in place without dragging across half the document — and the
-/// `2 * CONTEXT_LINES` greedy-extend threshold (`file_blocks_from`)
-/// merges nearby matches into one block, so dense regions don't
-/// produce a wall of repeated context.
-const CONTEXT_LINES: usize = 3;
-/// Cap on total matches returned per call to keep IPC payload sane.
-const MAX_BLOCKS: usize = 500;
+// `ContentBlock` and `BlockLine` are now defined in `markdown_index`
+// — re-export under the same name so existing call sites and the
+// IPC contract stay unchanged.
+pub use crate::commands::markdown_index::{BlockLine, ContentBlock};
 
 /// Streaming-style content search across every `.md` / `.markdown`
-/// file under the supplied vault roots.  Returns one [`ContentBlock`]
-/// per contiguous run of matches in a single file.
+/// file under the supplied vault roots, backed by `fff-search`.  See
+/// the comment on `markdown_index::search_file_contents` for the
+/// per-vault `FilePicker` lifecycle.
 ///
 /// Cancellation: callers mint a monotonic `token` and pass it in.
 /// Concurrent invocations register their own [`AtomicBool`] flag in
 /// `AppState::markdown_search_tokens`; calling
-/// [`markdown_stop_content_search`] flips that flag, which is checked
-/// at every per-file boundary so the worker drops out fast.
+/// [`markdown_stop_content_search`] flips that flag, which fff-search
+/// checks cooperatively at every per-file boundary.
 #[tauri::command]
 pub async fn markdown_search_contents(
     vaults: Vec<String>,
@@ -580,19 +546,16 @@ pub async fn markdown_search_contents(
     options: ContentSearchOptions,
     token: u64,
     state: tauri::State<'_, Mutex<AppState>>,
+    registry: tauri::State<'_, Arc<crate::commands::markdown_index::MarkdownIndexRegistry>>,
 ) -> AppResult<Vec<ContentBlock>> {
     let trimmed = query.trim();
     if trimmed.is_empty() {
         return Ok(Vec::new());
     }
 
-    // Build the matcher up-front so each per-file iteration just
-    // consults a `Regex`/literal pattern with no extra setup.
-    let matcher = build_matcher(trimmed, &options)?;
-    let include_set = build_globset(&options.includes)?;
-    let exclude_set = build_globset(&options.excludes)?;
-
-    // Register a fresh cancellation flag against the user's token.
+    // Register the cancel flag *before* doing any work so a
+    // `markdown_stop_content_search(token)` racing the start of this
+    // call still cancels it.
     let cancel: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
     let cancel_arc = {
         let s = state.lock().await;
@@ -600,23 +563,37 @@ pub async fn markdown_search_contents(
         s.markdown_search_tokens.clone()
     };
 
-    // Hop the actual filesystem walk + regex pass off to a blocking
-    // pool so the runtime stays responsive on big vaults.
-    let vaults_clone = vaults.clone();
+    let registry_arc: Arc<crate::commands::markdown_index::MarkdownIndexRegistry> =
+        Arc::clone(&*registry);
+    let opts = options.clone();
+    let q = trimmed.to_string();
+    let cancel_for_worker = Arc::clone(&cancel);
+
+    // Hop off the runtime — fff-search's grep is CPU/IO bound.
     let result = tauri::async_runtime::spawn_blocking(move || {
-        search_contents_blocking(
-            &vaults_clone,
-            matcher,
-            include_set.as_ref(),
-            exclude_set.as_ref(),
-            cancel.as_ref(),
-        )
+        let mut blocks = Vec::new();
+        for vault in &vaults {
+            if cancel_for_worker.load(Ordering::Relaxed) {
+                break;
+            }
+            match crate::commands::markdown_index::search_file_contents(
+                &registry_arc,
+                vault,
+                &q,
+                opts.use_regex,
+                opts.use_fuzzy,
+                opts.case_sensitive,
+                Some(cancel_for_worker.as_ref()),
+            ) {
+                Ok(per_vault) => blocks.extend(per_vault),
+                Err(e) => tracing::warn!("[markdown] grep on {vault}: {e}"),
+            }
+        }
+        blocks
     })
     .await
     .map_err(|e| AppError::Other(format!("join content-search worker: {e}")))?;
 
-    // Always tear down the cancel slot, even on success — bad hygiene
-    // otherwise; the map would grow unbounded across sessions.
     cancel_arc.lock().remove(&token);
     Ok(result)
 }
@@ -637,285 +614,31 @@ pub async fn markdown_stop_content_search(
     Ok(())
 }
 
-/// Pattern matcher — literal substring (with or without case folding),
-/// compiled regex, or all-words fuzzy.  Wrapped so the per-line inner
-/// loop only has to call `is_match` against pre-cased line slices.
-enum Matcher {
-    /// Case-sensitive literal: match against the raw line.
-    LiteralCase(String),
-    /// Case-insensitive literal: match against a pre-lowercased line.
-    LiteralLower(String),
-    /// Compiled regex (case-insensitivity baked into the regex itself).
-    Regex(Regex),
-    /// All-words fuzzy match against a pre-lowercased line.  Lines
-    /// match when *every* word appears anywhere; word order is free.
-    FuzzyAllWords(Vec<String>),
-}
-
-impl Matcher {
-    /// True when the matcher needs the lowercased copy of each line —
-    /// callers cache that copy once per line to avoid re-allocating.
-    fn needs_lower(&self) -> bool {
-        matches!(
-            self,
-            Matcher::LiteralLower(_) | Matcher::FuzzyAllWords(_),
+/// File fuzzy search across every supplied vault, backed by
+/// `fff-search`'s `FilePicker::fuzzy_search`.  Returns up to ~200
+/// ranked **absolute paths**.  Empty query → every indexed path
+/// across the union of vaults (frontend orders them by recents).
+#[tauri::command]
+pub async fn markdown_search_files(
+    vaults: Vec<String>,
+    query: String,
+    current_file: Option<String>,
+    registry: tauri::State<'_, Arc<crate::commands::markdown_index::MarkdownIndexRegistry>>,
+) -> AppResult<Vec<String>> {
+    let registry_arc: Arc<crate::commands::markdown_index::MarkdownIndexRegistry> =
+        Arc::clone(&*registry);
+    let q = query.clone();
+    let cf = current_file.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::commands::markdown_index::search_files(
+            &registry_arc,
+            &vaults,
+            &q,
+            cf.as_deref(),
         )
-    }
-
-    fn is_match(&self, line: &str, line_lower: &str) -> bool {
-        match self {
-            Matcher::LiteralCase(needle) => line.contains(needle.as_str()),
-            Matcher::LiteralLower(needle) => line_lower.contains(needle.as_str()),
-            Matcher::Regex(re) => re.is_match(line),
-            Matcher::FuzzyAllWords(words) => {
-                words.iter().all(|w| line_lower.contains(w.as_str()))
-            }
-        }
-    }
-}
-
-fn build_matcher(query: &str, options: &ContentSearchOptions) -> AppResult<Matcher> {
-    // Fuzzy wins over the other modes — same precedence as the UI's
-    // "fuzzy ⇒ regex+case toggles disabled" affordance.
-    if options.use_fuzzy {
-        let words: Vec<String> = query
-            .split_whitespace()
-            .map(|w| w.to_ascii_lowercase())
-            .filter(|w| !w.is_empty())
-            .collect();
-        if words.is_empty() {
-            // Nothing to match — fall through to a guaranteed-empty
-            // literal so we don't spin through every file for nothing.
-            return Ok(Matcher::LiteralCase("\0__never__\0".to_string()));
-        }
-        return Ok(Matcher::FuzzyAllWords(words));
-    }
-    if options.use_regex {
-        let re = RegexBuilder::new(query)
-            .case_insensitive(!options.case_sensitive)
-            .build()
-            .map_err(|e| AppError::BadRequest(format!("invalid regex: {e}")))?;
-        return Ok(Matcher::Regex(re));
-    }
-    if options.case_sensitive {
-        Ok(Matcher::LiteralCase(query.to_string()))
-    } else {
-        Ok(Matcher::LiteralLower(query.to_ascii_lowercase()))
-    }
-}
-
-fn build_globset(patterns: &[String]) -> AppResult<Option<GlobSet>> {
-    let live: Vec<&String> = patterns.iter().filter(|p| !p.trim().is_empty()).collect();
-    if live.is_empty() {
-        return Ok(None);
-    }
-    let mut builder = GlobSetBuilder::new();
-    for pat in live {
-        builder.add(
-            Glob::new(pat).map_err(|e| AppError::BadRequest(format!("bad glob `{pat}`: {e}")))?,
-        );
-    }
-    Ok(Some(builder.build().map_err(|e| {
-        AppError::Other(format!("compile glob set: {e}"))
-    })?))
-}
-
-/// Two-phase search:
-///   1. Walk every vault sequentially to collect the set of candidate
-///      `.md` files (cheap — `fs::read_dir` is fast).  Glob filters
-///      are applied here so the parallel pass doesn't waste work.
-///   2. Process the candidates in parallel via rayon, reading +
-///      scanning each file independently.  An [`AtomicUsize`] tracks
-///      the running match-count so threads can short-circuit once the
-///      `MAX_BLOCKS` cap is reached.
-fn search_contents_blocking(
-    vaults: &[String],
-    matcher: Matcher,
-    include: Option<&GlobSet>,
-    exclude: Option<&GlobSet>,
-    cancel: &AtomicBool,
-) -> Vec<ContentBlock> {
-    // Phase 1 — gather candidate files.
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    'outer: for vault in vaults {
-        let root = PathBuf::from(vault);
-        let mut stack = vec![root.clone()];
-        while let Some(dir) = stack.pop() {
-            if cancel.load(Ordering::Relaxed) {
-                break 'outer;
-            }
-            let Ok(entries) = fs::read_dir(&dir) else {
-                continue;
-            };
-            for entry in entries.flatten() {
-                let path = entry.path();
-                let name = path.file_name().map(|s| s.to_string_lossy().to_string());
-                if let Some(n) = name.as_deref() {
-                    if n.starts_with('.')
-                        || n == "node_modules"
-                        || n == "target"
-                        || n == "dist"
-                        || n == "build"
-                    {
-                        continue;
-                    }
-                }
-                if path.is_dir() {
-                    stack.push(path);
-                    continue;
-                }
-                let Some(name_str) = name.as_deref() else {
-                    continue;
-                };
-                if !is_markdown(name_str) {
-                    continue;
-                }
-                let rel = path
-                    .strip_prefix(&root)
-                    .unwrap_or(&path)
-                    .to_string_lossy()
-                    .to_string();
-                if let Some(set) = include {
-                    if !set.is_match(&rel) {
-                        continue;
-                    }
-                }
-                if let Some(set) = exclude {
-                    if set.is_match(&rel) {
-                        continue;
-                    }
-                }
-                candidates.push(path);
-            }
-        }
-    }
-    if cancel.load(Ordering::Relaxed) {
-        return Vec::new();
-    }
-
-    // Phase 2 — parallel search.  `block_count` lets each worker
-    // bail as soon as the global cap is reached without coordinating
-    // through a Mutex on the result vec.
-    let block_count = AtomicUsize::new(0);
-    let needs_lower = matcher.needs_lower();
-    let mut blocks: Vec<ContentBlock> = candidates
-        .par_iter()
-        .filter_map(|path| {
-            if cancel.load(Ordering::Relaxed) {
-                return None;
-            }
-            if block_count.load(Ordering::Relaxed) >= MAX_BLOCKS {
-                return None;
-            }
-            let meta = fs::metadata(path).ok()?;
-            if meta.len() > MAX_CONTENT_FILE_BYTES {
-                return None;
-            }
-            let contents = fs::read_to_string(path).ok()?;
-            let file_blocks = file_blocks_from(path, &contents, &matcher, needs_lower);
-            if file_blocks.is_empty() {
-                return None;
-            }
-            block_count.fetch_add(file_blocks.len(), Ordering::Relaxed);
-            Some(file_blocks)
-        })
-        .flatten()
-        .collect();
-
-    // Sort for stable output regardless of rayon's scheduling order.
-    blocks.sort_by(|a, b| {
-        a.path
-            .cmp(&b.path)
-            .then_with(|| a.start_line.cmp(&b.start_line))
-    });
-    if blocks.len() > MAX_BLOCKS {
-        blocks.truncate(MAX_BLOCKS);
-    }
-    blocks
-}
-
-/// Truncate `s` to at most `max_chars` Unicode scalar values, appending
-/// an ellipsis when anything was dropped.  Byte-safe — never panics on
-/// multi-byte characters.
-fn truncate_chars(s: &str, max_chars: usize) -> String {
-    let mut iter = s.chars();
-    let mut out: String = iter.by_ref().take(max_chars).collect();
-    if iter.next().is_some() {
-        out.push('…');
-    }
-    out
-}
-
-/// Walk `contents` once per file, emitting one [`ContentBlock`] per
-/// run of consecutive match lines (with [`CONTEXT_LINES`] of context
-/// stitched in).
-///
-/// `needs_lower` lets us skip a per-line `to_ascii_lowercase` allocation
-/// for case-sensitive literal + regex modes — just match against an
-/// empty string when it's unused.
-fn file_blocks_from(
-    path: &Path,
-    contents: &str,
-    matcher: &Matcher,
-    needs_lower: bool,
-) -> Vec<ContentBlock> {
-    let lines: Vec<&str> = contents.lines().collect();
-    if lines.is_empty() {
-        return Vec::new();
-    }
-    let match_flags: Vec<bool> = if needs_lower {
-        lines
-            .iter()
-            .map(|l| matcher.is_match(l, &l.to_ascii_lowercase()))
-            .collect()
-    } else {
-        lines.iter().map(|l| matcher.is_match(l, "")).collect()
-    };
-    let mut out: Vec<ContentBlock> = Vec::new();
-    let mut i = 0usize;
-    while i < lines.len() {
-        if !match_flags[i] {
-            i += 1;
-            continue;
-        }
-        // Found a match; greedy-extend through any tightly-grouped
-        // matches (within 2*CONTEXT_LINES of the previous match).
-        let block_start = i.saturating_sub(CONTEXT_LINES);
-        let mut last_match = i;
-        let mut j = i + 1;
-        while j < lines.len() {
-            if match_flags[j] {
-                last_match = j;
-                j += 1;
-            } else if j - last_match <= CONTEXT_LINES * 2 {
-                j += 1;
-            } else {
-                break;
-            }
-        }
-        let block_end = (last_match + CONTEXT_LINES).min(lines.len() - 1);
-        let mut block_lines = Vec::with_capacity(block_end - block_start + 1);
-        for k in block_start..=block_end {
-            let raw = lines[k];
-            // `String::truncate` works on byte indices, so naïvely
-            // truncating at `MAX_LINE_CHARS` panics when the boundary
-            // falls mid-UTF-8-codepoint (emoji, accents, CJK …).  Cap
-            // by *character* count instead.
-            let text = truncate_chars(raw, MAX_LINE_CHARS);
-            block_lines.push(BlockLine {
-                line: k + 1,
-                text,
-                is_match: match_flags[k],
-            });
-        }
-        out.push(ContentBlock {
-            path: path.to_string_lossy().to_string(),
-            start_line: block_start + 1,
-            lines: block_lines,
-        });
-        i = block_end + 1;
-    }
-    out
+    })
+    .await
+    .map_err(|e| AppError::Other(format!("join file-search worker: {e}")))?
 }
 
 /// Find a sibling name that doesn't yet exist.  Returns the resolved

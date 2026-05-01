@@ -172,6 +172,27 @@ export const markdownTauri = {
   /** Cancel the content search identified by `token`. */
   stopContentSearch: (token: number) =>
     invoke<void>("markdown_stop_content_search", { token }),
+
+  /**
+   * File fuzzy search across every supplied vault, backed by
+   * `fff-search`'s `FilePicker::fuzzy_search`.  Returns up to ~200
+   * ranked **absolute paths**.  Empty query → every indexed path
+   * (frontend orders by recents); non-empty query → ranked.
+   *
+   * `currentFile` is an optional ranking boost: paths near the
+   * active document score higher.  Pass the active tab's path; the
+   * backend tolerates `null` for fire-and-forget calls.
+   */
+  searchFiles: (
+    vaults: string[],
+    query: string,
+    currentFile: string | null,
+  ) =>
+    invoke<string[]>("markdown_search_files", {
+      vaults,
+      query,
+      currentFile,
+    }),
 };
 
 // ────────────────────────────────────────────────────────────────────────

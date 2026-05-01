@@ -41,6 +41,26 @@ globset = "0.4"
 # WKWebView taints any canvas an SVG <img> is drawn into, so we keep
 # the raster path entirely on the Rust side.
 resvg = { version = "0.45", default-features = false, features = ["text", "system-fonts"] }
+# File-finder + grep SDK backing the markdown editor's search palette.
+# Replaces our hand-rolled `regex` + `rayon` content search and the
+# pure-TS `file-rank.ts` ranker.  Same crate flowstate uses; no
+# default features (the `zlob` feature requires zig and isn't worth
+# forcing into the toolchain).
+#
+# Build-time gotcha: fff-search 0.5.2's `build.rs` panics under
+# `CI=true` even with `default-features = false`.  Our release
+# workflow already strips `CI` for the cargo build step
+# (`env -u CI`); see the comment in `.github/workflows/release.yml`.
+# Local dev shells don't set `CI`, so this is a non-issue outside CI.
+fff-search = "0.5.2"
+# Path canonicalisation that doesn't rewrite into Windows
+# extended-length form.  fff-search's notify-backed watcher emits
+# events with non-extended paths and `strip_prefix`s them against the
+# registered root; if we register a `\\?\C:\...` root every event
+# would error out with `StripPrefixError`.  No-op on macOS / Linux,
+# but cheap to keep so reinstating Windows is a matrix-row addition
+# with no other code change.
+dunce = "1.0"
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
