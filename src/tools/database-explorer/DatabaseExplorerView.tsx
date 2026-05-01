@@ -21,6 +21,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { CacheStatusBadge } from "./components/cache-status-badge";
 import { ConnectionList } from "./components/connection-list";
 import { ConnectionForm } from "./components/connection-form";
 import { ConnectionTabs } from "./components/connection-tabs";
@@ -33,6 +34,7 @@ import {
   SqlEditor,
   type SqlEditorHandle,
 } from "./components/sql-editor";
+import { SchemaProgressIndicator } from "./components/schema-progress-indicator";
 import { RunToolbar } from "./components/run-toolbar";
 import { ResultsPane } from "./components/results-pane";
 import { useDbExplorerStore } from "./store/db-explorer-store";
@@ -41,6 +43,8 @@ import { useSqlProjectsBootstrap } from "./hooks/use-sql-workspace";
 import { sqlWorkspaceTauri, type SqlFileTreeItem } from "./lib/tauri";
 import { formatError } from "./lib/format-error";
 import { statementAtCursor } from "./lib/sql-statements";
+import { ensureTablesForSql } from "./lib/schema-cache";
+import { useAutoSave } from "@/hooks/use-auto-save";
 import { useVimMode } from "@/tools/http-runner/hooks/use-vim-mode";
 
 export function DatabaseExplorerView() {
@@ -147,35 +151,22 @@ export function DatabaseExplorerView() {
     [dispatch],
   );
 
-  // ── Auto-save (1 s trailing-edge debounce) ────────────────────────
-  //
-  // `pendingRef` holds the file path + last-typed content waiting to
-  // hit disk. `timerRef` holds the active setTimeout handle. Each
-  // keystroke clears the previous timer and re-arms — only the LAST
-  // version inside a quiet 1 s window actually writes, mirroring
-  // VS Code / IntelliJ. Manual ⌘S, file-switch, and unmount all
-  // call `flushAutoSave()` which writes immediately.
-  const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const autoSavePendingRef = useRef<{ path: string; content: string } | null>(
-    null,
-  );
-
-  const flushAutoSave = useCallback(async () => {
-    if (autoSaveTimerRef.current) {
-      clearTimeout(autoSaveTimerRef.current);
-      autoSaveTimerRef.current = null;
-    }
-    const pending = autoSavePendingRef.current;
-    autoSavePendingRef.current = null;
-    if (!pending) return;
-    try {
-      await sqlWorkspaceTauri.writeFile(pending.path, pending.content);
-      dispatch({ type: "mark-clean", path: pending.path });
-    } catch (err) {
-      // eslint-disable-next-line no-console
-      console.error("auto-save failed", formatError(err));
-    }
-  }, [dispatch]);
+  // Shared trailing-edge debounce. Keystrokes flip dirty=true and
+  // update the buffer; `useAutoSave` handles the timer, file-switch
+  // flush, and unmount flush. ⌘S (handleSave below) calls
+  // `autoSave.flush()` to short-circuit the timer.
+  const autoSave = useAutoSave({
+    key: selectedPath,
+    content: buffer,
+    dirty: isDirty,
+    save: useCallback(
+      async (path: string, content: string) => {
+        await sqlWorkspaceTauri.writeFile(path, content);
+        dispatch({ type: "mark-clean", path });
+      },
+      [dispatch],
+    ),
+  });
 
   const handleEditorChange = useCallback(
     (next: string) => {
@@ -186,32 +177,18 @@ export function DatabaseExplorerView() {
         content: next,
         dirty: true,
       });
-      // Re-arm the trailing-edge debounce. The pending ref always
-      // holds the freshest content, so when the timer eventually
-      // fires (or `flushAutoSave` is called), the latest typed
-      // bytes hit disk.
-      if (autoSaveTimerRef.current) {
-        clearTimeout(autoSaveTimerRef.current);
-      }
-      autoSavePendingRef.current = { path: selectedPath, content: next };
-      autoSaveTimerRef.current = setTimeout(() => {
-        autoSaveTimerRef.current = null;
-        void flushAutoSave();
-      }, 1000);
     },
-    [selectedPath, dispatch, flushAutoSave],
+    [selectedPath, dispatch],
   );
 
   const handleSave = useCallback(
     async (next: string) => {
       if (!selectedPath) return;
-      // Manual ⌘S beats the timer to the punch — cancel anything
-      // pending so we don't double-write.
-      if (autoSaveTimerRef.current) {
-        clearTimeout(autoSaveTimerRef.current);
-        autoSaveTimerRef.current = null;
-      }
-      autoSavePendingRef.current = null;
+      // ⌘S takes the editor's current value as the source of truth
+      // (the autosave hook's pending ref might be one render behind).
+      // Cancel the pending debounce so it can't re-fire with stale
+      // bytes a second later.
+      autoSave.cancel();
       try {
         await sqlWorkspaceTauri.writeFile(selectedPath, next);
         dispatch({ type: "mark-clean", path: selectedPath });
@@ -220,17 +197,8 @@ export function DatabaseExplorerView() {
         console.error("write file failed", formatError(err));
       }
     },
-    [selectedPath, dispatch],
+    [selectedPath, dispatch, autoSave],
   );
-
-  // Force-flush pending save when the user switches files or the
-  // pane unmounts — otherwise the last edits to file A would be
-  // discarded the moment the user clicks file B.
-  useEffect(() => {
-    return () => {
-      void flushAutoSave();
-    };
-  }, [selectedPath, flushAutoSave]);
 
   const ctxOpts = useMemo(
     () => ({
@@ -249,12 +217,38 @@ export function DatabaseExplorerView() {
    *
    * Bound to Cmd+Enter via the editor keymap and to the Run button.
    */
+  /**
+   * Best-effort default schema for cache prefetch on run. Postgres
+   * defaults to `public`; MSSQL to `dbo`. Used only by
+   * `ensureTablesForSql` to bucket bare refs — the actual query
+   * still runs with whatever `ctxOpts` already carries.
+   */
+  const cacheDefaultSchema =
+    activeSchema ?? (active?.driver === "postgres" ? "public" : "dbo");
+
+  /** Trigger cache fill for every table in the SQL we're about to
+   * run. Fire-and-forget so the run itself is never blocked; the
+   * progress chip surfaces what's actually being indexed. */
+  const ensureCacheForSql = useCallback(
+    (sqlText: string) => {
+      if (!activeId || !activeDatabase) return;
+      ensureTablesForSql(
+        activeId,
+        activeDatabase,
+        cacheDefaultSchema,
+        sqlText,
+      );
+    },
+    [activeId, activeDatabase, cacheDefaultSchema],
+  );
+
   const handleRun = useCallback(() => {
     if (!activeId) return;
     const editor = editorRef.current;
     if (!editor) return;
     const selection = editor.getSelection();
     if (selection.trim().length > 0) {
+      ensureCacheForSql(selection);
       runQuery(activeId, selection, ctxOpts);
       return;
     }
@@ -262,8 +256,9 @@ export function DatabaseExplorerView() {
     const cursor = editor.getCursorOffset();
     const stmt = statementAtCursor(buffer, cursor);
     if (!stmt) return;
+    ensureCacheForSql(stmt.sql);
     runQuery(activeId, stmt.sql, ctxOpts);
-  }, [activeId, runQuery, ctxOpts]);
+  }, [activeId, runQuery, ctxOpts, ensureCacheForSql]);
 
   /** Explicit "run every statement in the buffer". */
   const handleRunAll = useCallback(() => {
@@ -272,11 +267,17 @@ export function DatabaseExplorerView() {
     if (!editor) return;
     const buffer = editor.getValue();
     if (buffer.trim().length === 0) return;
+    ensureCacheForSql(buffer);
     runQuery(activeId, buffer, ctxOpts);
-  }, [activeId, runQuery, ctxOpts]);
+  }, [activeId, runQuery, ctxOpts, ensureCacheForSql]);
 
   return (
     <div className="flex h-full min-h-0 w-full min-w-0 flex-1 overflow-hidden">
+      {/* Schema-cache progress chip(s). Position: fixed bottom-right of
+          the viewport via the component's own styling — render
+          location in the tree doesn't matter, but mounting it here
+          keeps the indicator scoped to the database-explorer view. */}
+      <SchemaProgressIndicator />
       {/* Left: SQL file tree.
           Note: the row root has `min-w-0 overflow-hidden` because flex
           children default to `min-width: auto` (intrinsic content). A
@@ -339,6 +340,9 @@ export function DatabaseExplorerView() {
                     key={selectedPath}
                     imperativeRef={editorRef}
                     driver={active?.driver ?? "postgres"}
+                    connectionId={activeId}
+                    database={activeDatabase}
+                    schema={activeSchema}
                     value={buffer}
                     onChange={handleEditorChange}
                     onSave={handleSave}
@@ -408,6 +412,13 @@ export function DatabaseExplorerView() {
           >
             <div className="shrink-0 border-b border-border/60">
               <ConnectionList onCollapse={() => setRightCollapsed(true)} />
+            </div>
+            {/* Schema-cache status — pinned to the right rail above
+                the DB tree so the user always has a fixed place to
+                see "X/Y tables indexed" and watch live indexing
+                progress. Hides itself when no connection is live. */}
+            <div className="shrink-0 border-b border-border/60 px-2 py-1.5">
+              <CacheStatusBadge />
             </div>
             <div className="flex-1 overflow-auto">
               <DbTree />

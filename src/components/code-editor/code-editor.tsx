@@ -73,6 +73,14 @@ export interface CodeEditorProps {
   /** Mod-Shift-Enter variant. */
   onRunLineWithDeps?: (line: number) => void;
   /**
+   * Alt-Enter (Option+Enter on macOS) handler. Receives the underlying
+   * `EditorView` so the caller can read cursor coordinates / dispatch
+   * effects (e.g. open an actions popup at the caret). Fires at
+   * `Prec.highest` alongside the other action shortcuts so vim mode
+   * and `defaultKeymap`'s `splitLine` don't shadow it.
+   */
+  onAltEnter?: (view: EditorView) => void;
+  /**
    * Per-tool extensions: language, run-gutter, hover tooltips, etc.
    * Passed as a function so callers can react to the theme without
    * reaching into our internals.
@@ -82,6 +90,14 @@ export interface CodeEditorProps {
   vimMode?: boolean;
   /** Forwarded ref for imperative control. */
   imperativeRef?: Ref<CodeEditorHandle>;
+  /**
+   * Optional callback fired when the underlying `EditorView` is
+   * (re)created or destroyed. Lets a caller drive cursor-coordinate
+   * reads (`coordsAtPos`) and `view.dispatch` from React without
+   * forking the editor or threading every operation through the
+   * imperative handle.
+   */
+  onView?: (view: EditorView | null) => void;
 }
 
 /** Generic CodeMirror 6 editor. */
@@ -92,9 +108,11 @@ export function CodeEditor({
   onSave,
   onRunLine,
   onRunLineWithDeps,
+  onAltEnter,
   extensions,
   vimMode = true,
   imperativeRef,
+  onView,
 }: CodeEditorProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const viewRef = useRef<EditorView | null>(null);
@@ -102,7 +120,9 @@ export function CodeEditor({
   const onSaveRef = useRef(onSave);
   const onRunLineRef = useRef(onRunLine);
   const onRunLineWithDepsRef = useRef(onRunLineWithDeps);
+  const onAltEnterRef = useRef(onAltEnter);
   const extensionsRef = useRef(extensions);
+  const onViewRef = useRef(onView);
   const { theme } = useTheme();
 
   useEffect(() => {
@@ -110,8 +130,18 @@ export function CodeEditor({
     onSaveRef.current = onSave;
     onRunLineRef.current = onRunLine;
     onRunLineWithDepsRef.current = onRunLineWithDeps;
+    onAltEnterRef.current = onAltEnter;
     extensionsRef.current = extensions;
-  }, [onChange, onSave, onRunLine, onRunLineWithDeps, extensions]);
+    onViewRef.current = onView;
+  }, [
+    onChange,
+    onSave,
+    onRunLine,
+    onRunLineWithDeps,
+    onAltEnter,
+    extensions,
+    onView,
+  ]);
 
   // Vim ex commands — register once. The Vim wrapper passes its adapter;
   // we ignore it and read the live view.
@@ -175,6 +205,19 @@ export function CodeEditor({
             return true;
           },
         },
+        {
+          // Option+Enter (mac) / Alt+Enter — opens the per-tool
+          // actions popup. At `Prec.highest` so neither vim mode's
+          // keymap nor `defaultKeymap`'s `splitLine` shadows it. The
+          // handler is a no-op when no callback is wired.
+          key: "Alt-Enter",
+          preventDefault: true,
+          run: (view) => {
+            if (!onAltEnterRef.current) return false;
+            onAltEnterRef.current(view);
+            return true;
+          },
+        },
       ]),
     ),
     keymap.of([
@@ -202,7 +245,9 @@ export function CodeEditor({
       parent: hostRef.current,
     });
     viewRef.current = view;
+    onViewRef.current?.(view);
     return () => {
+      onViewRef.current?.(null);
       view.destroy();
       viewRef.current = null;
     };

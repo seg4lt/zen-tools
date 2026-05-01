@@ -10,7 +10,10 @@ use sqlx::types::Uuid;
 use sqlx::{Column as _, Postgres, Row, TypeInfo, ValueRef};
 
 use crate::driver::{DbConnection, DbError, DbResult};
-use crate::types::{Cell, Column, ConnectionConfig, QueryResult};
+use crate::types::{
+    Cell, Column, ColumnDescription, ConnectionConfig, QueryResult, TableDescription, TableKind,
+    TableSummary,
+};
 
 pub struct PostgresConnection {
     pool: PgPool,
@@ -88,6 +91,126 @@ impl DbConnection for PostgresConnection {
         .await
         .map_err(|e| DbError::Query(e.to_string()))?;
         Ok(rows)
+    }
+
+    async fn list_all_tables(&mut self, _database: &str) -> DbResult<Vec<TableSummary>> {
+        // sqlx is bound to the connection's database; cross-DB browsing
+        // isn't supported in v1 (mirrors `list_schemas` / `list_tables`).
+        // The query excludes system schemas and toast tables — same
+        // exclusions as `list_schemas`.
+        let rows: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT n.nspname::text AS schema_name, \
+                    c.relname::text AS table_name, \
+                    c.relkind::text AS relkind \
+             FROM pg_class c \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+             WHERE c.relkind IN ('r', 'v', 'm', 'p', 'f') \
+               AND n.nspname NOT IN ('pg_catalog', 'information_schema') \
+               AND n.nspname NOT LIKE 'pg_toast%' \
+               AND n.nspname NOT LIKE 'pg_temp%' \
+             ORDER BY n.nspname, c.relname",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| DbError::Query(e.to_string()))?;
+
+        Ok(rows
+            .into_iter()
+            .map(|(schema, name, relkind)| TableSummary {
+                schema,
+                name,
+                kind: match relkind.as_str() {
+                    "v" | "m" => TableKind::View,
+                    _ => TableKind::Table,
+                },
+            })
+            .collect())
+    }
+
+    async fn describe_table(
+        &mut self,
+        database: &str,
+        schema: &str,
+        table: &str,
+    ) -> DbResult<TableDescription> {
+        // Pull `format_type` for a render-friendly type string (e.g.
+        // `varchar(64)`, `numeric(10,2)`) instead of the raw oid name.
+        // PK flag comes from `pg_index.indisprimary` joined on the
+        // attribute number — cheap, single round-trip.
+        let column_rows: Vec<(
+            String,         // column_name
+            String,         // formatted type
+            bool,           // nullable (is_nullable = 'YES')
+            Option<String>, // default
+            i32,            // ordinal_position
+            bool,           // is_primary_key
+            String,         // relkind ('r','v','m','p','f',...)
+        )> = sqlx::query_as(
+            "SELECT \
+                a.attname::text AS column_name, \
+                pg_catalog.format_type(a.atttypid, a.atttypmod) AS data_type, \
+                NOT a.attnotnull AS nullable, \
+                pg_get_expr(d.adbin, d.adrelid) AS default_expr, \
+                a.attnum::int4 AS ordinal_position, \
+                COALESCE(pk.is_pk, false) AS is_primary_key, \
+                c.relkind::text AS relkind \
+             FROM pg_attribute a \
+             JOIN pg_class c ON c.oid = a.attrelid \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+             LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum \
+             LEFT JOIN ( \
+               SELECT i.indrelid, x.attnum, true AS is_pk \
+               FROM pg_index i \
+               JOIN unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord) ON true \
+               JOIN pg_attribute x ON x.attrelid = i.indrelid AND x.attnum = k.attnum \
+               WHERE i.indisprimary \
+             ) pk ON pk.indrelid = a.attrelid AND pk.attnum = a.attnum \
+             WHERE n.nspname = $1 AND c.relname = $2 \
+               AND a.attnum > 0 AND NOT a.attisdropped \
+             ORDER BY a.attnum",
+        )
+        .bind(schema)
+        .bind(table)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| DbError::Query(e.to_string()))?;
+
+        if column_rows.is_empty() {
+            return Err(DbError::Query(format!(
+                "table not found: {schema}.{table}"
+            )));
+        }
+
+        let kind = match column_rows[0].6.as_str() {
+            "v" | "m" => TableKind::View,
+            _ => TableKind::Table,
+        };
+
+        let columns = column_rows
+            .into_iter()
+            .map(
+                |(name, data_type, nullable, default, ordinal, is_pk, _relkind)| {
+                    ColumnDescription {
+                        name,
+                        data_type,
+                        nullable,
+                        default,
+                        ordinal,
+                        is_primary_key: is_pk,
+                    }
+                },
+            )
+            .collect();
+
+        Ok(TableDescription {
+            database: database.to_string(),
+            schema: schema.to_string(),
+            name: table.to_string(),
+            kind,
+            columns,
+            indexes: Vec::new(),
+            foreign_keys: Vec::new(),
+        })
     }
 
     async fn execute(&mut self, sql: &str) -> DbResult<QueryResult> {

@@ -1,19 +1,26 @@
-//! Persisted UI preferences — stored as JSON inside the OS-specific app
-//! data directory (resolved by Tauri):
+//! Persisted UI preferences — stored as a single JSON blob inside the
+//! `user_config.db` SQLite database (key `preferences`) under the
+//! OS-specific app-data directory:
 //!
 //! | OS      | Path (typical)                                                  |
 //! |---------|-----------------------------------------------------------------|
-//! | macOS   | `~/Library/Application Support/com.zen.tools/preferences.json`  |
-//! | Linux   | `~/.local/share/com.zen.tools/preferences.json`                 |
-//! | Windows | `%APPDATA%\com.zen.tools\preferences.json`                      |
+//! | macOS   | `~/Library/Application Support/com.zen.tools/user_config.db`    |
+//! | Linux   | `~/.local/share/com.zen.tools/user_config.db`                   |
+//! | Windows | `%APPDATA%\com.zen.tools\user_config.db`                        |
+//!
+//! Older builds wrote a `preferences.json` file in the same directory;
+//! `UserConfig::open` migrates it on first launch (the file becomes
+//! `preferences.json.bak`). Callers continue to use the
+//! `load_preferences` / `write_preferences` helpers below — only the
+//! storage backend changed.
 //!
 //! Only includes user-facing UI state (open project list, expanded
 //! folders). Anything sensitive or per-environment lives elsewhere.
 
-use crate::error::{AppError, AppResult};
+use crate::error::AppResult;
+use crate::user_config::{self, PREFERENCES_KEY};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 
 /// Persisted UI state. New optional fields can be added without
 /// breaking older preferences files thanks to `#[serde(default)]`.
@@ -138,47 +145,32 @@ impl Default for Preferences {
     }
 }
 
-/// Resolve the preferences file path. Creates the parent directory if
-/// it doesn't exist yet.
-fn preferences_path(app: &AppHandle) -> AppResult<PathBuf> {
-    let dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| AppError::Other(format!("resolve app_data_dir: {e}")))?;
-    std::fs::create_dir_all(&dir)?;
-    Ok(dir.join("preferences.json"))
-}
-
 /// Synchronous read used by other backend modules (e.g.
 /// `commands::files` when persisting the project list). Returns
-/// defaults if the file is missing or malformed — the call site is
-/// expected to persist the merged result back via [`write_preferences`].
+/// defaults when the row is absent or fails to deserialise — the call
+/// site is expected to persist the merged result back via
+/// [`write_preferences`].
 pub fn load_preferences(app: &AppHandle) -> AppResult<Preferences> {
-    let path = preferences_path(app)?;
-    tracing::info!(path = %path.display(), "preferences load");
-    if !path.exists() {
-        return Ok(Preferences::default());
-    }
-    let content = std::fs::read_to_string(&path)?;
-    match serde_json::from_str::<Preferences>(&content) {
-        Ok(prefs) => Ok(prefs),
+    let cfg = user_config::require(app)?;
+    match cfg.get::<Preferences>(PREFERENCES_KEY) {
+        Ok(Some(prefs)) => Ok(prefs),
+        Ok(None) => Ok(Preferences::default()),
         Err(e) => {
-            tracing::warn!(?e, path = %path.display(), "preferences parse failed; using defaults");
+            // A schema-incompatible JSON shouldn't brick the app; the
+            // next save will overwrite it cleanly. Caller chains
+            // already use `unwrap_or_default()` for missing files, so
+            // we mirror that resilience here.
+            tracing::warn!(?e, "preferences parse failed; using defaults");
             Ok(Preferences::default())
         }
     }
 }
 
-/// Synchronous atomic write used by other backend modules. Writes to
-/// a sibling `.tmp` and renames into place so a crash mid-write can't
-/// leave a half-written file.
+/// Synchronous write used by other backend modules. SQLite handles
+/// atomicity for us — no temp-file dance required.
 pub fn write_preferences(app: &AppHandle, prefs: &Preferences) -> AppResult<()> {
-    let path = preferences_path(app)?;
-    let tmp = path.with_extension("json.tmp");
-    let json = serde_json::to_string_pretty(prefs)?;
-    std::fs::write(&tmp, json)?;
-    std::fs::rename(&tmp, &path)?;
-    Ok(())
+    let cfg = user_config::require(app)?;
+    cfg.set(PREFERENCES_KEY, prefs)
 }
 
 /// Read the preferences JSON. Returns defaults when the file is

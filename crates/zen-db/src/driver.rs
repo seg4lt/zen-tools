@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use thiserror::Error;
 
-use crate::types::QueryResult;
+use crate::types::{QueryResult, TableDescription, TableSummary};
 
 #[derive(Debug, Error)]
 pub enum DbError {
@@ -45,6 +45,22 @@ pub trait DbConnection: Send + Sync {
 
     /// Tables (and views) in `database.schema`.
     async fn list_tables(&mut self, database: &str, schema: &str) -> DbResult<Vec<String>>;
+
+    /// Every relation (table or view) visible in `database`, grouped by
+    /// schema. Single round-trip — used by the SQL editor's autocomplete
+    /// to seed schema + qualified-table completions cold, without one
+    /// `list_tables` call per schema.
+    async fn list_all_tables(&mut self, database: &str) -> DbResult<Vec<TableSummary>>;
+
+    /// Describe a single table: columns now, indexes/FKs in a future
+    /// revision. Drivers fill the cheap fields and leave the rest empty;
+    /// the shape is stable so the cache payload survives later upgrades.
+    async fn describe_table(
+        &mut self,
+        database: &str,
+        schema: &str,
+        table: &str,
+    ) -> DbResult<TableDescription>;
 
     /// Execute a single SQL statement and materialise the result.
     async fn execute(&mut self, sql: &str) -> DbResult<QueryResult>;

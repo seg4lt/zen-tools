@@ -51,6 +51,12 @@ export interface DbExplorerState {
   /** Cached tree data keyed by connection id. */
   trees: Record<string, ConnectionTreeData>;
   /**
+   * `connId/database/schema/table` → unix-ms timestamp of the last
+   * schema-cache upsert. Drives the "fresh / stale / unknown" dot in
+   * the DB-explorer tree without re-querying the backend per row.
+   */
+  schemaIndexedAt: Record<string, number>;
+  /**
    * Active "current database" per connection (MSSQL). For Postgres the
    * connection is bound to one DB so this is informational only.
    */
@@ -120,6 +126,11 @@ type Action =
   | { type: "set-databases"; id: string; databases: string[] }
   | { type: "set-schemas"; id: string; database: string; schemas: string[] }
   | { type: "set-tables"; id: string; database: string; schema: string; tables: string[] }
+  | {
+      type: "set-schema-indexed-at";
+      entries: { id: string; database: string; schema: string; table: string; indexedAt: number }[];
+    }
+  | { type: "clear-schema-indexed-at"; id: string }
   | { type: "set-active-database"; id: string; database: string }
   | { type: "set-active-schema"; id: string; schema: string }
   | { type: "open-form"; mode: "new" | { editId: string } }
@@ -147,6 +158,7 @@ const initial: DbExplorerState = {
   errors: {},
   running: {},
   trees: {},
+  schemaIndexedAt: {},
   activeResultIndexByConnection: {},
   activeDbByConnection: {},
   activeSchemaByConnection: {},
@@ -293,6 +305,24 @@ function reducer(state: DbExplorerState, action: Action): DbExplorerState {
           },
         },
       };
+    }
+
+    case "set-schema-indexed-at": {
+      if (action.entries.length === 0) return state;
+      const next = { ...state.schemaIndexedAt };
+      for (const e of action.entries) {
+        next[`${e.id}/${e.database}/${e.schema}/${e.table}`] = e.indexedAt;
+      }
+      return { ...state, schemaIndexedAt: next };
+    }
+
+    case "clear-schema-indexed-at": {
+      const prefix = `${action.id}/`;
+      const next: Record<string, number> = {};
+      for (const [k, v] of Object.entries(state.schemaIndexedAt)) {
+        if (!k.startsWith(prefix)) next[k] = v;
+      }
+      return { ...state, schemaIndexedAt: next };
     }
 
     case "set-active-database":

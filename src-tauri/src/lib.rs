@@ -8,12 +8,16 @@
 pub mod commands;
 pub mod dto;
 pub mod error;
+pub mod schema_cache;
 pub mod state;
 pub mod tray;
+pub mod user_config;
 
 use commands::markdown_index::MarkdownIndexRegistry;
 use commands::runs::{load_runs, RunHistory};
+use schema_cache::SchemaCache;
 use state::AppState;
+use user_config::UserConfig;
 use std::sync::Arc;
 use tauri::{Emitter, Manager};
 use tokio::sync::Mutex;
@@ -43,12 +47,42 @@ pub fn run() {
         // Wrapped in `Arc` so command handlers can clone cheaply.
         .manage(Arc::new(MarkdownIndexRegistry::default()))
         .setup(|app| {
+            // Open the user-config store FIRST so subsequent setup
+            // steps (and every command path) can read settings via
+            // `commands::preferences::load_preferences`. Registering
+            // before `load_runs` is overkill today (runs.rs reads its
+            // own file) but keeps the invariant simple: settings are
+            // available from this point onward.
+            match UserConfig::open(app.handle()) {
+                Ok(cfg) => {
+                    app.manage(cfg);
+                }
+                Err(e) => {
+                    // Non-fatal — `load_preferences` falls back to
+                    // defaults when the store is missing, so the app
+                    // still launches; the user just sees a fresh state.
+                    tracing::warn!(?e, "user_config: open failed; settings will use defaults");
+                }
+            }
+
             // Hydrate run history from disk so previous-session runs
             // are immediately available in the History tab.
             let store = app.state::<Mutex<RunHistory>>();
             let mut s = store.blocking_lock();
             load_runs(app.handle(), &mut s);
             drop(s);
+
+            // Open (or create) the SQL-autocomplete schema cache. Held
+            // as managed state so commands can clone the `Arc` cheaply
+            // without touching the outer `Mutex<AppState>`.
+            match SchemaCache::open(app.handle()) {
+                Ok(cache) => {
+                    app.manage(cache);
+                }
+                Err(e) => {
+                    tracing::warn!(?e, "schema_cache: open failed; auto-complete will be live-only");
+                }
+            }
 
             // ── Process Monitor: spawn the sampler thread + the broadcast
             // → Tauri-event bridge. The sampler skips work whenever no
@@ -175,7 +209,12 @@ pub fn run() {
             commands::database::db_list_databases,
             commands::database::db_list_schemas,
             commands::database::db_list_tables,
+            commands::database::db_list_all_tables,
             commands::database::db_query,
+            commands::database::db_describe_table,
+            commands::database::db_describe_tables_bulk,
+            commands::database::db_list_cached_tables,
+            commands::database::db_invalidate_schema_cache,
             // sql workspace (database explorer file tree)
             commands::sql_workspace::sql_workspace_list,
             commands::sql_workspace::sql_workspace_add,

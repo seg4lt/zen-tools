@@ -16,4 +16,7 @@ pub mod types;
 
 pub use driver::{DbConnection, DbError, DbResult};
 pub use registry::ConnectionRegistry;
-pub use types::{Cell, Column, ConnectionConfig, DbDriver, QueryResult};
+pub use types::{
+    Cell, Column, ColumnDescription, ConnectionConfig, DbDriver, ForeignKeyDescription,
+    IndexDescription, QueryResult, TableDescription, TableKind, TableSummary,
+};

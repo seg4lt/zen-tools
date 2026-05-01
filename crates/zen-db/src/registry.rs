@@ -12,7 +12,7 @@ use tokio::sync::Mutex;
 use crate::driver::{DbConnection, DbError, DbResult};
 use crate::mssql::MsSqlConnection;
 use crate::postgres::PostgresConnection;
-use crate::types::{ConnectionConfig, DbDriver, QueryResult};
+use crate::types::{ConnectionConfig, DbDriver, QueryResult, TableDescription, TableSummary};
 
 type Slot = Arc<Mutex<Box<dyn DbConnection>>>;
 
@@ -83,6 +83,32 @@ impl ConnectionRegistry {
         let slot = self.slot(id)?;
         let mut conn = slot.lock().await;
         conn.list_tables(database, schema).await
+    }
+
+    /// Single round-trip catalog dump used by the SQL editor's
+    /// autocomplete to seed completions cold (no per-schema fan-out).
+    pub async fn list_all_tables(
+        &self,
+        id: &str,
+        database: &str,
+    ) -> DbResult<Vec<TableSummary>> {
+        let slot = self.slot(id)?;
+        let mut conn = slot.lock().await;
+        conn.list_all_tables(database).await
+    }
+
+    /// Fetch a single `TableDescription` from the live connection. The
+    /// caller is responsible for caching — the registry just dispatches.
+    pub async fn describe_table(
+        &self,
+        id: &str,
+        database: &str,
+        schema: &str,
+        table: &str,
+    ) -> DbResult<TableDescription> {
+        let slot = self.slot(id)?;
+        let mut conn = slot.lock().await;
+        conn.describe_table(database, schema, table).await
     }
 
     pub async fn execute(&self, id: &str, sql: &str) -> DbResult<QueryResult> {

@@ -61,6 +61,91 @@ pub enum Cell {
     Bool(bool),
 }
 
+/// What kind of relation a `TableDescription` represents. Drivers map
+/// their native catalogues onto this small enum so the front-end has one
+/// shape to render.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TableKind {
+    Table,
+    View,
+}
+
+/// Lightweight `(schema, table)` row used to seed the SQL editor's
+/// autocomplete catalog without paying the per-table-column cost up
+/// front. One round-trip per connection brings back every relation
+/// (table or view) the user can reference, so completions for
+/// `<schema>.<table>` work the moment the editor opens — before the
+/// user has typed any reference.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableSummary {
+    /// Schema (Postgres) / owner (MSSQL) the relation belongs to.
+    pub schema: String,
+    /// Table or view name.
+    pub name: String,
+    /// Whether this is a base table or a view.
+    pub kind: TableKind,
+}
+
+/// One column on a table. `data_type` is the driver-native type string
+/// (e.g. `"integer"`, `"varchar(64)"`, `"jsonb"`) — good enough for
+/// autocomplete tooltips. `is_primary_key` is best-effort: drivers fill
+/// it from their PK metadata where cheap, otherwise leave it `false`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ColumnDescription {
+    pub name: String,
+    pub data_type: String,
+    pub nullable: bool,
+    pub default: Option<String>,
+    pub ordinal: i32,
+    #[serde(default)]
+    pub is_primary_key: bool,
+}
+
+/// Index metadata stub — populated in a future revision. The shape is
+/// fixed now so the cache payload doesn't need a migration when the
+/// details pane lands.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexDescription {
+    pub name: String,
+    pub columns: Vec<String>,
+    #[serde(default)]
+    pub is_unique: bool,
+    #[serde(default)]
+    pub is_primary: bool,
+}
+
+/// Foreign-key metadata stub — also populated later.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForeignKeyDescription {
+    pub name: String,
+    pub columns: Vec<String>,
+    pub referenced_schema: String,
+    pub referenced_table: String,
+    pub referenced_columns: Vec<String>,
+}
+
+/// Full description of a single table, suitable for both autocomplete
+/// (columns) and a future "table details" pane (indexes, FKs). Drivers
+/// fill in what they cheaply can; everything else stays empty.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableDescription {
+    pub database: String,
+    pub schema: String,
+    pub name: String,
+    pub kind: TableKind,
+    pub columns: Vec<ColumnDescription>,
+    #[serde(default)]
+    pub indexes: Vec<IndexDescription>,
+    #[serde(default)]
+    pub foreign_keys: Vec<ForeignKeyDescription>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QueryResult {

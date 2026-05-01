@@ -233,3 +233,12 @@ opened file.
   polling.
 - **Frontend rAF-batches `perf:update` events** so high-frequency
   progress messages don't trigger a re-render storm.
+
+## Further reading
+
+- [`docs/IPC.md`](docs/IPC.md) — `src-tauri` ↔ frontend command and
+  event contract.
+- [`docs/STORAGE.md`](docs/STORAGE.md) — what lives where in
+  `app_data_dir/` (`user_config.db`, `schema_cache.db`, the legacy
+  `preferences.json` migration, secrets handling), and the design
+  rationale behind the SQLite key/value layout.

@@ -14,6 +14,11 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+[dev-dependencies]
+# Temp-directory helper for tests that exercise the on-disk migration
+# path (`UserConfig::migrate_legacy`).
+tempfile = "3"
+
 [dependencies]
 zen-types = { workspace = true }
 zen-parser = { workspace = true }
@@ -69,3 +74,7 @@ tracing-subscriber = { workspace = true }
 dirs = { workspace = true }
 chrono = { workspace = true }
 async-trait = { workspace = true }
+# Local SQLite for the schema-cache (per-table column/index/FK metadata).
+# `bundled` vendors the SQLite source so we don't depend on a system
+# library — keeps Windows builds simple.
+rusqlite = { version = "0.32", features = ["bundled"] }

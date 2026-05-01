@@ -13,7 +13,10 @@ use tokio::net::TcpStream;
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 
 use crate::driver::{DbConnection, DbError, DbResult};
-use crate::types::{Cell, Column, ConnectionConfig, QueryResult};
+use crate::types::{
+    Cell, Column, ColumnDescription, ConnectionConfig, QueryResult, TableDescription, TableKind,
+    TableSummary,
+};
 
 type MsClient = Client<Compat<TcpStream>>;
 
@@ -110,6 +113,221 @@ impl DbConnection for MsSqlConnection {
             schema.replace('\'', "''"),
         );
         run_string_column(&mut self.client, &q, "name").await
+    }
+
+    async fn list_all_tables(&mut self, database: &str) -> DbResult<Vec<TableSummary>> {
+        // tiberius shares one TCP session, so the `USE` plus the
+        // following query naturally run on the same db.
+        let use_stmt = format!("USE [{}]", escape_ident(database));
+        self.client
+            .simple_query(use_stmt)
+            .await
+            .map_err(|e| DbError::Query(e.to_string()))?;
+
+        let q = "SELECT s.name AS schema_name, t.name AS table_name, 'TABLE' AS table_type \
+                 FROM sys.tables t \
+                 JOIN sys.schemas s ON s.schema_id = t.schema_id \
+                 WHERE s.name NOT IN ('sys','INFORMATION_SCHEMA','db_owner','db_accessadmin', \
+                                      'db_securityadmin','db_ddladmin','db_backupoperator', \
+                                      'db_datareader','db_datawriter','db_denydatareader','db_denydatawriter') \
+                 UNION ALL \
+                 SELECT s.name, v.name, 'VIEW' \
+                 FROM sys.views v \
+                 JOIN sys.schemas s ON s.schema_id = v.schema_id \
+                 WHERE s.name NOT IN ('sys','INFORMATION_SCHEMA','db_owner','db_accessadmin', \
+                                      'db_securityadmin','db_ddladmin','db_backupoperator', \
+                                      'db_datareader','db_datawriter','db_denydatareader','db_denydatawriter') \
+                 ORDER BY schema_name, table_name";
+
+        let mut out: Vec<TableSummary> = Vec::new();
+        let mut stream = self
+            .client
+            .simple_query(q.to_string())
+            .await
+            .map_err(|e| DbError::Query(e.to_string()))?;
+        while let Some(item) = stream
+            .try_next()
+            .await
+            .map_err(|e| DbError::Query(e.to_string()))?
+        {
+            if let QueryItem::Row(row) = item {
+                let schema = row
+                    .try_get::<&str, _>("schema_name")
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default()
+                    .to_string();
+                let name = row
+                    .try_get::<&str, _>("table_name")
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default()
+                    .to_string();
+                let kind_raw = row
+                    .try_get::<&str, _>("table_type")
+                    .ok()
+                    .flatten()
+                    .unwrap_or("TABLE");
+                let kind = if kind_raw.eq_ignore_ascii_case("VIEW") {
+                    TableKind::View
+                } else {
+                    TableKind::Table
+                };
+                if !name.is_empty() && !schema.is_empty() {
+                    out.push(TableSummary { schema, name, kind });
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    async fn describe_table(
+        &mut self,
+        database: &str,
+        schema: &str,
+        table: &str,
+    ) -> DbResult<TableDescription> {
+        // Pin the session to the requested database first; the column
+        // metadata queries below all reference the current DB's
+        // INFORMATION_SCHEMA / sys.* views.
+        let use_stmt = format!("USE [{}]", escape_ident(database));
+        self.client
+            .simple_query(use_stmt)
+            .await
+            .map_err(|e| DbError::Query(e.to_string()))?;
+
+        // Detect view vs base table up-front. Empty result = not found.
+        let kind_q = format!(
+            "SELECT TOP 1 TABLE_TYPE FROM INFORMATION_SCHEMA.TABLES \
+             WHERE TABLE_SCHEMA = '{}' AND TABLE_NAME = '{}'",
+            schema.replace('\'', "''"),
+            table.replace('\'', "''"),
+        );
+        let mut kind = TableKind::Table;
+        let mut found = false;
+        {
+            let mut stream = self
+                .client
+                .simple_query(kind_q)
+                .await
+                .map_err(|e| DbError::Query(e.to_string()))?;
+            while let Some(item) = stream
+                .try_next()
+                .await
+                .map_err(|e| DbError::Query(e.to_string()))?
+            {
+                if let QueryItem::Row(row) = item {
+                    found = true;
+                    if let Some(t) = row.try_get::<&str, _>("TABLE_TYPE").ok().flatten() {
+                        if t.eq_ignore_ascii_case("VIEW") {
+                            kind = TableKind::View;
+                        }
+                    }
+                }
+            }
+        }
+        if !found {
+            return Err(DbError::Query(format!(
+                "table not found: {schema}.{table}"
+            )));
+        }
+
+        // Column rundown — ordinal, type with length, null-ability,
+        // default, plus a left-join against KEY_COLUMN_USAGE filtered to
+        // PRIMARY KEY constraints to flag PK columns.
+        let q = format!(
+            "SELECT \
+                c.COLUMN_NAME AS column_name, \
+                c.DATA_TYPE AS data_type, \
+                c.CHARACTER_MAXIMUM_LENGTH AS char_max, \
+                c.NUMERIC_PRECISION AS num_prec, \
+                c.NUMERIC_SCALE AS num_scale, \
+                c.IS_NULLABLE AS is_nullable, \
+                c.COLUMN_DEFAULT AS column_default, \
+                c.ORDINAL_POSITION AS ordinal_position, \
+                CASE WHEN pk.COLUMN_NAME IS NULL THEN 0 ELSE 1 END AS is_pk \
+             FROM INFORMATION_SCHEMA.COLUMNS c \
+             LEFT JOIN ( \
+               SELECT k.TABLE_SCHEMA, k.TABLE_NAME, k.COLUMN_NAME \
+               FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS t \
+               JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE k \
+                 ON k.CONSTRAINT_NAME = t.CONSTRAINT_NAME \
+                AND k.TABLE_SCHEMA  = t.TABLE_SCHEMA \
+                AND k.TABLE_NAME    = t.TABLE_NAME \
+               WHERE t.CONSTRAINT_TYPE = 'PRIMARY KEY' \
+             ) pk \
+               ON pk.TABLE_SCHEMA = c.TABLE_SCHEMA \
+              AND pk.TABLE_NAME   = c.TABLE_NAME \
+              AND pk.COLUMN_NAME  = c.COLUMN_NAME \
+             WHERE c.TABLE_SCHEMA = '{}' AND c.TABLE_NAME = '{}' \
+             ORDER BY c.ORDINAL_POSITION",
+            schema.replace('\'', "''"),
+            table.replace('\'', "''"),
+        );
+
+        let mut columns: Vec<ColumnDescription> = Vec::new();
+        let mut stream = self
+            .client
+            .simple_query(q)
+            .await
+            .map_err(|e| DbError::Query(e.to_string()))?;
+        while let Some(item) = stream
+            .try_next()
+            .await
+            .map_err(|e| DbError::Query(e.to_string()))?
+        {
+            if let QueryItem::Row(row) = item {
+                let name: String = row
+                    .try_get::<&str, _>("column_name")
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default()
+                    .to_string();
+                let base_type: String = row
+                    .try_get::<&str, _>("data_type")
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default()
+                    .to_string();
+                let char_max: Option<i32> = row.try_get::<i32, _>("char_max").ok().flatten();
+                let num_prec: Option<u8> = row.try_get::<u8, _>("num_prec").ok().flatten();
+                let num_scale: Option<i32> = row.try_get::<i32, _>("num_scale").ok().flatten();
+                let is_nullable: String = row
+                    .try_get::<&str, _>("is_nullable")
+                    .ok()
+                    .flatten()
+                    .unwrap_or("YES")
+                    .to_string();
+                let default: Option<String> = row
+                    .try_get::<&str, _>("column_default")
+                    .ok()
+                    .flatten()
+                    .map(|s| s.to_string());
+                let ordinal: i32 = row.try_get::<i32, _>("ordinal_position").ok().flatten().unwrap_or(0);
+                let is_pk_raw: i32 = row.try_get::<i32, _>("is_pk").ok().flatten().unwrap_or(0);
+
+                let data_type = format_mssql_type(&base_type, char_max, num_prec, num_scale);
+
+                columns.push(ColumnDescription {
+                    name,
+                    data_type,
+                    nullable: is_nullable.eq_ignore_ascii_case("YES"),
+                    default,
+                    ordinal,
+                    is_primary_key: is_pk_raw != 0,
+                });
+            }
+        }
+
+        Ok(TableDescription {
+            database: database.to_string(),
+            schema: schema.to_string(),
+            name: table.to_string(),
+            kind,
+            columns,
+            indexes: Vec::new(),
+            foreign_keys: Vec::new(),
+        })
     }
 
     async fn execute_batch(
@@ -215,6 +433,31 @@ async fn run_string_column(
 
 fn escape_ident(s: &str) -> String {
     s.replace(']', "]]")
+}
+
+/// Render an MSSQL `INFORMATION_SCHEMA.COLUMNS` row into a tooltip-ready
+/// type string, e.g. `varchar(64)`, `decimal(10,2)`. Width is appended
+/// only for types that actually carry one.
+fn format_mssql_type(
+    base: &str,
+    char_max: Option<i32>,
+    num_prec: Option<u8>,
+    num_scale: Option<i32>,
+) -> String {
+    let lower = base.to_ascii_lowercase();
+    match lower.as_str() {
+        "char" | "varchar" | "nchar" | "nvarchar" | "binary" | "varbinary" => match char_max {
+            Some(n) if n < 0 => format!("{base}(max)"),
+            Some(n) => format!("{base}({n})"),
+            None => base.to_string(),
+        },
+        "decimal" | "numeric" => match (num_prec, num_scale) {
+            (Some(p), Some(s)) => format!("{base}({p},{s})"),
+            (Some(p), None) => format!("{base}({p})"),
+            _ => base.to_string(),
+        },
+        _ => base.to_string(),
+    }
 }
 
 fn decode_cell(col: &ColumnData<'_>) -> Cell {
