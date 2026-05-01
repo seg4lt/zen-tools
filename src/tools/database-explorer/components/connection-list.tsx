@@ -1,26 +1,36 @@
 /**
- * Left-rail list of saved connections. Click to make active; double-click
- * (or Connect button) opens a live connection.
+ * Right-rail list of saved connections. Single-row design: name +
+ * status are always visible; Connect/Disconnect + Edit appear on hover.
+ * Delete moved into the edit dialog (a destructive button in the
+ * dialog footer) so the row itself stays clean.
+ *
+ * Click row → make active. Double-click → connect.
  */
 
 import {
   Database,
   Plus,
   Pencil,
-  Trash2,
   Plug,
   Unplug,
   Loader2,
   CheckCircle2,
   AlertCircle,
+  PanelRightClose,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 import { useDbExplorerStore } from "../store/db-explorer-store";
 import { useDbConnection } from "../hooks/use-db-connection";
 import { useDbTree } from "../hooks/use-db-tree";
-import { dbTauri, type DbConnectionPrefs } from "../lib/tauri";
+import type { DbConnectionPrefs } from "../lib/tauri";
 
-export function ConnectionList() {
+interface ConnectionListProps {
+  /** Optional — if provided, a chevron button collapses the rail. */
+  onCollapse?: () => void;
+}
+
+export function ConnectionList({ onCollapse }: ConnectionListProps = {}) {
   const { state, dispatch } = useDbExplorerStore();
   const { connect, disconnect } = useDbConnection();
   const { fetchDatabases } = useDbTree();
@@ -31,36 +41,34 @@ export function ConnectionList() {
     fetchDatabases(c.id);
   }
 
-  async function handleDelete(c: DbConnectionPrefs) {
-    if (!confirm(`Delete connection "${c.name}"?`)) return;
-    try {
-      await dbTauri.deleteConnection(c.id);
-      const rows = await dbTauri.listSavedConnections();
-      dispatch({ type: "set-connections", connections: rows });
-      if (state.activeConnectionId === c.id) {
-        dispatch({ type: "set-active-connection", id: null });
-      }
-    } catch (err) {
-      // eslint-disable-next-line no-console
-      console.error("delete connection failed", err);
-    }
-  }
-
   return (
-    <div className="flex flex-col gap-2 p-2">
-      <div className="flex items-center justify-between px-1">
+    <div className="flex flex-col gap-1 p-2">
+      <div className="flex items-center justify-between gap-1 px-1">
         <span className="text-[11px] uppercase tracking-wide text-muted-foreground">
           Connections
         </span>
-        <Button
-          size="sm"
-          variant="ghost"
-          className="h-6 w-6 p-0"
-          onClick={() => dispatch({ type: "open-form", mode: "new" })}
-          title="Add connection"
-        >
-          <Plus className="h-3.5 w-3.5" />
-        </Button>
+        <div className="flex items-center gap-0.5">
+          <Button
+            size="sm"
+            variant="ghost"
+            className="h-6 w-6 p-0"
+            onClick={() => dispatch({ type: "open-form", mode: "new" })}
+            title="Add connection"
+          >
+            <Plus className="h-3.5 w-3.5" />
+          </Button>
+          {onCollapse && (
+            <Button
+              size="sm"
+              variant="ghost"
+              className="h-6 w-6 p-0"
+              onClick={onCollapse}
+              title="Collapse panel"
+            >
+              <PanelRightClose className="size-3" />
+            </Button>
+          )}
+        </div>
       </div>
 
       {state.connections.length === 0 && (
@@ -69,84 +77,103 @@ export function ConnectionList() {
         </div>
       )}
 
-      <ul className="flex flex-col gap-1">
+      <ul className="flex flex-col">
         {state.connections.map((c) => {
           const status = state.status[c.id] ?? "disconnected";
           const isActive = state.activeConnectionId === c.id;
+          const connected = status === "connected";
           return (
             <li
               key={c.id}
-              className={
-                "group rounded px-2 py-1.5 transition " +
-                (isActive ? "bg-muted" : "hover:bg-muted/50")
-              }
+              className={cn(
+                "group flex items-center gap-1 rounded px-2 py-1 transition",
+                isActive ? "bg-muted" : "hover:bg-muted/50",
+              )}
             >
+              {/* Title — fills the row, click = select, dblclick = connect. */}
               <button
                 type="button"
-                className="flex w-full items-center gap-2 text-left"
+                className="flex min-w-0 flex-1 items-center gap-2 text-left"
                 onClick={() =>
                   dispatch({ type: "set-active-connection", id: c.id })
                 }
                 onDoubleClick={() => handleConnect(c)}
+                title={`${c.name} — double-click to connect`}
               >
                 <Database className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                 <span className="flex-1 truncate text-sm">{c.name}</span>
-                <StatusBadge status={status} />
               </button>
 
-              <div className="mt-1 flex gap-1 opacity-0 transition group-hover:opacity-100">
-                {status === "connected" ? (
+              {/* Hover-revealed actions on the same row. */}
+              <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition group-hover:opacity-100">
+                {connected ? (
                   <Button
                     size="sm"
                     variant="ghost"
-                    className="h-6 px-2 text-[11px]"
-                    onClick={() => disconnect(c.id)}
+                    className="h-5 gap-1 px-1.5 text-[10px]"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void disconnect(c.id);
+                    }}
+                    title="Disconnect"
                   >
-                    <Unplug className="mr-1 h-3 w-3" />
+                    <Unplug className="size-3" />
                     Disconnect
                   </Button>
                 ) : (
                   <Button
                     size="sm"
                     variant="ghost"
-                    className="h-6 px-2 text-[11px]"
-                    onClick={() => handleConnect(c)}
+                    className="h-5 gap-1 px-1.5 text-[10px]"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void handleConnect(c);
+                    }}
+                    title="Connect"
                   >
-                    <Plug className="mr-1 h-3 w-3" />
+                    <Plug className="size-3" />
                     Connect
                   </Button>
                 )}
                 <Button
                   size="sm"
                   variant="ghost"
-                  className="h-6 w-6 p-0"
-                  onClick={() =>
-                    dispatch({ type: "open-form", mode: { editId: c.id } })
-                  }
-                  title="Edit"
+                  className="h-5 w-5 p-0"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    dispatch({ type: "open-form", mode: { editId: c.id } });
+                  }}
+                  title="Edit (Delete lives inside the edit dialog)"
                 >
-                  <Pencil className="h-3 w-3" />
-                </Button>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  className="h-6 w-6 p-0"
-                  onClick={() => handleDelete(c)}
-                  title="Delete"
-                >
-                  <Trash2 className="h-3 w-3" />
+                  <Pencil className="size-3" />
                 </Button>
               </div>
 
-              {state.errors[c.id] && (
-                <div className="mt-1 truncate text-[11px] text-red-500" title={state.errors[c.id] ?? ""}>
-                  {state.errors[c.id]}
-                </div>
-              )}
+              {/* Status indicator pinned at the right edge. */}
+              <StatusBadge status={status} />
             </li>
           );
         })}
       </ul>
+
+      {/* Per-connection error line, displayed below the list since the
+          row itself is now single-line. */}
+      {state.connections.some((c) => state.errors[c.id]) && (
+        <ul className="mt-1 flex flex-col gap-0.5 px-1 text-[11px] text-red-500">
+          {state.connections.map((c) =>
+            state.errors[c.id] ? (
+              <li
+                key={c.id}
+                className="truncate"
+                title={state.errors[c.id] ?? ""}
+              >
+                <span className="font-mono opacity-70">{c.name}:</span>{" "}
+                {state.errors[c.id]}
+              </li>
+            ) : null,
+          )}
+        </ul>
+      )}
     </div>
   );
 }

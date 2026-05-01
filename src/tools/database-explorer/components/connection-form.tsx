@@ -5,7 +5,7 @@
  */
 
 import { useEffect, useMemo, useState } from "react";
-import { Loader2 } from "lucide-react";
+import { Loader2, Trash2 } from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -83,6 +83,8 @@ export function ConnectionForm() {
   const [form, setForm] = useState<DbConnectionInput>(() => emptyForm("postgres"));
   const [testing, setTesting] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [feedback, setFeedback] = useState<
     | { kind: "ok"; message: string }
     | { kind: "err"; message: string }
@@ -93,6 +95,7 @@ export function ConnectionForm() {
   useEffect(() => {
     if (!isOpen) return;
     setFeedback(null);
+    setConfirmingDelete(false);
     if (editing) {
       setForm(fromPrefs(editing));
     } else {
@@ -152,6 +155,26 @@ export function ConnectionForm() {
       setFeedback({ kind: "err", message: formatError(err) });
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function handleDelete() {
+    if (!editing) return;
+    setDeleting(true);
+    setFeedback(null);
+    try {
+      await dbTauri.deleteConnection(editing.id);
+      const rows = await dbTauri.listSavedConnections();
+      dispatch({ type: "set-connections", connections: rows });
+      if (state.activeConnectionId === editing.id) {
+        dispatch({ type: "set-active-connection", id: null });
+      }
+      dispatch({ type: "close-form" });
+    } catch (err) {
+      setFeedback({ kind: "err", message: formatError(err) });
+    } finally {
+      setDeleting(false);
+      setConfirmingDelete(false);
     }
   }
 
@@ -276,24 +299,65 @@ export function ConnectionForm() {
             </div>
           )}
 
-          <DialogFooter className="gap-2">
-            <Button
-              type="button"
-              variant="ghost"
-              onClick={handleTest}
-              disabled={testing || saving}
-            >
-              {testing && <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />}
-              Test
-            </Button>
-            <Button
-              type="submit"
-              variant="outline"
-              disabled={testing || saving}
-            >
-              {saving && <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />}
-              {editing ? "Save" : "Add"}
-            </Button>
+          <DialogFooter className="gap-2 sm:justify-between">
+            {/* Delete only renders in edit mode; first click flips into
+                a confirm state ("Click again to delete") so a misclick
+                doesn't nuke the connection. */}
+            {editing ? (
+              <Button
+                type="button"
+                variant="ghost"
+                onClick={() => {
+                  if (confirmingDelete) {
+                    void handleDelete();
+                  } else {
+                    setConfirmingDelete(true);
+                  }
+                }}
+                disabled={testing || saving || deleting}
+                className={
+                  confirmingDelete
+                    ? "text-destructive focus:text-destructive"
+                    : "text-muted-foreground hover:text-destructive"
+                }
+                title={
+                  confirmingDelete
+                    ? "Click again to delete"
+                    : "Delete connection"
+                }
+              >
+                {deleting && (
+                  <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+                )}
+                <Trash2 className="mr-1 h-3.5 w-3.5" />
+                {confirmingDelete ? "Click again to delete" : "Delete"}
+              </Button>
+            ) : (
+              <span />
+            )}
+            <div className="flex items-center gap-2">
+              <Button
+                type="button"
+                variant="ghost"
+                onClick={handleTest}
+                disabled={testing || saving || deleting}
+              >
+                {testing && (
+                  <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+                )}
+                Test
+              </Button>
+              <Button
+                type="submit"
+                variant="outline"
+                disabled={testing || saving || deleting}
+              >
+                {saving && (
+                  <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+                )}
+                {editing ? "Save" : "Add"}
+              </Button>
+            </div>
           </DialogFooter>
         </form>
       </DialogContent>

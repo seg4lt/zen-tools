@@ -22,8 +22,10 @@ services:
       retries: 10
 
   mssql:
-    # Default image is amd64-only.
-    # Apple Silicon: copy .env.example to .env to switch to azure-sql-edge (multi-arch).
+    # mssql/server:2022 is amd64-only but runs cleanly on Apple Silicon
+    # via Rosetta 2 — slightly slower first boot, but doesn't have the
+    # SIGABRT-during-master-upgrade bug that plagues azure-sql-edge on
+    # M-series Macs. See .env.example for opt-in overrides.
     image: ${MSSQL_IMAGE:-mcr.microsoft.com/mssql/server:2022-latest}
     platform: ${DOCKER_PLATFORM:-linux/amd64}
     container_name: zen-mssql

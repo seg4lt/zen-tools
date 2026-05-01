@@ -27,6 +27,8 @@ import { ConnectionTabs } from "./components/connection-tabs";
 import { DbTree } from "./components/db-tree";
 import { SqlFileTree } from "./components/sql-file-tree";
 import { DragHandle } from "@/components/drag-handle";
+import { Button } from "@/components/ui/button";
+import { PanelLeftOpen, PanelRightOpen } from "lucide-react";
 import {
   SqlEditor,
   type SqlEditorHandle,
@@ -69,6 +71,16 @@ export function DatabaseExplorerView() {
   const [leftWidth, setLeftWidth] = useState(256);
   const [rightWidth, setRightWidth] = useState(288);
   const [resultsHeight, setResultsHeight] = useState(320);
+
+  // Per-rail collapse state — user-controlled via the chevron in the
+  // rail's header. Maximize forces both to collapse so the results
+  // pane truly fills the viewport, then restoring brings them back to
+  // whatever the user had previously set. The drag handles + the
+  // editor pane disappear in lockstep with the rails.
+  const [leftCollapsed, setLeftCollapsed] = useState(false);
+  const [rightCollapsed, setRightCollapsed] = useState(false);
+  const effectiveLeftCollapsed = resultsMaximized || leftCollapsed;
+  const effectiveRightCollapsed = resultsMaximized || rightCollapsed;
   const results = activeId ? state.resultsByConnection[activeId] ?? null : null;
   const error = activeId ? state.errors[activeId] ?? null : null;
 
@@ -273,23 +285,38 @@ export function DatabaseExplorerView() {
           since the asides are `shrink-0`. With this clip, only the
           inner scroll container grows past its parent and engages its
           own scrollbar. */}
-      <aside
-        className="flex shrink-0 flex-col border-r border-border/60"
-        style={{ width: leftWidth }}
-      >
-        <SqlFileTree
-          selectedPath={selectedPath}
-          onSelect={handleSelectFile}
-        />
-      </aside>
-
-      <DragHandle
-        direction="x"
-        initial={leftWidth}
-        min={180}
-        max={520}
-        onResize={setLeftWidth}
-      />
+      {effectiveLeftCollapsed ? (
+        // Collapsed: a thin vertical strip with an "open" chevron so
+        // the user always sees a way back. Hidden when the results
+        // pane is maximized — that mode wants the entire viewport.
+        !resultsMaximized && (
+          <CollapsedRail
+            side="left"
+            title="Show SQL Files"
+            onExpand={() => setLeftCollapsed(false)}
+          />
+        )
+      ) : (
+        <>
+          <aside
+            className="flex shrink-0 flex-col border-r border-border/60"
+            style={{ width: leftWidth }}
+          >
+            <SqlFileTree
+              selectedPath={selectedPath}
+              onSelect={handleSelectFile}
+              onCollapse={() => setLeftCollapsed(true)}
+            />
+          </aside>
+          <DragHandle
+            direction="x"
+            initial={leftWidth}
+            min={180}
+            max={520}
+            onResize={setLeftWidth}
+          />
+        </>
+      )}
 
       {/* Centre: tabs + toolbar + editor + results */}
       <section className="flex min-w-0 flex-1 flex-col">
@@ -356,27 +383,38 @@ export function DatabaseExplorerView() {
         </div>
       </section>
 
-      <DragHandle
-        direction="x"
-        inverse
-        initial={rightWidth}
-        min={200}
-        max={520}
-        onResize={setRightWidth}
-      />
-
-      {/* Right: connections + schema browser */}
-      <aside
-        className="flex shrink-0 flex-col border-l border-border/60"
-        style={{ width: rightWidth }}
-      >
-        <div className="shrink-0 border-b border-border/60">
-          <ConnectionList />
-        </div>
-        <div className="flex-1 overflow-auto">
-          <DbTree />
-        </div>
-      </aside>
+      {effectiveRightCollapsed ? (
+        !resultsMaximized && (
+          <CollapsedRail
+            side="right"
+            title="Show Connections"
+            onExpand={() => setRightCollapsed(false)}
+          />
+        )
+      ) : (
+        <>
+          <DragHandle
+            direction="x"
+            inverse
+            initial={rightWidth}
+            min={200}
+            max={520}
+            onResize={setRightWidth}
+          />
+          {/* Right: connections + schema browser */}
+          <aside
+            className="flex shrink-0 flex-col border-l border-border/60"
+            style={{ width: rightWidth }}
+          >
+            <div className="shrink-0 border-b border-border/60">
+              <ConnectionList onCollapse={() => setRightCollapsed(true)} />
+            </div>
+            <div className="flex-1 overflow-auto">
+              <DbTree />
+            </div>
+          </aside>
+        </>
+      )}
 
       <ConnectionForm />
     </div>
@@ -388,6 +426,46 @@ function EmptyEditor() {
     <div className="flex h-full flex-col items-center justify-center gap-1 text-center text-xs text-muted-foreground">
       <span>No file open.</span>
       <span>Add a project folder on the left, then pick a .sql file.</span>
+    </div>
+  );
+}
+
+/**
+ * Thin vertical strip rendered in place of a collapsed side rail. The
+ * single button restores the full panel. Border side flips so the
+ * strip sits flush against the centre column on the correct edge.
+ */
+function CollapsedRail({
+  side,
+  title,
+  onExpand,
+}: {
+  side: "left" | "right";
+  title: string;
+  onExpand: () => void;
+}) {
+  return (
+    <div
+      className={
+        "flex w-7 shrink-0 flex-col items-center bg-muted/20 py-1 " +
+        (side === "left"
+          ? "border-r border-border/60"
+          : "border-l border-border/60")
+      }
+    >
+      <Button
+        variant="ghost"
+        size="sm"
+        className="h-6 w-6 p-0"
+        title={title}
+        onClick={onExpand}
+      >
+        {side === "left" ? (
+          <PanelLeftOpen className="size-3" />
+        ) : (
+          <PanelRightOpen className="size-3" />
+        )}
+      </Button>
     </div>
   );
 }

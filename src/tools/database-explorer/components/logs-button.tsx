@@ -66,7 +66,10 @@ export function LogsButton() {
         onCloseAutoFocus={(e) => e.preventDefault()}
       >
         <SheetHeader className="pb-2">
-          <div className="flex items-center justify-between gap-2">
+          {/* `pr-8` reserves space for the Sheet's built-in close X
+              (it's `absolute top-4 right-4`); without this Clear and
+              the X overlap. */}
+          <div className="flex items-center justify-between gap-2 pr-8">
             <SheetTitle className="text-sm">Query log</SheetTitle>
             <Button
               variant="ghost"

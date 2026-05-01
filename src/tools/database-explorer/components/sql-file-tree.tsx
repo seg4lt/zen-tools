@@ -20,6 +20,7 @@ import {
   Folder,
   FolderOpen,
   FolderPlus,
+  PanelLeftClose,
   RefreshCw,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -42,6 +43,8 @@ import { formatError } from "../lib/format-error";
 interface SqlFileTreeProps {
   selectedPath: string | null;
   onSelect: (item: SqlFileTreeItem) => void;
+  /** Optional — if provided, a chevron button collapses the rail. */
+  onCollapse?: () => void;
 }
 
 interface TreeNode {
@@ -69,7 +72,11 @@ function buildTree(items: SqlFileTreeItem[]): TreeNode[] {
   return roots;
 }
 
-export function SqlFileTree({ selectedPath, onSelect }: SqlFileTreeProps) {
+export function SqlFileTree({
+  selectedPath,
+  onSelect,
+  onCollapse,
+}: SqlFileTreeProps) {
   const { data: projects = [], isLoading } = useSqlProjects();
   const { addProject, removeProject, refresh } = useSqlProjectActions();
   const { state, dispatch } = useDbExplorerStore();
@@ -118,6 +125,17 @@ export function SqlFileTree({ selectedPath, onSelect }: SqlFileTreeProps) {
             <FolderPlus className="size-3" />
             Add
           </Button>
+          {onCollapse && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-6 w-6 p-0"
+              title="Collapse panel"
+              onClick={onCollapse}
+            >
+              <PanelLeftClose className="size-3" />
+            </Button>
+          )}
         </div>
       </div>
 

@@ -90,67 +90,76 @@ function TabStrip({
   onClose,
 }: TabStripProps) {
   return (
-    <div className="flex shrink-0 items-stretch gap-0.5 overflow-x-auto border-b border-border/60 bg-muted/20 px-1">
-      {results.map((r, idx) => {
-        const isActive = idx === activeIdx;
-        return (
-          <div
-            key={idx}
-            className={cn(
-              "group flex shrink-0 items-center gap-1 rounded-t px-2 py-1 text-[11px] transition",
-              isActive
-                ? "bg-background shadow-sm"
-                : "text-muted-foreground hover:bg-muted/50",
-            )}
-          >
-            <button
-              type="button"
-              className="flex items-center gap-1"
-              onClick={() => onSelect(idx)}
-              title={r.statement}
-            >
-              <span className="font-mono">
-                {labelForTab(idx, r)}
-              </span>
-              <span className="text-[10px] text-muted-foreground/70">
-                {summaryFor(r)}
-              </span>
-            </button>
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-4 w-4 p-0 opacity-0 transition group-hover:opacity-100"
-              onClick={(e) => {
-                e.stopPropagation();
-                onToggleMaximize();
-              }}
-              title={
-                maximized
-                  ? "Restore split view"
-                  : "Maximize results pane"
-              }
-            >
-              {maximized ? (
-                <Minimize2 className="size-3" />
-              ) : (
-                <Maximize2 className="size-3" />
+    <div className="flex shrink-0 items-stretch border-b border-border/60 bg-muted/20">
+      {/* Scrollable tab strip — narrow viewports overflow-scroll
+          horizontally without pushing the maximize button off. */}
+      <div className="flex min-w-0 flex-1 items-stretch gap-0.5 overflow-x-auto px-1">
+        {results.map((r, idx) => {
+          const isActive = idx === activeIdx;
+          return (
+            <div
+              key={idx}
+              className={cn(
+                "group flex shrink-0 items-center gap-1 rounded-t px-2 py-1 text-[11px] transition",
+                isActive
+                  ? "bg-background shadow-sm"
+                  : "text-muted-foreground hover:bg-muted/50",
               )}
-            </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-4 w-4 p-0 opacity-0 transition group-hover:opacity-100"
-              onClick={(e) => {
-                e.stopPropagation();
-                onClose(idx);
-              }}
-              title="Close result"
             >
-              <X className="size-3" />
-            </Button>
-          </div>
-        );
-      })}
+              <button
+                type="button"
+                className="flex items-center gap-1"
+                onClick={() => onSelect(idx)}
+                title={r.statement}
+              >
+                <span className="font-mono">{labelForTab(idx, r)}</span>
+                <span className="text-[10px] text-muted-foreground/70">
+                  {summaryFor(r)}
+                </span>
+              </button>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-4 w-4 p-0 opacity-0 transition group-hover:opacity-100"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onClose(idx);
+                }}
+                title="Close result"
+              >
+                <X className="size-3" />
+              </Button>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Always-visible global maximize toggle — pinned to the right
+          end of the strip, outside the scrollable tabs container so
+          it can't get lost behind a long row of tabs. */}
+      <div className="flex shrink-0 items-center border-l border-border/60 px-1">
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-6 gap-1 px-1.5 text-[11px]"
+          onClick={onToggleMaximize}
+          title={
+            maximized ? "Restore split view" : "Maximize results pane"
+          }
+        >
+          {maximized ? (
+            <>
+              <Minimize2 className="size-3" />
+              Restore
+            </>
+          ) : (
+            <>
+              <Maximize2 className="size-3" />
+              Maximize
+            </>
+          )}
+        </Button>
+      </div>
     </div>
   );
 }

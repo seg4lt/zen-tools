@@ -94,15 +94,16 @@ FROM generate_series(1, 20000);
 
 CREATE INDEX events_happened_idx ON metrics.events (happened DESC);
 
--- A view so the tree shows views too.
+-- A view so the tree shows views too. `day` is cast to plain DATE so
+-- it matches MSSQL's `metrics.daily_event_counts.day` shape (the
+-- view stays in parity across both seeds).
 CREATE VIEW metrics.daily_event_counts AS
 SELECT
-    date_trunc('day', happened) AS day,
+    (happened AT TIME ZONE 'UTC')::date AS day,
     action,
     count(*) AS n
 FROM metrics.events
-GROUP BY 1, 2
-ORDER BY 1 DESC, 2;
+GROUP BY 1, 2;
 
 -- ────────────────────────────────────────────────────────────────────────
 -- "metrics" : a wide telemetry table — 32 columns of mixed types so we
