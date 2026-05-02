@@ -29,6 +29,7 @@ import {
   FolderTree,
   Image as ImageIcon,
   Loader2,
+  PanelLeftClose,
   Pencil,
   PenLine,
   RefreshCw,
@@ -83,7 +84,12 @@ function buildTree(items: MarkdownFileItem[]): TreeNode[] {
   return roots;
 }
 
-export function VaultSidebar() {
+interface VaultSidebarProps {
+  /** When provided, renders a collapse button in the header. */
+  onCollapse?: () => void;
+}
+
+export function VaultSidebar({ onCollapse }: VaultSidebarProps = {}) {
   const { state } = useMarkdownStore();
   const { addVault, removeVault, refresh } = useVaults();
 
@@ -106,7 +112,7 @@ export function VaultSidebar() {
   };
 
   return (
-    <div className="flex h-full min-h-0 w-64 shrink-0 flex-col border-r bg-card/40">
+    <div className="flex h-full min-h-0 min-w-0 w-full shrink-0 flex-col border-r bg-card/40">
       <div className="flex h-9 shrink-0 items-center justify-between gap-1 border-b px-2">
         <span className="text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
           Vaults
@@ -129,6 +135,16 @@ export function VaultSidebar() {
           >
             <FolderPlus className="size-3" /> Add
           </Button>
+          {onCollapse && (
+            <Button
+              size="icon-xs"
+              variant="ghost"
+              onClick={onCollapse}
+              title="Collapse panel"
+            >
+              <PanelLeftClose className="size-3" />
+            </Button>
+          )}
         </div>
       </div>
 
