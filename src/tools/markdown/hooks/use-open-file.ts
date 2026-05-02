@@ -7,7 +7,12 @@
  */
 
 import { useCallback } from "react";
-import { basenameNoExt, markdownTauri, normalizePath } from "../lib/tauri";
+import {
+  basenameNoExt,
+  isExcalidrawPath,
+  markdownTauri,
+  normalizePath,
+} from "../lib/tauri";
 import { activeTab, useMarkdownStore } from "../store/markdown-store";
 
 export function useOpenFile() {
@@ -34,7 +39,7 @@ export function useOpenFile() {
       // here — it can be megabytes and shouldn't sit in `tab.doc`
       // bouncing through reducer churn on every keystroke; the
       // Excalidraw editor reads it directly from disk on mount.
-      const isExcalidraw = path.toLowerCase().endsWith(".excalidraw.svg");
+      const isExcalidraw = isExcalidrawPath(path);
       try {
         // Avoid re-reading from disk when the file is already open as
         // a tab — we'd clobber any dirty edits the user has made.
@@ -68,14 +73,25 @@ export function useOpenFile() {
     [dispatch, state.tabs],
   );
 
-  /** Save the active tab's doc to disk.  No-op if nothing is open. */
+  /** Save the active tab's doc to disk.  No-op if nothing is open.
+   *
+   *  `overrideContent` is what an external editor (e.g. the
+   *  Excalidraw drawing pane) hands us via the `onSave` prop.  A
+   *  `string` goes through `writeFile` (text), a `Uint8Array` goes
+   *  through `writeBytes` (binary) — the latter path is what
+   *  `*.excalidraw.png` saves take.
+   */
   const saveCurrent = useCallback(
-    async (overrideContent?: string) => {
+    async (overrideContent?: string | Uint8Array) => {
       const tab = activeTab(state);
       if (!tab) return;
-      const content = overrideContent ?? tab.doc;
       try {
-        await markdownTauri.writeFile(tab.path, content);
+        if (overrideContent instanceof Uint8Array) {
+          await markdownTauri.writeBytes(tab.path, overrideContent);
+        } else {
+          const content = overrideContent ?? tab.doc;
+          await markdownTauri.writeFile(tab.path, content);
+        }
         dispatch({ type: "markSaved" });
       } catch (err) {
         console.error("[markdown] save failed", err);

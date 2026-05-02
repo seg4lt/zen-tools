@@ -30,6 +30,8 @@ import {
   type ViewUpdate,
   WidgetType,
 } from "@codemirror/view";
+import { isExcalidrawPath } from "../tauri";
+import { ExcalidrawImageWidget } from "./excalidraw-image-widget";
 import { ImageWidget, resolveImageSrc } from "./image-widget";
 
 /**
@@ -75,6 +77,7 @@ const WIKILINK_RE = /\[\[([^\[\]\n]+?)\]\]/g;
 function buildDecorations(
   state: EditorState,
   docDir: string,
+  theme: "light" | "dark",
 ): DecorationSet {
   const decorations: Range<Decoration>[] = [];
   const lineDecorations: Range<Decoration>[] = [];
@@ -158,10 +161,17 @@ function buildDecorations(
         if (m) {
           const [, alt, src] = m;
           const { resolved, isLocal } = resolveImageSrc(src, docDir);
+          // Excalidraw drawings get a theme-reactive widget that
+          // re-exports the SVG via excalidraw at the current theme.
+          // Static images / plain SVGs / PNGs keep the cheap `<img>`
+          // path.  Both `.excalidraw.svg` and `.excalidraw.png`
+          // qualify — the widget re-renders to SVG either way.
+          const isExcalidraw = isLocal && isExcalidrawPath(resolved);
+          const widget = isExcalidraw
+            ? new ExcalidrawImageWidget(resolved, alt, theme)
+            : new ImageWidget(resolved, alt, isLocal);
           decorations.push(
-            Decoration.replace({
-              widget: new ImageWidget(resolved, alt, isLocal),
-            }).range(node.from, node.to),
+            Decoration.replace({ widget }).range(node.from, node.to),
           );
         }
         return;
@@ -341,18 +351,21 @@ function buildDecorations(
  * can re-resolve image paths whenever the open document changes
  * without needing a `Compartment` reconfigure.
  */
-export function livePreviewPlugin(getDocDir: () => string) {
+export function livePreviewPlugin(
+  getDocDir: () => string,
+  getTheme: () => "light" | "dark",
+) {
   return ViewPlugin.fromClass(
     class {
       decorations: DecorationSet;
 
       constructor(view: EditorView) {
-        this.decorations = buildDecorations(view.state, getDocDir());
+        this.decorations = buildDecorations(view.state, getDocDir(), getTheme());
       }
 
       update(u: ViewUpdate) {
         if (u.docChanged || u.selectionSet || u.viewportChanged) {
-          this.decorations = buildDecorations(u.state, getDocDir());
+          this.decorations = buildDecorations(u.state, getDocDir(), getTheme());
         }
       }
     },

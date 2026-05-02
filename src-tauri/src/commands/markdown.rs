@@ -253,12 +253,17 @@ fn is_image(name: &str) -> bool {
         || lower.ends_with(".avif")
 }
 
-/// Excalidraw drawings.  We only treat the *double-extension* form as
-/// editable drawings — a plain `.svg` is just an image, but anything
-/// suffixed `.excalidraw.svg` carries an embedded scene we know how to
-/// open in the drawing pane.
+/// Excalidraw drawings.  Two on-disk formats — both carry an
+/// embedded scene we can re-open in the drawing pane:
+///   - `*.excalidraw.svg`: scene embedded in a `<metadata>` block.
+///     Saved + read as text.
+///   - `*.excalidraw.png`: scene embedded in a `tEXt` PNG chunk.
+///     Saved + read as binary (Excalidraw's `loadFromBlob` accepts
+///     both formats).
+/// Plain `.svg` / `.png` files stay as `image` kind.
 fn is_excalidraw(name: &str) -> bool {
-    name.to_ascii_lowercase().ends_with(".excalidraw.svg")
+    let lower = name.to_ascii_lowercase();
+    lower.ends_with(".excalidraw.svg") || lower.ends_with(".excalidraw.png")
 }
 
 fn has_included_descendant(dir: &Path) -> bool {
@@ -750,6 +755,33 @@ pub async fn markdown_save_pasted_image(
 //
 // The frontend computes the source size from the SVG's viewBox and
 // passes a `scale` factor (typically 2) so the result is hi-DPI.
+
+/// Generic binary write — used by the Excalidraw editor's PNG save
+/// path (the `.svg` case still goes through `write_file_content`'s
+/// string write).  Distinct command rather than reusing
+/// `markdown_save_pasted_image` because pasted images are *new*
+/// files placed under a `pasted/` subdir, whereas this overwrites
+/// an existing absolute path the editor already owns.
+#[tauri::command]
+pub async fn markdown_write_bytes(
+    path: String,
+    bytes: Vec<u8>,
+) -> AppResult<()> {
+    let pb = PathBuf::from(&path);
+    let parent = pb
+        .parent()
+        .ok_or_else(|| AppError::Other(format!("path has no parent: {path}")))?;
+    if !parent.is_dir() {
+        return Err(AppError::BadRequest(format!(
+            "parent is not a directory: {}",
+            parent.display()
+        )));
+    }
+    tokio::fs::write(&pb, &bytes)
+        .await
+        .map_err(|e| AppError::Other(format!("write {path}: {e}")))?;
+    Ok(())
+}
 
 /// Rasterise `svg` to RGBA at `scale`× and put the resulting bitmap on
 /// the OS clipboard.  Errors are surfaced as plain strings so the

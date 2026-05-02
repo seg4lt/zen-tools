@@ -49,6 +49,7 @@ import {
   useMarkdownStore,
 } from "../store/markdown-store";
 import {
+  isExcalidrawPath,
   markdownTauri,
   normalizePath,
   type MarkdownFileItem,
@@ -669,7 +670,7 @@ async function openFile(
   // reducer to churn over.  The Excalidraw editor reads the file
   // straight from disk on mount; we just open the tab with an empty
   // doc and the right kind.
-  const isExcalidraw = path.toLowerCase().endsWith(".excalidraw.svg");
+  const isExcalidraw = isExcalidrawPath(path);
   try {
     if (isExcalidraw) {
       dispatch({ type: "openFile", path, doc: "", kind: "excalidraw" });

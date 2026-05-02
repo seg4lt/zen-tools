@@ -27,6 +27,11 @@ export interface LivePreviewOptions {
   /** Returns every open vault root.  Forwarded to fff-search via
    *  `markdownTauri.searchFiles` for the link autocomplete. */
   getVaults: () => string[];
+  /** Returns the active app theme.  Used by the embedded
+   *  `*.excalidraw.svg` widget to re-export the drawing's SVG with
+   *  the user's current colour scheme — without this, an SVG saved
+   *  in light mode stays light when the app flips to dark. */
+  getTheme: () => "light" | "dark";
   /** Returns every basename (no extension) the wikilink autocomplete
    *  should propose. */
   getWikilinkCandidates: () => string[];
@@ -51,7 +56,7 @@ export interface LivePreviewOptions {
  */
 export function livePreview(opts: LivePreviewOptions): Extension {
   return [
-    livePreviewPlugin(opts.getDocDir),
+    livePreviewPlugin(opts.getDocDir, opts.getTheme),
     // Block-level decorations (mermaid diagram widget) — must come
     // from a state field, not a view plugin.
     mermaidField(),

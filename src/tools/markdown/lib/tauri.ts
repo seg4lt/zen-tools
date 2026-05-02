@@ -173,6 +173,20 @@ export const markdownTauri = {
   stopContentSearch: (token: number) =>
     invoke<void>("markdown_stop_content_search", { token }),
 
+  /** Write raw bytes to an absolute path.  Used by the Excalidraw
+   *  editor's `.excalidraw.png` save path; the `.svg` path still
+   *  uses `writeFile` (string).  Backend rejects non-existent
+   *  parent directories so this won't accidentally create deep
+   *  trees from a typo. */
+  writeBytes: (path: string, bytes: Uint8Array) =>
+    invoke<void>("markdown_write_bytes", {
+      path,
+      // Tauri serialises `Uint8Array` as a JSON number array on the
+      // wire — that's how the existing `markdown_save_pasted_image`
+      // wrapper does it too.
+      bytes: Array.from(bytes),
+    }),
+
   /**
    * File fuzzy search across every supplied vault, backed by
    * `fff-search`'s `FilePicker::fuzzy_search`.  Returns up to ~200
@@ -221,6 +235,16 @@ export function basenameNoExt(path: string): string {
  *  meaningful information. */
 export function basename(path: string): string {
   return path.split("/").pop() ?? path;
+}
+
+/** `true` when `path` is an Excalidraw drawing — either the SVG or
+ *  PNG flavour (both formats embed the scene in a metadata block
+ *  excalidraw can round-trip).  Centralised here so the sidebar,
+ *  view-plugin, link-open handler, and store all agree on what
+ *  counts as a drawing without each rolling its own regex. */
+export function isExcalidrawPath(path: string): boolean {
+  const lower = path.toLowerCase();
+  return lower.endsWith(".excalidraw.svg") || lower.endsWith(".excalidraw.png");
 }
 
 /** Parent directory of an absolute path. Returns `""` when none. */

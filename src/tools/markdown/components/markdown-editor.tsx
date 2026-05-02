@@ -245,6 +245,13 @@ export function MarkdownEditor({
       getWikilinkCandidates: () => getCandidatesRef.current(),
       onWikilinkOpen: (label) => onWikilinkOpenRef.current(label),
       onLinkOpen: (url) => onLinkOpenRef.current(url),
+      // Theme is baked into the closure here; the editor is rebuilt
+      // (`buildExtensions(theme === "dark")` further up the file)
+      // whenever the user toggles dark mode, so each rebuild produces
+      // a fresh `livePreview()` extension with the right theme value.
+      // The embedded `*.excalidraw.svg` widget reads this on every
+      // decoration build to know which colour scheme to re-export.
+      getTheme: () => (isDark ? "dark" : "light"),
     }),
     imagePasteHandler({
       getCurrentPath: () => getCurrentPathRef.current(),
