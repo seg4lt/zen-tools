@@ -3,7 +3,14 @@
  * means appending one entry to this array and creating its route subtree.
  */
 import type { LucideIcon } from "lucide-react";
-import { Activity, Database, FileText, Sparkles, Zap } from "lucide-react";
+import {
+  Activity,
+  Database,
+  FileText,
+  GitPullRequest,
+  Sparkles,
+  Zap,
+} from "lucide-react";
 
 export interface Tool {
   /** Stable identifier (used for route segments and persistence keys). */
@@ -53,6 +60,14 @@ export const TOOLS: readonly Tool[] = [
     icon: Database,
     route: "/database-explorer",
     description: "DataGrip-lite — query Postgres & MSSQL with syntax highlighting",
+  },
+  {
+    id: "prmaster",
+    label: "PRMaster",
+    icon: GitPullRequest,
+    route: "/prmaster",
+    description:
+      "GitHub PR review dashboard — Mine, To Review, Done, Conversations, AI Summary",
   },
 ] as const;
 

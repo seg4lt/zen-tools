@@ -35,6 +35,7 @@ import { useProjectsBootstrap } from "@/tools/http-runner/hooks/use-projects";
 import { HttpRunnerStoreProvider } from "@/tools/http-runner/store/http-runner-store";
 import { MarkdownStoreProvider } from "@/tools/markdown/store/markdown-store";
 import { ProcessMonitorStoreProvider } from "@/tools/process-monitor/store/process-monitor-store";
+import { PrMasterStoreProvider } from "@/tools/prmaster/store/prmaster-store";
 
 export function AppProviders({ children }: { children: ReactNode }) {
   return (
@@ -43,15 +44,17 @@ export function AppProviders({ children }: { children: ReactNode }) {
         <CleanerStoreProvider>
           <MarkdownStoreProvider>
             <DbExplorerStoreProvider>
-              {/* Bootstrap hooks need to live inside the providers
-                  whose state they touch. `useProjectsBootstrap`
-                  uses React Query (already wired in App.tsx) plus
-                  the http-runner backend; doesn't actually depend
-                  on the http-runner store, but keeping it here
-                  groups all "fire-once at app start" effects in
-                  one place so they're easy to find. */}
-              <Bootstrappers />
-              {children}
+              <PrMasterStoreProvider>
+                {/* Bootstrap hooks need to live inside the providers
+                    whose state they touch. `useProjectsBootstrap`
+                    uses React Query (already wired in App.tsx) plus
+                    the http-runner backend; doesn't actually depend
+                    on the http-runner store, but keeping it here
+                    groups all "fire-once at app start" effects in
+                    one place so they're easy to find. */}
+                <Bootstrappers />
+                {children}
+              </PrMasterStoreProvider>
             </DbExplorerStoreProvider>
           </MarkdownStoreProvider>
         </CleanerStoreProvider>

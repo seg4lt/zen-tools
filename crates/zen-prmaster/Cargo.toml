@@ -1,0 +1,32 @@
+[package]
+name = "zen-prmaster"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Domain controller for the PRMaster tool: refresh loop, notification diff, filter persistence, badge text, AI summary orchestration."
+
+[lints.rust]
+missing_docs = "warn"
+
+[dev-dependencies]
+tempfile = "3"
+
+[dependencies]
+zen-github = { workspace = true }
+zen-shell = { workspace = true }
+zen-ai-cli = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+tokio = { workspace = true }
+parking_lot = { workspace = true }
+arc-swap = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+rusqlite = { workspace = true }
+dirs = { workspace = true }
+uuid = { workspace = true }
+ahash = { workspace = true }
+regex = { workspace = true }
+globset = { workspace = true }

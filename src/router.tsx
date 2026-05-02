@@ -1,10 +1,13 @@
+import { useEffect } from "react";
 import {
   createRootRoute,
   createRoute,
   createRouter,
   Outlet,
   redirect,
+  useNavigate,
 } from "@tanstack/react-router";
+import { listen } from "@tauri-apps/api/event";
 import { AppProviders } from "@/components/app-shell/app-providers";
 import { TitleBar } from "@/components/app-shell/title-bar";
 import { HTTPRunnerShell } from "@/tools/http-runner/HTTPRunnerShell";
@@ -13,32 +16,93 @@ import { ProcessMonitorShell } from "@/tools/process-monitor/ProcessMonitorShell
 import { CleanerShell } from "@/tools/cleaner/CleanerShell";
 import { MarkdownShell } from "@/tools/markdown/MarkdownShell";
 import { DatabaseExplorerShell } from "@/tools/database-explorer/DatabaseExplorerShell";
+import { PRMasterShell } from "@/tools/prmaster/PRMasterShell";
 import { SettingsShell } from "@/tools/settings/SettingsShell";
 import { readLastRoute } from "@/hooks/use-last-route";
 
 const rootRoute = createRootRoute({
-  component: () => (
-    <div className="flex h-screen w-screen flex-col overflow-hidden bg-background text-foreground">
-      <TitleBar />
-      <main className="flex min-h-0 flex-1">
-        {/* All tool store providers live here so per-tool state
-            (active connection, open files, results, …) survives
-            navigation between tool tabs. The route Outlet only
-            swaps the shell component; the providers and their
-            useReducer state stay mounted for the lifetime of
-            the app. */}
-        <AppProviders>
-          <Outlet />
-        </AppProviders>
-      </main>
-    </div>
-  ),
+  component: () => {
+    // The PRMaster menu-bar popover (a frameless 500x700 window declared
+    // in `tauri.conf.json`) renders the same React tree as the main
+    // window — it just skips the TitleBar so the popover is pure tool
+    // chrome. We detect it by Tauri window label (set in the config).
+    const isPopover = isPopoverWindow();
+    return (
+      <div className="flex h-screen w-screen flex-col overflow-hidden bg-background text-foreground">
+        {!isPopover && <TitleBar />}
+        <main className="flex min-h-0 flex-1">
+          <AppProviders>
+            <FocusRouteListener />
+            <Outlet />
+          </AppProviders>
+        </main>
+      </div>
+    );
+  },
 });
+
+/**
+ * Listens for the `prmaster:focus-route` Tauri event (emitted by the
+ * permanent menu-bar tray's "Open PRMaster" item and by the global
+ * ⌥⌘⇧P hotkey) and navigates the main window's router accordingly.
+ * The popover window also receives the event but ignores it — its
+ * router URL is set at window creation and the window itself stays
+ * scoped to PRMaster.
+ */
+function FocusRouteListener() {
+  const navigate = useNavigate();
+  useEffect(() => {
+    if (isPopoverWindow()) return;
+    let unlisten: (() => void) | null = null;
+    (async () => {
+      unlisten = await listen<string>("prmaster:focus-route", (event) => {
+        const target = event.payload || "/prmaster";
+        try {
+          void navigate({ to: target });
+        } catch {
+          // Router may not be ready on the very first event (extremely
+          // unlikely outside dev hot-reload) — falling back to a hash
+          // change keeps the UX correct.
+          window.location.hash = `#${target}`;
+        }
+      });
+    })();
+    return () => {
+      unlisten?.();
+    };
+  }, [navigate]);
+  return null;
+}
+
+/**
+ * Returns `true` when this React tree is mounted inside the menu-bar
+ * popover window. Tauri 2 exposes the current window label via
+ * `__TAURI_INTERNALS__.metadata.currentWindow.label`.
+ */
+function isPopoverWindow(): boolean {
+  if (typeof window === "undefined") return false;
+  const label = (
+    window as unknown as {
+      __TAURI_INTERNALS__?: {
+        metadata?: { currentWindow?: { label?: string } };
+      };
+    }
+  ).__TAURI_INTERNALS__?.metadata?.currentWindow?.label;
+  return label === "prmaster-popover";
+}
 
 const indexRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/",
   beforeLoad: () => {
+    // The PRMaster menu-bar popover loads the main shell at `/` so the
+    // Vite dev server serves it (Vite returns 404 for an explicit
+    // `/index.html` request) — redirect that window straight to
+    // `/prmaster` regardless of the last-route fallback used by the
+    // main window.
+    if (isPopoverWindow()) {
+      throw redirect({ to: "/prmaster" });
+    }
     // Resume on the last route the user was viewing (sync read from
     // localStorage; see use-last-route.tsx). Falls back to the HTTP
     // runner's requests view on first launch / cleared storage / when
@@ -109,6 +173,12 @@ const settingsRoute = createRoute({
   component: SettingsShell,
 });
 
+const prmasterRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/prmaster",
+  component: PRMasterShell,
+});
+
 const routeTree = rootRoute.addChildren([
   indexRoute,
   httpRunnerRoute.addChildren([
@@ -120,6 +190,7 @@ const routeTree = rootRoute.addChildren([
   cleanerRoute,
   markdownRoute,
   databaseExplorerRoute,
+  prmasterRoute,
   settingsRoute,
 ]);
 

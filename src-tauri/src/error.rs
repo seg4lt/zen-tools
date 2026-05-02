@@ -4,6 +4,7 @@
 use serde::{Serialize, Serializer};
 use thiserror::Error;
 use zen_db::DbError;
+use zen_github::GhError;
 use zen_http::{CrossFileDependencyError, DependencyError, FileRegistryError, HttpError};
 use zen_parser::ParserError;
 use zen_perf::PerfError;
@@ -43,6 +44,10 @@ pub enum AppError {
     #[error("db: {0}")]
     Db(#[from] DbError),
 
+    /// `gh` CLI / GitHub failure (PRMaster tool).
+    #[error("github: {0}")]
+    Github(#[from] GhError),
+
     /// Tauri framework error.
     #[error("tauri: {0}")]
     Tauri(#[from] tauri::Error),
@@ -73,6 +78,7 @@ impl AppError {
             AppError::FileRegistry(_) => "fileRegistry",
             AppError::Perf(_) => "perf",
             AppError::Db(_) => "db",
+            AppError::Github(_) => "github",
             AppError::Tauri(_) => "tauri",
             AppError::Other(_) => "other",
             AppError::BadRequest(_) => "badRequest",

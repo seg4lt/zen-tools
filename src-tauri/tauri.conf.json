@@ -22,6 +22,20 @@
         "fullscreen": false,
         "titleBarStyle": "Overlay",
         "hiddenTitle": true
+      },
+      {
+        "label": "prmaster-popover",
+        "title": "PRMaster",
+        "url": "/",
+        "width": 500,
+        "height": 700,
+        "resizable": false,
+        "decorations": false,
+        "skipTaskbar": true,
+        "alwaysOnTop": true,
+        "visible": false,
+        "focus": false,
+        "transparent": false
       }
     ],
     "security": {

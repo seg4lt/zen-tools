@@ -9,6 +9,10 @@ members = [
     "crates/zen-cleaner",
     "crates/zen-db",
     "crates/zen-test-server",
+    "crates/zen-shell",
+    "crates/zen-github",
+    "crates/zen-ai-cli",
+    "crates/zen-prmaster",
     "src-tauri",
 ]
 
@@ -69,6 +73,14 @@ zen-perf = { path = "crates/zen-perf" }
 zen-process-monitor = { path = "crates/zen-process-monitor" }
 zen-cleaner = { path = "crates/zen-cleaner" }
 zen-db = { path = "crates/zen-db" }
+zen-shell = { path = "crates/zen-shell" }
+zen-github = { path = "crates/zen-github" }
+zen-ai-cli = { path = "crates/zen-ai-cli" }
+zen-prmaster = { path = "crates/zen-prmaster" }
+
+# zen-prmaster / zen-github
+globset = "0.4"
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 [profile.release]
 opt-level = 3

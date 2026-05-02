@@ -1,0 +1,22 @@
+[package]
+name = "zen-github"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "GitHub client backed entirely by the `gh` CLI — used by zen-prmaster."
+
+[lints.rust]
+missing_docs = "warn"
+
+[dependencies]
+zen-shell = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+parking_lot = { workspace = true }
+ahash = { workspace = true }

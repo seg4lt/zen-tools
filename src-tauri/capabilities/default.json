@@ -2,15 +2,18 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Default capabilities for the Zen Tools main window.",
-  "windows": ["main"],
+  "windows": ["main", "prmaster-popover"],
   "permissions": [
     "core:default",
     "core:event:default",
     "core:window:default",
     "core:window:allow-start-dragging",
     "core:window:allow-show",
+    "core:window:allow-hide",
     "core:window:allow-set-focus",
+    "core:window:allow-set-position",
     "core:window:allow-unminimize",
+    "core:app:default",
     "core:webview:default",
     "core:webview:allow-set-webview-zoom",
     "core:tray:default",
@@ -20,6 +23,8 @@
     "fs:default",
     "clipboard-manager:default",
     "clipboard-manager:allow-write-text",
-    "clipboard-manager:allow-read-text"
+    "clipboard-manager:allow-read-text",
+    "notification:default",
+    "global-shortcut:default"
   ]
 }

@@ -1,0 +1,17 @@
+[package]
+name = "zen-shell"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "General-purpose async child-process executor with PATH augmentation."
+
+[lints.rust]
+missing_docs = "warn"
+
+[dependencies]
+tokio = { workspace = true, features = ["process", "io-util"] }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+dirs = { workspace = true }

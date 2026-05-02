@@ -1,0 +1,421 @@
+//! Tauri command surface for the PRMaster tool.
+//!
+//! All commands proxy to [`zen_prmaster::PrMasterEngine`] held inside
+//! [`AppState`]. The engine itself wraps a `gh`-CLI-backed GitHub client —
+//! see `crates/zen-github` for the underlying transport.
+//!
+//! The surface exposed here is the **P1 cut**: enough for the **Mine** tab
+//! (list mine, get detail, approve / request-changes / add-self-as-reviewer)
+//! plus the auth probe used by the Settings panel. Subsequent phases extend
+//! this module without churning existing signatures.
+
+use serde::{Deserialize, Serialize};
+use tauri::{AppHandle, Manager, State};
+use tokio::sync::Mutex;
+
+use zen_github::{
+    AuthStatus, CheckContext, ConversationGroup, EnrichedPullRequest, GhCall, PrRef,
+};
+use zen_prmaster::{
+    AiSummaryParams, NotificationFilter, PrMasterSettings, SummaryCard,
+};
+
+use crate::user_config::UserConfig;
+
+use crate::error::AppResult;
+use crate::state::AppState;
+
+/// Shape passed back for `prmaster_get_gh_status`. Mirrors `AuthStatus` but
+/// stable across crate versions so the frontend doesn't see internal renames.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GhStatusDto {
+    /// Whether `gh` was found on `$PATH` (with PRMaster's augmentation).
+    pub installed: bool,
+    /// `gh --version` (first line) when installed.
+    pub version: Option<String>,
+    /// Whether `gh auth status` reports a logged-in session.
+    pub authenticated: bool,
+    /// Active login if known.
+    pub login: Option<String>,
+    /// Hostname (e.g. `github.com`) if known.
+    pub host: Option<String>,
+    /// Raw stdout/stderr from `gh auth status` for diagnostics.
+    pub raw: String,
+}
+
+impl From<AuthStatus> for GhStatusDto {
+    fn from(s: AuthStatus) -> Self {
+        Self {
+            installed: s.installed,
+            version: s.version,
+            authenticated: s.authenticated,
+            login: s.login,
+            host: s.host,
+            raw: s.raw,
+        }
+    }
+}
+
+/// Snapshot of a single CI check used by the Mine tab's detail panel.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CheckSummaryDto {
+    /// Display label (CheckRun name → StatusContext context).
+    pub name: String,
+    /// `success | pending | failed | unknown`.
+    pub kind: &'static str,
+    /// Click-through URL (if the provider supplied one).
+    pub url: Option<String>,
+}
+
+impl From<&CheckContext> for CheckSummaryDto {
+    fn from(c: &CheckContext) -> Self {
+        let kind = if c.is_success() {
+            "success"
+        } else if c.is_pending() {
+            "pending"
+        } else if c.is_failed() {
+            "failed"
+        } else {
+            "unknown"
+        };
+        Self {
+            name: c.display_name().to_string(),
+            kind,
+            url: c.url().map(|s| s.to_string()),
+        }
+    }
+}
+
+fn engine(state: &AppState) -> zen_prmaster::PrMasterEngine {
+    state.prmaster.clone()
+}
+
+/// Return the current GitHub user's login (`gh api user --jq .login`).
+#[tauri::command]
+pub async fn prmaster_whoami(state: State<'_, Mutex<AppState>>) -> AppResult<String> {
+    let engine = {
+        let s = state.lock().await;
+        engine(&s)
+    };
+    Ok(engine.whoami().await?)
+}
+
+/// Return the combined `gh --version` + `gh auth status` health check.
+#[tauri::command]
+pub async fn prmaster_get_gh_status(
+    state: State<'_, Mutex<AppState>>,
+) -> AppResult<GhStatusDto> {
+    let engine = {
+        let s = state.lock().await;
+        engine(&s)
+    };
+    Ok(engine.auth_status().await?.into())
+}
+
+/// Open PRs the current user authored, enriched with reviewer + check
+/// detail (drives the **Mine** tab).
+#[tauri::command]
+pub async fn prmaster_get_mine(
+    state: State<'_, Mutex<AppState>>,
+) -> AppResult<Vec<EnrichedPullRequest>> {
+    let engine = {
+        let s = state.lock().await;
+        engine(&s)
+    };
+    Ok(engine.list_mine().await?)
+}
+
+/// Open PRs requesting the current user as reviewer, enriched with
+/// reviewer / check / mergeable detail (drives the **To Review** tab).
+#[tauri::command]
+pub async fn prmaster_get_to_review(
+    state: State<'_, Mutex<AppState>>,
+) -> AppResult<Vec<EnrichedPullRequest>> {
+    let engine = {
+        let s = state.lock().await;
+        engine(&s)
+    };
+    Ok(engine.list_to_review().await?)
+}
+
+/// Open PRs the current user has reviewed, enriched (drives the **Done**
+/// tab).
+#[tauri::command]
+pub async fn prmaster_get_reviewed(
+    state: State<'_, Mutex<AppState>>,
+) -> AppResult<Vec<EnrichedPullRequest>> {
+    let engine = {
+        let s = state.lock().await;
+        engine(&s)
+    };
+    Ok(engine.list_reviewed().await?)
+}
+
+/// Submit an APPROVE review on `pr`.
+#[tauri::command]
+pub async fn prmaster_approve_pr(
+    state: State<'_, Mutex<AppState>>,
+    pr: PrRef,
+) -> AppResult<()> {
+    let engine = {
+        let s = state.lock().await;
+        engine(&s)
+    };
+    engine.approve(&pr).await?;
+    Ok(())
+}
+
+/// Submit a REQUEST_CHANGES review on `pr` with `body`.
+#[tauri::command]
+pub async fn prmaster_request_changes(
+    state: State<'_, Mutex<AppState>>,
+    pr: PrRef,
+    body: String,
+) -> AppResult<()> {
+    let engine = {
+        let s = state.lock().await;
+        engine(&s)
+    };
+    engine.request_changes(&pr, &body).await?;
+    Ok(())
+}
+
+/// Add `login` as a requested reviewer on `pr`. The frontend supplies the
+/// login (typically the result of [`prmaster_whoami`]).
+#[tauri::command]
+pub async fn prmaster_add_self_reviewer(
+    state: State<'_, Mutex<AppState>>,
+    pr: PrRef,
+    login: String,
+) -> AppResult<()> {
+    let engine = {
+        let s = state.lock().await;
+        engine(&s)
+    };
+    engine.add_reviewer(&pr, &login).await?;
+    Ok(())
+}
+
+/// Conversation groups — unresolved review threads and top-level @mentions
+/// on PRs the user is involved in.
+#[tauri::command]
+pub async fn prmaster_get_conversations(
+    state: State<'_, Mutex<AppState>>,
+) -> AppResult<Vec<ConversationGroup>> {
+    let engine = {
+        let s = state.lock().await;
+        engine(&s)
+    };
+    Ok(engine.list_conversations().await?)
+}
+
+/// Snapshot of the rolling `gh` call log (drives the API Stats tab — P7
+/// renders a UI; this command is exposed early because the call log is
+/// always populated regardless of which tab is open).
+#[tauri::command]
+pub async fn prmaster_get_call_log(
+    state: State<'_, Mutex<AppState>>,
+) -> AppResult<Vec<GhCall>> {
+    let engine = {
+        let s = state.lock().await;
+        engine(&s)
+    };
+    Ok(engine.call_log())
+}
+
+/// Storage key under [`UserConfig`] for the PRMaster settings blob.
+const PRMASTER_SETTINGS_KEY: &str = "prmaster";
+
+/// Force a refresh + notification diff. Mirrors the Swift
+/// `PRListViewModel.refresh()` user-driven path; the 5-minute background
+/// loop calls the engine directly without going through this command.
+#[tauri::command]
+pub async fn prmaster_refresh(
+    state: State<'_, Mutex<AppState>>,
+    config: State<'_, UserConfig>,
+) -> AppResult<()> {
+    let engine = {
+        let s = state.lock().await;
+        engine(&s)
+    };
+    let settings = config
+        .get::<PrMasterSettings>(PRMASTER_SETTINGS_KEY)?
+        .unwrap_or_default();
+    engine.refresh_lists_and_notify(&settings).await?;
+    Ok(())
+}
+
+/// Read persisted PRMaster settings (returns defaults if nothing saved).
+#[tauri::command]
+pub async fn prmaster_get_settings(
+    config: State<'_, UserConfig>,
+) -> AppResult<PrMasterSettings> {
+    Ok(config
+        .get::<PrMasterSettings>(PRMASTER_SETTINGS_KEY)?
+        .unwrap_or_default())
+}
+
+/// Persist updated PRMaster settings.
+#[tauri::command]
+pub async fn prmaster_save_settings(
+    config: State<'_, UserConfig>,
+    settings: PrMasterSettings,
+) -> AppResult<()> {
+    config.set(PRMASTER_SETTINGS_KEY, &settings)?;
+    Ok(())
+}
+
+/// List every persisted notification filter (oldest first).
+#[tauri::command]
+pub async fn prmaster_list_filters(
+    state: State<'_, Mutex<AppState>>,
+) -> AppResult<Vec<NotificationFilter>> {
+    let engine = {
+        let s = state.lock().await;
+        engine(&s)
+    };
+    engine
+        .list_filters()
+        .map_err(|e| crate::error::AppError::Other(format!("filter store: {e}")))
+}
+
+/// Insert or update a notification filter. The frontend supplies the full
+/// row; the engine bumps `updated_at_ms` and persists.
+#[tauri::command]
+pub async fn prmaster_save_filter(
+    state: State<'_, Mutex<AppState>>,
+    filter: NotificationFilter,
+) -> AppResult<()> {
+    let engine = {
+        let s = state.lock().await;
+        engine(&s)
+    };
+    engine
+        .save_filter(&filter)
+        .map_err(|e| crate::error::AppError::Other(format!("filter store: {e}")))
+}
+
+/// Delete a filter by id.
+#[tauri::command]
+pub async fn prmaster_delete_filter(
+    state: State<'_, Mutex<AppState>>,
+    id: String,
+) -> AppResult<()> {
+    let engine = {
+        let s = state.lock().await;
+        engine(&s)
+    };
+    engine
+        .delete_filter(&id)
+        .map_err(|e| crate::error::AppError::Other(format!("filter store: {e}")))
+}
+
+/// Hide the menu-bar popover window. Called by the popover shell on `blur`.
+#[tauri::command]
+pub async fn prmaster_hide_popover(app: AppHandle) -> AppResult<()> {
+    crate::prmaster_tray::hide_popover(&app);
+    Ok(())
+}
+
+/// Update the menu-bar tray badge text. Pass an empty string to clear it.
+/// The future P5 refresh loop will call this from inside `lib.rs`'s
+/// broadcast bridge; surfacing it as a command also lets the frontend
+/// nudge the badge directly (e.g. after an optimistic action).
+#[tauri::command]
+pub async fn prmaster_set_badge(app: AppHandle, badge: String) -> AppResult<()> {
+    crate::prmaster_tray::set_badge(&app, &badge);
+    Ok(())
+}
+
+/// Generate (or return cached) AI summary for `(repo, since, until)`.
+#[tauri::command]
+pub async fn prmaster_ai_summary(
+    state: State<'_, Mutex<AppState>>,
+    config: State<'_, UserConfig>,
+    params: AiSummaryParams,
+) -> AppResult<SummaryCard> {
+    let engine = {
+        let s = state.lock().await;
+        engine(&s)
+    };
+    let settings = config
+        .get::<PrMasterSettings>(PRMASTER_SETTINGS_KEY)?
+        .unwrap_or_default();
+    let card = engine
+        .ai_summary(&params, &settings)
+        .await
+        .map_err(|e| crate::error::AppError::Other(format!("ai summary: {e}")))?;
+    Ok(card)
+}
+
+/// List the active provider's supported model identifiers.
+#[tauri::command]
+pub async fn prmaster_ai_list_models(
+    config: State<'_, UserConfig>,
+) -> AppResult<Vec<String>> {
+    let settings = config
+        .get::<PrMasterSettings>(PRMASTER_SETTINGS_KEY)?
+        .unwrap_or_default();
+    let kind = zen_ai_cli::AiProviderType::from_wire(settings.ai_provider.as_str());
+    let provider = zen_ai_cli::build_provider(kind);
+    let models = provider
+        .list_models()
+        .await
+        .map_err(|e| crate::error::AppError::Other(format!("ai list_models: {e}")))?;
+    Ok(models)
+}
+
+/// Drop every cached AI summary card.
+#[tauri::command]
+pub async fn prmaster_clear_ai_cache(
+    state: State<'_, Mutex<AppState>>,
+) -> AppResult<()> {
+    let engine = {
+        let s = state.lock().await;
+        engine(&s)
+    };
+    engine
+        .clear_ai_cache()
+        .map_err(|e| crate::error::AppError::Io(e))
+}
+
+/// Personal + every-org repo enumeration. Drives the AI Summary repo
+/// picker.
+#[tauri::command]
+pub async fn prmaster_list_repos(
+    state: State<'_, Mutex<AppState>>,
+) -> AppResult<Vec<String>> {
+    let engine = {
+        let s = state.lock().await;
+        engine(&s)
+    };
+    Ok(engine.list_accessible_repos().await?)
+}
+
+/// Quit the entire application. Surfaced as a command so the
+/// SettingsTab "Quit" button doesn't need the autostart / process
+/// plugin (which is not installed in this workspace). Equivalent to
+/// the menu-bar tray's "Quit PRMaster" item.
+#[tauri::command]
+pub async fn prmaster_quit_app(app: AppHandle) -> AppResult<()> {
+    app.exit(0);
+    Ok(())
+}
+
+/// Bring the main window forward and switch back to the regular macOS
+/// activation policy (so the Dock icon reappears if we were running in
+/// background-agent / accessory mode).
+#[tauri::command]
+pub async fn prmaster_open_full_window(app: AppHandle) -> AppResult<()> {
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.unminimize();
+        let _ = win.show();
+        let _ = win.set_focus();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use tauri::ActivationPolicy;
+        let _ = app.set_activation_policy(ActivationPolicy::Regular);
+    }
+    Ok(())
+}

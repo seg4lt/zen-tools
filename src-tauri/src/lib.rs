@@ -8,6 +8,7 @@
 pub mod commands;
 pub mod dto;
 pub mod error;
+pub mod prmaster_tray;
 pub mod schema_cache;
 pub mod state;
 pub mod tray;
@@ -22,6 +23,40 @@ use std::sync::Arc;
 use tauri::{Emitter, Manager};
 use tokio::sync::Mutex;
 use tracing_subscriber::EnvFilter;
+
+/// Build the `tauri-plugin-global-shortcut` plugin with the PRMaster hotkey
+/// handler baked in. The handler matches against the chord we register in
+/// `setup` and brings the main window forward + emits `prmaster:focus-route`
+/// so the React router navigates regardless of where the user was.
+fn build_global_shortcut_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
+    use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut, ShortcutState};
+    let prmaster_chord = Shortcut::new(
+        Some(Modifiers::ALT | Modifiers::SHIFT | Modifiers::SUPER),
+        Code::KeyP,
+    );
+    tauri_plugin_global_shortcut::Builder::new()
+        .with_handler(move |app, sc, ev| {
+            if ev.state() != ShortcutState::Pressed {
+                return;
+            }
+            if sc == &prmaster_chord {
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Some(win) = app.get_webview_window("main") {
+                        let _ = win.unminimize();
+                        let _ = win.show();
+                        let _ = win.set_focus();
+                    }
+                    #[cfg(target_os = "macos")]
+                    {
+                        let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
+                    }
+                    let _ = app.emit("prmaster:focus-route", "/prmaster");
+                });
+            }
+        })
+        .build()
+}
 
 /// Initialise the Tauri app. Called from `main.rs` and from mobile entry
 /// points.
@@ -39,6 +74,8 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_notification::init())
+        .plugin(build_global_shortcut_plugin())
         .manage(Mutex::new(AppState::new()))
         .manage(Mutex::new(RunHistory::default()))
         // fff-search per-vault file pickers.  Lazily populated on
@@ -119,6 +156,127 @@ pub fn run() {
                     }
                 }
             });
+
+            // ── PRMaster: build the always-present tray. The tray exists for
+            // the lifetime of the app (matching PRMaster's `MenuBarExtra`).
+            // Failing to build it isn't fatal — the app still works as a
+            // window-only multi-tool.
+            if let Err(e) = prmaster_tray::init(app.handle()) {
+                tracing::warn!(?e, "prmaster_tray::init failed");
+            }
+
+            // PRMaster broadcast → Tauri-event bridge. Subscribes to the
+            // engine's broadcast channel, re-emits each event for the
+            // frontend, updates the tray badge on `BadgeChanged`, and
+            // dispatches `Notification` events through the macOS
+            // notification centre via `tauri-plugin-notification`.
+            let prmaster_engine = {
+                let app_state = app.state::<Mutex<AppState>>();
+                let s = app_state.blocking_lock();
+                s.prmaster.clone()
+            };
+            let mut prmaster_rx = prmaster_engine.subscribe();
+            let app_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                use tauri_plugin_notification::NotificationExt;
+                use zen_prmaster::PrMasterEvent;
+                loop {
+                    match prmaster_rx.recv().await {
+                        Ok(PrMasterEvent::Refreshed(snapshot)) => {
+                            let _ = app_handle.emit("prmaster:refreshed", &snapshot);
+                        }
+                        Ok(PrMasterEvent::BadgeChanged(text)) => {
+                            prmaster_tray::set_badge(&app_handle, &text);
+                            let _ = app_handle.emit("prmaster:badge-changed", &text);
+                        }
+                        Ok(PrMasterEvent::Notification(note)) => {
+                            let _ = app_handle.emit("prmaster:notification", &note);
+                            // Suppress badge-only / muted entries here too —
+                            // they should never reach the system notification
+                            // centre. (The engine already filters muted; this
+                            // is belt-and-braces.)
+                            if note.badge_only || note.muted {
+                                continue;
+                            }
+                            let mut builder = app_handle
+                                .notification()
+                                .builder()
+                                .title(&note.title)
+                                .body(&note.body);
+                            if note.silent {
+                                builder = builder.sound("");
+                            }
+                            if let Err(e) = builder.show() {
+                                tracing::warn!(?e, "notification show failed");
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            });
+
+            // Spawn the 5-minute background refresh (mirrors PRMaster's
+            // hardcoded `Timer.scheduledTimer(withTimeInterval: 300)`).
+            // Uses `tauri::async_runtime::spawn` so it works regardless of
+            // whether `setup` runs inside a tokio worker — `tokio::spawn`
+            // panics when called from the AppKit main thread that Tauri
+            // hands `setup` to during launch.
+            let bg_engine = prmaster_engine.clone();
+            tauri::async_runtime::spawn(async move {
+                use std::time::Duration;
+                let mut tick = tokio::time::interval(Duration::from_secs(300));
+                tick.tick().await; // skip immediate first tick
+                loop {
+                    tick.tick().await;
+                    if let Err(e) = bg_engine
+                        .refresh_lists_and_notify(&zen_prmaster::PrMasterSettings::default())
+                        .await
+                    {
+                        tracing::warn!(error = %e, "background refresh failed");
+                    }
+                }
+            });
+
+            // Background-agent lifecycle: when the user closes the main
+            // window we keep the process alive (so polling continues) and
+            // drop the Dock icon by switching to `Accessory` activation
+            // policy. Re-opening (via tray menu / hotkey / `prmaster_open_full_window`
+            // command) flips it back to `Regular`.
+            #[cfg(target_os = "macos")]
+            {
+                let app_handle = app.handle().clone();
+                if let Some(main) = app.get_webview_window("main") {
+                    main.on_window_event(move |event| {
+                        if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                            api.prevent_close();
+                            if let Some(win) = app_handle.get_webview_window("main") {
+                                let _ = win.hide();
+                            }
+                            let _ = app_handle.set_activation_policy(
+                                tauri::ActivationPolicy::Accessory,
+                            );
+                        }
+                    });
+                }
+            }
+
+            // Global hotkey ⌥⌘⇧P → opens the main window at /prmaster.
+            // The hotkey *handler* lives inside the plugin builder
+            // (`build_global_shortcut_plugin`); here we just register the
+            // chord. Failure is non-fatal — the user can still navigate
+            // manually.
+            #[cfg(desktop)]
+            {
+                use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut};
+                let chord = Shortcut::new(
+                    Some(Modifiers::ALT | Modifiers::SHIFT | Modifiers::SUPER),
+                    Code::KeyP,
+                );
+                if let Err(e) = app.global_shortcut().register(chord) {
+                    tracing::warn!(?e, "global-shortcut register failed; hotkey disabled");
+                }
+            }
 
             Ok(())
         })
@@ -227,6 +385,31 @@ pub fn run() {
             commands::sql_workspace::sql_workspace_create_dir,
             commands::sql_workspace::sql_workspace_rename,
             commands::sql_workspace::sql_workspace_delete_to_trash,
+            // prmaster (P1 surface — Mine tab + auth + call log)
+            commands::prmaster::prmaster_whoami,
+            commands::prmaster::prmaster_get_gh_status,
+            commands::prmaster::prmaster_get_mine,
+            commands::prmaster::prmaster_get_to_review,
+            commands::prmaster::prmaster_get_reviewed,
+            commands::prmaster::prmaster_get_conversations,
+            commands::prmaster::prmaster_approve_pr,
+            commands::prmaster::prmaster_request_changes,
+            commands::prmaster::prmaster_add_self_reviewer,
+            commands::prmaster::prmaster_get_call_log,
+            commands::prmaster::prmaster_hide_popover,
+            commands::prmaster::prmaster_set_badge,
+            commands::prmaster::prmaster_open_full_window,
+            commands::prmaster::prmaster_get_settings,
+            commands::prmaster::prmaster_save_settings,
+            commands::prmaster::prmaster_list_filters,
+            commands::prmaster::prmaster_save_filter,
+            commands::prmaster::prmaster_delete_filter,
+            commands::prmaster::prmaster_refresh,
+            commands::prmaster::prmaster_quit_app,
+            commands::prmaster::prmaster_ai_summary,
+            commands::prmaster::prmaster_ai_list_models,
+            commands::prmaster::prmaster_clear_ai_cache,
+            commands::prmaster::prmaster_list_repos,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

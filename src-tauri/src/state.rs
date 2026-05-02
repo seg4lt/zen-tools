@@ -9,6 +9,7 @@ use zen_http::{FileRegistry, HttpExecutor};
 use zen_parser::PerfConfig;
 use zen_perf::{MetricsSnapshot, RequestSample, StopHandle};
 use zen_process_monitor::{Sample as PmSample, SamplerHandle, SamplerState, SharedState as PmSharedState};
+use zen_prmaster::PrMasterEngine;
 use zen_types::prelude::*;
 
 /// Per-tool state for the Cleaner. Held inside [`AppState::cleaner`].
@@ -116,6 +117,20 @@ pub struct AppState {
     /// workspace. Separate from `working_dirs` (which is the http-runner
     /// project list) so the two tools don't bleed into each other.
     pub sql_workspace_dirs: Vec<PathBuf>,
+
+    // ──── PRMaster ────
+    /// Domain controller for the PRMaster tool. Wraps a `gh`-CLI-backed
+    /// GitHub client; cheap to clone (`Arc`-backed). Constructed once at
+    /// startup so the polling loop and command handlers share the same
+    /// rolling call log + cache. Future phases (P5) will hold the
+    /// background-refresh `JoinHandle` here too.
+    pub prmaster: PrMasterEngine,
+
+    /// Permanent menu-bar tray icon for the PRMaster tool. Created once
+    /// during `setup`, lives until the app exits (matching PRMaster's
+    /// always-present `MenuBarExtra`). Distinct from [`tray`] (the lazy
+    /// zen-tools tray bound to perf / process-monitor activity).
+    pub prmaster_tray: Option<tauri::tray::TrayIcon>,
 }
 
 impl AppState {
@@ -149,6 +164,8 @@ impl AppState {
             markdown_search_tokens: Arc::new(parking_lot::Mutex::new(HashMap::default())),
             db: Arc::new(ConnectionRegistry::new()),
             sql_workspace_dirs: Vec::new(),
+            prmaster: PrMasterEngine::new(),
+            prmaster_tray: None,
         }
     }
 
