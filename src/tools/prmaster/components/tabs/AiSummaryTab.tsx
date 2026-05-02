@@ -352,6 +352,84 @@ export function AiSummaryTab() {
     }
   }
 
+  /** Bulk action — regenerate every cached card in `range`, plus
+   *  generate fresh cards for any currently-mapped repo that doesn't
+   *  yet have one. Wired to the "Regenerate week" button on each
+   *  WeekGroupView header so the user can refresh a whole week with
+   *  one click instead of clicking the per-card icon for each repo. */
+  async function regenerateWeek(range: WeekRange) {
+    if (generating) return;
+
+    // Mapped repos plus any cached repos in this week (so removed-
+    // mapping cards still get refreshed if the user explicitly asks
+    // for it). Dedup + alphabetical for predictable status messages.
+    const cached = cards
+      .filter((c) => c.since === range.since && c.until === range.until)
+      .map((c) => c.repo);
+    const targets = Array.from(new Set([...mappedRepos, ...cached])).sort(
+      (a, b) => a.localeCompare(b),
+    );
+    if (targets.length === 0) return;
+
+    setError(null);
+    setGenerating(true);
+    cancelRef.current = false;
+
+    setCellStatus((prev) => {
+      const next = new Map(prev);
+      for (const repo of targets) {
+        next.set(cardKey(repo, range.since, range.until), { kind: "loading" });
+      }
+      return next;
+    });
+
+    let nextCards = cards.slice();
+    const label = formatRangeLabel(range.since, range.until);
+    for (const repo of targets) {
+      if (cancelRef.current) break;
+      const k = cardKey(repo, range.since, range.until);
+      setStatusMessage(`Regenerating ${repo} · ${label}…`);
+      try {
+        const card = await prmasterTauri.aiSummary({
+          repo,
+          since: range.since,
+          until: range.until,
+          force: true,
+        });
+        if (cancelRef.current) break;
+        nextCards = upsertCard(nextCards, card);
+        await persistCards(nextCards);
+        setCellStatus((prev) => {
+          const next = new Map(prev);
+          next.delete(k);
+          return next;
+        });
+      } catch (err) {
+        setCellStatus((prev) =>
+          new Map(prev).set(k, {
+            kind: "error",
+            message: formatError(err),
+          }),
+        );
+      }
+    }
+
+    if (cancelRef.current) {
+      setCellStatus((prev) => {
+        const next = new Map(prev);
+        for (const [k, v] of next) {
+          if (v.kind === "loading") next.delete(k);
+        }
+        return next;
+      });
+      setStatusMessage("Generation cancelled.");
+      window.setTimeout(() => setStatusMessage(null), 2000);
+    } else {
+      setStatusMessage(null);
+    }
+    setGenerating(false);
+  }
+
   /** Drop one (repo, week) card from the cache. */
   async function deleteCell(repo: string, range: WeekRange) {
     const next = cards.filter(
@@ -486,7 +564,9 @@ export function AiSummaryTab() {
                 group={group}
                 mappedRepos={mappedRepos}
                 cellStatus={cellStatus}
+                generating={generating}
                 onRegenerate={regenerateCell}
+                onRegenerateWeek={regenerateWeek}
                 onDelete={deleteCell}
                 onEdit={editCell}
               />
@@ -664,14 +744,20 @@ function WeekGroupView({
   group,
   mappedRepos,
   cellStatus,
+  generating,
   onRegenerate,
+  onRegenerateWeek,
   onDelete,
   onEdit,
 }: {
   group: WeekGroup;
   mappedRepos: string[];
   cellStatus: Map<string, CellStatus>;
+  /** Whether *any* generation pass is in flight — disables the bulk
+   *  Regenerate-week button so two passes can't fight each other. */
+  generating: boolean;
   onRegenerate: (repo: string, range: WeekRange) => void;
+  onRegenerateWeek: (range: WeekRange) => void;
   onDelete: (repo: string, range: WeekRange) => void;
   onEdit: (
     prevRepo: string,
@@ -700,13 +786,25 @@ function WeekGroupView({
   // Default open so freshly generated cards are visible.
   const [open, setOpen] = useState(true);
 
+  // `overflow-hidden` on the Panel: keeps the rounded-md corners from
+  // clipping the sticky header oddly when it scrolls inside its panel
+  // — without it the corner radius shows on top of the stuck header
+  // during scroll.
   return (
-    <Panel>
-      <PanelHeader className="cursor-pointer select-none gap-2">
+    <Panel className="overflow-hidden">
+      {/* The header is `sticky top-0` within the surrounding scroll
+          container, so as the user reads through this week's repo
+          cards the date label stays pinned at the top. As soon as
+          this week's last card scrolls past, the panel itself leaves
+          the viewport and the next week's header takes over —
+          standard CSS sticky behaviour, no JS. The explicit `bg-card`
+          is needed so content scrolling underneath the stuck header
+          doesn't bleed through. */}
+      <PanelHeader className="sticky top-0 z-10 select-none gap-2 bg-card shadow-[0_1px_0_rgba(0,0,0,0.04)]">
         <button
           type="button"
           onClick={() => setOpen((o) => !o)}
-          className="-mx-1 -my-1 flex flex-1 items-center gap-2 rounded px-1 py-1 text-left hover:bg-accent/40"
+          className="-mx-1 -my-1 flex flex-1 cursor-pointer items-center gap-2 rounded px-1 py-1 text-left hover:bg-accent/40"
           aria-expanded={open}
           aria-label={open ? "Collapse week" : "Expand week"}
         >
@@ -727,11 +825,36 @@ function WeekGroupView({
             {group.cards.size}/{displayRepos.length} repos
           </Badge>
         </button>
+        {/* Bulk action: regenerate every repo card in this week with
+            one click. Sits next to the chevron so the per-row
+            buttons aren't the only path. Disabled while any
+            generation pass is running so two passes can't fight. */}
+        <Button
+          size="xs"
+          variant="ghost"
+          disabled={generating || displayRepos.length === 0}
+          onClick={(e) => {
+            e.stopPropagation();
+            onRegenerateWeek(group.range);
+          }}
+          aria-label="Regenerate every summary in this week"
+          title="Regenerate every summary in this week"
+        >
+          <RotateCcw className="size-3" />
+          Regenerate week
+        </Button>
       </PanelHeader>
       {open && (
-        <PanelContent className="grid gap-2 p-2">
+        // Responsive grid: 1 column at popover width, 2 once we have
+        // ~768px (covers narrow main-window resizes), 3 at ~1280px+
+        // (the main window's minimum is 960 so on a typical desktop
+        // setup users land in the 2- or 3-column track without the
+        // popover ever leaving 1-column). `items-start` keeps each
+        // card sized to its natural content rather than stretching to
+        // the tallest card in the row.
+        <PanelContent className="grid grid-cols-1 items-start gap-2 p-2 md:grid-cols-2 xl:grid-cols-3">
           {displayRepos.length === 0 ? (
-            <p className="py-2 text-center text-xs italic text-muted-foreground">
+            <p className="col-span-full py-2 text-center text-xs italic text-muted-foreground">
               No mapped repos for this week.
             </p>
           ) : (

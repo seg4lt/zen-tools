@@ -32,7 +32,17 @@ zen-github = { workspace = true }
 zen-ai-cli = { workspace = true }
 zen-prmaster = { workspace = true }
 
-tauri = { version = "2", features = ["tray-icon", "image-png", "protocol-asset"] }
+# `macos-private-api` is required so the `pm-popover` window can be
+# spawned with `transparent: true` (paired with `app.macOSPrivateApi:
+# true` in `tauri.conf.json`). Without it macOS refuses to compose the
+# vibrancy / transparent NSWindow and Tauri logs `macos-private-api
+# not enabled` at runtime.
+tauri = { version = "2", features = [
+    "tray-icon",
+    "image-png",
+    "protocol-asset",
+    "macos-private-api",
+] }
 tauri-plugin-dialog = "2"
 tauri-plugin-shell = "2"
 tauri-plugin-fs = "2"
