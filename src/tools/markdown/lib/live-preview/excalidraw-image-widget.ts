@@ -117,6 +117,21 @@ export class ExcalidrawImageWidget extends WidgetType {
         appState: {
           ...restored.appState,
           theme: this.theme,
+          // Override the saved canvas background so the embed flips
+          // with the *host* theme rather than carrying whatever was
+          // active when the user pressed save.  Excalidraw's `theme`
+          // flag inverts stock strokes/fills, but it leaves
+          // `viewBackgroundColor` alone — the spread above would
+          // otherwise restore a baked white (or black) bg and we'd
+          // see a light rectangle in a dark editor (or vice versa).
+          //
+          // The two values match Excalidraw's own canvas colours
+          // (`#ffffff` / `#121212`) so the embed reads as a native
+          // pane in either theme.  Custom-painted element colours
+          // still don't theme — that's an Excalidraw library
+          // constraint, not something we can override here.
+          viewBackgroundColor:
+            this.theme === "dark" ? "#121212" : "#ffffff",
           // Don't re-embed the scene on the re-themed export — the
           // canonical copy with the scene already lives on disk;
           // this in-memory render is just for display.

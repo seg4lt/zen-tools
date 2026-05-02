@@ -250,15 +250,18 @@ function VaultBlock({ root, vault, tree, onRemove }: VaultBlockProps) {
   const [dragOver, setDragOver] = useState(false);
   const dragDepth = useRef(0);
 
+  // No `dataTransfer.types.includes(TREE_DRAG_MIME)` gate — WebKit
+  // may not surface custom MIMEs in `types` during dragover.  The
+  // module-scope `draggedSourcePath` is the source of truth and is
+  // only set by our own dragstart handler, so a Finder file drag
+  // (where it stays null) is naturally rejected by the next check.
   const onDragEnter = (e: ReactDragEvent<HTMLDivElement>) => {
-    if (!e.dataTransfer.types.includes(TREE_DRAG_MIME)) return;
     if (!draggedSourcePath || !canDropInto(draggedSourcePath, root)) return;
     e.preventDefault();
     dragDepth.current += 1;
     setDragOver(true);
   };
   const onDragOver = (e: ReactDragEvent<HTMLDivElement>) => {
-    if (!e.dataTransfer.types.includes(TREE_DRAG_MIME)) return;
     if (!draggedSourcePath || !canDropInto(draggedSourcePath, root)) return;
     e.preventDefault();
     e.dataTransfer.dropEffect = "move";
@@ -413,10 +416,16 @@ function TreeRow({ node }: TreeRowProps) {
   // wikilink jump, etc.) scroll it into view so the user can see
   // where the open file lives in the tree.  `useLayoutEffect` so the
   // scroll happens before paint and avoids a visible jump.
-  const buttonRef = useRef<HTMLButtonElement | null>(null);
+  //
+  // The row is a `<div role="button">` rather than a `<button>` —
+  // WebKit (Tauri's WKWebView on macOS) does not reliably initiate
+  // HTML5 drag-and-drop from a native `<button>`.  Switching to a
+  // div with `role="button"` plus an Enter/Space keydown gives us
+  // the same a11y story while restoring drag.
+  const rowRef = useRef<HTMLDivElement | null>(null);
   useLayoutEffect(() => {
     if (active) {
-      buttonRef.current?.scrollIntoView({ block: "nearest" });
+      rowRef.current?.scrollIntoView({ block: "nearest" });
     }
   }, [active]);
 
@@ -433,15 +442,21 @@ function TreeRow({ node }: TreeRowProps) {
 
   // ─── Drag source ──────────────────────────────────────────────
   // Every row drags as itself.  We stash both a typed payload (so
-  // the drop target can confirm the drag is from our own tree) and
-  // a module-scoped path mirror (so `dragover` handlers can read
-  // it before the drop without waiting for the security-gated
-  // `getData`).
+  // a drop target *outside* this widget can read the path on drop)
+  // and a module-scoped path mirror (so `dragover` handlers can
+  // read it without waiting for the security-gated `getData` and
+  // without depending on `dataTransfer.types` exposing custom MIMEs
+  // — WebKit historically omits them).
   const onDragStart = (e: ReactDragEvent) => {
     e.stopPropagation();
     draggedSourcePath = item.path;
     e.dataTransfer.effectAllowed = "move";
-    e.dataTransfer.setData(TREE_DRAG_MIME, item.path);
+    try {
+      e.dataTransfer.setData(TREE_DRAG_MIME, item.path);
+    } catch {
+      // Some webviews refuse custom MIMEs; the module-scope mirror
+      // is the source of truth anyway.
+    }
     // text/plain fallback so dropping outside the app inserts a
     // sensible string rather than nothing.
     e.dataTransfer.setData("text/plain", item.path);
@@ -452,13 +467,16 @@ function TreeRow({ node }: TreeRowProps) {
 
   // ─── Drop target (folders only) ───────────────────────────────
   // Counter pattern avoids flicker as the cursor crosses children.
+  // We don't gate on `dataTransfer.types.includes(TREE_DRAG_MIME)`
+  // because WebKit may not surface custom MIMEs in `types` during
+  // dragover — `draggedSourcePath` non-null already tells us this
+  // is one of *our* drags (Finder drops never set it).
   const [dragOver, setDragOver] = useState(false);
   const dragDepth = useRef(0);
   const targetDir = item.isDir ? item.path : null;
 
   const onDragEnter = (e: ReactDragEvent) => {
     if (!targetDir) return;
-    if (!e.dataTransfer.types.includes(TREE_DRAG_MIME)) return;
     if (!draggedSourcePath || !canDropInto(draggedSourcePath, targetDir)) {
       return;
     }
@@ -468,7 +486,6 @@ function TreeRow({ node }: TreeRowProps) {
   };
   const onDragOver = (e: ReactDragEvent) => {
     if (!targetDir) return;
-    if (!e.dataTransfer.types.includes(TREE_DRAG_MIME)) return;
     if (!draggedSourcePath || !canDropInto(draggedSourcePath, targetDir)) {
       return;
     }
@@ -495,14 +512,24 @@ function TreeRow({ node }: TreeRowProps) {
     void movePath(src, targetDir);
   };
 
+  const onKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (isRenaming) return;
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      onClick();
+    }
+  };
+
   return (
     <li role="treeitem" aria-expanded={item.isDir ? open : undefined}>
       <ContextMenu>
         <ContextMenuTrigger asChild>
-          <button
-            ref={buttonRef}
-            type="button"
+          <div
+            ref={rowRef}
+            role="button"
+            tabIndex={isRenaming ? -1 : 0}
             onClick={onClick}
+            onKeyDown={onKeyDown}
             draggable={!isRenaming}
             onDragStart={onDragStart}
             onDragEnd={onDragEnd}
@@ -512,7 +539,7 @@ function TreeRow({ node }: TreeRowProps) {
             onDrop={onDrop}
             style={{ paddingLeft: `${indent}px` }}
             className={cn(
-              "flex w-full items-center gap-1.5 py-1 pr-2 text-left",
+              "flex w-full cursor-pointer items-center gap-1.5 py-1 pr-2 text-left",
               "hover:bg-muted/50",
               active && "bg-muted text-foreground",
               dragOver &&
@@ -551,7 +578,7 @@ function TreeRow({ node }: TreeRowProps) {
             ) : (
               <span className="truncate font-mono text-xs">{item.name}</span>
             )}
-          </button>
+          </div>
         </ContextMenuTrigger>
         <RowContextMenu node={node} />
       </ContextMenu>
