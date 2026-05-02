@@ -1,18 +1,18 @@
 /**
  * Tab strip rendered above the editor.
  *
- * Visual design (VS-Code-flavoured):
- *   - The strip itself sits on a dim `bg-muted/20` with a single
- *     bottom border.
- *   - The **active** tab's background matches the editor below
- *     (`bg-background`) so it visually merges into the editor; a
- *     slim primary-colored accent line sits on top.
- *   - Inactive tabs are transparent over the strip's dim bg, with a
- *     hover state that brightens them.
- *   - Each tab carries a file icon, the basename, and a hover-aware
- *     close affordance.  When the file is dirty, the close `×` is
- *     replaced by an amber `•` until the user hovers (then the `×`
- *     comes back so they can still close it).
+ * Visual design — matches the database-explorer editor-tab-strip so
+ * every tab rail across the app reads as the same surface:
+ *   - Strip is `bg-muted/60` with a single bottom border; tabs hang
+ *     off the top edge with `rounded-t-md` corners.
+ *   - The **active** tab lifts to `bg-background` (the editor surface
+ *     directly below) so it visually merges with the editor body.
+ *     No accent line — the surface lift alone reads as "selected".
+ *   - Inactive tabs are transparent over the strip's deep tint, with
+ *     a subtle hover state.
+ *   - Each tab carries a file icon, the basename, an inline dirty dot
+ *     when unsaved, and a hover-revealed close `×`. The close button
+ *     stays visible on the active tab.
  *   - Tabs whose basename collides with another open tab grow a
  *     small dim subtitle showing their immediate parent directory,
  *     so the user can tell them apart without reading a tooltip.
@@ -27,6 +27,7 @@
 
 import { useLayoutEffect, useMemo, useRef } from "react";
 import { FileText, PenLine, X } from "lucide-react";
+import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { useMarkdownStore, type TabState } from "../store/markdown-store";
 import { basenameNoExt } from "../lib/tauri";
@@ -71,7 +72,7 @@ export function TabStrip() {
     <div
       ref={stripRef}
       role="tablist"
-      className="flex h-9 shrink-0 items-stretch overflow-x-auto border-b border-border bg-muted/20 [scrollbar-width:thin]"
+      className="flex shrink-0 items-center gap-0.5 overflow-x-auto border-b border-border/60 bg-muted/60 px-1.5 pt-1 text-[11px] [scrollbar-width:thin]"
     >
       {state.tabs.map((tab) => (
         <Tab
@@ -113,35 +114,29 @@ function Tab({ tab, active, subtitle, onSelect, onClose }: TabProps) {
       onClick={onSelect}
       title={tab.path}
       className={cn(
-        "group relative flex min-w-[120px] max-w-[220px] shrink cursor-pointer items-center gap-1.5 border-r border-border/30 pl-3 pr-2 text-xs transition-colors",
+        "group relative flex max-w-[220px] shrink-0 cursor-pointer items-center gap-1.5 rounded-t-md px-2.5 py-1.5 transition",
         active
           ? "bg-background text-foreground"
-          : "text-muted-foreground hover:bg-muted/40 hover:text-foreground",
+          : "text-muted-foreground/70 hover:bg-muted/30 hover:text-muted-foreground",
       )}
     >
-      {/* Active accent — sits at the very top edge of the tab.
-          Inactive tabs render an invisible spacer of the same height
-          so toggling active doesn't reflow neighbours. */}
-      <div
-        aria-hidden
-        className={cn(
-          "absolute inset-x-0 top-0 h-[2px]",
-          active ? "bg-primary" : "bg-transparent",
-        )}
-      />
-
       <Icon
         className={cn(
           "size-3.5 shrink-0",
-          active
-            ? tab.kind === "excalidraw"
-              ? "text-violet-500/90"
-              : "text-primary/80"
-            : "text-muted-foreground/60",
+          active && tab.kind === "excalidraw"
+            ? "text-violet-500/90"
+            : undefined,
         )}
       />
 
-      <span className="min-w-0 flex-1 truncate font-medium">{name}</span>
+      <span
+        className={cn(
+          "min-w-0 flex-1 truncate",
+          active ? "font-medium" : "font-normal",
+        )}
+      >
+        {name}
+      </span>
 
       {subtitle ? (
         <span className="shrink-0 truncate text-[10px] text-muted-foreground/55">
@@ -149,65 +144,33 @@ function Tab({ tab, active, subtitle, onSelect, onClose }: TabProps) {
         </span>
       ) : null}
 
-      <CloseAffordance
-        dirty={tab.dirty}
-        active={active}
-        onClose={(e) => {
+      {tab.dirty ? (
+        <span
+          aria-hidden
+          className="ml-0.5 inline-block size-1.5 shrink-0 rounded-full bg-foreground/80"
+          title="Unsaved changes"
+        />
+      ) : null}
+
+      <Button
+        type="button"
+        variant="ghost"
+        size="sm"
+        onClick={(e) => {
           e.stopPropagation();
           onClose();
         }}
-      />
+        aria-label="Close tab"
+        title="Close (⌘W)"
+        className={cn(
+          "h-4 w-4 shrink-0 p-0 transition",
+          active
+            ? "opacity-70 hover:opacity-100"
+            : "opacity-0 group-hover:opacity-100",
+        )}
+      >
+        <X className="size-3" />
+      </Button>
     </div>
-  );
-}
-
-interface CloseAffordanceProps {
-  dirty: boolean;
-  active: boolean;
-  onClose: (e: React.MouseEvent) => void;
-}
-
-/**
- * Renders either:
- *   - dirty + not hovered → amber `•`
- *   - dirty + hovered     → `×`
- *   - clean + active      → `×` at low opacity, hover bumps it up
- *   - clean + inactive    → `×` hidden, appears on tab hover
- *
- * Click always closes; the dot itself is part of the close button so
- * a single click on either glyph performs the close.
- */
-function CloseAffordance({ dirty, active, onClose }: CloseAffordanceProps) {
-  return (
-    <button
-      type="button"
-      onClick={onClose}
-      aria-label="Close tab"
-      title="Close (⌘W)"
-      className="relative flex size-4 shrink-0 items-center justify-center rounded-sm hover:bg-muted/60"
-    >
-      {dirty ? (
-        <>
-          <span
-            aria-hidden
-            className="size-2 rounded-full bg-amber-500 group-hover:hidden"
-          />
-          <X
-            aria-hidden
-            className="hidden size-3 text-muted-foreground group-hover:block hover:text-foreground"
-          />
-        </>
-      ) : (
-        <X
-          aria-hidden
-          className={cn(
-            "size-3 transition-opacity",
-            active
-              ? "opacity-50 hover:opacity-100"
-              : "opacity-0 group-hover:opacity-50 hover:opacity-100",
-          )}
-        />
-      )}
-    </button>
   );
 }
