@@ -37,7 +37,6 @@ import { ConnectionTabs } from "./components/connection-tabs";
 import { DbTree } from "./components/db-tree";
 import { EditorTabStrip } from "./components/editor-tab-strip";
 import { SqlFileTree } from "./components/sql-file-tree";
-import { StatusBar } from "./components/status-bar";
 import { DragHandle } from "@/components/drag-handle";
 import { Button } from "@/components/ui/button";
 import { PanelLeftOpen, PanelRightOpen } from "lucide-react";
@@ -790,15 +789,6 @@ export function DatabaseExplorerView() {
             />
           </div>
         </div>
-        {/* Bottom status bar — replaces the old FileFooter. Carries
-            connection identity (driver-coloured dot + name) + the
-            relocated db/schema picker + open-file path + dirty
-            marker + a one-line cache-progress mirror. The previous
-            footer was a 10-px muted strip showing only the path
-            and `saved/unsaved`; the new bar earns its keep by
-            making *both* "where am I" and "what's running" visible
-            in the same row. */}
-        <StatusBar />
       </section>
 
       {effectiveRightCollapsed ? (

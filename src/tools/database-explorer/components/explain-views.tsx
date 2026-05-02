@@ -34,6 +34,12 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import {
   actualOrEstimatedRows,
@@ -699,23 +705,60 @@ function FlameView({
         {/* Sort siblings toggle. Plan order = whatever the planner
             emitted; descending = hottest child leftmost. Compact:
             single arrow when active, dash when off. */}
-        <button
-          type="button"
-          onClick={() => setSortDescending((s) => !s)}
-          className={cn(
-            "rounded px-1 transition",
-            sortDescending
-              ? "bg-primary/15 text-primary"
-              : "hover:bg-muted/40 hover:text-foreground",
-          )}
-          title={
-            sortDescending
-              ? "Siblings sorted by metric, descending. Click for plan order."
-              : "Siblings in plan order. Click to sort by metric (hottest first)."
-          }
-        >
-          {sortDescending ? "↓ sort" : "= sort"}
-        </button>
+        <TooltipProvider delayDuration={120}>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                onClick={() => setSortDescending((s) => !s)}
+                className={cn(
+                  "rounded px-1 transition",
+                  sortDescending
+                    ? "bg-primary/15 text-primary"
+                    : "hover:bg-muted/40 hover:text-foreground",
+                )}
+              >
+                {sortDescending ? "↓ sort" : "= sort"}
+              </button>
+            </TooltipTrigger>
+            <TooltipContent
+              side="bottom"
+              className="max-w-xs text-left text-[11px] leading-snug"
+            >
+              {sortDescending ? (
+                <>
+                  <div className="font-semibold">
+                    Sorting siblings by metric (descending)
+                  </div>
+                  <p className="mt-1">
+                    Within each parent, the hottest child is rendered
+                    leftmost. Click to switch back to{" "}
+                    <strong>plan order</strong> (the planner's
+                    original output).
+                  </p>
+                  <p className="mt-1 opacity-80">
+                    Use this view to find the dominant node fast;
+                    plan order to understand execution structure.
+                  </p>
+                </>
+              ) : (
+                <>
+                  <div className="font-semibold">Plan order (default)</div>
+                  <p className="mt-1">
+                    Children rendered in the order the planner
+                    emitted them. Click to <strong>sort by the
+                    current metric</strong> (hottest child leftmost).
+                  </p>
+                  <p className="mt-1 opacity-80">
+                    Plan order preserves outer-input-vs-inner-input
+                    semantics for joins; sorted order is faster for
+                    spotting the heaviest sibling at a glance.
+                  </p>
+                </>
+              )}
+            </TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
 
         {/* Search / filter. Press / to focus from inside the SVG.
             Compact width; placeholder is just "filter…" — the
@@ -899,63 +942,179 @@ function MetricChips({
   onModeChange: (m: WidthMode) => void;
   onBasisChange: (b: WidthBasis) => void;
 }) {
-  const modes: { id: WidthMode; label: string; help: string }[] = [
-    { id: "time", label: "time", help: "Width by Actual Total Time per node (Postgres ANALYZE)" },
-    { id: "cost", label: "cost", help: "Width by EstimatedTotalSubtreeCost (planner estimate)" },
-    { id: "rows", label: "rows", help: "Width by row count (actual when present, else estimated)" },
-    { id: "buffers", label: "buffers", help: "Width by sharedHit + sharedRead pages (Postgres I/O)" },
+  // Long-form tooltip copy. Each option gets a one-line headline +
+  // a couple of bullets explaining what the value means, where it
+  // comes from, and when to pick it. Shown via Radix Tooltip for
+  // an instant hover popup (browser-native `title=""` had a 500 ms
+  // delay that made the chips feel un-discoverable).
+  const modes: {
+    id: WidthMode;
+    label: string;
+    title: string;
+    body: React.ReactNode;
+  }[] = [
+    {
+      id: "time",
+      label: "time",
+      title: "Width by execution time",
+      body: (
+        <>
+          <p>Each flame cell is sized by per-node wall-clock.</p>
+          <p className="mt-1 opacity-80">
+            Source: Postgres <code>Actual Total Time</code> (EXPLAIN
+            ANALYZE) / MSSQL <code>ActualElapsedms</code>. Pick this
+            to find <strong>where the time actually went</strong> —
+            the default and usually the right answer.
+          </p>
+        </>
+      ),
+    },
+    {
+      id: "cost",
+      label: "cost",
+      title: "Width by planner cost",
+      body: (
+        <>
+          <p>Each cell is sized by the optimizer's estimated cost.</p>
+          <p className="mt-1 opacity-80">
+            Source: Postgres <code>Total Cost</code> (arbitrary cost
+            units; not ms) / MSSQL <code>EstimatedTotalSubtreeCost</code>.
+            Pick this to see what the planner <em>thought</em> would
+            be expensive — useful when comparing to <code>time</code>{" "}
+            shows the planner mis-estimated.
+          </p>
+        </>
+      ),
+    },
+    {
+      id: "rows",
+      label: "rows",
+      title: "Width by row count",
+      body: (
+        <>
+          <p>Each cell is sized by the rows flowing through that node.</p>
+          <p className="mt-1 opacity-80">
+            Uses actual row counts when present (ANALYZE), otherwise
+            falls back to the planner's estimate. Pick this to see
+            <strong> data volume</strong> per stage — wide rows on
+            tiny inputs hint at row explosions or missing predicates.
+          </p>
+        </>
+      ),
+    },
+    {
+      id: "buffers",
+      label: "buffers",
+      title: "Width by I/O (Postgres only)",
+      body: (
+        <>
+          <p>Each cell is sized by 8 KB pages touched.</p>
+          <p className="mt-1 opacity-80">
+            Source: Postgres <code>Shared Hit Blocks + Shared Read
+            Blocks</code> (EXPLAIN BUFFERS). Pick this to find
+            <strong> I/O-heavy nodes</strong> — wide cells = lots of
+            pages, narrow but slow = CPU-bound. Disabled when the
+            plan doesn't carry buffer counters.
+          </p>
+        </>
+      ),
+    },
   ];
-  // Both groups are rendered in a single chip strip without
-  // section labels — the chips are self-evident, and tooltips
-  // carry the long-form explanation. A thin separator marks the
-  // boundary between "what to measure" and "how to slice it".
   return (
-    <div className="flex items-center gap-0.5" title="Width metric · slicing basis">
-      {modes.map((m) => {
-        const isOn = mode === m.id;
-        const enabled = availability[m.id];
-        return (
-          <button
-            key={m.id}
-            type="button"
-            disabled={!enabled}
-            onClick={() => onModeChange(m.id)}
-            className={cn(
-              "rounded px-1 transition",
-              !enabled
-                ? "cursor-not-allowed opacity-40"
-                : isOn
-                  ? "bg-primary/15 text-primary"
-                  : "hover:bg-muted/40 hover:text-foreground",
-            )}
-            title={enabled ? m.help : `${m.help} — not available in this plan`}
-          >
-            {m.label}
-          </button>
-        );
-      })}
-      <span aria-hidden className="mx-0.5 h-3 w-px bg-border/60" />
-      {(["total", "self"] as const).map((b) => (
-        <button
-          key={b}
-          type="button"
-          onClick={() => onBasisChange(b)}
-          className={cn(
-            "rounded px-1 transition",
-            basis === b
-              ? "bg-primary/15 text-primary"
-              : "hover:bg-muted/40 hover:text-foreground",
-          )}
-          title={
-            b === "total"
-              ? "Each cell sized by its full subtree metric (standard flame layout)."
-              : "Each cell sized by the node's own contribution (children render alongside, not stacked under). Surfaces the actual bottleneck node."
-          }
-        >
-          {b}
-        </button>
-      ))}
-    </div>
+    <TooltipProvider delayDuration={120}>
+      <div className="flex items-center gap-0.5">
+        {modes.map((m) => {
+          const isOn = mode === m.id;
+          const enabled = availability[m.id];
+          return (
+            <Tooltip key={m.id}>
+              <TooltipTrigger asChild>
+                <button
+                  type="button"
+                  disabled={!enabled}
+                  onClick={() => onModeChange(m.id)}
+                  className={cn(
+                    "rounded px-1 transition",
+                    !enabled
+                      ? "cursor-not-allowed opacity-40"
+                      : isOn
+                        ? "bg-primary/15 text-primary"
+                        : "hover:bg-muted/40 hover:text-foreground",
+                  )}
+                >
+                  {m.label}
+                </button>
+              </TooltipTrigger>
+              <TooltipContent
+                side="bottom"
+                className="max-w-xs text-left text-[11px] leading-snug"
+              >
+                <div className="font-semibold">{m.title}</div>
+                <div className="mt-1">{m.body}</div>
+                {!enabled && (
+                  <div className="mt-2 text-amber-300">
+                    Not available — this plan doesn't carry the
+                    needed counters.
+                  </div>
+                )}
+              </TooltipContent>
+            </Tooltip>
+          );
+        })}
+        <span aria-hidden className="mx-0.5 h-3 w-px bg-border/60" />
+        {(["total", "self"] as const).map((b) => (
+          <Tooltip key={b}>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                onClick={() => onBasisChange(b)}
+                className={cn(
+                  "rounded px-1 transition",
+                  basis === b
+                    ? "bg-primary/15 text-primary"
+                    : "hover:bg-muted/40 hover:text-foreground",
+                )}
+              >
+                {b}
+              </button>
+            </TooltipTrigger>
+            <TooltipContent
+              side="bottom"
+              className="max-w-xs text-left text-[11px] leading-snug"
+            >
+              {b === "total" ? (
+                <>
+                  <div className="font-semibold">Total (subtree)</div>
+                  <p className="mt-1">
+                    Each cell sized by the full <em>subtree</em>{" "}
+                    metric — node + all descendants. Standard flame
+                    layout: parent always wider than children.
+                  </p>
+                  <p className="mt-1 opacity-80">
+                    Best for understanding query shape and where time
+                    aggregates.
+                  </p>
+                </>
+              ) : (
+                <>
+                  <div className="font-semibold">Self (own contribution)</div>
+                  <p className="mt-1">
+                    Each cell sized by the node's <em>own</em> work,
+                    excluding descendants. Children render alongside,
+                    not stacked under.
+                  </p>
+                  <p className="mt-1 opacity-80">
+                    Best for spotting the actual bottleneck node — the
+                    one doing the work, not just the one summing
+                    children's work.
+                  </p>
+                </>
+              )}
+            </TooltipContent>
+          </Tooltip>
+        ))}
+      </div>
+    </TooltipProvider>
   );
 }
 
