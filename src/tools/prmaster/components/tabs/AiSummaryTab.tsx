@@ -13,7 +13,6 @@ import { Copy, Download, Loader2, Sparkles, Trash2 } from "lucide-react";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -22,6 +21,12 @@ import {
   type AiSummaryParams,
   type SummaryCard,
 } from "../../lib/tauri";
+import {
+  Panel,
+  PanelContent,
+  PanelHeader,
+  PanelTitle,
+} from "../shared/density";
 import { RepoPicker } from "../shared/RepoPicker";
 
 type CardState =
@@ -151,7 +156,7 @@ export function AiSummaryTab() {
       />
 
       <div className="flex min-h-0 flex-1 flex-col overflow-y-auto bg-muted/20">
-        <div className="grid gap-3 p-3">
+        <div className="grid gap-2 p-2">
           {selected.size === 0 ? (
             <EmptyHint />
           ) : (
@@ -246,7 +251,7 @@ function Toolbar({
         </div>
         <Button
           size="sm"
-          variant={repos.length === 0 ? "default" : "outline"}
+          variant="outline"
           disabled={reposFetching}
           onClick={onFetchRepos}
           title="Fetch the full repo list from GitHub (ignores cache)"
@@ -301,14 +306,14 @@ function Toolbar({
 
 function EmptyHint() {
   return (
-    <Card className="border-dashed">
-      <CardContent className="flex flex-col items-center gap-2 py-12 text-center">
-        <Sparkles className="size-6 text-muted-foreground" />
-        <p className="text-sm text-muted-foreground">
+    <Panel className="border-dashed">
+      <PanelContent className="flex flex-col items-center gap-2 py-8 text-center">
+        <Sparkles className="size-5 text-muted-foreground" />
+        <p className="text-xs text-muted-foreground">
           Pick a date range + at least one repo, then click Generate.
         </p>
-      </CardContent>
-    </Card>
+      </PanelContent>
+    </Panel>
   );
 }
 
@@ -320,11 +325,11 @@ function CardView({
   card: CardState | undefined;
 }) {
   return (
-    <Card>
-      <CardHeader className="flex flex-row items-center justify-between gap-3 space-y-0 border-b py-2">
-        <CardTitle className="font-mono text-xs">{repo}</CardTitle>
+    <Panel>
+      <PanelHeader>
+        <PanelTitle className="font-mono">{repo}</PanelTitle>
         {card?.status === "ok" && (
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1.5">
             <Badge variant="secondary">{card.card.commit_count} commits</Badge>
             {card.card.cost_usd != null && (
               <Badge variant="outline">${card.card.cost_usd.toFixed(3)}</Badge>
@@ -339,8 +344,8 @@ function CardView({
             </Button>
           </div>
         )}
-      </CardHeader>
-      <CardContent className="p-4 text-sm">
+      </PanelHeader>
+      <PanelContent className="text-sm">
         {!card || card.status === "idle" ? (
           <span className="text-xs italic text-muted-foreground">
             Waiting…
@@ -351,7 +356,7 @@ function CardView({
             Summarising…
           </div>
         ) : card.status === "error" ? (
-          <pre className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-xs whitespace-pre-wrap text-destructive">
+          <pre className="rounded-md border border-destructive/40 bg-destructive/5 p-2 text-xs whitespace-pre-wrap text-destructive">
             {card.message}
           </pre>
         ) : (
@@ -359,8 +364,8 @@ function CardView({
             {card.card.summary}
           </pre>
         )}
-      </CardContent>
-    </Card>
+      </PanelContent>
+    </Panel>
   );
 }
 

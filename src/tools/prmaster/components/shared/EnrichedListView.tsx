@@ -1,20 +1,26 @@
 /**
- * Shared list+inline-detail view used by Mine / To Review / Done tabs.
+ * Shared list/detail view used by Mine / To Review / Done tabs.
  *
- * Header bar matches the rest of the PRMaster tool (10-px tall, 16-px
- * horizontal padding, ghost refresh button on the right). PR rows render
- * via `PrCard`; the inline detail panel renders directly below the
- * selected row.
+ * Two modes, swapped via a navigation pattern (no inline expand):
+ *
+ *   - **list** — header (title + Refresh) + optional filter strip + the
+ *     scrollable list of `PrCard`s.
+ *   - **detail** — header (← Back + PR title + Refresh) + the single
+ *     selected PR's `PrDetailPanel`, occupying the entire content area.
+ *
+ * Selection lives in the global store (`state.selectedPrId`) so it
+ * persists across tab switches; the detail mode kicks in whenever the
+ * selected row belongs to *this* list.
  */
 
-import { Loader2, RefreshCw } from "lucide-react";
+import { ArrowLeft, Loader2, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
 import {
   enrichedId,
   usePrMasterStore,
 } from "../../store/prmaster-store";
 import type { EnrichedPullRequest } from "../../lib/tauri";
+import { Panel, PanelContent } from "./density";
 import { PrCard } from "./PrCard";
 import { PrDetailPanel } from "./PrDetailPanel";
 
@@ -39,6 +45,63 @@ export function EnrichedListView({
   filterBar,
 }: Props) {
   const { state, dispatch } = usePrMasterStore();
+
+  // Resolve the selected row *in this list* — selection persists across
+  // tabs, so we ignore selections that don't belong here.
+  const selectedRow = state.selectedPrId
+    ? rows.find((r) => enrichedId(r) === state.selectedPrId)
+    : undefined;
+
+  if (selectedRow) {
+    return (
+      <div className="flex h-full min-h-0 flex-col">
+        <header className="flex h-10 shrink-0 items-center justify-between gap-2 border-b bg-card/40 px-3">
+          <div className="flex min-w-0 items-center gap-2">
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => dispatch({ type: "select", id: null })}
+              aria-label="Back to list"
+            >
+              <ArrowLeft className="size-4" />
+              Back
+            </Button>
+            <span className="truncate text-xs text-muted-foreground">
+              {selectedRow.pr.repository.nameWithOwner} · #
+              {selectedRow.pr.number}
+            </span>
+            <span
+              className="truncate text-sm font-medium"
+              title={selectedRow.pr.title}
+            >
+              {selectedRow.pr.title}
+            </span>
+          </div>
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={loading}
+            onClick={onRefresh}
+          >
+            {loading ? (
+              <Loader2 className="size-4 animate-spin" />
+            ) : (
+              <RefreshCw className="size-4" />
+            )}
+            Refresh
+          </Button>
+        </header>
+
+        <div className="flex min-h-0 flex-1 flex-col overflow-y-auto p-2">
+          <PrDetailPanel
+            pr={selectedRow}
+            currentUser={state.currentUser}
+            onActionDone={onRefresh}
+          />
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -70,13 +133,13 @@ export function EnrichedListView({
         </div>
       )}
 
-      <div className="flex min-h-0 flex-1 flex-col overflow-y-auto p-3">
+      <div className="flex min-h-0 flex-1 flex-col overflow-y-auto p-2">
         {error && (
-          <Card className="mb-3 border-destructive/40 bg-destructive/5">
-            <CardContent className="p-3 text-sm text-destructive">
+          <Panel className="mb-2 border-destructive/40 bg-destructive/5">
+            <PanelContent className="p-2 text-xs text-destructive">
               {error}
-            </CardContent>
-          </Card>
+            </PanelContent>
+          </Panel>
         )}
 
         {rows.length === 0 && !loading && !error && (
@@ -85,31 +148,17 @@ export function EnrichedListView({
           </div>
         )}
 
-        <div className="flex flex-col gap-2">
+        <div className="flex flex-col gap-1.5">
           {rows.map((row) => {
             const id = enrichedId(row);
-            const isSelected = id === state.selectedPrId;
             return (
-              <div key={id} className="flex flex-col gap-2">
-                <PrCard
-                  pr={row.pr}
-                  selected={isSelected}
-                  decision={row.reviewDecision}
-                  onSelect={() =>
-                    dispatch({
-                      type: "select",
-                      id: isSelected ? null : id,
-                    })
-                  }
-                />
-                {isSelected && (
-                  <PrDetailPanel
-                    pr={row}
-                    currentUser={state.currentUser}
-                    onActionDone={onRefresh}
-                  />
-                )}
-              </div>
+              <PrCard
+                key={id}
+                pr={row.pr}
+                selected={false}
+                decision={row.reviewDecision}
+                onSelect={() => dispatch({ type: "select", id })}
+              />
             );
           })}
         </div>

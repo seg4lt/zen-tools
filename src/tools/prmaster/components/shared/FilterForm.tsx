@@ -8,11 +8,11 @@
 import { useEffect, useState } from "react";
 import { Loader2, Save, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardFooter } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
+import { Panel, PanelContent, PanelFooter } from "./density";
 import {
   Select,
   SelectContent,
@@ -79,8 +79,8 @@ export function FilterForm({ initial, onCancel, onSaved }: Props) {
   }
 
   return (
-    <Card>
-      <CardContent className="grid gap-4 p-4">
+    <Panel>
+      <PanelContent className="grid gap-2 p-2.5">
         <Field id="filter-name" label="Name">
           <Input
             id="filter-name"
@@ -181,22 +181,27 @@ export function FilterForm({ initial, onCancel, onSaved }: Props) {
             rows={2}
           />
         )}
-      </CardContent>
-      <CardFooter className="gap-2 border-t px-4 py-3">
-        <Button onClick={() => void save()} disabled={saving}>
+      </PanelContent>
+      <PanelFooter>
+        <Button size="sm" onClick={() => void save()} disabled={saving}>
           {saving ? (
-            <Loader2 className="size-4 animate-spin" />
+            <Loader2 className="size-3.5 animate-spin" />
           ) : (
-            <Save className="size-4" />
+            <Save className="size-3.5" />
           )}
           Save
         </Button>
-        <Button variant="ghost" disabled={saving} onClick={onCancel}>
-          <X className="size-4" />
+        <Button
+          size="sm"
+          variant="ghost"
+          disabled={saving}
+          onClick={onCancel}
+        >
+          <X className="size-3.5" />
           Cancel
         </Button>
-      </CardFooter>
-    </Card>
+      </PanelFooter>
+    </Panel>
   );
 }
 
@@ -212,17 +217,22 @@ function Field({
   children: React.ReactNode;
 }) {
   return (
-    <div className="grid gap-1.5">
+    <div className="grid gap-1">
       {id ? (
-        <Label htmlFor={id} className="text-xs">
+        <Label
+          htmlFor={id}
+          className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground"
+        >
           {label}
         </Label>
       ) : (
-        <span className="text-xs font-medium">{label}</span>
+        <span className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+          {label}
+        </span>
       )}
       {children}
       {hint && (
-        <span className="text-xs text-muted-foreground">{hint}</span>
+        <span className="text-[10px] text-muted-foreground">{hint}</span>
       )}
     </div>
   );

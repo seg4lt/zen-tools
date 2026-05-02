@@ -30,12 +30,6 @@ import {
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -57,6 +51,12 @@ import {
   type PrMasterSettings,
 } from "../../lib/tauri";
 import { SearchableRepoDropdown } from "../shared/SearchableRepoDropdown";
+import {
+  Panel,
+  PanelContent,
+  PanelHeader,
+  PanelTitle,
+} from "../shared/density";
 
 export function SettingsTab() {
   const [status, setStatus] = useState<GhStatus | null>(null);
@@ -141,25 +141,25 @@ export function SettingsTab() {
       </header>
 
       <div className="flex min-h-0 flex-1 flex-col overflow-y-auto bg-muted/20">
-        <div className="flex flex-col gap-3 p-3">
+        <div className="flex flex-col gap-2 p-2">
           {error && (
-            <Card className="border-destructive/40 bg-destructive/5">
-              <CardContent className="p-3 text-sm text-destructive">
+            <Panel className="border-destructive/40 bg-destructive/5">
+              <PanelContent className="p-2 text-xs text-destructive">
                 {error}
-              </CardContent>
-            </Card>
+              </PanelContent>
+            </Panel>
           )}
 
           {status && <StatusStrip status={status} />}
 
           {loadingSettings || !settings ? (
-            <Card>
-              <CardContent className="flex items-center gap-2 p-6 text-sm text-muted-foreground">
+            <Panel>
+              <PanelContent className="flex items-center gap-2 text-xs text-muted-foreground">
                 <Loader2 className="size-4 animate-spin" /> Loading settings…
-              </CardContent>
-            </Card>
+              </PanelContent>
+            </Panel>
           ) : (
-            <div className="grid gap-3 lg:grid-cols-2">
+            <div className="grid gap-2 lg:grid-cols-2">
               <Section title="Refresh">
                 <SwitchRow
                   id="enabled"
@@ -360,18 +360,18 @@ function StatusStrip({ status }: { status: GhStatus }) {
       ? "gh is not authenticated"
       : `Logged in${status.login ? ` as @${status.login}` : ""}${status.host ? ` on ${status.host}` : ""}`;
   return (
-    <Card>
-      <CardContent className="flex items-center gap-3 p-3">
-        <Icon className={cn("size-4 shrink-0", tone)} />
-        <div className="flex-1 text-sm font-medium">{headline}</div>
+    <Panel>
+      <PanelContent className="flex items-center gap-2 px-3 py-1.5">
+        <Icon className={cn("size-3.5 shrink-0", tone)} />
+        <div className="flex-1 text-xs font-medium">{headline}</div>
         {status.version && (
           <span className="flex items-center gap-1 text-xs text-muted-foreground">
             <Terminal className="size-3" />
             {status.version}
           </span>
         )}
-      </CardContent>
-    </Card>
+      </PanelContent>
+    </Panel>
   );
 }
 
@@ -385,12 +385,12 @@ function Section({
   wide?: boolean;
 }) {
   return (
-    <Card className={cn(wide && "lg:col-span-2")}>
-      <CardHeader className="border-b px-4 py-2">
-        <CardTitle className="text-sm font-medium">{title}</CardTitle>
-      </CardHeader>
-      <CardContent className="grid gap-2 p-3">{children}</CardContent>
-    </Card>
+    <Panel className={cn(wide && "lg:col-span-2")}>
+      <PanelHeader>
+        <PanelTitle>{title}</PanelTitle>
+      </PanelHeader>
+      <PanelContent className="grid gap-1.5 p-2">{children}</PanelContent>
+    </Panel>
   );
 }
 
@@ -404,8 +404,8 @@ function FieldRow({
   control: React.ReactNode;
 }) {
   return (
-    <div className="flex items-center justify-between gap-3 py-1">
-      <Label htmlFor={id} className="text-sm font-normal">
+    <div className="flex items-center justify-between gap-3">
+      <Label htmlFor={id} className="text-xs font-normal">
         {label}
       </Label>
       <div className="shrink-0">{control}</div>
@@ -425,8 +425,8 @@ function SwitchRow({
   onChange: (next: boolean) => void;
 }) {
   return (
-    <div className="flex items-center justify-between gap-3 py-1">
-      <Label htmlFor={id} className="cursor-pointer text-sm font-normal">
+    <div className="flex items-center justify-between gap-3">
+      <Label htmlFor={id} className="cursor-pointer text-xs font-normal">
         {label}
       </Label>
       <Switch id={id} checked={checked} onCheckedChange={onChange} />
@@ -472,27 +472,23 @@ function BadgeEditor({
     ]);
   }
   return (
-    <div className="grid gap-2">
+    <div className="grid gap-1.5">
       <p className="text-xs text-muted-foreground">
-        Each row contributes <code className="font-mono">prefix + N + suffix</code>{" "}
-        to the menu-bar text when its count is non-zero. Prefix/suffix accept
-        emoji ({" "}
-        <span className="font-mono">"👀 "</span>,{" "}
-        <span className="font-mono">"✅ "</span>,{" "}
-        <span className="font-mono">"🚀 "</span> ). Pick{" "}
-        <em>Saved filter</em> to badge against a stored filter from the
-        Filters tab.
+        Each enabled row contributes{" "}
+        <code className="font-mono">prefix + N + suffix</code> to the
+        menu-bar (emoji ok: <span className="font-mono">"👀 "</span>,{" "}
+        <span className="font-mono">"✅ "</span>).
       </p>
 
       {configs.length === 0 && (
         <span className="text-xs italic text-muted-foreground">
-          No badge sources — the menu-bar icon will display no count.
+          No badge sources — the menu-bar icon will show no count.
         </span>
       )}
       {configs.map((cfg, idx) => (
         <div
           key={idx}
-          className="grid gap-2 rounded-md border bg-background p-2"
+          className="grid gap-1.5 rounded-md border bg-background p-1.5"
         >
           {/* Row 1 — source + prefix/suffix preview + remove */}
           <div className="grid grid-cols-[auto_1fr_auto_auto_auto_auto] items-center gap-2">
@@ -681,16 +677,20 @@ function RepoMappingsEditor({
       : `${availableRepos.length} cached · ${formatCacheAge(reposCachedAt)}${reposStale ? " (stale, click Fetch)" : ""}`;
 
   return (
-    <div className="grid gap-3">
+    <div className="grid gap-1.5">
       <p className="text-xs text-muted-foreground">
-        Map GitHub repositories to local clones for faster AI Summary
-        generation (5-10× speedup). The list caches for 7 days — use{" "}
-        <strong>Fetch</strong> to refresh from GitHub on demand.
+        Map GitHub repos → local clones for faster AI Summary (5–10×).
+        Cache TTL 7d.
       </p>
 
       {/* Cache strip — always-visible Fetch + cache age */}
       <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
-        <span>{cacheFooter}</span>
+        <span className="flex items-center gap-1.5">
+          {cacheFooter}
+          {(reposStale || availableRepos.length === 0) && (
+            <span className="text-amber-600 dark:text-amber-400">●</span>
+          )}
+        </span>
         <div className="flex items-center gap-1">
           <Button
             size="sm"
@@ -708,7 +708,7 @@ function RepoMappingsEditor({
           </Button>
           <Button
             size="sm"
-            variant={reposStale || availableRepos.length === 0 ? "default" : "outline"}
+            variant="outline"
             disabled={reposFetching}
             onClick={() => void fetchRepos()}
             title="Re-fetch the full repo list from GitHub (ignores cache)"
@@ -718,13 +718,13 @@ function RepoMappingsEditor({
             ) : (
               <Download className="size-3.5" />
             )}
-            Fetch from GitHub
+            Fetch
           </Button>
         </div>
       </div>
 
       {/* Add mapping row: [searchable repo dropdown] [Browse for folder…] */}
-      <div className="flex flex-wrap items-center gap-2 rounded-md border bg-background p-2">
+      <div className="flex flex-wrap items-center gap-1.5 rounded-md border bg-background p-1.5">
         <SearchableRepoDropdown
           items={unmappedRepos}
           value={pickRepo}
@@ -745,7 +745,7 @@ function RepoMappingsEditor({
         />
         <Button
           size="sm"
-          variant="default"
+          variant="secondary"
           disabled={!pickRepo}
           onClick={() => void addMappingForSelected()}
         >
@@ -768,11 +768,11 @@ function RepoMappingsEditor({
           .
         </span>
       ) : (
-        <div className="grid gap-1.5">
+        <div className="grid gap-1">
           {mappings.map((m, idx) => (
             <div
               key={`${m.repo}-${idx}`}
-              className="grid grid-cols-[14rem_1fr_auto_auto] items-center gap-2 rounded-md border bg-background p-2"
+              className="grid grid-cols-[14rem_1fr_auto_auto] items-center gap-2 rounded-md border bg-background px-2 py-1"
             >
               <span className="truncate font-mono text-xs">{m.repo}</span>
               <span

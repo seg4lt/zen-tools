@@ -35,6 +35,9 @@ import { MineTab } from "./components/tabs/MineTab";
 import { ReviewedTab } from "./components/tabs/ReviewedTab";
 import { SettingsTab } from "./components/tabs/SettingsTab";
 import { ToReviewTab } from "./components/tabs/ToReviewTab";
+import { usePrMasterStore } from "./store/prmaster-store";
+
+const DEFAULT_TAB = "to-review";
 
 interface TabDef {
   value: string;
@@ -64,8 +67,19 @@ export function PRMasterShell() {
     }
   });
 
-  // Hide-on-blur for the popover (matches macOS `NSPopover` dismissal).
-  // Routed through the backend so the tray's next click reopens it cleanly.
+  // Tabs are controlled so the popover-reopen handler can snap us back
+  // to Review without unmounting the rest of the tree.
+  const [tab, setTab] = useState(DEFAULT_TAB);
+  const { dispatch } = usePrMasterStore();
+
+  // Popover lifecycle (compact mode only):
+  //   - On focus loss → ask the backend to hide the popover (matches
+  //     the macOS `NSPopover` dismissal model).
+  //   - On focus gain → treat that as "the user just reopened the
+  //     popover" and reset the in-memory UI: jump back to Review and
+  //     drop any half-opened detail panel. The first mount also fires
+  //     this branch but the values are already at their defaults so
+  //     it's a no-op visually.
   useEffect(() => {
     if (!isCompact) return;
     const win = getCurrentWindow();
@@ -74,13 +88,16 @@ export function PRMasterShell() {
       unlisten = await win.onFocusChanged(({ payload: focused }) => {
         if (!focused) {
           void invoke("prmaster_hide_popover");
+        } else {
+          setTab(DEFAULT_TAB);
+          dispatch({ type: "select", id: null });
         }
       });
     })();
     return () => {
       unlisten?.();
     };
-  }, [isCompact]);
+  }, [isCompact, dispatch]);
 
   const visible = useMemo(
     () => TABS.filter((t) => !t.fullOnly || !isCompact),
@@ -89,7 +106,16 @@ export function PRMasterShell() {
 
   return (
     <div className="flex h-full min-h-0 w-full flex-col">
-      <Tabs defaultValue="to-review" className="flex h-full min-h-0 flex-col">
+      <Tabs
+        value={tab}
+        onValueChange={(v) => {
+          // Switching tabs always drops the active detail panel — list
+          // tabs share the same `selectedPrId` field in the store.
+          dispatch({ type: "select", id: null });
+          setTab(v);
+        }}
+        className="flex h-full min-h-0 flex-col"
+      >
         <div className="flex h-9 shrink-0 items-center gap-2 border-b bg-card/60 px-3">
           <TabsList className="h-7 gap-0.5 bg-transparent p-0">
             {visible.map((t) => (

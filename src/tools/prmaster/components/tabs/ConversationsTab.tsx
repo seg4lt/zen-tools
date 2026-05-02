@@ -16,8 +16,8 @@ import {
 import { open as openUrl } from "@tauri-apps/plugin-shell";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
+import { Panel, PanelContent } from "../shared/density";
 import {
   loadConversations,
   usePrMasterStore,
@@ -71,24 +71,24 @@ export function ConversationsTab() {
         </Button>
       </header>
 
-      <div className="flex min-h-0 flex-1 flex-col overflow-y-auto p-3">
+      <div className="flex min-h-0 flex-1 flex-col overflow-y-auto p-2">
         {state.errors.conversations && (
-          <Card className="mb-3 border-destructive/40 bg-destructive/5">
-            <CardContent className="p-3 text-sm text-destructive">
+          <Panel className="mb-2 border-destructive/40 bg-destructive/5">
+            <PanelContent className="p-2 text-xs text-destructive">
               {state.errors.conversations}
-            </CardContent>
-          </Card>
+            </PanelContent>
+          </Panel>
         )}
 
         {state.conversations.length === 0 &&
           !state.loading.conversations &&
           !state.errors.conversations && (
-            <div className="my-12 text-center text-sm text-muted-foreground">
+            <div className="my-12 text-center text-xs text-muted-foreground">
               No active conversations on PRs you're involved in.
             </div>
           )}
 
-        <div className="flex flex-col gap-2">
+        <div className="flex flex-col gap-1.5">
           {state.conversations.map((group) => (
             <ConversationGroupRow
               key={group.prId}
@@ -128,11 +128,11 @@ function ConversationGroupRow({
   );
 
   return (
-    <Card>
+    <Panel>
       <button
         type="button"
         onClick={onToggle}
-        className="flex w-full items-center gap-2 rounded-t-md px-4 py-2.5 text-left transition-colors hover:bg-accent/50"
+        className="flex w-full items-center gap-2 rounded-t-md px-2.5 py-1.5 text-left transition-colors hover:bg-accent/50"
       >
         {expanded ? (
           <ChevronDown className="size-4 shrink-0" />
@@ -169,16 +169,16 @@ function ConversationGroupRow({
       </button>
 
       {expanded && (
-        <CardContent className="border-t p-4">
+        <PanelContent className="border-t p-2.5">
           {needsReply.length > 0 && (
             <Section label="Needs your reply" emphasis items={needsReply} />
           )}
           {others.length > 0 && (
             <Section label="Other threads" items={others} />
           )}
-        </CardContent>
+        </PanelContent>
       )}
-    </Card>
+    </Panel>
   );
 }
 

@@ -23,7 +23,7 @@ export function PrCard({ pr, selected = false, decision, onSelect }: Props) {
       type="button"
       onClick={onSelect}
       className={cn(
-        "group flex w-full flex-col gap-1 rounded-md border bg-card px-3 py-2 text-left text-sm transition-colors",
+        "group flex w-full flex-col gap-0.5 rounded-md border bg-card px-2.5 py-1.5 text-left text-sm transition-colors",
         "hover:bg-accent/60",
         selected && "border-ring bg-accent",
       )}
@@ -35,7 +35,9 @@ export function PrCard({ pr, selected = false, decision, onSelect }: Props) {
             pr.isDraft ? "text-muted-foreground" : "text-foreground",
           )}
         />
-        <span className="line-clamp-2 flex-1 font-medium">{pr.title}</span>
+        <span className="line-clamp-2 flex-1 text-sm font-medium">
+          {pr.title}
+        </span>
         {decision && decision !== "Unknown" && (
           <DecisionBadge decision={decision} />
         )}

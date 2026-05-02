@@ -57,17 +57,13 @@ export function RepoPicker({
   const selectedList = useMemo(() => [...selected], [selected]);
   const overflow = Math.max(0, selectedList.length - MAX_CHIPS);
 
+  // Always alphabetical — items don't reshuffle on toggle, so the click
+  // target stays put.
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     const list = q ? repos.filter((r) => r.toLowerCase().includes(q)) : repos;
-    // Selected first, then alphabetic — same ordering as Swift RepoListPicker.
-    return [...list].sort((a, b) => {
-      const aSel = selected.has(a);
-      const bSel = selected.has(b);
-      if (aSel !== bSel) return aSel ? -1 : 1;
-      return a.localeCompare(b);
-    });
-  }, [repos, search, selected]);
+    return [...list].sort((a, b) => a.localeCompare(b));
+  }, [repos, search]);
 
   const trigger = compact ? (
     <Button

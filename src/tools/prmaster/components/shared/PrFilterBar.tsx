@@ -23,16 +23,12 @@ import {
   User,
   X,
 } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import {
   DropdownMenu,
   DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
@@ -46,15 +42,44 @@ export interface PrFilterState {
   authors: Set<string>;
   repos: Set<string>;
   search: string;
-  savedFilterId: string | null;
+  /** Saved filter IDs — multi-select: a row passes when it matches ANY
+   *  of the selected saved filters. Empty = saved-filter chip is off. */
+  savedFilterIds: Set<string>;
 }
 
 export const emptyFilterState: PrFilterState = {
   authors: new Set(),
   repos: new Set(),
   search: "",
-  savedFilterId: null,
+  savedFilterIds: new Set(),
 };
+
+/** Does a single saved filter match this row? — same predicate the engine
+ *  uses for notifications. File globs are intentionally skipped (we don't
+ *  always have file paths client-side). */
+function rowMatchesSavedFilter(
+  row: EnrichedPullRequest,
+  saved: NotificationFilter,
+): boolean {
+  const pr = row.pr;
+  if (saved.authors.length > 0) {
+    const author = pr.author?.login ?? "";
+    if (!saved.authors.includes(author)) return false;
+  }
+  if (saved.repos.length > 0) {
+    const full = pr.repository.nameWithOwner;
+    const short = full.split("/", 2)[1] ?? full;
+    if (!saved.repos.some((r) => r === full || r === short)) return false;
+  }
+  if (saved.title_regex) {
+    try {
+      if (!new RegExp(saved.title_regex, "i").test(pr.title)) return false;
+    } catch {
+      /* invalid regex -> skip the regex predicate */
+    }
+  }
+  return true;
+}
 
 export function applyPrFilters(
   rows: EnrichedPullRequest[],
@@ -63,31 +88,16 @@ export function applyPrFilters(
 ): EnrichedPullRequest[] {
   let filtered = rows;
 
-  const saved = state.savedFilterId
-    ? savedFilters.find((f) => f.id === state.savedFilterId)
-    : null;
-
-  if (saved) {
-    filtered = filtered.filter((row) => {
-      const pr = row.pr;
-      if (saved.authors.length > 0) {
-        const author = pr.author?.login ?? "";
-        if (!saved.authors.includes(author)) return false;
-      }
-      if (saved.repos.length > 0) {
-        const full = pr.repository.nameWithOwner;
-        const short = full.split("/", 2)[1] ?? full;
-        if (!saved.repos.some((r) => r === full || r === short)) return false;
-      }
-      if (saved.title_regex) {
-        try {
-          if (!new RegExp(saved.title_regex, "i").test(pr.title)) return false;
-        } catch {
-          /* invalid regex -> skip the regex filter */
-        }
-      }
-      return true;
-    });
+  // Saved filters → OR-match (a PR passes if it matches any picked one).
+  // Mirrors how Author/Repo chips work: multiple selections widen the
+  // result rather than narrow it.
+  if (state.savedFilterIds.size > 0) {
+    const active = savedFilters.filter((f) => state.savedFilterIds.has(f.id));
+    if (active.length > 0) {
+      filtered = filtered.filter((row) =>
+        active.some((f) => rowMatchesSavedFilter(row, f)),
+      );
+    }
   }
 
   if (state.authors.size > 0) {
@@ -154,59 +164,56 @@ export function PrFilterBar({
     return [...set].sort();
   }, [rows]);
 
-  const activeSaved = state.savedFilterId
-    ? savedFilters.find((f) => f.id === state.savedFilterId)
-    : null;
+  // Saved-filter chip is keyed by id; we look up the human name in
+  // `formatItem`/`labelFor` so the underlying MultiSelectChip stays
+  // generic over `string` items (consistent with Author/Repo).
+  const enabledSavedFilters = useMemo(
+    () => savedFilters.filter((f) => f.enabled),
+    [savedFilters],
+  );
+  const enabledSavedFilterIds = useMemo(
+    () => enabledSavedFilters.map((f) => f.id),
+    [enabledSavedFilters],
+  );
+  const savedFilterNameById = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const f of enabledSavedFilters) map.set(f.id, f.name);
+    return map;
+  }, [enabledSavedFilters]);
 
   const hasAny =
-    !!activeSaved ||
+    state.savedFilterIds.size > 0 ||
     state.authors.size > 0 ||
     state.repos.size > 0 ||
     state.search.length > 0;
 
   return (
     <div className="flex flex-wrap items-center gap-1.5">
-      {/* Saved filter dropdown */}
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <FilterChipButton
-            icon={Filter}
-            label={activeSaved ? activeSaved.name : "Filter"}
-            active={!!activeSaved}
-          />
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="start" className="w-56">
-          <DropdownMenuLabel>Saved filters</DropdownMenuLabel>
-          <DropdownMenuItem
-            onSelect={() => onChange({ ...state, savedFilterId: null })}
-          >
-            No filter
-          </DropdownMenuItem>
-          {savedFilters.length > 0 && <DropdownMenuSeparator />}
-          {savedFilters
-            .filter((f) => f.enabled)
-            .map((f) => (
-              <DropdownMenuItem
-                key={f.id}
-                onSelect={() => onChange({ ...state, savedFilterId: f.id })}
-              >
-                <span className="flex-1 truncate">{f.name}</span>
-                {state.savedFilterId === f.id && (
-                  <Badge variant="secondary" className="ml-2">
-                    on
-                  </Badge>
-                )}
-              </DropdownMenuItem>
-            ))}
-          {savedFilters.length === 0 && (
-            <DropdownMenuItem disabled>
-              <span className="text-xs text-muted-foreground">
-                Add filters in the Filters tab
-              </span>
-            </DropdownMenuItem>
-          )}
-        </DropdownMenuContent>
-      </DropdownMenu>
+      <MultiSelectChip
+        icon={Filter}
+        label={
+          state.savedFilterIds.size === 0
+            ? "Filter"
+            : state.savedFilterIds.size === 1
+              ? savedFilterNameById.get([...state.savedFilterIds][0]!) ??
+                "1 filter"
+              : `${state.savedFilterIds.size} filters`
+        }
+        active={state.savedFilterIds.size > 0}
+        items={enabledSavedFilterIds}
+        selected={state.savedFilterIds}
+        onToggle={(id) => {
+          const next = new Set(state.savedFilterIds);
+          if (next.has(id)) next.delete(id);
+          else next.add(id);
+          onChange({ ...state, savedFilterIds: next });
+        }}
+        onClear={() => onChange({ ...state, savedFilterIds: new Set() })}
+        formatItem={(id) => savedFilterNameById.get(id) ?? id}
+        sortKey={(id) => savedFilterNameById.get(id) ?? id}
+        placeholder="Filter saved filters…"
+        emptyMessage="No saved filters — add them in the Filters tab"
+      />
 
       <MultiSelectChip
         icon={User}
@@ -264,7 +271,7 @@ export function PrFilterBar({
               authors: new Set(),
               repos: new Set(),
               search: "",
-              savedFilterId: null,
+              savedFilterIds: new Set(),
             })
           }
           aria-label="Clear filters"
@@ -321,7 +328,9 @@ function MultiSelectChip({
   onToggle,
   onClear,
   formatItem,
+  sortKey,
   placeholder,
+  emptyMessage,
   wide = false,
 }: {
   icon: React.ComponentType<{ className?: string }>;
@@ -331,22 +340,28 @@ function MultiSelectChip({
   selected: Set<string>;
   onToggle: (item: string) => void;
   onClear: () => void;
+  /** How an item is rendered in the list. Defaults to identity. */
   formatItem: (item: string) => string;
+  /** Optional override for what to compare on when sorting / searching.
+   *  Defaults to `formatItem`. Useful when items are opaque IDs whose
+   *  display label lives elsewhere (e.g. saved-filter ids). */
+  sortKey?: (item: string) => string;
   placeholder: string;
+  /** Message shown when the list is empty (no items at all, vs no search match). */
+  emptyMessage?: string;
   wide?: boolean;
 }) {
   const [search, setSearch] = useState("");
+  const keyOf = sortKey ?? formatItem;
+  // Always alphabetical — items must NOT jump around as the user toggles
+  // them, since that destroys the click target a user is aiming at.
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
-    const list = q ? items.filter((i) => i.toLowerCase().includes(q)) : items;
-    // Selected first, then alphabetic — same ordering as Swift RepoListPicker.
-    return [...list].sort((a, b) => {
-      const aSel = selected.has(a);
-      const bSel = selected.has(b);
-      if (aSel !== bSel) return aSel ? -1 : 1;
-      return a.localeCompare(b);
-    });
-  }, [items, search, selected]);
+    const list = q
+      ? items.filter((i) => keyOf(i).toLowerCase().includes(q))
+      : items;
+    return [...list].sort((a, b) => keyOf(a).localeCompare(keyOf(b)));
+  }, [items, search, keyOf]);
 
   return (
     <DropdownMenu>
@@ -385,7 +400,9 @@ function MultiSelectChip({
         <div className="max-h-64 overflow-y-auto p-1">
           {filtered.length === 0 ? (
             <p className="p-3 text-center text-xs text-muted-foreground">
-              {items.length === 0 ? "Nothing to filter on yet." : "No matches."}
+              {items.length === 0
+                ? emptyMessage ?? "Nothing to filter on yet."
+                : "No matches."}
             </p>
           ) : (
             filtered.map((item) => {

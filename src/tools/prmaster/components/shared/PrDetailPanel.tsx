@@ -26,7 +26,6 @@ import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { open as openUrl } from "@tauri-apps/plugin-shell";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import { Textarea } from "@/components/ui/textarea";
@@ -36,6 +35,7 @@ import {
   type EnrichedPullRequest,
 } from "../../lib/tauri";
 import { CiChecks } from "./CiChecks";
+import { Panel, PanelContent, PanelHeader } from "./density";
 import { ReviewerAvatars } from "./ReviewerAvatars";
 
 interface Props {
@@ -76,17 +76,17 @@ export function PrDetailPanel({ pr, currentUser, onActionDone }: Props) {
   }
 
   return (
-    <Card>
-      <CardHeader className="flex flex-col gap-2 space-y-0 border-b p-4">
+    <Panel>
+      <PanelHeader className="flex flex-col items-stretch gap-1.5 px-3 py-2">
         <div className="flex items-start gap-2">
-          <h3 className="flex-1 text-base leading-tight font-semibold">
+          <h3 className="flex-1 text-sm leading-tight font-semibold">
             {pr.pr.title}
           </h3>
           <span className="font-mono text-xs text-muted-foreground">
             {pr.pr.repository.nameWithOwner}#{pr.pr.number}
           </span>
         </div>
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+        <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-xs text-muted-foreground">
           {pr.pr.author?.login && <span>by @{pr.pr.author.login}</span>}
           <span>opened {new Date(pr.pr.createdAt).toLocaleDateString()}</span>
           {pr.pr.isDraft && (
@@ -107,16 +107,20 @@ export function PrDetailPanel({ pr, currentUser, onActionDone }: Props) {
             state={detail?.mergeStateStatus ?? null}
           />
         </div>
-      </CardHeader>
+      </PanelHeader>
 
-      <CardContent className="grid gap-4 p-4">
-        <div className="grid gap-1.5">
-          <Label className="text-xs">Reviewers</Label>
+      <PanelContent className="grid gap-2 p-2.5">
+        <div className="grid gap-1">
+          <Label className="text-[10px] uppercase tracking-wide text-muted-foreground">
+            Reviewers
+          </Label>
           <ReviewerAvatars pr={pr} />
         </div>
 
-        <div className="grid gap-1.5">
-          <Label className="text-xs">Checks</Label>
+        <div className="grid gap-1">
+          <Label className="text-[10px] uppercase tracking-wide text-muted-foreground">
+            Checks
+          </Label>
           <CiChecks rollup={rollup} />
         </div>
 
@@ -223,8 +227,8 @@ export function PrDetailPanel({ pr, currentUser, onActionDone }: Props) {
             </Button>
           </div>
         )}
-      </CardContent>
-    </Card>
+      </PanelContent>
+    </Panel>
   );
 }
 

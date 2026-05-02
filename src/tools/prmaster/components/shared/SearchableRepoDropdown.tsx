@@ -51,15 +51,13 @@ export function SearchableRepoDropdown({
 }: Props) {
   const [search, setSearch] = useState("");
 
+  // Always alphabetical — even the selected value stays in its natural
+  // alphabetical slot so the list never reshuffles between renders.
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     const list = q ? items.filter((r) => r.toLowerCase().includes(q)) : items;
-    return [...list].sort((a, b) => {
-      if (a === value) return -1;
-      if (b === value) return 1;
-      return a.localeCompare(b);
-    });
-  }, [items, search, value]);
+    return [...list].sort((a, b) => a.localeCompare(b));
+  }, [items, search]);
 
   return (
     <DropdownMenu>
