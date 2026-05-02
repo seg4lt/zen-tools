@@ -100,6 +100,17 @@ pub struct PrMasterSettings {
     pub cached_repos_at_ms: Option<i64>,
     /// Local checkout mappings used by AI Summary.
     pub repo_mappings: Vec<LocalRepoMapping>,
+    /// Additional commit-author search terms for the AI Summary
+    /// commit fetcher. Combined (OR) with the primary author resolved
+    /// from `git config user.email` / `user.name` of each mapped
+    /// repo. Useful when the user's git identity has shifted over
+    /// time (job changes, multiple emails) or when they want to
+    /// roll up a teammate's work into the same report. Each entry
+    /// becomes a separate `--author=<value>` flag passed to
+    /// `git log`, which `git` matches as a substring against
+    /// author name / email — so `"alice"` matches both
+    /// `Alice Smith <alice@…>` and `alice@github.com`.
+    pub extra_authors: Vec<String>,
 }
 
 impl Default for PrMasterSettings {
@@ -124,6 +135,7 @@ impl Default for PrMasterSettings {
             cached_repos: Vec::new(),
             cached_repos_at_ms: None,
             repo_mappings: Vec::new(),
+            extra_authors: Vec::new(),
         }
     }
 }

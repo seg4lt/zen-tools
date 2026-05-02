@@ -254,6 +254,13 @@ export interface PrMasterSettings {
   cached_repos: string[];
   cached_repos_at_ms: number | null;
   repo_mappings: LocalRepoMapping[];
+  /** Extra commit-author search terms — combined (OR) with the
+   *  primary author resolved from the mapped repo's local git
+   *  identity (`user.email` / `user.name`). Each entry becomes a
+   *  separate `git log --author=<value>` flag, so substring matches
+   *  against author name AND email work — e.g. `"alice"` matches
+   *  both `Alice Smith <alice@…>` and `alice@github.com`. */
+  extra_authors: string[];
 }
 
 export interface RefreshSnapshot {

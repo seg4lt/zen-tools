@@ -465,10 +465,17 @@ impl PrMasterEngine {
         let provider_kind =
             zen_ai_cli::AiProviderType::from_wire(settings.ai_provider.as_str());
         let provider = zen_ai_cli::build_provider(provider_kind);
+
+        // Local mapping is required: the AI summary path now reads
+        // commits via `git log` against the user's local clone (no
+        // gh API). Repos without a mapping bail out with a clear
+        // diagnostic rather than silently falling back to a slow
+        // remote fetch.
         let mapping = settings
             .repo_mappings
             .iter()
-            .find(|m| m.repo.eq_ignore_ascii_case(&params.repo));
+            .find(|m| m.repo.eq_ignore_ascii_case(&params.repo))
+            .ok_or_else(|| SummaryError::MissingMapping(params.repo.clone()))?;
 
         let mut effective = params.clone();
         if effective.model.is_none() && !settings.ai_model.is_empty() {
@@ -480,9 +487,9 @@ impl PrMasterEngine {
         let result = summary::generate_summary(
             &effective,
             provider.as_ref(),
-            &self.inner.gh,
             mapping,
             settings.ai_token_ratio as usize,
+            &settings.extra_authors,
         )
         .await;
         let duration_ms = started_instant.elapsed().as_millis() as u64;

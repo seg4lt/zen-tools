@@ -79,7 +79,11 @@ pub struct SummaryCard {
 /// Errors raised by [`generate_summary`].
 #[derive(Debug, Error)]
 pub enum SummaryError {
-    /// Underlying `gh` CLI error.
+    /// Underlying `gh` CLI error. Retained even though the summary
+    /// commit-fetch path no longer hits `gh` (we read commits from
+    /// the user's local clone via `git log`); other engine code paths
+    /// still surface this variant when they propagate gh failures
+    /// through `SummaryError`.
     #[error(transparent)]
     Gh(#[from] GhError),
     /// AI provider failed.
@@ -94,6 +98,11 @@ pub enum SummaryError {
     /// No commits found in the requested range.
     #[error("no commits in range")]
     NoCommits,
+    /// The repo isn't mapped to a local clone in Settings → Local
+    /// repo mappings, and the AI summary path now requires a local
+    /// clone (we read commits via `git log`, not `gh api`).
+    #[error("no local repo mapping configured for {0} — add one in Settings → Local repo mappings")]
+    MissingMapping(String),
 }
 
 /// One commit + its (optional, possibly-truncated) diff.
@@ -378,25 +387,66 @@ fn format_date_label(since: DateTime<Utc>, until: DateTime<Utc>) -> String {
     }
 }
 
-/// Derive a fresh [`SummaryCard`] for the given params using the supplied
-/// AI provider, optionally honouring a [`LocalRepoMapping`] for offline
-/// `git log` / `git show`.
+/// Derive a fresh [`SummaryCard`] for the given params, reading
+/// commits from the user's **local clone** of the repo.
+///
+/// `mapping` is required: the heatmap-driven AI tab only summarises
+/// repos that have a `LocalRepoMapping` in Settings, and there's no
+/// good reason to hit `gh api repos/{repo}/commits` for the summary
+/// path when the same data is sitting on disk and `git log` is
+/// orders of magnitude faster + rate-limit-free. (`gh` is still used
+/// by the rest of the engine — PR list, refresh, repo enumeration,
+/// notifications — just not here.)
+///
+/// Author filtering is the **union** of:
+///   1. `params.author` if the caller explicitly supplied one,
+///      otherwise the local repo's `git config user.email` /
+///      `user.name` ("primary author").
+///   2. Every entry in `extra_authors` (Settings → "Additional
+///      authors") — useful when the user's git identity has shifted
+///      over the years or when they want to roll up a teammate's
+///      commits into the same report.
+///
+/// `git log` accepts repeated `--author=<value>` flags and OR-s
+/// them, with substring matching against the commit author's name
+/// AND email — so plain logins, full emails, or display names all
+/// work as inputs.
 pub async fn generate_summary(
     params: &AiSummaryParams,
     provider: &dyn AiProvider,
-    gh: &zen_github::GhClient,
-    mapping: Option<&LocalRepoMapping>,
+    mapping: &LocalRepoMapping,
     token_ratio: usize,
+    extra_authors: &[String],
 ) -> Result<SummaryCard, SummaryError> {
-    let author = match params.author.as_deref() {
+    let primary = match params.author.as_deref() {
         Some(a) if !a.is_empty() => a.to_string(),
-        _ => gh.whoami().await?,
+        _ => git_author(&mapping.local_path).await.unwrap_or_default(),
     };
 
-    let commits = match mapping {
-        Some(m) => fetch_commits_local(&m.local_path, &author, params.since, params.until).await?,
-        None => fetch_commits_remote(gh, &params.repo, &author, params.since, params.until).await?,
-    };
+    // Combine primary + extras, trimming, skipping empties, and
+    // de-duping case-insensitively so we don't emit a redundant
+    // `--author=` flag for the same identity.
+    let mut authors: Vec<String> = Vec::new();
+    if !primary.is_empty() {
+        authors.push(primary);
+    }
+    for raw in extra_authors {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if authors
+            .iter()
+            .any(|a| a.eq_ignore_ascii_case(trimmed))
+        {
+            continue;
+        }
+        authors.push(trimmed.to_string());
+    }
+
+    let commits =
+        fetch_commits_local(&mapping.local_path, &authors, params.since, params.until)
+            .await?;
 
     if commits.is_empty() {
         // Treat "no commits" as a successful but empty result rather
@@ -440,61 +490,31 @@ pub async fn generate_summary(
     })
 }
 
-async fn fetch_commits_remote(
-    gh: &zen_github::GhClient,
-    repo: &str,
-    author: &str,
-    since: DateTime<Utc>,
-    until: DateTime<Utc>,
-) -> Result<Vec<EnrichedCommit>, SummaryError> {
-    let value = gh
-        .list_repo_commits(repo, author, &since.to_rfc3339(), &until.to_rfc3339())
-        .await?;
-    let entries = value.as_array().cloned().unwrap_or_default();
-    let mut out = Vec::with_capacity(entries.len());
-    for entry in entries {
-        let sha = entry
-            .get("sha")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let message = entry
-            .get("commit")
-            .and_then(|c| c.get("message"))
-            .and_then(|m| m.as_str())
-            .unwrap_or("")
-            .to_string();
-        let author_date = entry
-            .get("commit")
-            .and_then(|c| c.get("author"))
-            .and_then(|a| a.get("date"))
-            .and_then(|d| d.as_str())
-            .and_then(|s| s.parse::<DateTime<Utc>>().ok())
-            .unwrap_or(since);
-        if sha.is_empty() {
-            continue;
-        }
-        let diff = match gh.commit_diff(repo, &sha).await {
-            Ok(d) => Some(d),
-            Err(e) => {
-                tracing::warn!(repo, sha, error = %e, "commit_diff failed");
-                None
+/// Read the local repo's git identity for use as the `git log
+/// --author=` filter. Tries `user.email` first (it's the canonical
+/// commit-author key), then `user.name`. Returns `None` when neither
+/// is set; callers fall back to "no filter" so the summary still
+/// runs against every commit in range rather than failing outright.
+async fn git_author(repo_path: &str) -> Option<String> {
+    let exec = ShellExecutor::bare();
+    let path = std::path::Path::new(repo_path);
+    for key in ["user.email", "user.name"] {
+        if let Ok(out) = exec
+            .run_in_dir(path, "git", &["config", "--get", key])
+            .await
+        {
+            let trimmed = out.stdout.trim().to_string();
+            if !trimmed.is_empty() {
+                return Some(trimmed);
             }
-        };
-        out.push(EnrichedCommit {
-            short_sha: sha.chars().take(7).collect(),
-            sha,
-            message,
-            author_date,
-            diff,
-        });
+        }
     }
-    Ok(out)
+    None
 }
 
 async fn fetch_commits_local(
     repo_path: &str,
-    author: &str,
+    authors: &[String],
     since: DateTime<Utc>,
     until: DateTime<Utc>,
 ) -> Result<Vec<EnrichedCommit>, SummaryError> {
@@ -502,24 +522,28 @@ async fn fetch_commits_local(
     let format = "%H%x09%aI%x09%s";
     let since_arg = format!("--since={}", since.to_rfc3339());
     let until_arg = format!("--until={}", until.to_rfc3339());
-    let author_arg = format!("--author={author}");
     let pretty_arg = format!("--pretty=format:{format}");
     let path = std::path::Path::new(repo_path);
-    let log = exec
-        .run_in_dir(
-            path,
-            "git",
-            &[
-                "log",
-                "--no-color",
-                "--all",
-                &author_arg,
-                &since_arg,
-                &until_arg,
-                &pretty_arg,
-            ],
-        )
-        .await?;
+    // Build one `--author=<value>` flag per resolved author. When the
+    // list is empty we drop the filter entirely so the summary widens
+    // to every commit in range rather than silently returning none —
+    // important when the local repo has no `user.email` configured.
+    let author_args: Vec<String> = authors
+        .iter()
+        .map(|a| format!("--author={a}"))
+        .collect();
+    let mut args: Vec<&str> = vec![
+        "log",
+        "--no-color",
+        "--all",
+        &since_arg,
+        &until_arg,
+        &pretty_arg,
+    ];
+    for a in &author_args {
+        args.push(a);
+    }
+    let log = exec.run_in_dir(path, "git", &args).await?;
     let mut out = Vec::new();
     for line in log.stdout.lines() {
         let mut parts = line.splitn(3, '\t');

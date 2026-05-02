@@ -331,6 +331,15 @@ export function SettingsTab() {
                   }
                 />
               </Section>
+
+              <Section title="Additional commit authors" wide>
+                <ExtraAuthorsEditor
+                  authors={settings.extra_authors}
+                  onChange={(extra_authors) =>
+                    void persist({ ...settings, extra_authors })
+                  }
+                />
+              </Section>
             </div>
           )}
         </div>
@@ -785,6 +794,107 @@ function RepoMappingsEditor({
       )}
     </div>
   );
+}
+
+/** Editor for the "additional commit authors" list. Backs
+ *  `PrMasterSettings.extra_authors` — each entry becomes a separate
+ *  `git log --author=<value>` flag during AI summary generation, so
+ *  the search widens beyond the user's current local git identity
+ *  to cover renames / past emails / teammates. The text input takes
+ *  comma-separated values; we split, trim, and de-dupe on every
+ *  change. Existing entries also render as removable chips so users
+ *  can edit one at a time without retyping the whole list. */
+function ExtraAuthorsEditor({
+  authors,
+  onChange,
+}: {
+  authors: string[];
+  onChange: (next: string[]) => void;
+}) {
+  // Local draft so the user can type freely (commas mid-word, partial
+  // emails, etc.) without each keystroke reformatting the field.
+  // We push the parsed list upward on blur or Enter.
+  const [draft, setDraft] = useState("");
+
+  function commit() {
+    const parsed = draft
+      .split(",")
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+    if (parsed.length === 0) {
+      setDraft("");
+      return;
+    }
+    const merged = mergeAuthors(authors, parsed);
+    if (merged.length !== authors.length) onChange(merged);
+    setDraft("");
+  }
+
+  function removeAt(i: number) {
+    onChange(authors.filter((_, idx) => idx !== i));
+  }
+
+  return (
+    <div className="grid gap-2">
+      <p className="text-xs text-muted-foreground">
+        Combined (OR) with the local git identity of each mapped repo
+        when fetching commits for an AI summary. Plain logins (
+        <code className="font-mono">alice</code>), full emails (
+        <code className="font-mono">alice@github.com</code>), or
+        display names all work — git matches them as substrings.
+      </p>
+
+      {authors.length > 0 && (
+        <div className="flex flex-wrap gap-1.5">
+          {authors.map((a, i) => (
+            <Badge
+              key={`${a}-${i}`}
+              variant="secondary"
+              className="gap-1 pr-1 font-mono text-[11px]"
+            >
+              <span>{a}</span>
+              <button
+                type="button"
+                onClick={() => removeAt(i)}
+                className="cursor-pointer rounded-full p-0.5 hover:bg-muted-foreground/20"
+                aria-label={`Remove ${a}`}
+              >
+                <Trash2 className="size-2.5" />
+              </button>
+            </Badge>
+          ))}
+        </div>
+      )}
+
+      <Input
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === ",") {
+            e.preventDefault();
+            commit();
+          }
+        }}
+        placeholder="alice@example.com, bob, charlie@old-job.com"
+        className="h-8 font-mono"
+      />
+    </div>
+  );
+}
+
+/** Merge two author lists case-insensitively, preserving the order of
+ *  the original list and appending only genuinely new entries. */
+function mergeAuthors(existing: string[], incoming: string[]): string[] {
+  const seen = new Set(existing.map((a) => a.toLowerCase()));
+  const out = existing.slice();
+  for (const a of incoming) {
+    const key = a.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(a);
+  }
+  return out;
 }
 
 /** Select for the active provider's models. Mirrors the Swift
