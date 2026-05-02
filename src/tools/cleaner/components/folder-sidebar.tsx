@@ -13,13 +13,21 @@
 import {
   CheckCircle2,
   CircleAlert,
+  Copy,
   FolderOpen,
   FolderPlus,
   Loader2,
   RefreshCw,
   Trash2,
 } from "lucide-react";
+import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { Button } from "@/components/ui/button";
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuTrigger,
+} from "@/components/ui/context-menu";
 import { cn } from "@/lib/utils";
 import { useCleanerStore } from "../store/cleaner-store";
 import { useCleanerScans } from "../hooks/use-cleaner-scans";
@@ -37,7 +45,7 @@ export function FolderSidebar() {
   };
 
   return (
-    <div className="flex h-full min-h-0 w-64 shrink-0 flex-col border-r bg-card/40">
+    <div className="flex h-full min-h-0 w-64 shrink-0 flex-col overflow-hidden border-r bg-card/40">
       <div className="flex h-9 shrink-0 items-center gap-1 border-b px-2">
         <span className="text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
           Folders
@@ -108,50 +116,70 @@ function FolderItem({ folder, onRemove, onRefresh }: FolderItemProps) {
   const progress = state.sizeProgress[folder];
 
   return (
-    <li className="group flex flex-col gap-0.5 px-2 py-1 hover:bg-muted/40">
-      <div className="flex items-center gap-1">
-        <button
-          type="button"
-          onClick={onRefresh}
-          title={folder}
-          className="flex flex-1 items-center gap-1.5 truncate text-left"
-        >
-          <FolderOpen className="size-3.5 shrink-0 text-primary/70" />
-          <span className="truncate font-mono text-xs">{basename}</span>
-          <span className="ml-1 inline-flex shrink-0 items-center gap-1 text-[10px] text-muted-foreground/60">
-            {status === "scanning" ? (
-              <Loader2 className="size-3 animate-spin" />
-            ) : status === "error" ? (
-              <CircleAlert
-                className="size-3 text-destructive"
-                aria-label={state.scanError[folder]}
-              />
-            ) : status === "ready" && repoCount != null && !progress ? (
-              <CheckCircle2 className="size-3 text-emerald-500/70" />
-            ) : null}
-            {repoCount != null && status !== "scanning" ? (
-              <span>
-                {repoCount} repo{repoCount === 1 ? "" : "s"}
+    <ContextMenu>
+      <ContextMenuTrigger asChild>
+        <li className="group flex min-w-0 flex-col gap-0.5 px-2 py-1 hover:bg-muted/40">
+          <div className="flex min-w-0 items-center gap-1">
+            <button
+              type="button"
+              onClick={onRefresh}
+              title={folder}
+              className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
+            >
+              <FolderOpen className="size-3.5 shrink-0 text-primary/70" />
+              <span className="min-w-0 flex-1 truncate font-mono text-xs">
+                {basename}
               </span>
-            ) : null}
-          </span>
-        </button>
-        <button
-          type="button"
-          onClick={onRemove}
-          title={`Remove ${basename}`}
-          aria-label={`Remove ${basename}`}
-          className={cn(
-            "rounded-sm p-0.5 opacity-0 transition-opacity",
-            "hover:bg-destructive/15 hover:text-destructive",
-            "group-hover:opacity-100 focus:opacity-100",
-          )}
+              <span className="ml-1 inline-flex shrink-0 items-center gap-1 text-[10px] text-muted-foreground/60">
+                {status === "scanning" ? (
+                  <Loader2 className="size-3 animate-spin" />
+                ) : status === "error" ? (
+                  <CircleAlert
+                    className="size-3 text-destructive"
+                    aria-label={state.scanError[folder]}
+                  />
+                ) : status === "ready" && repoCount != null && !progress ? (
+                  <CheckCircle2 className="size-3 text-emerald-500/70" />
+                ) : null}
+                {repoCount != null && status !== "scanning" ? (
+                  <span>
+                    {repoCount} repo{repoCount === 1 ? "" : "s"}
+                  </span>
+                ) : null}
+              </span>
+            </button>
+            <button
+              type="button"
+              onClick={onRemove}
+              title={`Remove ${basename}`}
+              aria-label={`Remove ${basename}`}
+              className={cn(
+                "shrink-0 rounded-sm p-0.5 opacity-0 transition-opacity",
+                "hover:bg-destructive/15 hover:text-destructive",
+                "group-hover:opacity-100 focus:opacity-100",
+              )}
+            >
+              <Trash2 className="size-3" />
+            </button>
+          </div>
+          {progress ? <SizeProgressBar progress={progress} /> : null}
+        </li>
+      </ContextMenuTrigger>
+      <ContextMenuContent>
+        <ContextMenuItem onSelect={() => void writeText(folder)}>
+          <Copy className="size-3.5" /> Copy path
+        </ContextMenuItem>
+        <ContextMenuItem onSelect={() => onRefresh()}>
+          <RefreshCw className="size-3.5" /> Refresh
+        </ContextMenuItem>
+        <ContextMenuItem
+          variant="destructive"
+          onSelect={() => onRemove()}
         >
-          <Trash2 className="size-3" />
-        </button>
-      </div>
-      {progress ? <SizeProgressBar progress={progress} /> : null}
-    </li>
+          <Trash2 className="size-3.5" /> Remove folder
+        </ContextMenuItem>
+      </ContextMenuContent>
+    </ContextMenu>
   );
 }
 

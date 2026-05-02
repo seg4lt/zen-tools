@@ -10,10 +10,18 @@
 import {
   ChevronDown,
   ChevronRight,
+  Copy,
   Folder,
   GitBranch,
   HardDrive,
 } from "lucide-react";
+import { writeText } from "@tauri-apps/plugin-clipboard-manager";
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuTrigger,
+} from "@/components/ui/context-menu";
 import { cn } from "@/lib/utils";
 import { ActionChip } from "./action-chip";
 import { fmtSize, type CleanerNodeAction, type CleanerTreeNode } from "../lib/tauri";
@@ -80,57 +88,71 @@ export function TreeRow({
   const isRepo = node.kind === "repo";
 
   return (
-    <div
-      role="treeitem"
-      aria-selected={active}
-      onClick={() => onSelect()}
-      className={cn(
-        "group/leaf flex w-full cursor-default items-center gap-2 px-2 transition-colors",
-        "hover:bg-muted/40",
-        active && "bg-accent/40",
-        action === "clean" && "ring-inset ring-1 ring-amber-500/20",
-        action === "delete" && "ring-inset ring-1 ring-destructive/30",
-      )}
-      style={{ height: ROW_HEIGHT, paddingLeft: indent }}
-    >
-      <span className="size-3 shrink-0" />
-      <Icon
-        className={cn(
-          "size-3.5 shrink-0",
-          isRepo ? "text-primary/70" : "text-fuchsia-500/80",
-        )}
-      />
-      <span className="truncate font-mono text-xs">{node.label}</span>
-      {/* Path tail — secondary, hidden on narrow views via overflow */}
-      <span
-        className="hidden min-w-0 flex-1 truncate font-mono text-[10px] text-muted-foreground/60 sm:inline"
-        title={node.path}
-      >
-        {node.path}
-      </span>
-      {/* Size column */}
-      <SizeSummary node={node} action={action} />
-      {/* Action chip — last column so it lines up across rows */}
-      <ActionChip
-        kind={isRepo ? "repo" : "globalPath"}
-        action={action}
-        active={active}
-        disabled={disabled}
-        onCycle={(e) => {
-          e.stopPropagation();
-          onCycleAction();
-        }}
-      />
-      {/* The "expand" affordance for leaves is invisible — keyboard
-          h/l on a leaf jumps to the section parent / first child. */}
-      <button
-        type="button"
-        aria-hidden
-        tabIndex={-1}
-        className="hidden"
-        onClick={onToggleExpand}
-      />
-    </div>
+    <ContextMenu>
+      <ContextMenuTrigger asChild>
+        <div
+          role="treeitem"
+          aria-selected={active}
+          onClick={() => onSelect()}
+          className={cn(
+            "group/leaf flex w-full min-w-0 cursor-default items-center gap-2 px-2 transition-colors",
+            "hover:bg-muted/40",
+            active && "bg-accent/40",
+            action === "clean" && "ring-inset ring-1 ring-amber-500/20",
+            action === "delete" && "ring-inset ring-1 ring-destructive/30",
+          )}
+          style={{ height: ROW_HEIGHT, paddingLeft: indent }}
+        >
+          <span className="size-3 shrink-0" />
+          <Icon
+            className={cn(
+              "size-3.5 shrink-0",
+              isRepo ? "text-primary/70" : "text-fuchsia-500/80",
+            )}
+          />
+          <span className="shrink-0 truncate font-mono text-xs">
+            {node.label}
+          </span>
+          {/* Path tail — secondary, hidden on narrow views via overflow */}
+          <span
+            className="hidden min-w-0 flex-1 truncate font-mono text-[10px] text-muted-foreground/60 sm:inline"
+            title={node.path}
+          >
+            {node.path}
+          </span>
+          {/* Size column */}
+          <SizeSummary node={node} action={action} />
+          {/* Action chip — last column so it lines up across rows */}
+          <ActionChip
+            kind={isRepo ? "repo" : "globalPath"}
+            action={action}
+            active={active}
+            disabled={disabled}
+            onCycle={(e) => {
+              e.stopPropagation();
+              onCycleAction();
+            }}
+          />
+          {/* The "expand" affordance for leaves is invisible — keyboard
+              h/l on a leaf jumps to the section parent / first child. */}
+          <button
+            type="button"
+            aria-hidden
+            tabIndex={-1}
+            className="hidden"
+            onClick={onToggleExpand}
+          />
+        </div>
+      </ContextMenuTrigger>
+      <ContextMenuContent>
+        <ContextMenuItem onSelect={() => void writeText(node.path)}>
+          <Copy className="size-3.5" /> Copy path
+        </ContextMenuItem>
+        <ContextMenuItem onSelect={() => void writeText(node.label)}>
+          <Copy className="size-3.5" /> Copy name
+        </ContextMenuItem>
+      </ContextMenuContent>
+    </ContextMenu>
   );
 }
 
