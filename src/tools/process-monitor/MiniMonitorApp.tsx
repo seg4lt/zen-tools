@@ -14,6 +14,12 @@
  *     focuses the main window and hides the popover.
  *   • Click anywhere outside — Tauri emits `tauri://blur` and we
  *     hide the window so it behaves like a native menu-bar panel.
+ *
+ * Per-process rows are derived from the sample itself (grouping
+ * `per_pid` by `root_pid`) rather than from a separate config
+ * fetch. That avoids the stale-state bug where the popover stays
+ * mounted across hide/show cycles: any new target the user picks
+ * via the main window shows up on the very next sample tick.
  */
 
 import { invoke } from "@tauri-apps/api/core";
@@ -26,21 +32,15 @@ import { pmTauri, type Sample } from "./lib/tauri";
 
 export function MiniMonitorApp() {
   const [sample, setSample] = useState<Sample | null>(null);
-  const [targetPids, setTargetPids] = useState<number[]>([]);
 
-  // Bootstrap from the latest historical sample + current target list.
-  // The sampler emits roughly every `poll_ms`, so the popover starts
-  // populated even before the next tick fires.
+  // Bootstrap from the latest historical sample so the popover starts
+  // populated even before the next sampler tick fires.
   useEffect(() => {
     let alive = true;
     (async () => {
       try {
-        const [hist, cfg] = await Promise.all([
-          pmTauri.getHistory(),
-          pmTauri.getConfig(),
-        ]);
+        const hist = await pmTauri.getHistory();
         if (!alive) return;
-        setTargetPids(cfg.target_pids);
         if (hist.length > 0) setSample(hist[hist.length - 1]);
       } catch (err) {
         console.warn("[mini-monitor] bootstrap failed", err);
@@ -53,7 +53,6 @@ export function MiniMonitorApp() {
     });
     const unlistenCleared = listen<null>("pm:targets-cleared", () => {
       if (!alive) return;
-      setTargetPids([]);
       setSample(null);
     });
 
@@ -73,23 +72,33 @@ export function MiniMonitorApp() {
     };
   }, []);
 
-  // Group per-pid stats by their root PID so we can show one row per
-  // monitored target with its full subtree's totals.
+  // Group per-pid stats by their root PID so we get one row per
+  // explicitly-monitored process, summed across its full subtree.
+  // Derived from the sample directly — no extra config fetch needed,
+  // so any newly-added target shows up on the next sample tick.
   const perRoot = useMemo(() => {
-    if (!sample) return [] as Array<{
-      rootPid: number;
-      name: string;
-      cpu: number;
-      rss: number;
-      procCount: number;
-    }>;
-    const byRoot = new Map<number, { name: string; cpu: number; rss: number; n: number }>();
+    if (!sample || sample.per_pid.length === 0) {
+      return [] as Array<{
+        rootPid: number;
+        name: string;
+        cpu: number;
+        rss: number;
+        procCount: number;
+      }>;
+    }
+
+    const byRoot = new Map<
+      number,
+      { name: string; cpu: number; rss: number; n: number; firstSeen: number }
+    >();
+    let order = 0;
     for (const p of sample.per_pid) {
       const entry = byRoot.get(p.root_pid) ?? {
         name: "",
         cpu: 0,
         rss: 0,
         n: 0,
+        firstSeen: order++,
       };
       entry.cpu += p.cpu_pct;
       entry.rss += p.rss;
@@ -98,20 +107,19 @@ export function MiniMonitorApp() {
       if (p.pid === p.root_pid) entry.name = p.name;
       byRoot.set(p.root_pid, entry);
     }
-    // Preserve the order the user picked in.
-    return targetPids
-      .filter((pid) => byRoot.has(pid))
-      .map((pid) => {
-        const e = byRoot.get(pid)!;
-        return {
-          rootPid: pid,
-          name: e.name || `pid ${pid}`,
-          cpu: e.cpu,
-          rss: e.rss,
-          procCount: e.n,
-        };
-      });
-  }, [sample, targetPids]);
+
+    // Stable order: by first appearance in per_pid (which the sampler
+    // emits in target-pick order).
+    return [...byRoot.entries()]
+      .sort((a, b) => a[1].firstSeen - b[1].firstSeen)
+      .map(([rootPid, e]) => ({
+        rootPid,
+        name: e.name || `pid ${rootPid}`,
+        cpu: e.cpu,
+        rss: e.rss,
+        procCount: e.n,
+      }));
+  }, [sample]);
 
   const openMain = async () => {
     try {
@@ -121,7 +129,7 @@ export function MiniMonitorApp() {
     }
   };
 
-  const empty = targetPids.length === 0;
+  const empty = perRoot.length === 0;
 
   return (
     <div
@@ -184,11 +192,9 @@ export function MiniMonitorApp() {
       <div className="min-h-0 flex-1 overflow-y-auto">
         {empty ? (
           <div className="flex h-full items-center justify-center px-4 text-center text-xs text-muted-foreground">
-            No processes are being monitored.
-          </div>
-        ) : !sample ? (
-          <div className="flex h-full items-center justify-center px-4 text-center text-xs text-muted-foreground">
-            Awaiting first sample…
+            {sample
+              ? "No monitored processes."
+              : "Awaiting first sample…"}
           </div>
         ) : (
           <ul className="divide-y divide-border/40">
@@ -202,8 +208,8 @@ export function MiniMonitorApp() {
                     {row.name}
                   </div>
                   <div className="text-[10px] text-muted-foreground tabular-nums">
-                    pid {row.rootPid} · {row.procCount} proc
-                    {row.procCount === 1 ? "" : "s"}
+                    pid {row.rootPid}
+                    {row.procCount > 1 ? ` · ${row.procCount} procs` : ""}
                   </div>
                 </div>
                 <div className="text-right">
