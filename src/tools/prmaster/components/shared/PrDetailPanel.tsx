@@ -1,11 +1,14 @@
 /**
- * Inline detail panel for a single PR — built on shadcn Card + Textarea
- * + Button so it shares the visual idiom of every other PRMaster form.
+ * Detail panel for a single PR.
  *
- * Layout: header (title, repo#number, branches, mergeable status),
- * Reviewers, Checks, Action row (Approve / Request Changes / Add me /
- * Open / Copy). The Request-Changes flow swaps the action row for a
- * shadcn Textarea + Submit/Cancel pair.
+ * The detail view already lives in its own routed area with a back-
+ * button header — wrapping the body in another bordered card adds
+ * nothing but visual noise (the user's words: "no card when I just
+ * view the item, why need card that is my own space"). So this is a
+ * flat layout: a metadata strip, two `Reviewers` / `Checks` blocks,
+ * a separator, and the action row (Approve / Request Changes / Add me
+ * as reviewer / Open / Copy). The Request-Changes flow swaps the
+ * action row for a Textarea + Submit/Cancel pair.
  */
 
 import { useState } from "react";
@@ -29,13 +32,13 @@ import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import { Textarea } from "@/components/ui/textarea";
+import { cn } from "@/lib/utils";
 import {
   prmasterTauri,
   prRefFor,
   type EnrichedPullRequest,
 } from "../../lib/tauri";
 import { CiChecks } from "./CiChecks";
-import { Panel, PanelContent, PanelHeader } from "./density";
 import { ReviewerAvatars } from "./ReviewerAvatars";
 
 interface Props {
@@ -76,40 +79,32 @@ export function PrDetailPanel({ pr, currentUser, onActionDone }: Props) {
   }
 
   return (
-    <Panel>
-      <PanelHeader className="flex flex-col items-stretch gap-1.5 px-3 py-2">
-        <div className="flex items-start gap-2">
-          <h3 className="flex-1 text-sm leading-tight font-semibold">
-            {pr.pr.title}
-          </h3>
-          <span className="font-mono text-xs text-muted-foreground">
-            {pr.pr.repository.nameWithOwner}#{pr.pr.number}
+    <div className="grid gap-2.5">
+      {/* Metadata strip — flat, no card chrome (the routed detail view
+          already owns the surrounding chrome). */}
+      <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-xs text-muted-foreground">
+        {pr.pr.author?.login && <span>by @{pr.pr.author.login}</span>}
+        <span>opened {new Date(pr.pr.createdAt).toLocaleDateString()}</span>
+        {pr.pr.isDraft && (
+          <Badge variant="outline" className="text-[10px] uppercase">
+            Draft
+          </Badge>
+        )}
+        {detail?.headRefName && detail?.baseRefName && (
+          <span className="flex items-center gap-1 font-mono">
+            <GitBranch className="size-3" />
+            {detail.headRefName}
+            <ArrowDown className="size-3 -rotate-90" />
+            {detail.baseRefName}
           </span>
-        </div>
-        <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-xs text-muted-foreground">
-          {pr.pr.author?.login && <span>by @{pr.pr.author.login}</span>}
-          <span>opened {new Date(pr.pr.createdAt).toLocaleDateString()}</span>
-          {pr.pr.isDraft && (
-            <Badge variant="outline" className="text-[10px] uppercase">
-              Draft
-            </Badge>
-          )}
-          {detail?.headRefName && detail?.baseRefName && (
-            <span className="flex items-center gap-1 font-mono">
-              <GitBranch className="size-3" />
-              {detail.headRefName}
-              <ArrowDown className="size-3 -rotate-90" />
-              {detail.baseRefName}
-            </span>
-          )}
-          <MergeStatus
-            mergeable={detail?.mergeable ?? null}
-            state={detail?.mergeStateStatus ?? null}
-          />
-        </div>
-      </PanelHeader>
+        )}
+        <MergeStatus
+          mergeable={detail?.mergeable ?? null}
+          state={detail?.mergeStateStatus ?? null}
+        />
+      </div>
 
-      <PanelContent className="grid gap-2 p-2.5">
+      <div className="grid gap-2">
         <div className="grid gap-1">
           <Label className="text-[10px] uppercase tracking-wide text-muted-foreground">
             Reviewers
@@ -133,8 +128,11 @@ export function PrDetailPanel({ pr, currentUser, onActionDone }: Props) {
         )}
 
         {showRequestForm ? (
-          <div className="grid gap-2">
-            <Label htmlFor="request-body" className="text-xs">
+          <div className="grid gap-1.5">
+            <Label
+              htmlFor="request-body"
+              className="text-[10px] uppercase tracking-wide text-muted-foreground"
+            >
               Request changes — message
             </Label>
             <Textarea
@@ -145,8 +143,9 @@ export function PrDetailPanel({ pr, currentUser, onActionDone }: Props) {
               placeholder="What needs to change?"
               className="font-mono text-xs"
             />
-            <div className="flex gap-2">
+            <div className="flex gap-1.5">
               <Button
+                size="sm"
                 variant="destructive"
                 disabled={pending !== null || requestBody.trim().length === 0}
                 onClick={() =>
@@ -158,13 +157,14 @@ export function PrDetailPanel({ pr, currentUser, onActionDone }: Props) {
                 }
               >
                 {pending === "request" ? (
-                  <Loader2 className="size-4 animate-spin" />
+                  <Loader2 className="size-3.5 animate-spin" />
                 ) : (
-                  <X className="size-4" />
+                  <X className="size-3.5" />
                 )}
                 Submit
               </Button>
               <Button
+                size="sm"
                 variant="ghost"
                 disabled={pending !== null}
                 onClick={() => {
@@ -177,30 +177,41 @@ export function PrDetailPanel({ pr, currentUser, onActionDone }: Props) {
             </div>
           </div>
         ) : (
-          <div className="flex flex-wrap gap-2">
+          <div className="flex flex-wrap gap-1.5">
             <Button
+              size="sm"
+              className={cn(
+                // GitHub-green Approve button — explicit colours rather
+                // than a global theme variant so the rest of the app's
+                // primary-colour scheme stays untouched.
+                "bg-emerald-600 text-white hover:bg-emerald-700",
+                "focus-visible:ring-emerald-600/30",
+                "dark:bg-emerald-600 dark:hover:bg-emerald-500",
+              )}
               disabled={pending !== null}
               onClick={() =>
                 withPending("approve", () => prmasterTauri.approve(ref))
               }
             >
               {pending === "approve" ? (
-                <Loader2 className="size-4 animate-spin" />
+                <Loader2 className="size-3.5 animate-spin" />
               ) : (
-                <Check className="size-4" />
+                <Check className="size-3.5" />
               )}
               Approve
             </Button>
             <Button
+              size="sm"
               variant="destructive"
               disabled={pending !== null}
               onClick={() => setShowRequestForm(true)}
             >
-              <X className="size-4" />
+              <X className="size-3.5" />
               Request changes
             </Button>
             {currentUser && !isAlreadyReviewer && (
               <Button
+                size="sm"
                 variant="outline"
                 disabled={pending !== null}
                 onClick={() =>
@@ -210,25 +221,33 @@ export function PrDetailPanel({ pr, currentUser, onActionDone }: Props) {
                 }
               >
                 {pending === "add" ? (
-                  <Loader2 className="size-4 animate-spin" />
+                  <Loader2 className="size-3.5 animate-spin" />
                 ) : (
-                  <UserPlus className="size-4" />
+                  <UserPlus className="size-3.5" />
                 )}
                 Add me as reviewer
               </Button>
             )}
-            <Button variant="ghost" onClick={() => void openUrl(pr.pr.url)}>
-              <ExternalLink className="size-4" />
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => void openUrl(pr.pr.url)}
+            >
+              <ExternalLink className="size-3.5" />
               Open
             </Button>
-            <Button variant="ghost" onClick={() => void writeText(pr.pr.url)}>
-              <Copy className="size-4" />
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => void writeText(pr.pr.url)}
+            >
+              <Copy className="size-3.5" />
               Copy link
             </Button>
           </div>
         )}
-      </PanelContent>
-    </Panel>
+      </div>
+    </div>
   );
 }
 
