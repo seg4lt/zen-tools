@@ -55,19 +55,26 @@ export function EnrichedListView({
   if (selectedRow) {
     return (
       <div className="flex h-full min-h-0 flex-col">
-        <header className="flex h-10 shrink-0 items-center justify-between gap-2 border-b bg-card/40 px-3">
-          <div className="flex min-w-0 items-center gap-2">
+        {/* Centred title rail: Back pinned left, Refresh pinned right
+            via absolute positioning so the middle column ignores their
+            widths and the PR title actually lands in the visual centre
+            of the bar (rather than getting nudged sideways by whichever
+            side button happens to be wider). */}
+        <header className="relative flex h-9 shrink-0 items-center border-b bg-card/40 px-2">
+          <div className="absolute inset-y-0 left-2 flex items-center">
             <Button
-              size="sm"
+              size="xs"
               variant="ghost"
               onClick={() => dispatch({ type: "select", id: null })}
               aria-label="Back to list"
             >
-              <ArrowLeft className="size-4" />
+              <ArrowLeft className="size-3.5" />
               Back
             </Button>
-            <span className="truncate text-xs text-muted-foreground">
-              {selectedRow.pr.repository.nameWithOwner} · #
+          </div>
+          <div className="mx-auto flex min-w-0 max-w-[60%] items-baseline gap-2">
+            <span className="truncate font-mono text-[11px] text-muted-foreground">
+              {selectedRow.pr.repository.nameWithOwner}#
               {selectedRow.pr.number}
             </span>
             <span
@@ -77,19 +84,21 @@ export function EnrichedListView({
               {selectedRow.pr.title}
             </span>
           </div>
-          <Button
-            size="sm"
-            variant="ghost"
-            disabled={loading}
-            onClick={onRefresh}
-          >
-            {loading ? (
-              <Loader2 className="size-4 animate-spin" />
-            ) : (
-              <RefreshCw className="size-4" />
-            )}
-            Refresh
-          </Button>
+          <div className="absolute inset-y-0 right-2 flex items-center">
+            <Button
+              size="xs"
+              variant="ghost"
+              disabled={loading}
+              onClick={onRefresh}
+            >
+              {loading ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : (
+                <RefreshCw className="size-3.5" />
+              )}
+              Refresh
+            </Button>
+          </div>
         </header>
 
         <div className="flex min-h-0 flex-1 flex-col overflow-y-auto p-2">

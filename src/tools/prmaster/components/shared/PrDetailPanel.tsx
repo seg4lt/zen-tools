@@ -143,9 +143,9 @@ export function PrDetailPanel({ pr, currentUser, onActionDone }: Props) {
               placeholder="What needs to change?"
               className="font-mono text-xs"
             />
-            <div className="flex gap-1.5">
+            <div className="flex gap-1">
               <Button
-                size="sm"
+                size="xs"
                 variant="destructive"
                 disabled={pending !== null || requestBody.trim().length === 0}
                 onClick={() =>
@@ -157,14 +157,14 @@ export function PrDetailPanel({ pr, currentUser, onActionDone }: Props) {
                 }
               >
                 {pending === "request" ? (
-                  <Loader2 className="size-3.5 animate-spin" />
+                  <Loader2 className="size-3 animate-spin" />
                 ) : (
-                  <X className="size-3.5" />
+                  <X className="size-3" />
                 )}
                 Submit
               </Button>
               <Button
-                size="sm"
+                size="xs"
                 variant="ghost"
                 disabled={pending !== null}
                 onClick={() => {
@@ -177,9 +177,9 @@ export function PrDetailPanel({ pr, currentUser, onActionDone }: Props) {
             </div>
           </div>
         ) : (
-          <div className="flex flex-wrap gap-1.5">
+          <div className="flex flex-wrap gap-1">
             <Button
-              size="sm"
+              size="xs"
               className={cn(
                 // GitHub-green Approve button — explicit colours rather
                 // than a global theme variant so the rest of the app's
@@ -194,24 +194,24 @@ export function PrDetailPanel({ pr, currentUser, onActionDone }: Props) {
               }
             >
               {pending === "approve" ? (
-                <Loader2 className="size-3.5 animate-spin" />
+                <Loader2 className="size-3 animate-spin" />
               ) : (
-                <Check className="size-3.5" />
+                <Check className="size-3" />
               )}
               Approve
             </Button>
             <Button
-              size="sm"
+              size="xs"
               variant="destructive"
               disabled={pending !== null}
               onClick={() => setShowRequestForm(true)}
             >
-              <X className="size-3.5" />
+              <X className="size-3" />
               Request changes
             </Button>
             {currentUser && !isAlreadyReviewer && (
               <Button
-                size="sm"
+                size="xs"
                 variant="outline"
                 disabled={pending !== null}
                 onClick={() =>
@@ -221,27 +221,27 @@ export function PrDetailPanel({ pr, currentUser, onActionDone }: Props) {
                 }
               >
                 {pending === "add" ? (
-                  <Loader2 className="size-3.5 animate-spin" />
+                  <Loader2 className="size-3 animate-spin" />
                 ) : (
-                  <UserPlus className="size-3.5" />
+                  <UserPlus className="size-3" />
                 )}
                 Add me as reviewer
               </Button>
             )}
             <Button
-              size="sm"
+              size="xs"
               variant="ghost"
               onClick={() => void openUrl(pr.pr.url)}
             >
-              <ExternalLink className="size-3.5" />
+              <ExternalLink className="size-3" />
               Open
             </Button>
             <Button
-              size="sm"
+              size="xs"
               variant="ghost"
               onClick={() => void writeText(pr.pr.url)}
             >
-              <Copy className="size-3.5" />
+              <Copy className="size-3" />
               Copy link
             </Button>
           </div>
