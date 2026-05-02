@@ -1,8 +1,12 @@
 /**
  * Process Monitor — top-level shell.
  *
- * Hosts the per-tool reducer/Context, then routes between the three views
- * (picker, dashboard, settings) just like the original Leptos app.
+ * Routes between the three views (picker, dashboard, settings) just
+ * like the original Leptos app.
+ *
+ * The store provider (`ProcessMonitorStoreProvider`) lives in
+ * `<AppProviders>` at the router root so per-tool state (selected
+ * targets, view, settings) survives navigation between tools.
  *
  * The macOS menu-bar tray icon is managed entirely backend-side
  * (`src-tauri/src/tray.rs`). The frontend only needs to call
@@ -16,21 +20,16 @@ import { pmTauri } from "./lib/tauri";
 import { Dashboard } from "./components/Dashboard";
 import { Picker } from "./components/Picker";
 import { Settings } from "./components/Settings";
-import {
-  ProcessMonitorStoreProvider,
-  useProcessMonitorStore,
-} from "./store/process-monitor-store";
+import { useProcessMonitorStore } from "./store/process-monitor-store";
 
 export function ProcessMonitorShell() {
   return (
-    <ProcessMonitorStoreProvider>
-      <div className="flex h-full min-h-0 w-full flex-col">
-        <SubNav />
-        <div className="flex min-h-0 flex-1">
-          <ViewSwitcher />
-        </div>
+    <div className="flex h-full min-h-0 w-full flex-col">
+      <SubNav />
+      <div className="flex min-h-0 flex-1">
+        <ViewSwitcher />
       </div>
-    </ProcessMonitorStoreProvider>
+    </div>
   );
 }
 

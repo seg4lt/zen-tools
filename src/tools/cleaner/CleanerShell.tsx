@@ -1,18 +1,16 @@
 /**
  * Cleaner — top-level shell.
  *
- * Mirrors the HTTP Runner / Process Monitor pattern: provide the
- * tool-local store at the top, then render the main view inside it.
- * The route entry in `src/router.tsx` mounts this component at `/cleaner`.
+ * The store provider (`CleanerStoreProvider`) lives in
+ * `<AppProviders>` at the router root so the view's state survives
+ * navigation between tools. This shell is a thin wrapper.
+ *
+ * The route entry in `src/router.tsx` mounts this component at
+ * `/cleaner`.
  */
 
 import { CleanerView } from "./CleanerView";
-import { CleanerStoreProvider } from "./store/cleaner-store";
 
 export function CleanerShell() {
-  return (
-    <CleanerStoreProvider>
-      <CleanerView />
-    </CleanerStoreProvider>
-  );
+  return <CleanerView />;
 }

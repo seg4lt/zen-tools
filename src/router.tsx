@@ -5,6 +5,7 @@ import {
   Outlet,
   redirect,
 } from "@tanstack/react-router";
+import { AppProviders } from "@/components/app-shell/app-providers";
 import { TitleBar } from "@/components/app-shell/title-bar";
 import { HTTPRunnerShell } from "@/tools/http-runner/HTTPRunnerShell";
 import { RequestsView } from "@/tools/http-runner/RequestsView";
@@ -20,7 +21,15 @@ const rootRoute = createRootRoute({
     <div className="flex h-screen w-screen flex-col overflow-hidden bg-background text-foreground">
       <TitleBar />
       <main className="flex min-h-0 flex-1">
-        <Outlet />
+        {/* All tool store providers live here so per-tool state
+            (active connection, open files, results, …) survives
+            navigation between tool tabs. The route Outlet only
+            swaps the shell component; the providers and their
+            useReducer state stay mounted for the lifetime of
+            the app. */}
+        <AppProviders>
+          <Outlet />
+        </AppProviders>
       </main>
     </div>
   ),
