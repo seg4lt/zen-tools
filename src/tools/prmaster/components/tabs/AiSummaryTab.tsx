@@ -9,7 +9,7 @@
  */
 
 import { useEffect, useState } from "react";
-import { Copy, Loader2, Sparkles, Trash2 } from "lucide-react";
+import { Copy, Download, Loader2, Sparkles, Trash2 } from "lucide-react";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -229,19 +229,35 @@ function Toolbar({
         className="h-8 w-[140px]"
       />
 
-      <div className="min-w-[260px] flex-1">
-        <RepoPicker
-          repos={repos}
-          selected={selected}
-          loading={reposLoading}
-          fetching={reposFetching}
-          cachedAtMs={reposCachedAt}
-          compact
-          onToggle={onToggleRepo}
-          onClear={onClearRepos}
-          onReload={onReloadRepos}
-          onFetch={onFetchRepos}
-        />
+      <div className="flex min-w-[260px] flex-1 items-center gap-1">
+        <div className="min-w-0 flex-1">
+          <RepoPicker
+            repos={repos}
+            selected={selected}
+            loading={reposLoading}
+            fetching={reposFetching}
+            cachedAtMs={reposCachedAt}
+            compact
+            onToggle={onToggleRepo}
+            onClear={onClearRepos}
+            onReload={onReloadRepos}
+            onFetch={onFetchRepos}
+          />
+        </div>
+        <Button
+          size="sm"
+          variant={repos.length === 0 ? "default" : "outline"}
+          disabled={reposFetching}
+          onClick={onFetchRepos}
+          title="Fetch the full repo list from GitHub (ignores cache)"
+        >
+          {reposFetching ? (
+            <Loader2 className="size-4 animate-spin" />
+          ) : (
+            <Download className="size-4" />
+          )}
+          Fetch
+        </Button>
       </div>
 
       <Label

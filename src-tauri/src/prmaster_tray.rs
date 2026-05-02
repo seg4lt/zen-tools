@@ -33,11 +33,13 @@ pub const PRMASTER_TRAY_ID: &str = "prmaster";
 /// Stable label used in `tauri.conf.json` and by the open/close commands.
 pub const POPOVER_LABEL: &str = "prmaster-popover";
 
-/// Embedded template PNG. We reuse the existing zen-tools tray icon for
-/// now — distinguishing the two icons visually is a polish item; the
-/// architecture lets us swap in a dedicated PR-shaped glyph later by
-/// changing this constant.
-const TRAY_ICON_PNG: &[u8] = include_bytes!("../icons/tray-icon.png");
+/// Embedded template PNG. Renders the macOS SF Symbol
+/// `arrow.triangle.pull` (the same glyph the Swift PRMaster app uses
+/// for its menu-bar label) baked at 44×44 with `isTemplate = true` so
+/// macOS auto-tints it to match the menu-bar appearance. Distinct from
+/// the zen-tools app logo so the PRMaster tray reads as PR-specific at
+/// a glance.
+const TRAY_ICON_PNG: &[u8] = include_bytes!("../icons/pr-tray-icon.png");
 
 /// Build the PRMaster tray on app startup. Idempotent — calling twice is
 /// harmless; the second call no-ops because the tray is keyed by id.

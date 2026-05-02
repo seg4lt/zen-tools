@@ -38,20 +38,25 @@ const buttonVariants = cva(
   }
 )
 
-function Button({
-  className,
-  variant = "default",
-  size = "default",
-  asChild = false,
-  ...props
-}: React.ComponentProps<"button"> &
-  VariantProps<typeof buttonVariants> & {
-    asChild?: boolean
-  }) {
+// Must be `forwardRef` so the button works as a Radix `asChild` trigger
+// (DropdownMenuTrigger / PopoverTrigger / TooltipTrigger / …). Without
+// this, clicks on triggers built around `<Button>` are silently dropped
+// because Radix can't bind its ref + event handlers.
+const Button = React.forwardRef<
+  HTMLButtonElement,
+  React.ComponentProps<"button"> &
+    VariantProps<typeof buttonVariants> & {
+      asChild?: boolean
+    }
+>(function Button(
+  { className, variant = "default", size = "default", asChild = false, ...props },
+  ref,
+) {
   const Comp = asChild ? Slot.Root : "button"
 
   return (
     <Comp
+      ref={ref as React.Ref<HTMLButtonElement>}
       data-slot="button"
       data-variant={variant}
       data-size={size}
@@ -59,6 +64,6 @@ function Button({
       {...props}
     />
   )
-}
+})
 
 export { Button, buttonVariants }

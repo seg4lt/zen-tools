@@ -17,6 +17,7 @@
 import { useEffect, useState } from "react";
 import {
   CheckCircle2,
+  Download,
   Loader2,
   Plus,
   Power,
@@ -687,6 +688,41 @@ function RepoMappingsEditor({
         <strong>Fetch</strong> to refresh from GitHub on demand.
       </p>
 
+      {/* Cache strip — always-visible Fetch + cache age */}
+      <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
+        <span>{cacheFooter}</span>
+        <div className="flex items-center gap-1">
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={reposLoading || reposFetching}
+            onClick={() => void reloadRepos()}
+            title="Reload from local cache"
+          >
+            {reposLoading ? (
+              <Loader2 className="size-3.5 animate-spin" />
+            ) : (
+              <RefreshCw className="size-3.5" />
+            )}
+            Reload
+          </Button>
+          <Button
+            size="sm"
+            variant={reposStale || availableRepos.length === 0 ? "default" : "outline"}
+            disabled={reposFetching}
+            onClick={() => void fetchRepos()}
+            title="Re-fetch the full repo list from GitHub (ignores cache)"
+          >
+            {reposFetching ? (
+              <Loader2 className="size-3.5 animate-spin" />
+            ) : (
+              <Download className="size-3.5" />
+            )}
+            Fetch from GitHub
+          </Button>
+        </div>
+      </div>
+
       {/* Add mapping row: [searchable repo dropdown] [Browse for folder…] */}
       <div className="flex flex-wrap items-center gap-2 rounded-md border bg-background p-2">
         <SearchableRepoDropdown
@@ -701,7 +737,7 @@ function RepoMappingsEditor({
           placeholder={
             unmappedRepos.length === 0
               ? availableRepos.length === 0
-                ? "No repositories cached — click Fetch"
+                ? "No repositories cached — click Fetch from GitHub"
                 : "All repositories are mapped"
               : "Pick a repository to map…"
           }
