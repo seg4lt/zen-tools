@@ -38,6 +38,10 @@ pub use summary::{
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+/// Hard cap on the rolling AI-run diagnostic log — older entries are
+/// dropped past this point.
+pub const AI_RUN_LOG_CAPACITY: usize = 200;
+
 use arc_swap::ArcSwapOption;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -96,9 +100,44 @@ struct EngineInner {
     notification_store: Mutex<Option<notifications::NotificationStore>>,
     /// JSON-file-backed AI summary cache. Lazily opened.
     summary_cache: Mutex<Option<AiSummaryCache>>,
+    /// Rolling diagnostic log of AI summary invocations — drives the
+    /// "AI runs" panel on the API Stats tab. Capped at 200 entries.
+    ai_runs: Mutex<std::collections::VecDeque<AiRunRecord>>,
     /// Fan-out channel for refresh / badge / notification events. Held
     /// for the engine's lifetime so subscribers can be added at any time.
     tx: broadcast::Sender<PrMasterEvent>,
+}
+
+/// One AI summary invocation, captured for the diagnostics panel. We
+/// log the resolved `provider` + `model` exactly as they were sent to
+/// the AI CLI so the user can verify their settings are taking effect
+/// (e.g. "I configured Sonnet but I'm seeing Haiku" — the panel makes
+/// that observable).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiRunRecord {
+    /// UNIX millis when the run started.
+    pub timestamp: i64,
+    /// Provider tag (`"claude"` / `"copilot"`).
+    pub provider: String,
+    /// Resolved model (the actual string handed to the CLI). `None`
+    /// when the user has not picked a model and the provider's CLI
+    /// default applies.
+    pub model: Option<String>,
+    /// Repository the run targeted (`owner/repo`).
+    pub repo: String,
+    /// Inclusive start (ISO-8601 UTC).
+    pub since: String,
+    /// Exclusive end (ISO-8601 UTC).
+    pub until: String,
+    /// Wall-clock duration in milliseconds.
+    pub duration_ms: u64,
+    /// Whether the run completed without raising an error.
+    pub success: bool,
+    /// Number of commits fed into the prompt (0 when the run errored
+    /// before commits were fetched).
+    pub commit_count: usize,
+    /// Cost reported by the provider, when available.
+    pub cost_usd: Option<f64>,
 }
 
 /// Events broadcast by the engine to the Tauri command layer (which
@@ -145,6 +184,9 @@ impl PrMasterEngine {
                 filter_store: Mutex::new(None),
                 notification_store: Mutex::new(None),
                 summary_cache: Mutex::new(None),
+                ai_runs: Mutex::new(std::collections::VecDeque::with_capacity(
+                    AI_RUN_LOG_CAPACITY,
+                )),
                 tx: broadcast::channel(64).0,
             }),
         }
@@ -160,6 +202,9 @@ impl PrMasterEngine {
                 filter_store: Mutex::new(None),
                 notification_store: Mutex::new(None),
                 summary_cache: Mutex::new(None),
+                ai_runs: Mutex::new(std::collections::VecDeque::with_capacity(
+                    AI_RUN_LOG_CAPACITY,
+                )),
                 tx: broadcast::channel(64).0,
             }),
         }
@@ -399,6 +444,11 @@ impl PrMasterEngine {
     /// Fetch (or reuse cached) AI Summary cards for `(repo, since, until)`.
     /// Picks the local-git path when a [`LocalRepoMapping`] is configured
     /// for the repo.
+    ///
+    /// Every non-cache-hit invocation appends an [`AiRunRecord`] to the
+    /// rolling diagnostic log so the API Stats tab can show *exactly*
+    /// which provider + model the user's settings resolved to (catches
+    /// "I configured Sonnet but the run used Haiku" surprises).
     pub async fn ai_summary(
         &self,
         params: &summary::AiSummaryParams,
@@ -424,16 +474,55 @@ impl PrMasterEngine {
         if effective.model.is_none() && !settings.ai_model.is_empty() {
             effective.model = Some(settings.ai_model.clone());
         }
-        let card = summary::generate_summary(
+
+        let started_at = chrono::Utc::now().timestamp_millis();
+        let started_instant = Instant::now();
+        let result = summary::generate_summary(
             &effective,
             provider.as_ref(),
             &self.inner.gh,
             mapping,
             settings.ai_token_ratio as usize,
         )
-        .await?;
+        .await;
+        let duration_ms = started_instant.elapsed().as_millis() as u64;
+
+        // Build a record regardless of outcome so failed runs are
+        // visible in the API tab too.
+        let record = AiRunRecord {
+            timestamp: started_at,
+            provider: settings.ai_provider.clone(),
+            model: effective.model.clone(),
+            repo: params.repo.clone(),
+            since: params.since.to_rfc3339(),
+            until: params.until.to_rfc3339(),
+            duration_ms,
+            success: result.is_ok(),
+            commit_count: result.as_ref().map(|c| c.commit_count).unwrap_or(0),
+            cost_usd: result.as_ref().ok().and_then(|c| c.cost_usd),
+        };
+        self.push_ai_run(record);
+
+        let card = result?;
         cache.put(key, card.clone());
         Ok(card)
+    }
+
+    /// Append `record` to the rolling diagnostic log, evicting the
+    /// oldest entry when we exceed [`AI_RUN_LOG_CAPACITY`].
+    fn push_ai_run(&self, record: AiRunRecord) {
+        let mut log = self.inner.ai_runs.lock();
+        if log.len() == AI_RUN_LOG_CAPACITY {
+            log.pop_front();
+        }
+        log.push_back(record);
+    }
+
+    /// Snapshot the AI-run diagnostic log, newest-first. Drives the
+    /// AI runs section on the API Stats tab.
+    pub fn ai_runs(&self) -> Vec<AiRunRecord> {
+        let log = self.inner.ai_runs.lock();
+        log.iter().rev().cloned().collect()
     }
 
     /// Drop every cached AI Summary card.

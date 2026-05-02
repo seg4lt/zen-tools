@@ -27,6 +27,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   CheckCircle2,
+  ChevronDown,
+  ChevronRight,
   Copy,
   Download,
   Loader2,
@@ -750,10 +752,27 @@ function WeekGroupView({
     0,
   );
 
+  // Each week is a collapsible accordion. Default-open so newly
+  // generated cards are visible; users can collapse old weeks once
+  // they've reviewed them. State is local to each group so collapsing
+  // one doesn't affect the others.
+  const [open, setOpen] = useState(true);
+
   return (
     <Panel>
-      <PanelHeader>
-        <div className="flex items-center gap-2">
+      <PanelHeader className="cursor-pointer select-none gap-2">
+        <button
+          type="button"
+          onClick={() => setOpen((o) => !o)}
+          className="-mx-1 -my-1 flex flex-1 items-center gap-2 rounded px-1 py-1 text-left hover:bg-accent/40"
+          aria-expanded={open}
+          aria-label={open ? "Collapse week" : "Expand week"}
+        >
+          {open ? (
+            <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
+          ) : (
+            <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />
+          )}
           <PanelTitle>
             {formatRangeLabel(group.range.since, group.range.until)}
           </PanelTitle>
@@ -765,39 +784,43 @@ function WeekGroupView({
           <Badge variant="outline" className="text-[10px]">
             {group.cards.size}/{displayRepos.length} repos
           </Badge>
-        </div>
+        </button>
       </PanelHeader>
-      <PanelContent className="grid gap-2 p-2">
-        {displayRepos.length === 0 ? (
-          <p className="py-2 text-center text-xs italic text-muted-foreground">
-            No repositories selected for this week.
-          </p>
-        ) : (
-          displayRepos.map((repo) => {
-            const card = group.cards.get(repo);
-            const status = cellStatus.get(
-              cardKey(repo, group.range.since, group.range.until),
-            );
-            return (
-              <RepoCardRow
-                key={repo}
-                repo={repo}
-                card={card}
-                status={status}
-                allRepos={allRepos}
-                onRegenerate={() => onRegenerate(repo, group.range)}
-                onDelete={card ? () => onDelete(repo, group.range) : undefined}
-                onEdit={
-                  card
-                    ? (nextRepo, nextRange) =>
-                        onEdit(repo, group.range, nextRepo, nextRange)
-                    : undefined
-                }
-              />
-            );
-          })
-        )}
-      </PanelContent>
+      {open && (
+        <PanelContent className="grid gap-2 p-2">
+          {displayRepos.length === 0 ? (
+            <p className="py-2 text-center text-xs italic text-muted-foreground">
+              No repositories selected for this week.
+            </p>
+          ) : (
+            displayRepos.map((repo) => {
+              const card = group.cards.get(repo);
+              const status = cellStatus.get(
+                cardKey(repo, group.range.since, group.range.until),
+              );
+              return (
+                <RepoCardRow
+                  key={repo}
+                  repo={repo}
+                  card={card}
+                  status={status}
+                  allRepos={allRepos}
+                  onRegenerate={() => onRegenerate(repo, group.range)}
+                  onDelete={
+                    card ? () => onDelete(repo, group.range) : undefined
+                  }
+                  onEdit={
+                    card
+                      ? (nextRepo, nextRange) =>
+                          onEdit(repo, group.range, nextRepo, nextRange)
+                      : undefined
+                  }
+                />
+              );
+            })
+          )}
+        </PanelContent>
+      )}
     </Panel>
   );
 }

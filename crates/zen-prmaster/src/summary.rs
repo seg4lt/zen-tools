@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Datelike, Utc};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -179,8 +179,31 @@ impl AiSummaryCache {
 
 /// Stitch enriched commits into the prompt the provider sees.
 ///
-/// Always-included header + commit messages, followed by diffs truncated
-/// to fit the token budget (chars / token_ratio).
+/// The output is meant to be **forwarded to a manager / leadership**,
+/// not pasted into a teammate's PR review. So the framing is:
+///
+///   - Audience: an engineering manager who skims, not a peer who'll
+///     read every commit. They want headline impact, not mechanics.
+///   - Tone: confident and outcome-focused. Lead with delivered value
+///     (features shipped, problems fixed, reliability / performance
+///     wins, unblocks for the team) and frame mechanics — refactors,
+///     test scaffolding, infra moves — as enablers of that value.
+///   - Style: still factual, no inflation. Don't claim impact that
+///     isn't supported by the diff.
+///
+/// Layout:
+///   1. **Role + framing** — sets up the manager-report tone.
+///   2. **Run header** — repo, human-readable date range, commit count.
+///   3. **Output instructions** — required Markdown shape, plus rules
+///      about the *style* (highlight outcomes, avoid SHAs / mechanics
+///      narrative, no inflation).
+///   4. **Commit messages** — one line per commit so the model can
+///      cross-reference.
+///   5. **Diffs** — fenced ```diff blocks per commit, truncated to fit
+///      `(budget_tokens × token_ratio)` characters. Per-commit cap is
+///      [`MAX_DIFF_CHARS`]; commits past the budget are summarised as
+///      "N commits skipped" so the model knows the picture is
+///      incomplete and hedges accordingly.
 pub fn build_prompt(
     repo: &str,
     since: DateTime<Utc>,
@@ -189,70 +212,170 @@ pub fn build_prompt(
     token_ratio: usize,
     budget_tokens: usize,
 ) -> String {
+    let date_label = format_date_label(since, until);
+
     let mut buf = String::new();
-    buf.push_str("You are summarising a developer's recent commits across one repository.\n\n");
+    // 1 — role + framing (manager-report tone)
+    buf.push_str(
+        "You are writing a weekly engineering report **for a manager / \
+         leadership audience**, not a peer code review. Read the commit \
+         messages and diffs below and produce a confident, outcome-focused \
+         summary that highlights what was delivered and why it matters.\n\
+         \n\
+         Lean into impact: features shipped, customer-visible bugs fixed, \
+         reliability or performance gains, scope unblocked for the team, \
+         technical debt paid down. Treat refactors / test work / infra \
+         moves as enablers — connect them to the outcome they support \
+         (\"refactored X to unblock the Y rollout\") rather than narrating \
+         them on their own. Do not invent impact the diff doesn't support; \
+         when the work is genuinely internal plumbing, say so plainly but \
+         frame why it matters.\n\n",
+    );
+
+    // 2 — run header
     buf.push_str(&format!(
-        "Repository: {repo}\nDate range: {} → {} (UTC)\nCommit count: {}\n\n",
-        since.to_rfc3339(),
-        until.to_rfc3339(),
-        commits.len(),
+        "**Repository:** `{repo}`\n\
+         **Date range:** {date_label}\n\
+         **Commit count:** {n}\n\n",
+        n = commits.len(),
     ));
-    buf.push_str("Write a short Markdown summary (under 250 words):\n");
-    buf.push_str("- 1 top-level bullet per *theme* or *area* — group commits, don't list every one\n");
-    buf.push_str("- prefer present-tense, active voice (\"adds X\", \"refactors Y\")\n");
-    buf.push_str("- end with one line headed `Notable risks:` if you spot any\n\n");
-    buf.push_str("--- Commit messages ---\n");
+
+    // 3 — output instructions
+    buf.push_str("# Output\n\n");
+    buf.push_str(&format!(
+        "Reply with Markdown in **exactly** this shape:\n\
+         \n\
+         ```\n\
+         ## {date_label} — `{repo}`\n\
+         \n\
+         **Highlights:** <one or two sentences naming the headline wins of \
+         the week — what shipped, what got better, what unblocked the team>\n\
+         \n\
+         - <outcome-led bullet>\n\
+         - <outcome-led bullet>\n\
+         …\n\
+         \n\
+         **Watch list:** <one short sentence on risks / follow-ups the manager should know about — omit the line entirely if nothing notable>\n\
+         ```\n\n",
+    ));
+    buf.push_str(
+        "Rules:\n\
+         - Open every bullet with the **outcome** (what got better, who \
+           benefits) and only then mention the mechanism. Good: \"Cut PR \
+           page load by ~40% by batching the GraphQL detail query.\" Bad: \
+           \"Refactored fetchPRs into batched queries.\"\n\
+         - Group related commits into a single bullet — one bullet per \
+           *theme* or *area*, not one per commit. Aim for 3–7 bullets.\n\
+         - Use present-tense, active voice. Name the subsystem / feature / \
+           customer surface when it matters; avoid the file-by-file play-\
+           by-play.\n\
+         - Do **not** mention commit SHAs, list individual commits, or \
+           paste diff hunks back. Do not pad the report — if a week is \
+           genuinely light, write a short report.\n\
+         - Stay under ~250 words across the whole report.\n\
+         - Don't oversell. If the diff is mostly internal cleanup, the \
+           Highlights line should say so honestly (\"quiet week — focus on \
+           paying down test debt before the X launch\") rather than \
+           inflating routine work.\n\n",
+    );
+
+    // 4 — commit messages
+    buf.push_str("# Commits\n\n");
     for c in commits {
         let first = c.message.lines().next().unwrap_or("").trim();
-        buf.push_str(&format!("{} ({}): {}\n", c.short_sha, c.author_date.format("%Y-%m-%d"), first));
+        buf.push_str(&format!(
+            "- `{}` {}: {}\n",
+            c.short_sha,
+            c.author_date.format("%Y-%m-%d"),
+            first,
+        ));
     }
-    buf.push_str("\n--- Diffs (may be truncated) ---\n");
+    buf.push_str("\n");
 
+    // 5 — diffs (token-budgeted)
+    buf.push_str("# Diffs\n\n");
     let ratio = token_ratio.max(1);
     let budget_chars = budget_tokens.saturating_mul(ratio);
     let header_chars = buf.chars().count();
     let mut remaining = budget_chars.saturating_sub(header_chars);
-    for c in commits {
+    let mut included = 0usize;
+
+    for (idx, c) in commits.iter().enumerate() {
         let Some(diff) = c.diff.as_deref() else {
             continue;
         };
-        let mut snippet = if diff.len() > MAX_DIFF_CHARS {
+
+        // Per-commit cap so a single huge diff can't starve the rest.
+        let mut body = if diff.len() > MAX_DIFF_CHARS {
             format!(
-                "{}\n[…truncated {} bytes…]\n",
+                "{}\n... (truncated; {} more bytes in this commit)",
                 &diff[..MAX_DIFF_CHARS],
-                diff.len() - MAX_DIFF_CHARS
+                diff.len() - MAX_DIFF_CHARS,
             )
         } else {
             diff.to_string()
         };
-        if snippet.len() > remaining {
-            if remaining < 200 {
-                buf.push_str(&format!(
-                    "\n[…remaining {} commit diff(s) skipped — token budget reached…]\n",
-                    commits
-                        .iter()
-                        .skip_while(|x| x.sha != c.sha)
-                        .count(),
-                ));
-                break;
-            }
-            snippet.truncate(remaining);
-            snippet.push_str("\n[…truncated by token budget…]\n");
-        }
-        let block = format!(
-            "\n=== {} {} ===\n{}\n",
+
+        let header = format!(
+            "## `{}` {}\n\n```diff\n",
             c.short_sha,
             c.message.lines().next().unwrap_or("").trim(),
-            snippet
         );
-        if block.len() > remaining {
+        let footer = "\n```\n\n";
+        let chrome_chars = header.len() + footer.len();
+
+        // Not enough room for a useful chunk → bail and tell the model.
+        if remaining < chrome_chars + 200 {
+            let skipped = commits.len().saturating_sub(idx);
+            buf.push_str(&format!(
+                "_…{} more commit diff(s) omitted to fit the token budget — base your summary on the commit messages above for those._\n",
+                skipped,
+            ));
             break;
         }
-        remaining -= block.len();
-        buf.push_str(&block);
+
+        let allowed_body = remaining - chrome_chars;
+        if body.len() > allowed_body {
+            body.truncate(allowed_body);
+            body.push_str("\n... (truncated to fit token budget)");
+        }
+        buf.push_str(&header);
+        buf.push_str(&body);
+        buf.push_str(footer);
+        remaining = remaining.saturating_sub(chrome_chars + body.len());
+        included += 1;
+    }
+
+    if included == 0 && commits.iter().any(|c| c.diff.is_some()) {
+        buf.push_str(
+            "_(No diffs included — token budget was too tight. Summarise from the commit messages above.)_\n",
+        );
     }
 
     buf
+}
+
+/// Render a UTC range as `Sep 1 – Sep 7, 2024` (or just `Sep 1, 2024`
+/// when both ends fall on the same calendar day). Designed for the
+/// prompt header so the model gets a human-readable label rather than
+/// a raw RFC-3339 string.
+fn format_date_label(since: DateTime<Utc>, until: DateTime<Utc>) -> String {
+    let same_day = since.date_naive() == until.date_naive();
+    if same_day {
+        since.format("%b %-d, %Y").to_string()
+    } else if since.year() == until.year() {
+        format!(
+            "{} – {}",
+            since.format("%b %-d"),
+            until.format("%b %-d, %Y"),
+        )
+    } else {
+        format!(
+            "{} – {}",
+            since.format("%b %-d, %Y"),
+            until.format("%b %-d, %Y"),
+        )
+    }
 }
 
 /// Derive a fresh [`SummaryCard`] for the given params using the supplied
@@ -451,7 +574,7 @@ mod tests {
     }
 
     #[test]
-    fn build_prompt_includes_commit_messages() {
+    fn build_prompt_includes_commit_messages_and_diff_block() {
         let commits = vec![EnrichedCommit {
             sha: "abc1234".into(),
             short_sha: "abc1234".into(),
@@ -459,17 +582,28 @@ mod tests {
             author_date: ts("2024-01-01T00:00:00Z"),
             diff: Some("diff --git a/foo b/foo\n+hello".into()),
         }];
+        // Generous budget (2.5k tokens × ratio 2 = 5k chars) so the
+        // header instructions don't crowd the diff section out.
         let prompt = build_prompt(
             "octo/repo",
             ts("2024-01-01T00:00:00Z"),
             ts("2024-01-02T00:00:00Z"),
             &commits,
             2,
-            1000,
+            2500,
         );
+        // Run header + commit message + diff fence.
+        assert!(prompt.contains("**Repository:** `octo/repo`"));
         assert!(prompt.contains("feat: new flow"));
-        assert!(prompt.contains("octo/repo"));
-        assert!(prompt.contains("=== abc1234 feat: new flow ==="));
+        assert!(prompt.contains("## `abc1234` feat: new flow"));
+        assert!(prompt.contains("```diff"));
+        // Manager-report framing — make sure the audience is clear and
+        // SHAs are blocked from the output.
+        assert!(prompt.contains("manager / leadership audience"));
+        assert!(prompt.contains("Do **not** mention commit SHAs"));
+        // Required output shape includes Highlights + Watch list.
+        assert!(prompt.contains("**Highlights:**"));
+        assert!(prompt.contains("**Watch list:**"));
     }
 
     #[test]
@@ -482,14 +616,59 @@ mod tests {
             author_date: ts("2024-01-01T00:00:00Z"),
             diff: Some(huge_diff),
         }];
+        // Budget 1500 tokens × ratio 2 = 3000 chars. The header
+        // instructions alone are ~1.2k chars so the diff has ~1.8k of
+        // room — which the 100kB diff blows past, forcing truncation.
         let prompt = build_prompt(
             "octo/repo",
             ts("2024-01-01T00:00:00Z"),
             ts("2024-01-02T00:00:00Z"),
             &commits,
             2,
-            500,
+            1500,
         );
         assert!(prompt.contains("truncated"));
+    }
+
+    #[test]
+    fn build_prompt_uses_human_date_label_when_range_spans_multiple_days() {
+        let commits = vec![EnrichedCommit {
+            sha: "abc1234".into(),
+            short_sha: "abc1234".into(),
+            message: "x".into(),
+            author_date: ts("2024-01-01T00:00:00Z"),
+            diff: None,
+        }];
+        let prompt = build_prompt(
+            "octo/repo",
+            ts("2024-01-01T00:00:00Z"),
+            ts("2024-01-07T23:59:59Z"),
+            &commits,
+            2,
+            1000,
+        );
+        // Human label rather than rfc3339 in the headings.
+        assert!(prompt.contains("Jan 1 – Jan 7, 2024"));
+        assert!(prompt.contains("## Jan 1 – Jan 7, 2024"));
+    }
+
+    #[test]
+    fn build_prompt_uses_single_day_label_when_range_collapses() {
+        let commits = vec![EnrichedCommit {
+            sha: "abc1234".into(),
+            short_sha: "abc1234".into(),
+            message: "x".into(),
+            author_date: ts("2024-01-01T00:00:00Z"),
+            diff: None,
+        }];
+        let prompt = build_prompt(
+            "octo/repo",
+            ts("2024-01-01T00:00:00Z"),
+            ts("2024-01-01T23:59:59Z"),
+            &commits,
+            2,
+            1000,
+        );
+        assert!(prompt.contains("Jan 1, 2024"));
     }
 }

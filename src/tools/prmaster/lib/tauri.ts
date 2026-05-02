@@ -174,6 +174,36 @@ export interface GhCall {
   success: boolean;
 }
 
+/** One AI summary invocation, captured for the API Stats diagnostics
+ *  panel. The fields here mirror the Rust `zen_prmaster::AiRunRecord`
+ *  exactly — they're recorded inside the engine after every run, NOT
+ *  reconstructed from the prompt, so they reflect the *actual* values
+ *  handed to the AI CLI (catches "I configured Sonnet but Haiku ran"). */
+export interface AiRunRecord {
+  /** UNIX millis when the run started. */
+  timestamp: number;
+  /** Provider tag (`"claude"` / `"copilot"`). */
+  provider: string;
+  /** Resolved model handed to the CLI. `null` when the user hasn't
+   *  picked one and the CLI's default applies. */
+  model: string | null;
+  /** Repository the run targeted (`owner/repo`). */
+  repo: string;
+  /** ISO-8601 inclusive start. */
+  since: string;
+  /** ISO-8601 exclusive end. */
+  until: string;
+  /** Wall-clock duration, ms. */
+  duration_ms: number;
+  /** Whether the underlying provider call resolved without error. */
+  success: boolean;
+  /** Number of commits fed into the prompt (0 when the run errored
+   *  before commits were fetched). */
+  commit_count: number;
+  /** Cost reported by the provider when available. */
+  cost_usd: number | null;
+}
+
 export type NotificationActionKind =
   | "sound_banner"
   | "silent_banner"
@@ -262,6 +292,7 @@ export const prmasterTauri = {
   addSelfReviewer: (pr: PrRef, login: string) =>
     invoke<void>("prmaster_add_self_reviewer", { pr, login }),
   getCallLog: () => invoke<GhCall[]>("prmaster_get_call_log"),
+  getAiRuns: () => invoke<AiRunRecord[]>("prmaster_get_ai_runs"),
   refresh: () => invoke<void>("prmaster_refresh"),
   getSettings: () => invoke<PrMasterSettings>("prmaster_get_settings"),
   saveSettings: (settings: PrMasterSettings) =>

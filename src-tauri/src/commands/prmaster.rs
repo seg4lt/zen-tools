@@ -223,6 +223,20 @@ pub async fn prmaster_get_call_log(
     Ok(engine.call_log())
 }
 
+/// Return the rolling AI-summary run log, newest-first. Drives the
+/// "AI runs" panel on the API Stats tab so the user can verify the
+/// resolved provider + model their settings produced.
+#[tauri::command]
+pub async fn prmaster_get_ai_runs(
+    state: State<'_, Mutex<AppState>>,
+) -> AppResult<Vec<zen_prmaster::AiRunRecord>> {
+    let engine = {
+        let s = state.lock().await;
+        engine(&s)
+    };
+    Ok(engine.ai_runs())
+}
+
 /// Storage key under [`UserConfig`] for the PRMaster settings blob.
 const PRMASTER_SETTINGS_KEY: &str = "prmaster";
 

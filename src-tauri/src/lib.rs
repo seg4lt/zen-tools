@@ -455,6 +455,7 @@ pub fn run() {
             commands::prmaster::prmaster_save_ai_summaries,
             commands::prmaster::prmaster_clear_ai_summaries,
             commands::prmaster::prmaster_load_pr_snapshot,
+            commands::prmaster::prmaster_get_ai_runs,
             commands::prmaster::prmaster_list_repos,
             commands::prmaster::prmaster_fetch_repos,
         ])
