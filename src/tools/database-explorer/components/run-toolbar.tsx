@@ -11,7 +11,6 @@
 
 import { Activity, Loader2, Play, PlaySquare } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { ContextPicker } from "./context-picker";
 import { LogsButton } from "./logs-button";
 import type { DbConnectionPrefs } from "../lib/tauri";
 import type { ResultTab } from "../store/db-explorer-store";
@@ -178,17 +177,9 @@ export function RunToolbar({
         </button>
       )}
 
-      <ToolbarSep />
-
-      {/* DB / schema picker — back in the toolbar where it sits
-          right next to Run. Earlier I'd moved it to the status bar
-          with the connection chip, but that put 'pick which DB
-          you're targeting' too far from 'click to run' and the
-          user lost track of it. Toolbar is the right home: the
-          picker IS the action context. */}
-      {connection && (
-        <ContextPicker connection={connection} isConnected={isConnected} />
-      )}
+      {/* DB / schema picker lives on the connection-tabs row now,
+          next to the connection picker — same row, same identity.
+          Toolbar stays purely action-focused. */}
 
       <span className="flex-1" />
 

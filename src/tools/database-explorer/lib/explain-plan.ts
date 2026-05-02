@@ -227,7 +227,6 @@ export function parseMssqlShowplan(xml: string, statement: string): PlanRoot {
 
   const walk = (el: Element): PlanNode => {
     const physicalOp = el.getAttribute("PhysicalOp") ?? "Unknown";
-    const logicalOp = el.getAttribute("LogicalOp");
     const estRows = parseFloat(el.getAttribute("EstimateRows") ?? "");
     const actRows = parseFloat(el.getAttribute("ActualRows") ?? "");
     const subtreeCost = parseFloat(
@@ -256,6 +255,24 @@ export function parseMssqlShowplan(xml: string, statement: string): PlanRoot {
     // so the immediate-grandchild-RelOps are this node's children.
     const children = directChildRelOps(el).map(walk);
 
+    // Pull the full `<Object>` attribute set into the details map
+    // under `Object.*` keys so the user can see Database / Schema /
+    // Table / Index / IndexKind / Storage at a glance. Without this,
+    // the parser threw away everything except the schema/table pair
+    // it concatenated into `relation`.
+    const objectAttrs: Record<string, unknown> = {};
+    if (obj) {
+      for (const attr of Array.from(obj.attributes)) {
+        objectAttrs[`Object.${attr.name}`] = attr.value;
+      }
+    }
+
+    // `collectAttrs` previously also stamped a lowercase
+    // `logicalOp` onto the details map, which produced a duplicate
+    // alongside the existing `LogicalOp` key from the XML — the
+    // dialog rendered both rows for the same value. The lowercase
+    // alias served no purpose other than that duplicate, so we drop
+    // the synthetic `extra` parameter entirely.
     return {
       id: mintId(),
       nodeType: physicalOp,
@@ -268,7 +285,7 @@ export function parseMssqlShowplan(xml: string, statement: string): PlanRoot {
       selfTimeMs: undefined,
       loops: undefined,
       buffers: undefined,
-      details: collectAttrs(el, { logicalOp }),
+      details: { ...collectAttrs(el, {}), ...objectAttrs },
       children,
     };
   };
@@ -403,23 +420,129 @@ export function aggregateBuffers(root: PlanNode): BufferStats | undefined {
   return acc;
 }
 
-/** Color palette for plan nodes by NodeType, mapped to the same
- * `--chart-N` CSS variables the http-runner perf dashboard uses
- * so the flame view honours light/dark mode automatically. */
+/**
+ * Total buffer pages this node touched, hits + reads. Used by the
+ * flame view's "buffers" width-metric so big I/O nodes blow up
+ * proportionally to how many pages they touched, not how long they
+ * took.
+ */
+export function bufferTotalFor(node: PlanNode): number {
+  if (!node.buffers) return 0;
+  return node.buffers.sharedHit + node.buffers.sharedRead;
+}
+
+/**
+ * Single-source "rows this node produced." Falls back to estimated
+ * when the plan didn't execute (estimate-only EXPLAIN). The flame
+ * view's rows-metric uses this so a plan-only render still has a
+ * sensible width allocation (estimates are all we have to go on).
+ */
+export function actualOrEstimatedRows(node: PlanNode): number {
+  return node.actualRows ?? node.estimatedRows;
+}
+
+/**
+ * Color palette for plan nodes by NodeType. Goals:
+ *
+ *   1. **Red is reserved for danger.** The skew-overlay pattern
+ *      uses `--destructive` to mean "the planner was wrong"; cells
+ *      themselves never carry red just because they're an
+ *      "aggregate" or "compute scalar" operator. The previous
+ *      mapping made every Compute Scalar / Stream Aggregate look
+ *      alarming via `--chart-5` (which is `--destructive` in dark
+ *      mode), which trained the eye to ignore the *real* skew
+ *      stripes when they appeared.
+ *
+ *   2. **Mode-stable.** OKLCH literals at L≈0.6-0.72, C≈0.05-0.16
+ *      give us colours that are readable on both light and dark
+ *      backgrounds without per-mode swapping (which the chart-N
+ *      vars do, swapping hue in dark mode). The previous palette
+ *      flipped Sort from violet (light) to yellow (dark), which
+ *      meant cross-mode screenshots were unrecognisable.
+ *
+ *   3. **MSSQL coverage.** The old chain had a fallthrough to grey
+ *      for `Nested Loops`, `Filter`, `Table Spool`,
+ *      `Clustered Index Scan`, `Compute Scalar` — half the common
+ *      MSSQL operators. The new chain maps every one we've seen
+ *      in real plans.
+ *
+ * Hue groups:
+ *   blue       → relation reads (Seq Scan, Table Scan, Clustered
+ *                Index Scan, CTE Scan, Subquery, Values, Function)
+ *   teal       → indexed reads (Index Scan, Index Seek, Index-Only,
+ *                Bitmap Heap/Index Scan)
+ *   green      → equi-joins that build a hash (Hash Join / Hash Match)
+ *   moss       → sorted-input joins (Merge Join)
+ *   purple     → row-by-row joins (Nested Loop / Nested Loops)
+ *   amber      → ordering ops (Sort)
+ *   orange     → grouping ops (Aggregate / Hash Aggregate / Stream
+ *                Aggregate, Group, Window functions)
+ *   slate      → bookkeeping (Filter, Compute Scalar, Projection)
+ *   smoke-blue → memoisation (Materialize, Spool variants)
+ *   sand       → row-flow control (Limit, Top, Append, Result, Union)
+ *   default    → mid-grey, anything we haven't catalogued
+ */
 export function colorVarForNodeType(nodeType: string): string {
   const lower = nodeType.toLowerCase();
-  if (lower.includes("index") && lower.includes("scan")) return "var(--chart-2)";
-  if (lower.includes("seq") || lower.includes("scan")) return "var(--chart-1)";
-  if (lower.includes("join") || lower.includes("hash") || lower.includes("merge"))
-    return "var(--chart-3)";
-  if (lower.includes("sort")) return "var(--chart-4)";
+
+  // Indexed reads — teal.
   if (
-    lower.includes("aggregate") ||
-    lower.includes("group") ||
-    lower.includes("compute")
+    /(?:^|\s)(?:index\s+(?:scan|seek|only)|bitmap\s+(?:heap|index)\s+scan)/.test(
+      lower,
+    )
   )
-    return "var(--chart-5)";
-  if (lower.includes("limit") || lower.includes("cte") || lower.includes("subquery"))
-    return "var(--chart-2)";
-  return "var(--muted-foreground)";
+    return "oklch(0.7 0.1 195)";
+
+  // Sequential / heap / clustered-as-table reads — blue.
+  if (
+    /(?:^|\s)(?:seq\s+scan|table\s+scan|clustered\s+index\s+scan|tid\s+scan|sample\s+scan|heap\s+scan)/.test(
+      lower,
+    )
+  )
+    return "oklch(0.65 0.12 235)";
+
+  // Synthetic / virtual reads — muted blue.
+  if (
+    /(?:cte\s+scan|subquery\s+scan|values\s+scan|function\s+scan|named\s+tuplestore|workfile)/.test(
+      lower,
+    )
+  )
+    return "oklch(0.66 0.08 225)";
+
+  // Joins — split by family so two adjacent join types read
+  // distinctly (huge for plan diffing).
+  if (/hash\s+(?:join|match)/.test(lower)) return "oklch(0.66 0.13 150)"; // green
+  if (/merge\s+join/.test(lower)) return "oklch(0.68 0.12 130)"; // moss
+  if (/nested\s+loops?/.test(lower)) return "oklch(0.62 0.13 295)"; // purple
+
+  // Ordering / grouping / windowing — amber & orange.
+  if (/sort/.test(lower)) return "oklch(0.74 0.13 85)"; // amber
+  if (/aggregate|grouping|partial\s+aggregate|group/.test(lower))
+    return "oklch(0.7 0.14 55)"; // orange
+  if (/window|sequence|cumulative/.test(lower)) return "oklch(0.72 0.13 65)"; // amber-orange
+
+  // Set ops — sand.
+  if (/append|union|intersect|except|concatenat|setop/.test(lower))
+    return "oklch(0.74 0.09 90)";
+
+  // Memoisation — smoke blue. Spool family is huge in MSSQL plans.
+  if (/spool|materialize|memoize|recursive\s+union/.test(lower))
+    return "oklch(0.66 0.04 235)";
+
+  // Restriction / projection — slate. Bookkeeping ops; visually
+  // recede so the eye lands on scans / joins / aggregates first.
+  if (
+    /^filter|compute\s+scalar|projection|gather|finalize|result(?!\s+set)|materialize/.test(
+      lower,
+    )
+  )
+    return "oklch(0.55 0.03 240)";
+
+  // Row-flow control — sand.
+  if (/limit|top\s|^top$|skip|page/.test(lower))
+    return "oklch(0.72 0.08 75)";
+
+  // Catch-all — neutral so unknown ops are obvious without
+  // accidentally signalling "danger".
+  return "oklch(0.55 0.04 240)";
 }

@@ -29,6 +29,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
+import { ContextPicker } from "./context-picker";
 import { useDbExplorerStore } from "../store/db-explorer-store";
 import { useDbConnection } from "../hooks/use-db-connection";
 import { useDbTree } from "../hooks/use-db-tree";
@@ -197,6 +198,17 @@ export function ConnectionTabs() {
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
+
+      {/* DB / schema picker — sits on the same row as the
+          connection picker, so all "what am I querying against"
+          context lives in one strip. Self-hides when the active
+          connection isn't live. */}
+      {active ? (
+        <ContextPicker
+          connection={active}
+          isConnected={activeStatus === "connected"}
+        />
+      ) : null}
 
       {/* Right-edge fast Add — duplicates the menu's last item but
           puts it one click away when the user just wants to add a

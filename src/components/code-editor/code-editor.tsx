@@ -232,6 +232,78 @@ export function CodeEditor({
         onChangeRef.current?.(update.state.doc.toString());
       }
     }),
+    // Vim-mode click defence.
+    //
+    // `@replit/codemirror-vim` has a long-standing quirk: after the
+    // user scrolls the editor (mouse-wheel or scrollbar) and *then*
+    // clicks somewhere visible, vim sometimes produces a phantom
+    // selection running from the stale pre-scroll cursor anchor to
+    // the click point. The click coordinates are hit-tested against
+    // the new viewport, but vim's internal anchor is still pinned
+    // to the old offset, so CM ends up creating a range instead of
+    // a single-cursor placement.
+    //
+    // Workaround: track every plain left-button mousedown (no
+    // modifier keys, no movement during the press) and, once the
+    // matching mouseup fires, collapse any selection wider than 1
+    // char back to a single cursor at the click head. We tolerate
+    // the 1-char-wide case so vim's normal-mode block-cursor
+    // rendering still works on implementations that store it as a
+    // 1-char selection.
+    //
+    // - Modified clicks (Shift / ⌘ / Ctrl / Alt) bypass entirely so
+    //   shift-click range-extension and ⌘-click multi-cursor still
+    //   work as expected.
+    // - Click-and-drag (mouse moves >3 px between down and up) also
+    //   bypasses, so the user can still drag-select normally.
+    ...(vimMode
+      ? [
+          EditorView.domEventHandlers({
+            mousedown(event) {
+              if (
+                event.button !== 0 ||
+                event.shiftKey ||
+                event.metaKey ||
+                event.ctrlKey ||
+                event.altKey
+              ) {
+                return false;
+              }
+              const sx = event.clientX;
+              const sy = event.clientY;
+              let moved = false;
+              const onMove = (e: MouseEvent) => {
+                if (
+                  Math.abs(e.clientX - sx) > 3 ||
+                  Math.abs(e.clientY - sy) > 3
+                ) {
+                  moved = true;
+                }
+              };
+              const onUp = () => {
+                window.removeEventListener("mousemove", onMove);
+                window.removeEventListener("mouseup", onUp);
+                if (moved) return;
+                // Defer past CM's own click handler so we collapse
+                // *after* it has computed and applied its selection.
+                queueMicrotask(() => {
+                  const v = viewRef.current;
+                  if (!v) return;
+                  const sel = v.state.selection.main;
+                  if (sel.to - sel.from > 1) {
+                    v.dispatch({
+                      selection: { anchor: sel.head, head: sel.head },
+                    });
+                  }
+                });
+              };
+              window.addEventListener("mousemove", onMove);
+              window.addEventListener("mouseup", onUp);
+              return false;
+            },
+          }),
+        ]
+      : []),
   ];
 
   // Mount.
