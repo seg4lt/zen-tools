@@ -173,13 +173,23 @@ export function PrMasterStoreProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(reducer, initialState);
   const value = useMemo(() => ({ state, dispatch }), [state]);
 
-  // Bootstrap: resolve the current user. Failures are non-fatal — the UI
-  // still works for users without `gh` configured; Settings surfaces the
-  // problem.
+  // Bootstrap: hydrate from the persisted PR snapshot first so the UI
+  // doesn't flash empty on cold start (Swift `CacheService` parity),
+  // then resolve the current user. Failures are non-fatal — the UI
+  // still works for users without `gh` configured; Settings surfaces
+  // the problem.
   useEffect(() => {
     let alive = true;
     let unlisten: (() => void) | null = null;
     (async () => {
+      try {
+        const snapshot = await prmasterTauri.loadPrSnapshot();
+        if (alive && snapshot) {
+          dispatch({ type: "applyRefresh", snapshot });
+        }
+      } catch (err) {
+        console.warn("[prmaster] loadPrSnapshot failed:", err);
+      }
       try {
         const user = await prmasterTauri.whoami();
         if (alive) dispatch({ type: "bootstrapped", user });

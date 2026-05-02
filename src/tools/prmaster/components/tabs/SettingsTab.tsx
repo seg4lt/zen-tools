@@ -278,17 +278,12 @@ export function SettingsTab() {
                   id="ai-model"
                   label="Model"
                   control={
-                    <Input
-                      id="ai-model"
+                    <ModelSelect
+                      provider={settings.ai_provider}
                       value={settings.ai_model}
-                      onChange={(e) =>
-                        void persist({
-                          ...settings,
-                          ai_model: e.target.value,
-                        })
+                      onChange={(v) =>
+                        void persist({ ...settings, ai_model: v })
                       }
-                      placeholder="sonnet"
-                      className="h-8 w-44 font-mono"
                     />
                   }
                 />
@@ -300,13 +295,15 @@ export function SettingsTab() {
                       id="token-ratio"
                       type="number"
                       min={1}
-                      max={8}
+                      max={4}
                       value={settings.ai_token_ratio}
                       onChange={(e) =>
                         void persist({
                           ...settings,
+                          // Clamped 1–4 to match the Swift Copilot
+                          // stepper (`AIProviderSection.swift:145`).
                           ai_token_ratio: Math.min(
-                            8,
+                            4,
                             Math.max(1, Number(e.target.value)),
                           ),
                         })
@@ -683,7 +680,10 @@ function RepoMappingsEditor({
         Cache TTL 7d.
       </p>
 
-      {/* Cache strip — always-visible Fetch + cache age */}
+      {/* Cache strip — always-visible Fetch + cache age. The cache is
+          loaded automatically on mount and shared with the AI tab, so
+          there's no separate "Reload from local cache" button — the
+          only meaningful action is fetching fresh data from GitHub. */}
       <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
         <span className="flex items-center gap-1.5">
           {cacheFooter}
@@ -691,36 +691,20 @@ function RepoMappingsEditor({
             <span className="text-amber-600 dark:text-amber-400">●</span>
           )}
         </span>
-        <div className="flex items-center gap-1">
-          <Button
-            size="sm"
-            variant="ghost"
-            disabled={reposLoading || reposFetching}
-            onClick={() => void reloadRepos()}
-            title="Reload from local cache"
-          >
-            {reposLoading ? (
-              <Loader2 className="size-3.5 animate-spin" />
-            ) : (
-              <RefreshCw className="size-3.5" />
-            )}
-            Reload
-          </Button>
-          <Button
-            size="sm"
-            variant="outline"
-            disabled={reposFetching}
-            onClick={() => void fetchRepos()}
-            title="Re-fetch the full repo list from GitHub (ignores cache)"
-          >
-            {reposFetching ? (
-              <Loader2 className="size-3.5 animate-spin" />
-            ) : (
-              <Download className="size-3.5" />
-            )}
-            Fetch
-          </Button>
-        </div>
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={reposFetching}
+          onClick={() => void fetchRepos()}
+          title="Re-fetch the full repo list from GitHub (ignores cache)"
+        >
+          {reposFetching ? (
+            <Loader2 className="size-3.5 animate-spin" />
+          ) : (
+            <Download className="size-3.5" />
+          )}
+          Fetch
+        </Button>
       </div>
 
       {/* Add mapping row: [searchable repo dropdown] [Browse for folder…] */}
@@ -731,7 +715,6 @@ function RepoMappingsEditor({
           onChange={setPickRepo}
           loading={reposLoading}
           fetching={reposFetching}
-          onReload={() => void reloadRepos()}
           onFetch={() => void fetchRepos()}
           footer={cacheFooter}
           placeholder={
@@ -801,6 +784,88 @@ function RepoMappingsEditor({
         </div>
       )}
     </div>
+  );
+}
+
+/** Select for the active provider's models. Mirrors the Swift
+ *  `AIProviderSection.swift:104–141` model picker — populated from
+ *  `prmaster_ai_list_models` on mount and whenever the provider
+ *  changes. Falls back to a free-text Input when the provider isn't
+ *  installed / the list call fails, so the user can still edit the
+ *  stored model string. */
+function ModelSelect({
+  provider,
+  value,
+  onChange,
+}: {
+  provider: string;
+  value: string;
+  onChange: (next: string) => void;
+}) {
+  const [models, setModels] = useState<string[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    setLoading(true);
+    setFailed(false);
+    void (async () => {
+      try {
+        const list = await prmasterTauri.aiListModels();
+        if (!alive) return;
+        setModels(list);
+      } catch {
+        if (!alive) return;
+        setFailed(true);
+        setModels([]);
+      } finally {
+        if (alive) setLoading(false);
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [provider]);
+
+  // If the list-call failed (provider missing) or the persisted value
+  // isn't in the returned list, fall through to a free-text editor.
+  if (failed || (models.length > 0 && !models.includes(value))) {
+    return (
+      <div className="flex items-center gap-1.5">
+        <Input
+          id="ai-model"
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder="sonnet"
+          className="h-8 w-44 font-mono"
+        />
+        {failed && (
+          <span className="text-[10px] text-amber-600 dark:text-amber-400">
+            list unavailable
+          </span>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <Select value={value || undefined} onValueChange={onChange}>
+      <SelectTrigger id="ai-model" size="sm" className="h-8 w-44 font-mono">
+        <SelectValue
+          placeholder={
+            loading ? "Loading models…" : models.length === 0 ? "—" : "Pick…"
+          }
+        />
+      </SelectTrigger>
+      <SelectContent>
+        {models.map((m) => (
+          <SelectItem key={m} value={m} className="font-mono">
+            {m}
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
   );
 }
 

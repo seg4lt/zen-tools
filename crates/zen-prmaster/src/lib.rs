@@ -347,6 +347,38 @@ impl PrMasterEngine {
         self.filter_store()?.delete(id)
     }
 
+    /// Broadcast a synthetic notification described by `filter` so the
+    /// user can preview how a saved rule will sound / look. Mirrors
+    /// Swift's `sendTestNotification(for:)` from `FiltersView`. The
+    /// payload is dispatched on the same broadcast channel as real
+    /// notifications, so the Tauri bridge takes the same code path.
+    pub fn fire_test_notification(
+        &self,
+        filter: &NotificationFilter,
+    ) -> Result<(), FilterStoreError> {
+        use NotificationAction as Action;
+        let (silent, badge_only, muted) = match filter.action {
+            Action::SoundBanner => (false, false, false),
+            Action::SilentBanner => (true, false, false),
+            Action::BadgeOnly => (false, true, false),
+            Action::Mute => (false, false, true),
+        };
+        let note = PendingNotification {
+            id: format!("test:{}", filter.id),
+            title: format!("PRMaster filter test — {}", filter.name),
+            body: format!(
+                "This is a preview of how the “{}” rule will fire.",
+                filter.name
+            ),
+            url: String::new(),
+            silent,
+            badge_only,
+            muted,
+        };
+        let _ = self.inner.tx.send(PrMasterEvent::Notification(note));
+        Ok(())
+    }
+
     // ─── AI Summary ──────────────────────────────────────────────────────
 
     fn summary_cache(&self) -> std::io::Result<AiSummaryCache> {

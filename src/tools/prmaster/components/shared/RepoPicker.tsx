@@ -10,7 +10,7 @@
  */
 
 import { useMemo, useState } from "react";
-import { ChevronsUpDown, Download, Loader2, RefreshCw, X } from "lucide-react";
+import { ChevronsUpDown, Download, Loader2, X } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -34,7 +34,6 @@ interface Props {
   compact?: boolean;
   onToggle: (repo: string) => void;
   onClear: () => void;
-  onReload: () => void;
   /** Force re-fetch from GitHub (ignores cache). Optional. */
   onFetch?: () => void;
 }
@@ -50,7 +49,6 @@ export function RepoPicker({
   compact = false,
   onToggle,
   onClear,
-  onReload,
   onFetch,
 }: Props) {
   const [search, setSearch] = useState("");
@@ -80,7 +78,7 @@ export function RepoPicker({
           ? loading
             ? "Loading repositories…"
             : repos.length === 0
-              ? "No repositories — click Reload"
+              ? "No repositories — click Fetch"
               : "Pick repositories…"
           : selectedList.length === 1
             ? selectedList[0]
@@ -100,7 +98,7 @@ export function RepoPicker({
             {loading
               ? "Loading repositories…"
               : repos.length === 0
-                ? "No repositories — click Reload"
+                ? "No repositories — click Fetch"
                 : "Pick repositories…"}
           </span>
         ) : (
@@ -187,20 +185,6 @@ export function RepoPicker({
                   Clear
                 </Button>
               )}
-              <Button
-                size="sm"
-                variant="ghost"
-                disabled={loading || fetching}
-                onClick={onReload}
-                title="Reload from local cache"
-              >
-                {loading ? (
-                  <Loader2 className="size-3.5 animate-spin" />
-                ) : (
-                  <RefreshCw className="size-3.5" />
-                )}
-                Reload
-              </Button>
               {onFetch && (
                 <Button
                   size="sm"
@@ -227,26 +211,11 @@ export function RepoPicker({
           <span>
             {selectedList.length} selected · {repos.length} available
           </span>
-          <div className="flex items-center gap-1">
-            {selectedList.length > 0 && (
-              <Button size="sm" variant="ghost" onClick={onClear}>
-                Clear
-              </Button>
-            )}
-            <Button
-              size="sm"
-              variant="ghost"
-              disabled={loading}
-              onClick={onReload}
-            >
-              {loading ? (
-                <Loader2 className="size-3.5 animate-spin" />
-              ) : (
-                <RefreshCw className="size-3.5" />
-              )}
-              Reload
+          {selectedList.length > 0 && (
+            <Button size="sm" variant="ghost" onClick={onClear}>
+              Clear
             </Button>
-          </div>
+          )}
         </div>
       )}
     </div>

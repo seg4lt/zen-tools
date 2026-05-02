@@ -8,6 +8,7 @@ import { useEffect, useState } from "react";
 import {
   Bell,
   BellOff,
+  BellRing,
   Loader2,
   PencilLine,
   Plus,
@@ -16,6 +17,7 @@ import {
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
 import { Panel, PanelContent, PanelTitle } from "../shared/density";
 import {
@@ -144,9 +146,39 @@ export function FiltersTab() {
                     setError(formatError(err));
                   }
                 }}
+                onToggleEnabled={async (next) => {
+                  try {
+                    await prmasterTauri.saveFilter({
+                      ...row,
+                      enabled: next,
+                      updated_at_ms: Date.now(),
+                    });
+                    await refresh();
+                  } catch (err) {
+                    setError(formatError(err));
+                  }
+                }}
+                onTest={async () => {
+                  try {
+                    await prmasterTauri.testFilterNotification(row.id);
+                  } catch (err) {
+                    setError(formatError(err));
+                  }
+                }}
               />
             ))}
           </div>
+
+          {/* Default-behaviour footer (port of `FiltersView.swift:170–180`) */}
+          {rows.length > 0 && (
+            <p className="px-2 py-1 text-[11px] italic text-muted-foreground">
+              Default: notify for all new review requests. Filters only
+              modify <em>which</em> requests fire and <em>how</em> they
+              announce themselves — they don't suppress the default
+              behaviour for unmatched PRs unless you turn on{" "}
+              <strong>Only filtered PRs</strong> in Settings.
+            </p>
+          )}
         </div>
       </div>
     </div>
@@ -158,21 +190,28 @@ function FilterRow({
   isEditing,
   onEdit,
   onDelete,
+  onToggleEnabled,
+  onTest,
 }: {
   row: NotificationFilter;
   isEditing: boolean;
   onEdit: () => void;
   onDelete: () => void;
+  onToggleEnabled: (next: boolean) => void;
+  onTest: () => void;
 }) {
   const Icon = row.enabled ? Bell : BellOff;
   return (
     <Panel
-      className={cn(
-        "transition-colors",
-        isEditing && "ring-2 ring-ring",
-      )}
+      className={cn("transition-colors", isEditing && "ring-2 ring-ring")}
     >
       <div className="flex items-start gap-2 px-2.5 py-1.5">
+        <Switch
+          checked={row.enabled}
+          onCheckedChange={(v) => onToggleEnabled(v)}
+          aria-label={row.enabled ? "Disable filter" : "Enable filter"}
+          className="mt-0.5"
+        />
         <Icon
           className={cn(
             "mt-0.5 size-3.5 shrink-0",
@@ -209,6 +248,15 @@ function FilterRow({
           </div>
         </div>
         <div className="flex shrink-0 gap-1">
+          <Button
+            size="icon-sm"
+            variant="ghost"
+            onClick={onTest}
+            aria-label="Send a test notification through this filter"
+            title="Send test notification"
+          >
+            <BellRing className="size-3.5" />
+          </Button>
           <Button
             size="icon-sm"
             variant="ghost"

@@ -8,7 +8,7 @@
  * a `DropdownMenu` so it composes with the rest of PRMaster's chrome.
  */
 import { forwardRef, useMemo, useState } from "react";
-import { ChevronsUpDown, Download, Loader2, RefreshCw } from "lucide-react";
+import { ChevronsUpDown, Download, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -23,8 +23,6 @@ interface Props {
   items: string[];
   value: string | null;
   onChange: (next: string | null) => void;
-  /** Called when the user clicks the inline reload button. */
-  onReload?: () => void;
   /** Called when the user clicks "Fetch from GitHub" (force re-fetch). */
   onFetch?: () => void;
   loading?: boolean;
@@ -40,7 +38,6 @@ export function SearchableRepoDropdown({
   items,
   value,
   onChange,
-  onReload,
   onFetch,
   loading = false,
   fetching = false,
@@ -138,40 +135,22 @@ export function SearchableRepoDropdown({
           <span className="truncate">
             {footer ?? `${items.length} repositories cached`}
           </span>
-          <div className="flex shrink-0 items-center gap-1">
-            {onReload && (
-              <Button
-                size="sm"
-                variant="ghost"
-                disabled={loading || fetching}
-                onClick={onReload}
-                title="Reload cached list"
-              >
-                {loading ? (
-                  <Loader2 className="size-3.5 animate-spin" />
-                ) : (
-                  <RefreshCw className="size-3.5" />
-                )}
-                Reload
-              </Button>
-            )}
-            {onFetch && (
-              <Button
-                size="sm"
-                variant="outline"
-                disabled={fetching}
-                onClick={onFetch}
-                title="Re-fetch the full repo list from GitHub"
-              >
-                {fetching ? (
-                  <Loader2 className="size-3.5 animate-spin" />
-                ) : (
-                  <Download className="size-3.5" />
-                )}
-                Fetch
-              </Button>
-            )}
-          </div>
+          {onFetch && (
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={fetching}
+              onClick={onFetch}
+              title="Re-fetch the full repo list from GitHub"
+            >
+              {fetching ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : (
+                <Download className="size-3.5" />
+              )}
+              Fetch
+            </Button>
+          )}
         </div>
       </DropdownMenuContent>
     </DropdownMenu>

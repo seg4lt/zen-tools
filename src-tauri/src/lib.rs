@@ -184,6 +184,15 @@ pub fn run() {
                     match prmaster_rx.recv().await {
                         Ok(PrMasterEvent::Refreshed(snapshot)) => {
                             let _ = app_handle.emit("prmaster:refreshed", &snapshot);
+                            // Persist the latest snapshot so the next
+                            // cold start hydrates from disk instead of
+                            // showing an empty list until the first
+                            // poll completes (Swift `CacheService`).
+                            let cfg = app_handle.state::<UserConfig>();
+                            commands::prmaster::persist_pr_snapshot(
+                                cfg.inner(),
+                                &snapshot,
+                            );
                         }
                         Ok(PrMasterEvent::BadgeChanged(text)) => {
                             prmaster_tray::set_badge(&app_handle, &text);
@@ -436,11 +445,16 @@ pub fn run() {
             commands::prmaster::prmaster_list_filters,
             commands::prmaster::prmaster_save_filter,
             commands::prmaster::prmaster_delete_filter,
+            commands::prmaster::prmaster_test_filter_notification,
             commands::prmaster::prmaster_refresh,
             commands::prmaster::prmaster_quit_app,
             commands::prmaster::prmaster_ai_summary,
             commands::prmaster::prmaster_ai_list_models,
             commands::prmaster::prmaster_clear_ai_cache,
+            commands::prmaster::prmaster_load_ai_summaries,
+            commands::prmaster::prmaster_save_ai_summaries,
+            commands::prmaster::prmaster_clear_ai_summaries,
+            commands::prmaster::prmaster_load_pr_snapshot,
             commands::prmaster::prmaster_list_repos,
             commands::prmaster::prmaster_fetch_repos,
         ])

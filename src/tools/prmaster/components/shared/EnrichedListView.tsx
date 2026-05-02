@@ -163,9 +163,8 @@ export function EnrichedListView({
             return (
               <PrCard
                 key={id}
-                pr={row.pr}
+                enriched={row}
                 selected={false}
-                decision={row.reviewDecision}
                 onSelect={() => dispatch({ type: "select", id })}
               />
             );

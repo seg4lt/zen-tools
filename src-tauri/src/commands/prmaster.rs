@@ -295,6 +295,31 @@ pub async fn prmaster_save_filter(
         .map_err(|e| crate::error::AppError::Other(format!("filter store: {e}")))
 }
 
+/// Fire a synthetic notification through the same broadcast bridge a
+/// real PRMaster notification uses. The frontend wires this to the
+/// per-row "test" button on the Filters tab.
+#[tauri::command]
+pub async fn prmaster_test_filter_notification(
+    state: State<'_, Mutex<AppState>>,
+    id: String,
+) -> AppResult<()> {
+    let engine = {
+        let s = state.lock().await;
+        engine(&s)
+    };
+    let filters = engine
+        .list_filters()
+        .map_err(|e| crate::error::AppError::Other(format!("filter store: {e}")))?;
+    let Some(filter) = filters.into_iter().find(|f| f.id == id) else {
+        return Err(crate::error::AppError::Other(format!(
+            "no filter with id {id}"
+        )));
+    };
+    engine
+        .fire_test_notification(&filter)
+        .map_err(|e| crate::error::AppError::Other(format!("filter test: {e}")))
+}
+
 /// Delete a filter by id.
 #[tauri::command]
 pub async fn prmaster_delete_filter(
@@ -363,6 +388,73 @@ pub async fn prmaster_ai_list_models(
         .await
         .map_err(|e| crate::error::AppError::Other(format!("ai list_models: {e}")))?;
     Ok(models)
+}
+
+/// Storage key for the AI Summary tab's persistent card list — the
+/// flat collection of completed `SummaryCard`s the user has generated
+/// over time. Mirrors the Swift `AISummaryCacheService` (`UserDefaults`
+/// `aiSummaryCache` key).
+const PRMASTER_AI_SUMMARIES_KEY: &str = "prmaster_ai_summaries";
+
+/// Storage key for the most-recent `RefreshSnapshot`. The frontend
+/// bootstraps from this so cold-start shows the user's last-seen PR
+/// lists instead of an empty state, mirroring Swift's `CacheService`
+/// behaviour (`PRListViewModel.swift:102–116`).
+const PRMASTER_PR_SNAPSHOT_KEY: &str = "prmaster_pr_snapshot";
+
+/// Read the persisted PR snapshot. Returns `None` on first launch (or
+/// after a `Clear` op) so the frontend can decide whether to seed the
+/// store or wait for the first poll.
+#[tauri::command]
+pub async fn prmaster_load_pr_snapshot(
+    config: State<'_, UserConfig>,
+) -> AppResult<Option<zen_prmaster::RefreshSnapshot>> {
+    Ok(config.get::<zen_prmaster::RefreshSnapshot>(PRMASTER_PR_SNAPSHOT_KEY)?)
+}
+
+/// Persist a `RefreshSnapshot`. Wired up by the Tauri broadcast bridge
+/// in `src-tauri/src/lib.rs` so every successful refresh updates the
+/// on-disk cache without explicit calls from the frontend.
+pub fn persist_pr_snapshot(
+    config: &UserConfig,
+    snapshot: &zen_prmaster::RefreshSnapshot,
+) {
+    if let Err(e) = config.set(PRMASTER_PR_SNAPSHOT_KEY, snapshot) {
+        tracing::warn!(error = %e, "persist pr snapshot failed");
+    }
+}
+
+/// Load every persisted summary card for the AI tab. Returns an empty
+/// list if the user has never generated one.
+#[tauri::command]
+pub async fn prmaster_load_ai_summaries(
+    config: State<'_, UserConfig>,
+) -> AppResult<Vec<SummaryCard>> {
+    Ok(config
+        .get::<Vec<SummaryCard>>(PRMASTER_AI_SUMMARIES_KEY)?
+        .unwrap_or_default())
+}
+
+/// Replace the persisted summary card list. The frontend owns the
+/// ordering / dedup policy; we just round-trip the JSON.
+#[tauri::command]
+pub async fn prmaster_save_ai_summaries(
+    config: State<'_, UserConfig>,
+    summaries: Vec<SummaryCard>,
+) -> AppResult<()> {
+    config.set(PRMASTER_AI_SUMMARIES_KEY, &summaries)?;
+    Ok(())
+}
+
+/// Drop the persisted summary card list (the AI tab's "Clear cache"
+/// button). Independent of the engine-level prompt-response cache
+/// cleared by [`prmaster_clear_ai_cache`].
+#[tauri::command]
+pub async fn prmaster_clear_ai_summaries(
+    config: State<'_, UserConfig>,
+) -> AppResult<()> {
+    config.set::<Vec<SummaryCard>>(PRMASTER_AI_SUMMARIES_KEY, &Vec::new())?;
+    Ok(())
 }
 
 /// Drop every cached AI summary card.

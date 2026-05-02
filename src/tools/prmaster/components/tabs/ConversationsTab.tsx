@@ -217,6 +217,10 @@ function ThreadRow({ item }: { item: ConversationItem }) {
     .trim();
   const truncated =
     preview && preview.length > 90 ? `${preview.slice(0, 87)}...` : preview;
+  // Reply count = total messages minus the original opening comment.
+  // Mirrors `ConversationListView.swift:285–293` which renders a
+  // bubble + count when there's at least one reply.
+  const replyCount = Math.max(0, item.messages.length - 1);
   return (
     <div className="rounded-md border bg-background">
       <button
@@ -248,6 +252,15 @@ function ThreadRow({ item }: { item: ConversationItem }) {
             </div>
           )}
         </div>
+        {replyCount > 0 && (
+          <span
+            className="inline-flex shrink-0 items-center gap-1 text-xs text-muted-foreground"
+            title={`${replyCount} ${replyCount === 1 ? "reply" : "replies"}`}
+          >
+            <MessageSquare className="size-3" />
+            {replyCount}
+          </span>
+        )}
         <Button
           asChild
           size="icon-sm"

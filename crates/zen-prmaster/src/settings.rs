@@ -112,13 +112,11 @@ impl Default for PrMasterSettings {
             notifications_enabled: true,
             only_filter_notifications: false,
             my_pr_notifications_enabled: true,
-            badge_configs: vec![BadgeSourceConfig {
-                source: BadgeSource::ToReview,
-                filter_id: None,
-                prefix: String::new(),
-                suffix: String::new(),
-                enabled: true,
-            }],
+            // Default to no badge sources — the menu-bar tray stays
+            // pristine until the user opts into a counter from
+            // Settings. Mirrors the Swift `@AppStorage("badgeConfig",
+            // "[]")` default.
+            badge_configs: Vec::new(),
             ai_provider: "claude".to_string(),
             ai_model: "sonnet".to_string(),
             ai_token_ratio: 2,
@@ -228,7 +226,9 @@ mod tests {
         assert!(s.my_pr_notifications_enabled);
         assert_eq!(s.ai_provider, "claude");
         assert_eq!(s.ai_token_ratio, 2);
-        assert_eq!(s.badge_configs.len(), 1);
-        assert_eq!(s.badge_configs[0].source, BadgeSource::ToReview);
+        assert!(
+            s.badge_configs.is_empty(),
+            "default badge_configs should be empty — matches Swift `@AppStorage(\"badgeConfig\", \"[]\")`"
+        );
     }
 }

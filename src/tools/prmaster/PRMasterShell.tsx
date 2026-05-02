@@ -10,9 +10,16 @@
  *
  * Window detection happens via `getCurrentWindow().label`; the popover
  * also dismisses on blur (mirrors macOS `NSPopover` behaviour).
+ *
+ * Keyboard nav (matches `MainView.swift:117–139`):
+ *   - `1` / `2` / `3` / `4` jump to the first four tabs.
+ *   - `←` / `→` cycle backwards / forwards through visible tabs.
+ *
+ * Tab pills carry numeric badge counts derived from the store
+ * (`MainView.swift:191–199`).
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   BarChart3,
   Bell,
@@ -27,6 +34,7 @@ import {
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { cn } from "@/lib/utils";
 import { AiSummaryTab } from "./components/tabs/AiSummaryTab";
 import { ApiStatsTab } from "./components/tabs/ApiStatsTab";
 import { ConversationsTab } from "./components/tabs/ConversationsTab";
@@ -70,7 +78,41 @@ export function PRMasterShell() {
   // Tabs are controlled so the popover-reopen handler can snap us back
   // to Review without unmounting the rest of the tree.
   const [tab, setTab] = useState(DEFAULT_TAB);
-  const { dispatch } = usePrMasterStore();
+  const { state, dispatch } = usePrMasterStore();
+
+  const visible = useMemo(
+    () => TABS.filter((t) => !t.fullOnly || !isCompact),
+    [isCompact],
+  );
+
+  // Tab badge counts — mirror Swift `badgeCount(for:)`. Only the four
+  // PR list tabs report a count; Filters / AI / API / Settings stay
+  // numberless. A count of zero hides the badge.
+  const badgeFor = useCallback(
+    (value: string): number => {
+      switch (value) {
+        case "to-review":
+          return state.toReview.length;
+        case "reviewed":
+          return state.reviewed.length;
+        case "mine":
+          return state.mine.length;
+        case "conversations":
+          // The Swift app counts threads needing a reply rather than
+          // groups; we don't have that classification on the store yet
+          // so the group count is the best stand-in.
+          return state.conversations.length;
+        default:
+          return 0;
+      }
+    },
+    [
+      state.toReview.length,
+      state.reviewed.length,
+      state.mine.length,
+      state.conversations.length,
+    ],
+  );
 
   // Popover lifecycle (compact mode only):
   //   - On focus loss → ask the backend to hide the popover (matches
@@ -99,10 +141,46 @@ export function PRMasterShell() {
     };
   }, [isCompact, dispatch]);
 
-  const visible = useMemo(
-    () => TABS.filter((t) => !t.fullOnly || !isCompact),
-    [isCompact],
-  );
+  // Keyboard navigation. `1`-`4` jump to the first four tabs, arrows
+  // cycle. We only act on bare keypresses (no modifiers) and ignore
+  // typing inside form fields so the list/filter inputs keep working.
+  useEffect(() => {
+    function isTypingTarget(target: EventTarget | null): boolean {
+      if (!(target instanceof HTMLElement)) return false;
+      if (target.isContentEditable) return true;
+      const tag = target.tagName;
+      return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
+    }
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;
+      if (isTypingTarget(e.target)) return;
+      const numericIdx = ["1", "2", "3", "4"].indexOf(e.key);
+      if (numericIdx >= 0) {
+        const target = visible[numericIdx];
+        if (target) {
+          e.preventDefault();
+          dispatch({ type: "select", id: null });
+          setTab(target.value);
+        }
+        return;
+      }
+      if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+        const idx = visible.findIndex((t) => t.value === tab);
+        if (idx < 0) return;
+        const next =
+          e.key === "ArrowLeft"
+            ? Math.max(0, idx - 1)
+            : Math.min(visible.length - 1, idx + 1);
+        if (next !== idx) {
+          e.preventDefault();
+          dispatch({ type: "select", id: null });
+          setTab(visible[next]!.value);
+        }
+      }
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [tab, visible, dispatch]);
 
   return (
     <div className="flex h-full min-h-0 w-full flex-col">
@@ -124,13 +202,19 @@ export function PRMasterShell() {
                 value={t.value}
                 icon={t.icon}
                 label={t.label}
+                badge={badgeFor(t.value)}
               />
             ))}
           </TabsList>
           {!isCompact && (
-            <span className="ml-auto text-xs text-muted-foreground">
-              <GitPullRequest className="mr-1 inline size-3" />
-              PRMaster
+            <span className="ml-auto flex items-center gap-2 text-xs text-muted-foreground">
+              {state.currentUser && (
+                <span className="font-mono">@{state.currentUser}</span>
+              )}
+              <span>
+                <GitPullRequest className="mr-1 inline size-3" />
+                PRMaster
+              </span>
             </span>
           )}
         </div>
@@ -172,10 +256,12 @@ function TabTrigger({
   value,
   icon: Icon,
   label,
+  badge,
 }: {
   value: string;
   icon: React.ComponentType<{ className?: string }>;
   label: string;
+  badge: number;
 }) {
   return (
     <TabsTrigger
@@ -184,6 +270,16 @@ function TabTrigger({
     >
       <Icon className="size-3" />
       {label}
+      {badge > 0 && (
+        <span
+          className={cn(
+            "ml-0.5 inline-flex h-4 min-w-[1rem] items-center justify-center rounded-full px-1",
+            "bg-primary/15 text-[10px] font-medium leading-none text-primary",
+          )}
+        >
+          {badge > 99 ? "99+" : badge}
+        </span>
+      )}
     </TabsTrigger>
   );
 }

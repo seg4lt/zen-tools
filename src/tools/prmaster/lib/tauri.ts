@@ -270,6 +270,8 @@ export const prmasterTauri = {
   saveFilter: (filter: NotificationFilter) =>
     invoke<void>("prmaster_save_filter", { filter }),
   deleteFilter: (id: string) => invoke<void>("prmaster_delete_filter", { id }),
+  testFilterNotification: (id: string) =>
+    invoke<void>("prmaster_test_filter_notification", { id }),
   hidePopover: () => invoke<void>("prmaster_hide_popover"),
   setBadge: (badge: string) => invoke<void>("prmaster_set_badge", { badge }),
   openFullWindow: () => invoke<void>("prmaster_open_full_window"),
@@ -278,6 +280,13 @@ export const prmasterTauri = {
     invoke<SummaryCard>("prmaster_ai_summary", { params }),
   aiListModels: () => invoke<string[]>("prmaster_ai_list_models"),
   clearAiCache: () => invoke<void>("prmaster_clear_ai_cache"),
+  loadAiSummaries: () =>
+    invoke<SummaryCard[]>("prmaster_load_ai_summaries"),
+  saveAiSummaries: (summaries: SummaryCard[]) =>
+    invoke<void>("prmaster_save_ai_summaries", { summaries }),
+  clearAiSummaries: () => invoke<void>("prmaster_clear_ai_summaries"),
+  loadPrSnapshot: () =>
+    invoke<RefreshSnapshot | null>("prmaster_load_pr_snapshot"),
   listAccessibleRepos: () => invoke<RepoListResult>("prmaster_list_repos"),
   fetchRepos: () => invoke<RepoListResult>("prmaster_fetch_repos"),
 };
