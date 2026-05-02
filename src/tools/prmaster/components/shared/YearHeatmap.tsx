@@ -77,17 +77,19 @@ export function YearHeatmap({
   }
 
   return (
-    <div className="space-y-1.5">
+    <div className="space-y-1">
       {rows.map((weeks, rowIdx) => (
         <div key={rowIdx} className="flex items-center gap-2">
-          <span className="w-7 shrink-0 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+          <span className="w-6 shrink-0 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
             {QUARTER_LABELS[rowIdx]}
           </span>
           <div
-            className="grid flex-1 gap-1"
-            // grid-cols-13 isn't a stock Tailwind class; inline it so
-            // the whole row stays cleanly aligned.
-            style={{ gridTemplateColumns: "repeat(13, minmax(0, 1fr))" }}
+            className="grid gap-0.5"
+            // Fixed-size cells (GitHub-contributions style) — keeps
+            // the heatmap visually dense and the cell-to-cell ratio
+            // consistent regardless of viewport width. ~16px square
+            // is small but still hoverable + readable.
+            style={{ gridTemplateColumns: "repeat(13, 16px)" }}
           >
             {weeks.map((week) => {
               const info = cells.get(week) ?? {
@@ -156,33 +158,25 @@ function HeatCell({
       title={tip}
       aria-label={tip}
       className={cn(
-        "group relative flex aspect-square cursor-pointer items-center justify-center rounded text-[10px] font-medium transition-colors",
-        // State-driven base colour. Light + dark mode pairs.
+        "relative flex aspect-square cursor-pointer items-center justify-center rounded-sm transition-colors",
+        // State-driven base colour. Light + dark mode pairs. Cells
+        // are ~16px so colour + tooltip carry all the info; we don't
+        // print the week number in the cell itself anymore.
         info.state === "empty" &&
-          "bg-muted/30 text-muted-foreground hover:bg-muted/60 dark:bg-muted/20 dark:hover:bg-muted/40",
+          "bg-muted/30 hover:bg-muted/60 dark:bg-muted/20 dark:hover:bg-muted/40",
         info.state === "partial" &&
-          "bg-amber-200/70 text-amber-900 hover:bg-amber-300/80 dark:bg-amber-900/40 dark:text-amber-200 dark:hover:bg-amber-900/60",
+          "bg-amber-300/70 hover:bg-amber-300 dark:bg-amber-700/60 dark:hover:bg-amber-700/80",
         info.state === "complete" &&
-          "bg-emerald-200/80 text-emerald-900 hover:bg-emerald-300/90 dark:bg-emerald-900/40 dark:text-emerald-200 dark:hover:bg-emerald-900/60",
+          "bg-emerald-300/80 hover:bg-emerald-300 dark:bg-emerald-700/70 dark:hover:bg-emerald-700/90",
         info.state === "inFlight" &&
-          "animate-pulse bg-primary/30 text-primary hover:bg-primary/40",
+          "animate-pulse bg-primary/40 hover:bg-primary/60",
         // Selection ring + future-week dim layered last so they win.
-        isSelected && "ring-2 ring-primary ring-offset-1 ring-offset-card",
+        isSelected && "ring-1 ring-primary ring-offset-1 ring-offset-card",
         isFuture && info.state === "empty" && "opacity-40",
       )}
     >
-      {info.state === "inFlight" ? (
-        <Loader2 className="size-3 animate-spin" />
-      ) : (
-        <span>{week}</span>
-      )}
-      {/* Tiny corner pip carrying commit count when there's something
-          worth showing. Keeps the cell scannable at a glance without
-          requiring the tooltip. */}
-      {info.commits > 0 && info.state !== "inFlight" && (
-        <span className="pointer-events-none absolute right-0.5 top-0.5 text-[8px] leading-none opacity-70">
-          {info.commits > 99 ? "99+" : info.commits}
-        </span>
+      {info.state === "inFlight" && (
+        <Loader2 className="size-2.5 animate-spin text-primary-foreground/80" />
       )}
     </button>
   );
@@ -190,20 +184,17 @@ function HeatCell({
 
 function Legend() {
   return (
-    <div className="ml-9 flex items-center gap-3 pt-1 text-[10px] text-muted-foreground">
+    <div className="ml-8 flex items-center gap-3 pt-1 text-[10px] text-muted-foreground">
       <LegendChip className="bg-muted/30 dark:bg-muted/20" label="empty" />
       <LegendChip
-        className="bg-amber-200/70 dark:bg-amber-900/40"
+        className="bg-amber-300/70 dark:bg-amber-700/60"
         label="partial"
       />
       <LegendChip
-        className="bg-emerald-200/80 dark:bg-emerald-900/40"
+        className="bg-emerald-300/80 dark:bg-emerald-700/70"
         label="generated"
       />
-      <LegendChip
-        className="bg-primary/30"
-        label="generating"
-      />
+      <LegendChip className="bg-primary/40" label="generating" />
     </div>
   );
 }
@@ -211,7 +202,7 @@ function Legend() {
 function LegendChip({ className, label }: { className: string; label: string }) {
   return (
     <span className="inline-flex items-center gap-1">
-      <span className={cn("inline-block size-3 rounded", className)} />
+      <span className={cn("inline-block size-2.5 rounded-sm", className)} />
       {label}
     </span>
   );

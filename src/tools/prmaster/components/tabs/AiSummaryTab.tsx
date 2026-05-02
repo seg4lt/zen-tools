@@ -50,6 +50,7 @@ import {
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
 import {
@@ -75,6 +76,13 @@ import {
   type HeatCellInfo,
 } from "../shared/YearHeatmap";
 import { MarkdownReader } from "../shared/MarkdownReader";
+
+/** How many years (ending at the current year) appear in the year-tab
+ *  strip by default. Picked so a freshly-installed user sees enough
+ *  history to drill into without having to click "+ Year" right away,
+ *  while keeping the strip from getting visually noisy. Anything older
+ *  is reachable via the "+ Year" picker. */
+const DEFAULT_LOOKBACK_YEARS = 5;
 
 // ────────────────────────────────────────────────────────────────────────
 // Types
@@ -198,16 +206,31 @@ export function AiSummaryTab() {
     return m;
   }, [cards]);
 
-  // Year tabs: every year that has at least one card, plus the current
-  // year, sorted descending.
+  // Years the user has manually added via the "+ Year" button. We
+  // keep these in plain in-memory state — once you've added an old
+  // year you can always re-add it; no need to persist a list of "tab
+  // bookmarks". Resets cleanly on app restart.
+  const [extraYears, setExtraYears] = useState<Set<number>>(new Set());
+
+  // Year tabs: union of
+  //   - the last DEFAULT_LOOKBACK_YEARS (current year + N-1 prior),
+  //     so brand-new users see a useful range without having to add
+  //     anything manually
+  //   - every year that already has at least one cached card
+  //   - any year the user explicitly added via the "+ Year" picker
+  // Sorted newest-first.
   const yearOptions = useMemo<number[]>(() => {
-    const set = new Set<number>([todayIso.year]);
+    const set = new Set<number>();
+    for (let y = todayIso.year; y > todayIso.year - DEFAULT_LOOKBACK_YEARS; y--) {
+      set.add(y);
+    }
     for (const c of cards) {
       const w = isoWeekOf(new Date(c.since));
       set.add(w.year);
     }
+    for (const y of extraYears) set.add(y);
     return [...set].sort((a, b) => b - a);
-  }, [cards, todayIso.year]);
+  }, [cards, todayIso.year, extraYears]);
 
   // Heatmap cell info for the selected year, keyed by week number.
   const cellsByWeek = useMemo<Map<number, HeatCellInfo>>(() => {
@@ -648,6 +671,16 @@ export function AiSummaryTab() {
           setSelectedYear(y);
           setSelectedWeek(null); // re-pick on next effect
         }}
+        onAddYear={(y) => {
+          setExtraYears((prev) => {
+            const next = new Set(prev);
+            next.add(y);
+            return next;
+          });
+          setSelectedYear(y);
+          setSelectedWeek(null);
+        }}
+        currentYear={todayIso.year}
         mappedCount={mappedRepos.length}
         pendingCount={pendingCount}
         onGenerate={() => void generate()}
@@ -740,6 +773,8 @@ function Toolbar({
   yearOptions,
   selectedYear,
   onSelectYear,
+  onAddYear,
+  currentYear,
   mappedCount,
   pendingCount,
   onGenerate,
@@ -753,6 +788,8 @@ function Toolbar({
   yearOptions: number[];
   selectedYear: number;
   onSelectYear: (y: number) => void;
+  onAddYear: (y: number) => void;
+  currentYear: number;
   mappedCount: number;
   pendingCount: number;
   onGenerate: () => void;
@@ -782,6 +819,11 @@ function Toolbar({
             {year}
           </Button>
         ))}
+        <AddYearButton
+          existing={yearOptions}
+          currentYear={currentYear}
+          onAdd={onAddYear}
+        />
       </div>
 
       <span
@@ -860,6 +902,105 @@ function Toolbar({
         </Button>
       </div>
     </div>
+  );
+}
+
+/** "+ Year" tab — opens a small popover with a year input so the user
+ *  can extend the heatmap navigator backwards (or forwards) past the
+ *  default lookback window. Validates the input is a sane year, isn't
+ *  already in the tab strip, and can't be a year `git log` will never
+ *  reach (caps at 1970-current+1). */
+function AddYearButton({
+  existing,
+  currentYear,
+  onAdd,
+}: {
+  existing: number[];
+  currentYear: number;
+  onAdd: (y: number) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState(String(currentYear - existing.length));
+
+  // Re-prime the draft each time the popover opens so the user gets a
+  // sensible starting point (one year older than the oldest currently
+  // shown — usually what they want to add next).
+  useEffect(() => {
+    if (open) {
+      const oldest = existing.length > 0 ? Math.min(...existing) : currentYear;
+      setDraft(String(oldest - 1));
+    }
+  }, [open, existing, currentYear]);
+
+  const parsed = Number(draft);
+  const valid =
+    Number.isInteger(parsed) &&
+    parsed >= 1970 &&
+    parsed <= currentYear + 1 &&
+    !existing.includes(parsed);
+  const reason = (() => {
+    if (!Number.isInteger(parsed)) return "Enter a 4-digit year.";
+    if (parsed < 1970) return "Pick a year ≥ 1970.";
+    if (parsed > currentYear + 1) return "Year is too far in the future.";
+    if (existing.includes(parsed)) return "Year is already shown.";
+    return "";
+  })();
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <Button
+          size="xs"
+          variant="ghost"
+          className="font-mono text-muted-foreground"
+          aria-label="Add year"
+          title="Add an older year to the tab strip"
+        >
+          + Year
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent align="start" className="w-[220px] p-3">
+        <div className="grid gap-2">
+          <Label className="text-[10px] uppercase tracking-wide text-muted-foreground">
+            Add year
+          </Label>
+          <div className="flex items-center gap-1.5">
+            <Input
+              type="number"
+              min={1970}
+              max={currentYear + 1}
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && valid) {
+                  e.preventDefault();
+                  onAdd(parsed);
+                  setOpen(false);
+                }
+              }}
+              className="h-7 w-24 font-mono"
+              autoFocus
+            />
+            <Button
+              size="xs"
+              disabled={!valid}
+              onClick={() => {
+                if (!valid) return;
+                onAdd(parsed);
+                setOpen(false);
+              }}
+            >
+              Add
+            </Button>
+          </div>
+          {!valid && draft.length > 0 && (
+            <span className="text-[10px] text-amber-600 dark:text-amber-400">
+              {reason}
+            </span>
+          )}
+        </div>
+      </PopoverContent>
+    </Popover>
   );
 }
 
