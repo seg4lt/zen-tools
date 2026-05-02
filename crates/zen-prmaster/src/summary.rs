@@ -399,7 +399,21 @@ pub async fn generate_summary(
     };
 
     if commits.is_empty() {
-        return Err(SummaryError::NoCommits);
+        // Treat "no commits" as a successful but empty result rather
+        // than an error. The frontend uses `commit_count == 0` as the
+        // signal for "park this repo in the compact 'no commits this
+        // week' section so it doesn't waste a full grid cell". The
+        // empty card persists like any other so we don't re-fetch on
+        // every Generate.
+        return Ok(SummaryCard {
+            repo: params.repo.clone(),
+            since: params.since,
+            until: params.until,
+            commit_count: 0,
+            summary: String::from("_No commits in this range._"),
+            cost_usd: None,
+            generated_at_ms: chrono::Utc::now().timestamp_millis(),
+        });
     }
 
     let prompt = build_prompt(

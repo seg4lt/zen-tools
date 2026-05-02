@@ -63,6 +63,8 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { cn } from "@/lib/utils";
+import { MarkdownReader } from "../shared/MarkdownReader";
 import {
   prmasterTauri,
   type PrMasterSettings,
@@ -770,12 +772,30 @@ function WeekGroupView({
   // repos that don't yet have a card. Cards from removed mappings stay
   // visible (so you can read or delete them) but won't get a fresh
   // run unless explicitly regenerated.
+  //
+  // Split the cached set into two buckets:
+  //   - reposWithCommits  → render as full cards in the responsive
+  //     grid (these have an actual summary worth reading)
+  //   - emptyRepos        → render as compact chips below the grid
+  //     so a week where 8 of 10 repos had zero commits doesn't
+  //     produce 8 empty boxes
+  // Pending (not-yet-generated) repos still flow through the grid as
+  // "Not generated yet" placeholders.
   const cachedRepos = [...group.cards.keys()].sort((a, b) =>
     a.localeCompare(b),
   );
+  const reposWithCommits = cachedRepos.filter((r) => {
+    const c = group.cards.get(r);
+    return !!c && c.commit_count > 0;
+  });
+  const emptyRepos = cachedRepos.filter((r) => {
+    const c = group.cards.get(r);
+    return !!c && c.commit_count === 0;
+  });
   const pendingRepos = mappedRepos
     .filter((r) => !group.cards.has(r))
     .sort((a, b) => a.localeCompare(b));
+  const gridRepos = [...reposWithCommits, ...pendingRepos];
   const displayRepos = [...cachedRepos, ...pendingRepos];
 
   const totalCommits = [...group.cards.values()].reduce(
@@ -845,51 +865,147 @@ function WeekGroupView({
         </Button>
       </PanelHeader>
       {open && (
-        // Responsive grid: 1 column at popover width, 2 once we have
-        // ~768px (covers narrow main-window resizes), 3 at ~1280px+
-        // (the main window's minimum is 960 so on a typical desktop
-        // setup users land in the 2- or 3-column track without the
-        // popover ever leaving 1-column). `items-start` keeps each
-        // card sized to its natural content rather than stretching to
-        // the tallest card in the row.
-        <PanelContent className="grid grid-cols-1 items-start gap-2 p-2 md:grid-cols-2 xl:grid-cols-3">
-          {displayRepos.length === 0 ? (
-            <p className="col-span-full py-2 text-center text-xs italic text-muted-foreground">
-              No mapped repos for this week.
-            </p>
-          ) : (
-            displayRepos.map((repo) => {
-              const card = group.cards.get(repo);
-              const status = cellStatus.get(
-                cardKey(repo, group.range.since, group.range.until),
-              );
-              const isStaleMapping =
-                !!card && !mappedRepos.includes(repo);
-              return (
-                <RepoCardRow
-                  key={repo}
-                  repo={repo}
-                  card={card}
-                  status={status}
-                  isStaleMapping={isStaleMapping}
-                  mappedRepos={mappedRepos}
-                  onRegenerate={() => onRegenerate(repo, group.range)}
-                  onDelete={
-                    card ? () => onDelete(repo, group.range) : undefined
-                  }
-                  onEdit={
-                    card
-                      ? (nextRepo, nextRange) =>
-                          onEdit(repo, group.range, nextRepo, nextRange)
-                      : undefined
-                  }
-                />
-              );
-            })
+        <>
+          {/* Responsive grid for repos that actually shipped commits
+              this week. 1 column at popover width, 2 once we have
+              ~768px, 3 at ~1280px+. `items-start` keeps each card
+              sized to its natural content rather than stretching to
+              match the tallest sibling. */}
+          {gridRepos.length > 0 && (
+            <PanelContent className="grid grid-cols-1 items-start gap-2 p-2 md:grid-cols-2 xl:grid-cols-3">
+              {gridRepos.map((repo) => {
+                const card = group.cards.get(repo);
+                const status = cellStatus.get(
+                  cardKey(repo, group.range.since, group.range.until),
+                );
+                const isStaleMapping =
+                  !!card && !mappedRepos.includes(repo);
+                return (
+                  <RepoCardRow
+                    key={repo}
+                    repo={repo}
+                    card={card}
+                    status={status}
+                    isStaleMapping={isStaleMapping}
+                    mappedRepos={mappedRepos}
+                    onRegenerate={() => onRegenerate(repo, group.range)}
+                    onDelete={
+                      card ? () => onDelete(repo, group.range) : undefined
+                    }
+                    onEdit={
+                      card
+                        ? (nextRepo, nextRange) =>
+                            onEdit(repo, group.range, nextRepo, nextRange)
+                        : undefined
+                    }
+                  />
+                );
+              })}
+            </PanelContent>
           )}
-        </PanelContent>
+
+          {/* Repos that we ran summaries for but found zero commits.
+              Park them in a compact chip strip so a week where most
+              mapped repos were quiet doesn't waste a full grid card
+              per repo. Each chip carries a regenerate + delete pair
+              for the rare case the user wants to retry one. */}
+          {emptyRepos.length > 0 && (
+            <div className="border-t bg-muted/30 px-2 py-1.5">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                  No commits this week
+                </span>
+                {emptyRepos.map((repo) => (
+                  <EmptyRepoChip
+                    key={repo}
+                    repo={repo}
+                    range={group.range}
+                    cellStatus={cellStatus.get(
+                      cardKey(repo, group.range.since, group.range.until),
+                    )}
+                    isStaleMapping={!mappedRepos.includes(repo)}
+                    onRegenerate={() => onRegenerate(repo, group.range)}
+                    onDelete={() => onDelete(repo, group.range)}
+                  />
+                ))}
+              </div>
+            </div>
+          )}
+
+          {gridRepos.length === 0 && emptyRepos.length === 0 && (
+            <PanelContent className="p-2">
+              <p className="py-2 text-center text-xs italic text-muted-foreground">
+                {displayRepos.length === 0
+                  ? "No mapped repos for this week."
+                  : "Generate to fill in this week."}
+              </p>
+            </PanelContent>
+          )}
+        </>
       )}
     </Panel>
+  );
+}
+
+/** Compact chip used in the "No commits this week" footer. Carries the
+ *  same regenerate / delete affordances as a full RepoCardRow but in
+ *  the height of one line. */
+function EmptyRepoChip({
+  repo,
+  range,
+  cellStatus,
+  isStaleMapping,
+  onRegenerate,
+  onDelete,
+}: {
+  repo: string;
+  range: WeekRange;
+  cellStatus: CellStatus | undefined;
+  isStaleMapping: boolean;
+  onRegenerate: () => void;
+  onDelete: () => void;
+}) {
+  const isLoading = cellStatus?.kind === "loading";
+  // Range is unused inside the chip itself but it carries the cache
+  // coordinates the caller needs — referenced via the closures above.
+  void range;
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center gap-1 rounded border bg-background px-1.5 py-0.5 font-mono text-[11px]",
+        isStaleMapping && "border-amber-500/50",
+      )}
+      title={
+        isStaleMapping
+          ? `${repo} (no longer mapped — kept for reference)`
+          : repo
+      }
+    >
+      <span className="truncate">{repo}</span>
+      <button
+        type="button"
+        disabled={isLoading}
+        onClick={onRegenerate}
+        className="cursor-pointer rounded p-0.5 hover:bg-muted disabled:cursor-not-allowed disabled:opacity-60"
+        aria-label={`Regenerate ${repo}`}
+        title="Re-check for commits"
+      >
+        {isLoading ? (
+          <Loader2 className="size-2.5 animate-spin" />
+        ) : (
+          <RotateCcw className="size-2.5" />
+        )}
+      </button>
+      <button
+        type="button"
+        onClick={onDelete}
+        className="cursor-pointer rounded p-0.5 hover:bg-muted"
+        aria-label={`Drop ${repo} from cache`}
+        title="Drop from cache"
+      >
+        <Trash2 className="size-2.5" />
+      </button>
+    </span>
   );
 }
 
@@ -1008,15 +1124,30 @@ function RepoCardRow({
             {(status as { kind: "error"; message: string }).message}
           </pre>
         ) : card ? (
-          <pre className="font-sans text-sm leading-relaxed whitespace-pre-wrap">
-            {card.summary}
-          </pre>
+          // Fixed-height viewport — anything taller scrolls inside the
+          // card so a single chatty summary can't blow up the page
+          // height. ~20rem is roughly 12 lines of text, plenty for a
+          // weekly report at a glance and a comfortable scroll target
+          // for longer ones. CodeMirror handles its own internal
+          // scrolling once the host is height-bounded.
+          <SummaryView summary={card.summary} />
         ) : (
           <span className="text-xs italic text-muted-foreground">
             Not generated yet — click Generate to fill in.
           </span>
         )}
       </div>
+    </div>
+  );
+}
+
+/** Fixed-height Markdown viewport for AI summary text. Anything taller
+ *  than ~20rem scrolls inside the card so a chatty summary can't blow
+ *  up the page height. */
+function SummaryView({ summary }: { summary: string }) {
+  return (
+    <div className="max-h-[20rem] overflow-y-auto rounded">
+      <MarkdownReader source={summary} />
     </div>
   );
 }
