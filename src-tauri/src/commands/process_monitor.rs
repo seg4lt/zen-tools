@@ -125,3 +125,26 @@ pub async fn pm_set_poll_interval(
     s.pm_state.lock().set_poll_interval(poll_ms);
     Ok(())
 }
+
+/// Hide the tray popover window. Used by the popover's "Open Full
+/// Window" button so the popover dismisses as the main window comes
+/// forward.
+#[tauri::command]
+pub async fn pm_popover_close(app: AppHandle) -> AppResult<()> {
+    tray::hide_popover(&app);
+    Ok(())
+}
+
+/// Bring the main window to the foreground (and unminimise if needed).
+/// Used by the popover's "Open Full Window" button.
+#[tauri::command]
+pub async fn pm_show_main_window(app: AppHandle) -> AppResult<()> {
+    use tauri::Manager;
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.unminimize();
+        let _ = win.show();
+        let _ = win.set_focus();
+    }
+    tray::hide_popover(&app);
+    Ok(())
+}
