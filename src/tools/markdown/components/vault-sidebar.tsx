@@ -16,7 +16,14 @@
  * render an input where appropriate.
  */
 
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type DragEvent as ReactDragEvent,
+} from "react";
 import {
   ChevronDown,
   ChevronRight,
@@ -62,6 +69,45 @@ import { useFileOps } from "../hooks/use-file-ops";
 interface TreeNode {
   item: MarkdownFileItem;
   children: TreeNode[];
+}
+
+/**
+ * MIME used by the file-tree drag operation.  The exact value isn't
+ * inspected by anything outside this file — it just lets dragenter /
+ * dragover decide whether to react (so dragging a *file from Finder*
+ * over the tree doesn't trigger our move-into-folder UI).
+ */
+const TREE_DRAG_MIME = "application/x-zen-markdown-tree";
+
+/**
+ * Module-scope handle on the in-flight drag.  `dataTransfer.getData`
+ * isn't readable during `dragover` for security reasons, so we mirror
+ * the dragged absolute path here while a tree-row drag is in flight
+ * and clear it on `dragend`.  Only one drag happens at a time.
+ */
+let draggedSourcePath: string | null = null;
+
+/**
+ * Predicate: would moving `source` into `targetDir` be a meaningful,
+ * legal operation?  Used to gate the drop-target highlight so the
+ * user only sees a glow on rows where letting go will actually do
+ * something.
+ *
+ *   - Refuse drops onto the source itself.
+ *   - Refuse drops into a descendant of the source (would corrupt
+ *     the tree — same check the backend enforces).
+ *   - Refuse drops into the source's existing parent (no-op move).
+ */
+function canDropInto(source: string, targetDir: string): boolean {
+  if (!source) return false;
+  if (source === targetDir) return false;
+  // Drop into descendant — `targetDir` lives under `source/`.
+  if (targetDir.startsWith(`${source}/`)) return false;
+  // No-op — `source`'s parent already equals `targetDir`.
+  const lastSlash = source.lastIndexOf("/");
+  const parent = lastSlash > 0 ? source.slice(0, lastSlash) : "";
+  if (parent === targetDir) return false;
+  return true;
 }
 
 /** Walk the backend's DFS list and rebuild a nested tree. */
@@ -189,6 +235,7 @@ interface VaultBlockProps {
 function VaultBlock({ root, vault, tree, onRemove }: VaultBlockProps) {
   const { state, dispatch } = useMarkdownStore();
   const { refresh } = useVaults();
+  const { movePath } = useFileOps();
   const open = isExpanded(state.expanded, `vault:${root}`);
   const name = vault?.name ?? root.split("/").filter(Boolean).slice(-1)[0] ?? root;
 
@@ -197,12 +244,51 @@ function VaultBlock({ root, vault, tree, onRemove }: VaultBlockProps) {
   const showCreateRowAtRoot =
     state.editing?.kind === "create" && state.editing.parentDir === root;
 
+  // Drag-over highlight for the vault header — drops land in the
+  // vault root.  Counter avoids flicker as the cursor crosses child
+  // elements (every dragenter/leave fires for descendants too).
+  const [dragOver, setDragOver] = useState(false);
+  const dragDepth = useRef(0);
+
+  const onDragEnter = (e: ReactDragEvent<HTMLDivElement>) => {
+    if (!e.dataTransfer.types.includes(TREE_DRAG_MIME)) return;
+    if (!draggedSourcePath || !canDropInto(draggedSourcePath, root)) return;
+    e.preventDefault();
+    dragDepth.current += 1;
+    setDragOver(true);
+  };
+  const onDragOver = (e: ReactDragEvent<HTMLDivElement>) => {
+    if (!e.dataTransfer.types.includes(TREE_DRAG_MIME)) return;
+    if (!draggedSourcePath || !canDropInto(draggedSourcePath, root)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+  };
+  const onDragLeave = () => {
+    dragDepth.current = Math.max(0, dragDepth.current - 1);
+    if (dragDepth.current === 0) setDragOver(false);
+  };
+  const onDrop = (e: ReactDragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    dragDepth.current = 0;
+    setDragOver(false);
+    const src = draggedSourcePath ?? e.dataTransfer.getData(TREE_DRAG_MIME);
+    if (!src || !canDropInto(src, root)) return;
+    void movePath(src, root);
+  };
+
   return (
     <li>
       <ContextMenu>
         <ContextMenuTrigger asChild>
           <div
-            className="group flex items-center gap-1 px-2 py-1 hover:bg-muted/50"
+            onDragEnter={onDragEnter}
+            onDragOver={onDragOver}
+            onDragLeave={onDragLeave}
+            onDrop={onDrop}
+            className={cn(
+              "group flex items-center gap-1 px-2 py-1 hover:bg-muted/50",
+              dragOver && "bg-primary/15 outline outline-1 outline-primary/50",
+            )}
             title={root}
           >
             <button
@@ -307,6 +393,7 @@ interface TreeRowProps {
 
 function TreeRow({ node }: TreeRowProps) {
   const { state, dispatch } = useMarkdownStore();
+  const { movePath } = useFileOps();
   const { item, children } = node;
   const indent = item.depth * 12 + 18;
   const open = item.isDir ? isExpanded(state.expanded, item.path) : false;
@@ -344,6 +431,70 @@ function TreeRow({ node }: TreeRowProps) {
     }
   };
 
+  // ─── Drag source ──────────────────────────────────────────────
+  // Every row drags as itself.  We stash both a typed payload (so
+  // the drop target can confirm the drag is from our own tree) and
+  // a module-scoped path mirror (so `dragover` handlers can read
+  // it before the drop without waiting for the security-gated
+  // `getData`).
+  const onDragStart = (e: ReactDragEvent) => {
+    e.stopPropagation();
+    draggedSourcePath = item.path;
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData(TREE_DRAG_MIME, item.path);
+    // text/plain fallback so dropping outside the app inserts a
+    // sensible string rather than nothing.
+    e.dataTransfer.setData("text/plain", item.path);
+  };
+  const onDragEnd = () => {
+    draggedSourcePath = null;
+  };
+
+  // ─── Drop target (folders only) ───────────────────────────────
+  // Counter pattern avoids flicker as the cursor crosses children.
+  const [dragOver, setDragOver] = useState(false);
+  const dragDepth = useRef(0);
+  const targetDir = item.isDir ? item.path : null;
+
+  const onDragEnter = (e: ReactDragEvent) => {
+    if (!targetDir) return;
+    if (!e.dataTransfer.types.includes(TREE_DRAG_MIME)) return;
+    if (!draggedSourcePath || !canDropInto(draggedSourcePath, targetDir)) {
+      return;
+    }
+    e.preventDefault();
+    dragDepth.current += 1;
+    setDragOver(true);
+  };
+  const onDragOver = (e: ReactDragEvent) => {
+    if (!targetDir) return;
+    if (!e.dataTransfer.types.includes(TREE_DRAG_MIME)) return;
+    if (!draggedSourcePath || !canDropInto(draggedSourcePath, targetDir)) {
+      return;
+    }
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+  };
+  const onDragLeave = () => {
+    if (!targetDir) return;
+    dragDepth.current = Math.max(0, dragDepth.current - 1);
+    if (dragDepth.current === 0) setDragOver(false);
+  };
+  const onDrop = (e: ReactDragEvent) => {
+    if (!targetDir) return;
+    e.preventDefault();
+    e.stopPropagation();
+    dragDepth.current = 0;
+    setDragOver(false);
+    const src =
+      draggedSourcePath ?? e.dataTransfer.getData(TREE_DRAG_MIME) ?? "";
+    if (!src || !canDropInto(src, targetDir)) return;
+    // Auto-expand the destination so the user sees the moved entry
+    // appear in its new home.
+    if (!open) dispatch({ type: "toggleExpand", nodeId: targetDir });
+    void movePath(src, targetDir);
+  };
+
   return (
     <li role="treeitem" aria-expanded={item.isDir ? open : undefined}>
       <ContextMenu>
@@ -352,11 +503,20 @@ function TreeRow({ node }: TreeRowProps) {
             ref={buttonRef}
             type="button"
             onClick={onClick}
+            draggable={!isRenaming}
+            onDragStart={onDragStart}
+            onDragEnd={onDragEnd}
+            onDragEnter={onDragEnter}
+            onDragOver={onDragOver}
+            onDragLeave={onDragLeave}
+            onDrop={onDrop}
             style={{ paddingLeft: `${indent}px` }}
             className={cn(
               "flex w-full items-center gap-1.5 py-1 pr-2 text-left",
               "hover:bg-muted/50",
               active && "bg-muted text-foreground",
+              dragOver &&
+                "bg-primary/15 outline outline-1 -outline-offset-1 outline-primary/50",
               // Plain images are display-only — dim them to signal
               // they aren't openable.  Excalidraw drawings ARE
               // openable, so they keep full opacity even though they

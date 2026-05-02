@@ -34,7 +34,7 @@ import { useAutoSave } from "@/hooks/use-auto-save";
 import { markdownTauri } from "./lib/tauri";
 import { useVaults } from "./hooks/use-vaults";
 import { useMarkdownKeyboardNav } from "./hooks/use-keyboard-nav";
-import { basename, basenameNoExt, dirname } from "./lib/tauri";
+import { basename, basenameNoExt, dirname, normalizePath } from "./lib/tauri";
 import { useTheme } from "@/hooks/use-theme";
 
 export function MarkdownView() {
@@ -223,6 +223,10 @@ export function MarkdownView() {
         }
         target = `${dir}/${decoded}`;
       }
+      // Collapse `./` and `../` segments so the backend never sees
+      // literal dot-segments — a `../assets/foo.md` link from
+      // `/notes/sub/page.md` becomes `/notes/assets/foo.md`.
+      target = normalizePath(target);
       // Markdown OR Excalidraw drawings open in the editor — the
       // tab kind determines which pane mounts (CodeMirror vs the
       // drawing canvas).  Plain images would render as garbage in

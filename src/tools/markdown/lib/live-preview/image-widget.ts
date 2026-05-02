@@ -17,7 +17,7 @@
  */
 
 import { WidgetType } from "@codemirror/view";
-import { assetUrl } from "../tauri";
+import { assetUrl, normalizePath } from "../tauri";
 
 export class ImageWidget extends WidgetType {
   /**
@@ -93,12 +93,26 @@ export function resolveImageSrc(
   if (/^(https?:|data:)/i.test(src)) {
     return { resolved: src, isLocal: false };
   }
-  if (src.startsWith("file://")) {
-    return { resolved: src.slice("file://".length), isLocal: true };
+  // Decode `%20` and friends so a path like `My%20Notes/foo.png`
+  // resolves correctly against the filesystem.  Authors commonly
+  // copy URL-encoded paths from other markdown editors.
+  let raw = src;
+  try {
+    raw = decodeURIComponent(src);
+  } catch {
+    // Leave as-is on malformed encoding.
   }
-  if (src.startsWith("/")) {
-    return { resolved: src, isLocal: true };
+  if (raw.startsWith("file://")) {
+    return { resolved: normalizePath(raw.slice("file://".length)), isLocal: true };
   }
-  // Relative — join with docDir.
-  return { resolved: `${docDir}/${src}`, isLocal: true };
+  if (raw.startsWith("/")) {
+    // Absolute paths can still carry `./` / `..` segments that the
+    // Tauri asset protocol won't canonicalize itself — normalize.
+    return { resolved: normalizePath(raw), isLocal: true };
+  }
+  // Relative — join with docDir, then collapse `.` / `..` segments.
+  // Without normalization, `convertFileSrc` receives literal dot
+  // segments (e.g. `/Users/x/notes/../foo.svg`) which Tauri's asset
+  // protocol can refuse to load.
+  return { resolved: normalizePath(`${docDir}/${raw}`), isLocal: true };
 }
