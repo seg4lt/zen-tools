@@ -7,10 +7,11 @@
  * store's `currentFile.path` changes.
  */
 
-import { lazy, Suspense, useCallback, useEffect, useRef } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Keyboard, Loader2, Save } from "lucide-react";
+import { Keyboard, Loader2, PanelLeftOpen, Save } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { DragHandle } from "@/components/drag-handle";
 import { tauri as httpTauri } from "@/tools/http-runner/lib/tauri";
 import { cn } from "@/lib/utils";
 import { VaultSidebar } from "./components/vault-sidebar";
@@ -264,6 +265,12 @@ export function MarkdownView() {
   const hasVaults = state.vaults.length > 0;
   const hasFile = !!tab;
 
+  // Drag-resizable sidebar — local state only, mirrors the
+  // database-explorer / http-runner pattern. Default mirrors the
+  // previous hard-coded `w-64` (256 px).
+  const [sidebarWidth, setSidebarWidth] = useState(256);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+
   return (
     <div className="flex h-full min-h-0 w-full flex-col">
       <div className="flex h-9 shrink-0 items-center gap-2 border-b bg-card/60 px-3">
@@ -325,8 +332,36 @@ export function MarkdownView() {
         </div>
       </div>
       <div className="flex min-h-0 flex-1">
-        <VaultSidebar />
-        <div className="flex min-h-0 flex-1 flex-col">
+        {sidebarCollapsed ? (
+          <div className="flex w-7 shrink-0 flex-col items-center border-r bg-muted/20 py-1">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-6 w-6 p-0"
+              title="Show vaults"
+              onClick={() => setSidebarCollapsed(false)}
+            >
+              <PanelLeftOpen className="size-3" />
+            </Button>
+          </div>
+        ) : (
+          <>
+            <aside
+              className="flex shrink-0 flex-col"
+              style={{ width: sidebarWidth }}
+            >
+              <VaultSidebar onCollapse={() => setSidebarCollapsed(true)} />
+            </aside>
+            <DragHandle
+              direction="x"
+              initial={sidebarWidth}
+              min={180}
+              max={520}
+              onResize={setSidebarWidth}
+            />
+          </>
+        )}
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           <TabStrip />
           {hasFile ? (
             isExcalidraw ? (
