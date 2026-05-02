@@ -162,8 +162,16 @@ function HeatCell({
         // State-driven base colour. Light + dark mode pairs. Cells
         // are ~16px so colour + tooltip carry all the info; we don't
         // print the week number in the cell itself anymore.
+        //
+        // Empty cells use `muted-foreground` (a mid-grey that flips
+        // with the theme) at modest opacity rather than `muted` —
+        // `muted` is so close to `card` that empty cells were
+        // basically invisible against the surrounding panel
+        // background. `muted-foreground/20` is dark-on-light in
+        // light mode and light-on-dark in dark mode, so empty cells
+        // read clearly in both.
         info.state === "empty" &&
-          "bg-muted/30 hover:bg-muted/60 dark:bg-muted/20 dark:hover:bg-muted/40",
+          "bg-muted-foreground/20 hover:bg-muted-foreground/35",
         info.state === "partial" &&
           "bg-amber-300/70 hover:bg-amber-300 dark:bg-amber-700/60 dark:hover:bg-amber-700/80",
         info.state === "complete" &&
@@ -172,7 +180,9 @@ function HeatCell({
           "animate-pulse bg-primary/40 hover:bg-primary/60",
         // Selection ring + future-week dim layered last so they win.
         isSelected && "ring-1 ring-primary ring-offset-1 ring-offset-card",
-        isFuture && info.state === "empty" && "opacity-40",
+        // Future weeks in the current year stay visible but clearly
+        // less prominent than past empty weeks.
+        isFuture && info.state === "empty" && "opacity-50",
       )}
     >
       {info.state === "inFlight" && (
@@ -185,7 +195,7 @@ function HeatCell({
 function Legend() {
   return (
     <div className="ml-8 flex items-center gap-3 pt-1 text-[10px] text-muted-foreground">
-      <LegendChip className="bg-muted/30 dark:bg-muted/20" label="empty" />
+      <LegendChip className="bg-muted-foreground/20" label="empty" />
       <LegendChip
         className="bg-amber-300/70 dark:bg-amber-700/60"
         label="partial"
