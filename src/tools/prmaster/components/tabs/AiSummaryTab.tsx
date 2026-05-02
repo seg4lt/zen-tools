@@ -1,26 +1,34 @@
 /**
- * AI Summary tab — port of the Swift `AISummaryView` + `AISummaryViewModel`.
+ * AI Summary tab — generates per-(repo, week) Markdown reports.
  *
- * Behaviour, mirrored 1-to-1 with the reference app:
+ * Repo selection model (intentional simplification over the Swift app):
+ * we **only** summarise repositories that have a local mapping in
+ * Settings. A mapping points at a local clone, which lets the engine
+ * read commits via `git log` / `git show` instead of `gh api repos/…`
+ * — local is *much* faster (no rate limits, no network). Without a
+ * mapping the engine can technically still hit the GitHub API, but
+ * the experience is so much slower that we treat "mapped" as the
+ * supported set.
  *
- *   - Selected repos are **persisted** in `PrMasterSettings.selected_repos`
- *     so the picker survives a restart (matches the Swift `RepoManager`'s
- *     UserDefaults `"selectedRepos"` key).
- *   - Summary cards are **persisted** via `prmaster_load_ai_summaries`
- *     / `prmaster_save_ai_summaries` (matches the `aiSummaryCache`
- *     UserDefaults key).
- *   - The default date range is "today minus one month → today".
- *   - When the chosen range exceeds 7 days, it's split into 7-day
- *     weeks; one **week group** is rendered per range, with one
- *     **per-repo card** inside each group (the user explicitly wants
- *     per-repo subdivision so they can read repo-level summaries).
- *   - **Generate only what's new**: a click on Generate looks at the
- *     cached cards and only fires AI calls for `(week, repo)` pairs
- *     that aren't already complete. Adding a repo and re-clicking
- *     Generate fills in the missing repo column for every existing
- *     week without regenerating the rest.
- *   - **Copy all** concatenates every completed card's summary text
- *     joined with `\n\n`, exactly like the Swift version.
+ * Consequences:
+ *   - No repo dropdown on the AI tab. Mappings live in Settings; this
+ *     tab just consumes them.
+ *   - Generate runs against **every mapped repo × every week** in the
+ *     selected date range. Already-generated `(repo, week)` cells are
+ *     skipped automatically.
+ *   - Cards from removed mappings remain visible (so you can still
+ *     read or delete old summaries) but won't be re-generated.
+ *
+ * Persistence:
+ *   - Summary cards: `prmaster_load_ai_summaries` /
+ *     `prmaster_save_ai_summaries` (UserConfig SQLite blob).
+ *   - Date range: in-memory only (Swift parity — defaults to "last 30
+ *     days" on every launch).
+ *
+ * Diagnostics:
+ *   - Every `aiSummary` call is recorded on the engine's
+ *     `AiRunRecord` log and rendered in the API Stats tab so the
+ *     resolved provider + model is visible.
  */
 
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -30,7 +38,7 @@ import {
   ChevronDown,
   ChevronRight,
   Copy,
-  Download,
+  Folder,
   Loader2,
   Pencil,
   RotateCcw,
@@ -66,9 +74,8 @@ import {
   PanelHeader,
   PanelTitle,
 } from "../shared/density";
-import { RepoPicker } from "../shared/RepoPicker";
 
-/** Status overlay for in-flight cells in the per-week grid. */
+/** Status overlay for in-flight cells. */
 type CellStatus =
   | { kind: "idle" }
   | { kind: "loading" }
@@ -83,9 +90,14 @@ interface WeekRange {
 
 interface WeekGroup {
   range: WeekRange;
-  /** Cards keyed by repo, in selection order. */
+  /** Cards keyed by repo. */
   cards: Map<string, SummaryCard>;
 }
+
+type ProviderStatus =
+  | { kind: "checking" }
+  | { kind: "ready" }
+  | { kind: "missing"; message: string };
 
 export function AiSummaryTab() {
   // ── Date range ──────────────────────────────────────────────────────
@@ -94,12 +106,7 @@ export function AiSummaryTab() {
   );
   const [until, setUntil] = useState(() => isoDate(new Date()));
 
-  // ── Repos ───────────────────────────────────────────────────────────
-  const [repos, setRepos] = useState<string[]>([]);
-  const [reposLoading, setReposLoading] = useState(false);
-  const [reposFetching, setReposFetching] = useState(false);
-  const [reposCachedAt, setReposCachedAt] = useState<number | null>(null);
-  const [selected, setSelected] = useState<Set<string>>(new Set());
+  // ── Settings (mapped repos come from here) ──────────────────────────
   const [settings, setSettings] = useState<PrMasterSettings | null>(null);
 
   // ── Cached + in-flight summaries ────────────────────────────────────
@@ -110,17 +117,9 @@ export function AiSummaryTab() {
   const [generating, setGenerating] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-
-  /** Flips to true when the user clicks Cancel; the generation loop
-   *  watches the ref between iterations and bails out early. Reset
-   *  inside `generate()` on entry so a fresh run always starts clean. */
   const cancelRef = useRef(false);
 
-  // ── Provider status probe (cheap availability check via list_models) ─
-  type ProviderStatus =
-    | { kind: "checking" }
-    | { kind: "ready" }
-    | { kind: "missing"; message: string };
+  // ── Provider status probe ───────────────────────────────────────────
   const [providerStatus, setProviderStatus] = useState<ProviderStatus>({
     kind: "checking",
   });
@@ -133,19 +132,15 @@ export function AiSummaryTab() {
         if (alive) setProviderStatus({ kind: "ready" });
       } catch (err) {
         if (alive)
-          setProviderStatus({
-            kind: "missing",
-            message: formatError(err),
-          });
+          setProviderStatus({ kind: "missing", message: formatError(err) });
       }
     })();
     return () => {
       alive = false;
     };
-    // Re-probe whenever the chosen provider changes.
   }, [settings?.ai_provider]);
 
-  // ── Bootstrap: load persisted state in parallel ─────────────────────
+  // ── Bootstrap: load settings + persisted cards in parallel ──────────
   useEffect(() => {
     let alive = true;
     void (async () => {
@@ -156,64 +151,43 @@ export function AiSummaryTab() {
         ]);
         if (!alive) return;
         setSettings(s);
-        setSelected(new Set(s.selected_repos ?? []));
         setCards(list);
       } catch (err) {
         if (alive) setError(formatError(err));
       }
     })();
-    void refreshRepos();
     return () => {
       alive = false;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  async function refreshRepos() {
-    setReposLoading(true);
-    try {
-      const result = await prmasterTauri.listAccessibleRepos();
-      setRepos(result.repos);
-      setReposCachedAt(result.cached_at_ms);
-    } catch (err) {
-      console.warn("[ai-summary] listAccessibleRepos failed:", err);
-    } finally {
-      setReposLoading(false);
+  // Refresh settings whenever the tab regains focus, so adding a
+  // mapping in Settings shows up here without a hard reload.
+  useEffect(() => {
+    function onFocus() {
+      void (async () => {
+        try {
+          setSettings(await prmasterTauri.getSettings());
+        } catch (err) {
+          console.warn("[ai-summary] settings refresh failed:", err);
+        }
+      })();
     }
-  }
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, []);
 
-  async function fetchRepos() {
-    setReposFetching(true);
-    try {
-      const result = await prmasterTauri.fetchRepos();
-      setRepos(result.repos);
-      setReposCachedAt(result.cached_at_ms);
-    } catch (err) {
-      console.warn("[ai-summary] fetchRepos failed:", err);
-    } finally {
-      setReposFetching(false);
+  // The repos we summarise == the repos with a local mapping in
+  // Settings. Sorted + deduped so callers downstream get a stable
+  // ordering.
+  const mappedRepos = useMemo<string[]>(() => {
+    if (!settings) return [];
+    const set = new Set<string>();
+    for (const m of settings.repo_mappings) {
+      if (m.repo.length > 0) set.add(m.repo);
     }
-  }
-
-  /** Persist the new selection back to `PrMasterSettings.selected_repos`. */
-  async function persistSelected(next: Set<string>) {
-    setSelected(next);
-    if (!settings) return;
-    const updated = { ...settings, selected_repos: [...next].sort() };
-    setSettings(updated);
-    try {
-      await prmasterTauri.saveSettings(updated);
-    } catch (err) {
-      console.warn("[ai-summary] saveSettings failed:", err);
-    }
-  }
-
-  function toggleRepo(repo: string) {
-    const next = new Set(selected);
-    if (next.has(repo)) next.delete(repo);
-    else next.add(repo);
-    void persistSelected(next);
-  }
+    return [...set].sort((a, b) => a.localeCompare(b));
+  }, [settings]);
 
   async function persistCards(next: SummaryCard[]) {
     setCards(next);
@@ -224,26 +198,22 @@ export function AiSummaryTab() {
     }
   }
 
-  // ── Derived: week ranges from start/end + cached cards by week ──────
+  // ── Derived: week ranges + cached card index ────────────────────────
   const weekRanges = useMemo<WeekRange[]>(
     () => splitIntoWeeks(since, until),
     [since, until],
   );
 
-  /** Card lookup keyed by `${repo}|${since}|${until}` so we can detect
-   *  what's already cached and skip re-generating it. */
+  /** Card lookup keyed by `${repo}|${since}|${until}`. */
   const cardIndex = useMemo(() => {
     const m = new Map<string, SummaryCard>();
     for (const c of cards) m.set(cardKey(c.repo, c.since, c.until), c);
     return m;
   }, [cards]);
 
-  /** Group rendered weeks newest-first; each group lists every card we
-   *  have for that week regardless of the current selection (so users
-   *  can see history) plus placeholders for currently-selected repos
-   *  that are still pending generation. */
+  /** Render groups newest-first; show cached cards (even from removed
+   *  mappings) plus pending placeholders for currently-mapped repos. */
   const visibleGroups = useMemo<WeekGroup[]>(() => {
-    // Start from cached weeks, descending.
     const weekKey = (since: string, until: string) => `${since}|${until}`;
     const byWeek = new Map<string, WeekGroup>();
     for (const card of cards) {
@@ -258,8 +228,6 @@ export function AiSummaryTab() {
       }
       g.cards.set(card.repo, card);
     }
-    // Layer in currently-pending weeks (e.g. the user just clicked
-    // Generate so weeks exist as placeholders).
     for (const range of weekRanges) {
       const key = weekKey(range.since, range.until);
       if (!byWeek.has(key)) byWeek.set(key, { range, cards: new Map() });
@@ -269,10 +237,12 @@ export function AiSummaryTab() {
     );
   }, [cards, weekRanges]);
 
-  // ── Generate (only weeks × repos that aren't already cached) ────────
+  // ── Generate (every mapped repo × every week, skipping cached) ──────
   async function generate() {
-    if (selected.size === 0) {
-      setError("Pick at least one repository.");
+    if (mappedRepos.length === 0) {
+      setError(
+        "Add at least one local repo mapping in Settings to enable AI summaries.",
+      );
       return;
     }
     if (weekRanges.length === 0) return;
@@ -281,10 +251,9 @@ export function AiSummaryTab() {
     setGenerating(true);
     cancelRef.current = false;
 
-    // Compute the missing pairs.
     const queue: Array<{ repo: string; range: WeekRange }> = [];
     for (const range of weekRanges) {
-      for (const repo of selected) {
+      for (const repo of mappedRepos) {
         if (!cardIndex.has(cardKey(repo, range.since, range.until))) {
           queue.push({ repo, range });
         }
@@ -292,14 +261,14 @@ export function AiSummaryTab() {
     }
 
     if (queue.length === 0) {
-      setStatusMessage("Already generated for every selected repo + week.");
+      setStatusMessage(
+        "Already generated for every mapped repo + week in this range.",
+      );
       setGenerating(false);
       window.setTimeout(() => setStatusMessage(null), 2500);
       return;
     }
 
-    // Mark queued cells as loading up-front so the grid lights up
-    // instead of dripping in one pip at a time.
     setCellStatus((prev) => {
       const next = new Map(prev);
       for (const { repo, range } of queue) {
@@ -338,8 +307,6 @@ export function AiSummaryTab() {
       }
     }
 
-    // If the user cancelled mid-flight, drop the loading flag from any
-    // still-pending cells so the grid stops spinning.
     if (cancelRef.current) {
       setCellStatus((prev) => {
         const next = new Map(prev);
@@ -390,15 +357,18 @@ export function AiSummaryTab() {
     const next = cards.filter(
       (c) =>
         !(
-          c.repo === repo && c.since === range.since && c.until === range.until
+          c.repo === repo &&
+          c.since === range.since &&
+          c.until === range.until
         ),
     );
     await persistCards(next);
   }
 
   /** Replace a card with a fresh generation at a different
-   *  `(repo, since, until)` triple. Mirrors Swift's "Update Summary"
-   *  popover from `CommitSummaryCard.swift:108–141`. */
+   *  `(repo, since, until)` triple. Edit popover only offers mapped
+   *  repos as targets — switching to a non-mapped repo would force a
+   *  slow remote fetch and defeat the purpose. */
   async function editCell(
     prevRepo: string,
     prevRange: WeekRange,
@@ -407,8 +377,6 @@ export function AiSummaryTab() {
   ) {
     const k = cardKey(nextRepo, nextRange.since, nextRange.until);
     setCellStatus((prev) => new Map(prev).set(k, { kind: "loading" }));
-    // Drop the old card first so the cache key shifts cleanly even
-    // when only the date range changed and the repo stayed the same.
     const stripped = cards.filter(
       (c) =>
         !(
@@ -431,7 +399,6 @@ export function AiSummaryTab() {
         return x;
       });
     } catch (err) {
-      // Restore the old card on failure so the user doesn't lose data.
       await persistCards(cards);
       setCellStatus((prev) =>
         new Map(prev).set(k, { kind: "error", message: formatError(err) }),
@@ -440,9 +407,6 @@ export function AiSummaryTab() {
   }
 
   async function copyAll() {
-    // Concatenate every completed card across every week, ordered
-    // newest-first by week then by repo, separated by blank lines —
-    // matches Swift `copyAllSummaries`.
     const lines: string[] = [];
     for (const group of visibleGroups) {
       for (const [repo, card] of group.cards) {
@@ -475,14 +439,7 @@ export function AiSummaryTab() {
         until={until}
         onSince={setSince}
         onUntil={setUntil}
-        repos={repos}
-        reposLoading={reposLoading}
-        reposFetching={reposFetching}
-        reposCachedAt={reposCachedAt}
-        selected={selected}
-        onToggleRepo={toggleRepo}
-        onClearRepos={() => void persistSelected(new Set())}
-        onFetchRepos={() => void fetchRepos()}
+        mappedCount={mappedRepos.length}
         onGenerate={() => void generate()}
         onCancel={cancelGeneration}
         onCopyAll={() => void copyAll()}
@@ -518,16 +475,17 @@ export function AiSummaryTab() {
             </Panel>
           )}
 
-          {visibleGroups.length === 0 ? (
-            <EmptyHint hasSelection={selected.size > 0} />
+          {settings && mappedRepos.length === 0 && cards.length === 0 ? (
+            <NoMappingsHint />
+          ) : visibleGroups.length === 0 ? (
+            <EmptyHint />
           ) : (
             visibleGroups.map((group) => (
               <WeekGroupView
                 key={`${group.range.since}|${group.range.until}`}
                 group={group}
-                selectedRepos={selected}
+                mappedRepos={mappedRepos}
                 cellStatus={cellStatus}
-                allRepos={repos}
                 onRegenerate={regenerateCell}
                 onDelete={deleteCell}
                 onEdit={editCell}
@@ -545,14 +503,7 @@ function Toolbar({
   until,
   onSince,
   onUntil,
-  repos,
-  reposLoading,
-  reposFetching,
-  reposCachedAt,
-  selected,
-  onToggleRepo,
-  onClearRepos,
-  onFetchRepos,
+  mappedCount,
   onGenerate,
   onCancel,
   onCopyAll,
@@ -565,24 +516,14 @@ function Toolbar({
   until: string;
   onSince: (v: string) => void;
   onUntil: (v: string) => void;
-  repos: string[];
-  reposLoading: boolean;
-  reposFetching: boolean;
-  reposCachedAt: number | null;
-  selected: Set<string>;
-  onToggleRepo: (repo: string) => void;
-  onClearRepos: () => void;
-  onFetchRepos: () => void;
+  mappedCount: number;
   onGenerate: () => void;
   onCancel: () => void;
   onCopyAll: () => void;
   onClearAll: () => void;
   generating: boolean;
   cardCount: number;
-  providerStatus:
-    | { kind: "checking" }
-    | { kind: "ready" }
-    | { kind: "missing"; message: string };
+  providerStatus: ProviderStatus;
 }) {
   return (
     <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-b bg-card/40 px-3 py-1.5">
@@ -607,21 +548,13 @@ function Toolbar({
         className="h-7 w-[130px]"
       />
 
-      <div className="flex min-w-[240px] flex-1 items-center gap-1">
-        <div className="min-w-0 flex-1">
-          <RepoPicker
-            repos={repos}
-            selected={selected}
-            loading={reposLoading}
-            fetching={reposFetching}
-            cachedAtMs={reposCachedAt}
-            compact
-            onToggle={onToggleRepo}
-            onClear={onClearRepos}
-            onFetch={onFetchRepos}
-          />
-        </div>
-      </div>
+      <span
+        className="flex items-center gap-1 text-xs text-muted-foreground"
+        title="Summaries run against every locally-mapped repo from Settings → Local repo mappings"
+      >
+        <Folder className="size-3.5" />
+        {mappedCount} mapped {mappedCount === 1 ? "repo" : "repos"}
+      </span>
 
       {generating ? (
         <Button size="sm" variant="destructive" onClick={onCancel}>
@@ -631,11 +564,13 @@ function Toolbar({
       ) : (
         <Button
           size="sm"
-          disabled={selected.size === 0 || providerStatus.kind === "missing"}
+          disabled={
+            mappedCount === 0 || providerStatus.kind === "missing"
+          }
           onClick={onGenerate}
         >
           <Sparkles className="size-3.5" />
-          Generate{selected.size > 0 ? ` (${selected.size})` : ""}
+          Generate
         </Button>
       )}
 
@@ -664,14 +599,7 @@ function Toolbar({
   );
 }
 
-function ProviderStatusPill({
-  status,
-}: {
-  status:
-    | { kind: "checking" }
-    | { kind: "ready" }
-    | { kind: "missing"; message: string };
-}) {
+function ProviderStatusPill({ status }: { status: ProviderStatus }) {
   if (status.kind === "checking") {
     return (
       <span className="flex items-center gap-1 text-xs text-muted-foreground">
@@ -699,15 +627,33 @@ function ProviderStatusPill({
   );
 }
 
-function EmptyHint({ hasSelection }: { hasSelection: boolean }) {
+function NoMappingsHint() {
+  return (
+    <Panel className="border-dashed">
+      <PanelContent className="flex flex-col items-center gap-1.5 py-6 text-center">
+        <Folder className="size-5 text-muted-foreground" />
+        <p className="text-xs text-muted-foreground">
+          No local repo mappings yet.
+        </p>
+        <p className="max-w-[420px] text-xs text-muted-foreground">
+          Open <strong>Settings → Local repo mappings</strong> and point
+          PRMaster at the local clones you want summarised. AI summaries
+          run against those mapped repos by default — local{" "}
+          <code className="font-mono">git log</code> is much faster than{" "}
+          <code className="font-mono">gh api</code>.
+        </p>
+      </PanelContent>
+    </Panel>
+  );
+}
+
+function EmptyHint() {
   return (
     <Panel className="border-dashed">
       <PanelContent className="flex flex-col items-center gap-1.5 py-6 text-center">
         <Sparkles className="size-5 text-muted-foreground" />
         <p className="text-xs text-muted-foreground">
-          {hasSelection
-            ? "Pick a date range and click Generate to summarise your commits."
-            : "Pick at least one repository and a date range, then Generate."}
+          Pick a date range and click Generate.
         </p>
       </PanelContent>
     </Panel>
@@ -716,17 +662,15 @@ function EmptyHint({ hasSelection }: { hasSelection: boolean }) {
 
 function WeekGroupView({
   group,
-  selectedRepos,
+  mappedRepos,
   cellStatus,
-  allRepos,
   onRegenerate,
   onDelete,
   onEdit,
 }: {
   group: WeekGroup;
-  selectedRepos: Set<string>;
+  mappedRepos: string[];
   cellStatus: Map<string, CellStatus>;
-  allRepos: string[];
   onRegenerate: (repo: string, range: WeekRange) => void;
   onDelete: (repo: string, range: WeekRange) => void;
   onEdit: (
@@ -736,13 +680,14 @@ function WeekGroupView({
     nextRange: WeekRange,
   ) => void;
 }) {
-  // Render order: cached cards first (alphabetical by repo), then any
-  // currently-selected repos that don't yet have a card (so the grid
-  // is predictable).
+  // Show cached cards first (alphabetical), then any currently-mapped
+  // repos that don't yet have a card. Cards from removed mappings stay
+  // visible (so you can read or delete them) but won't get a fresh
+  // run unless explicitly regenerated.
   const cachedRepos = [...group.cards.keys()].sort((a, b) =>
     a.localeCompare(b),
   );
-  const pendingRepos = [...selectedRepos]
+  const pendingRepos = mappedRepos
     .filter((r) => !group.cards.has(r))
     .sort((a, b) => a.localeCompare(b));
   const displayRepos = [...cachedRepos, ...pendingRepos];
@@ -752,10 +697,7 @@ function WeekGroupView({
     0,
   );
 
-  // Each week is a collapsible accordion. Default-open so newly
-  // generated cards are visible; users can collapse old weeks once
-  // they've reviewed them. State is local to each group so collapsing
-  // one doesn't affect the others.
+  // Default open so freshly generated cards are visible.
   const [open, setOpen] = useState(true);
 
   return (
@@ -790,7 +732,7 @@ function WeekGroupView({
         <PanelContent className="grid gap-2 p-2">
           {displayRepos.length === 0 ? (
             <p className="py-2 text-center text-xs italic text-muted-foreground">
-              No repositories selected for this week.
+              No mapped repos for this week.
             </p>
           ) : (
             displayRepos.map((repo) => {
@@ -798,13 +740,16 @@ function WeekGroupView({
               const status = cellStatus.get(
                 cardKey(repo, group.range.since, group.range.until),
               );
+              const isStaleMapping =
+                !!card && !mappedRepos.includes(repo);
               return (
                 <RepoCardRow
                   key={repo}
                   repo={repo}
                   card={card}
                   status={status}
-                  allRepos={allRepos}
+                  isStaleMapping={isStaleMapping}
+                  mappedRepos={mappedRepos}
                   onRegenerate={() => onRegenerate(repo, group.range)}
                   onDelete={
                     card ? () => onDelete(repo, group.range) : undefined
@@ -829,7 +774,8 @@ function RepoCardRow({
   repo,
   card,
   status,
-  allRepos,
+  isStaleMapping,
+  mappedRepos,
   onRegenerate,
   onDelete,
   onEdit,
@@ -837,7 +783,8 @@ function RepoCardRow({
   repo: string;
   card: SummaryCard | undefined;
   status: CellStatus | undefined;
-  allRepos: string[];
+  isStaleMapping: boolean;
+  mappedRepos: string[];
   onRegenerate: () => void;
   onDelete?: () => void;
   onEdit?: (nextRepo: string, nextRange: WeekRange) => void;
@@ -868,6 +815,15 @@ function RepoCardRow({
               ${card.cost_usd.toFixed(3)}
             </Badge>
           )}
+          {isStaleMapping && (
+            <Badge
+              variant="outline"
+              className="border-amber-500/50 text-[10px] text-amber-600 dark:text-amber-400"
+              title="This repo has no local mapping in Settings — kept around so you can read or delete the cached summary."
+            >
+              unmapped
+            </Badge>
+          )}
         </div>
         <div className="flex items-center gap-0.5">
           {card && (
@@ -888,7 +844,7 @@ function RepoCardRow({
           {card && onEdit && (
             <UpdatePopoverButton
               card={card}
-              allRepos={allRepos}
+              mappedRepos={mappedRepos}
               onSubmit={(nextRepo, nextRange) => onEdit(nextRepo, nextRange)}
             />
           )}
@@ -934,7 +890,6 @@ function RepoCardRow({
           </pre>
         ) : (
           <span className="text-xs italic text-muted-foreground">
-            <Download className="mr-1 inline size-3" />
             Not generated yet — click Generate to fill in.
           </span>
         )}
@@ -943,18 +898,17 @@ function RepoCardRow({
   );
 }
 
-/** Per-card edit popover — port of Swift `CommitSummaryCard.swift`'s
- *  "Update Summary" sheet. Lets the user pick a different repo and a
- *  different date window for an existing card without losing it: the
- *  parent's `onSubmit` deletes the old card and queues a fresh
- *  generation at the new coordinates. */
+/** Per-card edit popover. Only mapped repos are offered as targets so
+ *  switching never accidentally fires a slow `gh api` fetch. The
+ *  card's current repo is always listed even if it's no longer
+ *  mapped, so the user can edit the date range without changing repo. */
 function UpdatePopoverButton({
   card,
-  allRepos,
+  mappedRepos,
   onSubmit,
 }: {
   card: SummaryCard;
-  allRepos: string[];
+  mappedRepos: string[];
   onSubmit: (nextRepo: string, nextRange: WeekRange) => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -964,9 +918,6 @@ function UpdatePopoverButton({
   const [until, setUntil] = useState(initialUntil);
   const [repo, setRepo] = useState(card.repo);
 
-  // Reset the form values whenever the popover (re)opens — the user
-  // expects "edit again" to start from the current cached card, not
-  // from whatever they typed last time.
   useEffect(() => {
     if (open) {
       setSince(initialSince);
@@ -978,6 +929,11 @@ function UpdatePopoverButton({
   const dirty =
     since !== initialSince || until !== initialUntil || repo !== card.repo;
   const valid = repo.length > 0 && since.length > 0 && until.length > 0;
+
+  const repoOptions = useMemo(() => {
+    if (mappedRepos.includes(card.repo)) return mappedRepos;
+    return [card.repo, ...mappedRepos];
+  }, [mappedRepos, card.repo]);
 
   return (
     <Popover open={open} onOpenChange={setOpen}>
@@ -1028,10 +984,7 @@ function UpdatePopoverButton({
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                {(allRepos.includes(card.repo)
-                  ? allRepos
-                  : [card.repo, ...allRepos]
-                ).map((r) => (
+                {repoOptions.map((r) => (
                   <SelectItem key={r} value={r} className="font-mono text-xs">
                     {r}
                   </SelectItem>
@@ -1040,11 +993,7 @@ function UpdatePopoverButton({
             </Select>
           </div>
           <div className="flex items-center justify-end gap-1.5">
-            <Button
-              size="xs"
-              variant="ghost"
-              onClick={() => setOpen(false)}
-            >
+            <Button size="xs" variant="ghost" onClick={() => setOpen(false)}>
               Cancel
             </Button>
             <Button
@@ -1079,12 +1028,10 @@ function isoDate(d: Date): string {
   return `${y}-${m}-${day}`;
 }
 
-/** Stable cache key for a (repo, week) pair. */
 function cardKey(repo: string, since: string, until: string): string {
   return `${repo}|${since}|${until}`;
 }
 
-/** Insert / replace a card in a flat array, keyed by (repo, since, until). */
 function upsertCard(cards: SummaryCard[], next: SummaryCard): SummaryCard[] {
   const key = cardKey(next.repo, next.since, next.until);
   const existing = cards.findIndex(
@@ -1098,14 +1045,7 @@ function upsertCard(cards: SummaryCard[], next: SummaryCard): SummaryCard[] {
   return [next, ...cards];
 }
 
-/** Split `[since,until]` (date strings, inclusive) into 7-day windows.
- *  Each returned range is ISO with the same `T00:00:00Z` / `T23:59:59Z`
- *  bookends the backend already expects. Single window if the span is
- *  ≤ 7 days. Mirrors Swift `splitIntoWeeks`. */
 function splitIntoWeeks(sinceDate: string, untilDate: string): WeekRange[] {
-  // Treat both bounds as local midnight; convert to a UTC range with
-  // matching offsets so the backend's `until` truly covers the end of
-  // the user-picked day.
   const start = new Date(`${sinceDate}T00:00:00`);
   const end = new Date(`${untilDate}T23:59:59`);
   if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return [];
