@@ -213,6 +213,22 @@ export function AiSummaryTab() {
     return m;
   }, [cards]);
 
+  /** Number of (mapped repo × week) pairs in the current date range
+   *  that still need generating. Drives the "Generate (N new)" badge
+   *  on the toolbar so the user always sees what clicking Generate
+   *  will actually do, especially right after they nudge the date
+   *  inputs. Zero when everything in scope is already cached. */
+  const pendingCount = useMemo(() => {
+    if (mappedRepos.length === 0 || weekRanges.length === 0) return 0;
+    let n = 0;
+    for (const range of weekRanges) {
+      for (const repo of mappedRepos) {
+        if (!cardIndex.has(cardKey(repo, range.since, range.until))) n += 1;
+      }
+    }
+    return n;
+  }, [mappedRepos, weekRanges, cardIndex]);
+
   /** Render groups newest-first; show cached cards (even from removed
    *  mappings) plus pending placeholders for currently-mapped repos. */
   const visibleGroups = useMemo<WeekGroup[]>(() => {
@@ -520,6 +536,8 @@ export function AiSummaryTab() {
         onSince={setSince}
         onUntil={setUntil}
         mappedCount={mappedRepos.length}
+        pendingCount={pendingCount}
+        weekCount={weekRanges.length}
         onGenerate={() => void generate()}
         onCancel={cancelGeneration}
         onCopyAll={() => void copyAll()}
@@ -586,6 +604,8 @@ function Toolbar({
   onSince,
   onUntil,
   mappedCount,
+  pendingCount,
+  weekCount,
   onGenerate,
   onCancel,
   onCopyAll,
@@ -599,6 +619,15 @@ function Toolbar({
   onSince: (v: string) => void;
   onUntil: (v: string) => void;
   mappedCount: number;
+  /** (mapped repo × week) pairs in the current range that aren't yet
+   *  cached. Drives the "Generate (N new)" pill so the user can see
+   *  what clicking will actually do, especially right after editing
+   *  the date inputs. */
+  pendingCount: number;
+  /** Number of weeks the current `since`/`until` range expands to.
+   *  Used so we can say "Generate (12 new)" or "All up to date · 4
+   *  weeks" depending on state. */
+  weekCount: number;
   onGenerate: () => void;
   onCancel: () => void;
   onCopyAll: () => void;
@@ -607,8 +636,15 @@ function Toolbar({
   cardCount: number;
   providerStatus: ProviderStatus;
 }) {
+  // Generate button label/state derived from the queue so the user
+  // always knows what the click will produce. Layout-wise the button
+  // is locked into the right cluster so date / mapped-count edits on
+  // the left can never push it out of view.
+  const upToDate = !generating && pendingCount === 0 && cardCount > 0;
+
   return (
-    <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-b bg-card/40 px-3 py-1.5">
+    <div className="flex shrink-0 flex-wrap items-center gap-x-1.5 gap-y-1 border-b bg-card/40 px-3 py-1.5">
+      {/* Left cluster — inputs the user is twiddling. */}
       <Label htmlFor="since" className="text-xs text-muted-foreground">
         Since
       </Label>
@@ -636,28 +672,70 @@ function Toolbar({
       >
         <Folder className="size-3.5" />
         {mappedCount} mapped {mappedCount === 1 ? "repo" : "repos"}
+        {weekCount > 1 ? ` · ${weekCount} weeks` : ""}
       </span>
 
-      {generating ? (
-        <Button size="sm" variant="destructive" onClick={onCancel}>
-          <XCircle className="size-3.5" />
-          Cancel
-        </Button>
-      ) : (
-        <Button
-          size="sm"
-          disabled={
-            mappedCount === 0 || providerStatus.kind === "missing"
-          }
-          onClick={onGenerate}
-        >
-          <Sparkles className="size-3.5" />
-          Generate
-        </Button>
-      )}
-
+      {/* Right cluster — Generate is the primary action and lives in
+          a dedicated, never-wraps-mid-cluster group pinned to the
+          right via `ml-auto`. Bigger than the surrounding chips so it
+          always reads as the call to action. The label swaps between
+          three modes:
+            • "Generate (N new)" while there's pending work
+            • "Generate"          when nothing is pending yet (e.g.
+              the user just changed the range to one that's all
+              cached and we want a clear no-op affordance)
+            • "Cancel"            during a run
+            • "Up to date"        as a disabled pill once everything
+              in scope has been generated and cached */}
       <div className="ml-auto flex items-center gap-1">
         <ProviderStatusPill status={providerStatus} />
+        {generating ? (
+          <Button
+            size="default"
+            variant="destructive"
+            onClick={onCancel}
+            className="h-9"
+          >
+            <XCircle className="size-4" />
+            Cancel
+          </Button>
+        ) : upToDate ? (
+          <Button
+            size="default"
+            variant="outline"
+            disabled
+            className="h-9"
+            title="Every mapped repo + week in this range already has a summary."
+          >
+            <Sparkles className="size-4" />
+            Up to date
+          </Button>
+        ) : (
+          <Button
+            size="default"
+            disabled={
+              mappedCount === 0 || providerStatus.kind === "missing"
+            }
+            onClick={onGenerate}
+            className="h-9"
+            title={
+              pendingCount > 0
+                ? `Generate ${pendingCount} new summary card${pendingCount === 1 ? "" : "s"}`
+                : "Generate AI summaries for the selected range"
+            }
+          >
+            <Sparkles className="size-4" />
+            Generate
+            {pendingCount > 0 && (
+              <Badge
+                variant="secondary"
+                className="ml-0.5 bg-primary-foreground/20 text-primary-foreground"
+              >
+                {pendingCount} new
+              </Badge>
+            )}
+          </Button>
+        )}
         <Button
           size="sm"
           variant="ghost"
@@ -803,6 +881,34 @@ function WeekGroupView({
     0,
   );
 
+  // Per-week state machine that drives the header button + the
+  // "generated" check on the title.
+  //
+  //   inFlight   — at least one cell in this week is currently
+  //                queued or running (cellStatus = "loading"). The
+  //                bulk-regenerate machinery flips every queued cell
+  //                to loading up front, so this also covers the
+  //                "queued behind another week" case the user
+  //                described.
+  //   complete   — every repo in scope already has a cached card
+  //                (including zero-commit empty cards). Lets us swap
+  //                the header CTA from "Generate week" to a clearly-
+  //                already-done "Regenerate" with a check icon.
+  //   partial    — some cards but not all (e.g. user added a new
+  //                mapping after a previous run). Header reads
+  //                "Generate" so they know clicking will fill in the
+  //                gaps without touching what's there.
+  const inFlight = displayRepos.some((repo) => {
+    const s = cellStatus.get(
+      cardKey(repo, group.range.since, group.range.until),
+    );
+    return s?.kind === "loading";
+  });
+  const complete =
+    !inFlight &&
+    displayRepos.length > 0 &&
+    displayRepos.every((repo) => group.cards.has(repo));
+
   // Default open so freshly generated cards are visible.
   const [open, setOpen] = useState(true);
 
@@ -836,6 +942,28 @@ function WeekGroupView({
           <PanelTitle>
             {formatRangeLabel(group.range.since, group.range.until)}
           </PanelTitle>
+          {/* "Already-generated" indicator on the title itself, so a
+              user scrolling the list of weeks can spot what's done at
+              a glance even with the panel collapsed. Spinner takes
+              priority — when the week is in flight (or queued) the
+              live spinner is the most honest signal. */}
+          {inFlight ? (
+            <span
+              className="flex items-center gap-1 text-[10px] text-muted-foreground"
+              title="This week is currently being summarised."
+            >
+              <Loader2 className="size-3 animate-spin" />
+              generating…
+            </span>
+          ) : complete ? (
+            <span
+              className="flex items-center gap-1 text-[10px] text-emerald-600 dark:text-emerald-400"
+              title="Every repo in scope for this week has been summarised. Click Regenerate to refresh."
+            >
+              <CheckCircle2 className="size-3" />
+              generated
+            </span>
+          ) : null}
           {totalCommits > 0 && (
             <Badge variant="secondary" className="text-[10px]">
               {totalCommits} commits
@@ -845,24 +973,58 @@ function WeekGroupView({
             {group.cards.size}/{displayRepos.length} repos
           </Badge>
         </button>
-        {/* Bulk action: regenerate every repo card in this week with
-            one click. Sits next to the chevron so the per-row
-            buttons aren't the only path. Disabled while any
-            generation pass is running so two passes can't fight. */}
-        <Button
-          size="xs"
-          variant="ghost"
-          disabled={generating || displayRepos.length === 0}
-          onClick={(e) => {
-            e.stopPropagation();
-            onRegenerateWeek(group.range);
-          }}
-          aria-label="Regenerate every summary in this week"
-          title="Regenerate every summary in this week"
-        >
-          <RotateCcw className="size-3" />
-          Regenerate week
-        </Button>
+        {/* Bulk action with a state-aware label so the user always
+            knows whether clicking will *start* work, *finish* work, or
+            is currently watching work that's already running.
+              • inFlight  → spinner + "Generating…", disabled (clicking
+                            would queue a second pass on the same week)
+              • complete  → green check + "Regenerate" (re-runs every
+                            cell with force=true)
+              • idle/partial → sparkle + "Generate" (fills missing cells
+                                or runs the whole week if nothing yet) */}
+        {inFlight ? (
+          <Button
+            size="xs"
+            variant="ghost"
+            disabled
+            className="text-muted-foreground"
+            aria-label="Generating this week"
+            title="Generating this week — already in flight"
+          >
+            <Loader2 className="size-3 animate-spin" />
+            Generating…
+          </Button>
+        ) : complete ? (
+          <Button
+            size="xs"
+            variant="ghost"
+            disabled={generating}
+            onClick={(e) => {
+              e.stopPropagation();
+              onRegenerateWeek(group.range);
+            }}
+            aria-label="Regenerate every summary in this week"
+            title="Re-evaluate every summary in this week"
+          >
+            <RotateCcw className="size-3" />
+            Regenerate
+          </Button>
+        ) : (
+          <Button
+            size="xs"
+            variant="ghost"
+            disabled={generating || displayRepos.length === 0}
+            onClick={(e) => {
+              e.stopPropagation();
+              onRegenerateWeek(group.range);
+            }}
+            aria-label="Generate every summary in this week"
+            title="Generate every summary in this week"
+          >
+            <Sparkles className="size-3" />
+            Generate week
+          </Button>
+        )}
       </PanelHeader>
       {open && (
         <>
