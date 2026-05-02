@@ -791,6 +791,25 @@ impl DbConnection for MsSqlConnection {
         //   its batch — so we send it as a separate `simple_query`
         //   first, then run the user SQL on the same session.
         //   `data` is `None` because nothing executed.
+        //
+        // Statistics we *don't* enable today, why, and the path:
+        //   - `SET STATISTICS IO ON` — emits per-table "logical reads N,
+        //     physical reads N" InfoMessage rows. ShowPlanXML already
+        //     embeds `ActualLogicalReads` / `ActualPhysicalReads` /
+        //     `ActualReadAheads` per <RelOp>, so this is mostly
+        //     duplicate; capturing it would require subscribing to
+        //     tiberius's `Token::Info` stream alongside the QueryStream.
+        //   - `SET STATISTICS TIME ON` — emits "SQL Server parse and
+        //     compile time… Execution Time…" InfoMessage rows. We
+        //     approximate via `ExplainResult.duration_ms` (round-trip
+        //     wall-clock). Capturing per-statement parse/compile/exec
+        //     splits would also need the InfoMessage stream.
+        //   - `SET STATISTICS PROFILE ON` — text-form per-row plan,
+        //     superseded by STATISTICS XML.
+        // If a future user wants the InfoMessage timings split out,
+        // the right shape is a `tiberius_messages: Vec<String>` field
+        // on `ExplainResult` populated by capturing `Token::Info` in
+        // `run_capturing_all_sets`.
         let trimmed = sql.trim_end_matches(&[' ', '\t', '\n', '\r', ';'][..]);
 
         let start = Instant::now();

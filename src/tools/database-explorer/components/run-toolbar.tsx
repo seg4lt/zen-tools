@@ -75,7 +75,14 @@ export function RunToolbar({
     lastDataTab && lastDataTab.kind === "data" ? lastDataTab.data.rows.length : 0;
 
   return (
-    <div className="flex items-center gap-2 border-b border-border/60 bg-muted/30 px-3 py-1.5 text-xs">
+    // Toolbar surface: explicitly `bg-background` so it reads as a
+    // "raised" strip between the deeper-tinted connection tabs above
+    // and the editor below. The thin separators (`border-r border-
+    // border/40`) carve the row into logical groups — Run actions,
+    // Plan actions, Connection context, status — instead of one long
+    // chain where everything blurs together.
+    <div className="flex items-center gap-1.5 border-b border-border bg-background px-3 py-1.5 text-xs">
+      {/* Group 1 — Run actions. */}
       <Button
         variant="ghost"
         size="sm"
@@ -103,6 +110,12 @@ export function RunToolbar({
         <PlaySquare className="size-3" />
         Run all
       </Button>
+
+      <ToolbarSep />
+
+      {/* Group 2 — Plan actions. The two pieces (button + actuals
+          toggle) belong together: the toggle decides which flavour
+          of EXPLAIN the button runs. */}
       <Button
         variant="ghost"
         size="sm"
@@ -118,17 +131,12 @@ export function RunToolbar({
         <Activity className="size-3" />
         {analyzeOnExplain ? "Run with plan" : "Plan only"}
       </Button>
-
-      {/* Actuals checkbox — controls whether the "Run with plan"
-          button (and the auto-EXPLAIN piggyback when on) runs the
-          ANALYZE flavour or the estimate-only flavour. Per-connection
-          state, default ON. */}
       <label
         className={
-          "flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] transition " +
+          "flex h-6 cursor-pointer items-center gap-1 rounded border px-1.5 text-[10px] uppercase tracking-wide transition " +
           (analyzeOnExplain
-            ? "border-primary/60 bg-primary/5 text-foreground"
-            : "border-border/60 bg-background text-muted-foreground")
+            ? "border-primary/60 bg-primary/10 text-primary"
+            : "border-border/60 bg-background text-muted-foreground hover:border-primary/40")
         }
         title={
           analyzeOnExplain
@@ -145,40 +153,41 @@ export function RunToolbar({
         />
         actuals
       </label>
-
-      {connection && (
-        <span className="rounded border border-border/60 bg-background px-1.5 py-0.5 font-mono text-[10px] uppercase text-muted-foreground">
-          {connection.driver}
-        </span>
-      )}
-
-      {connection && (
-        <ContextPicker connection={connection} isConnected={isConnected} />
-      )}
-
-      {/* Auto-EXPLAIN toggle pill. Per-connection state — when on,
-          every Run also captures a plan and adds a Plan tab next to
-          the data tab. Disabled when no connection is active. */}
+      {/* Auto-EXPLAIN: compact icon-pill — full label "Auto-EXPLAIN:
+          off" was wrapping into 3 lines on narrow viewports. The
+          tooltip carries the long form. */}
       {connection && (
         <button
           type="button"
           onClick={onToggleAutoExplain}
           disabled={!isConnected}
           className={
-            "flex items-center gap-1 rounded border px-1.5 py-0.5 font-mono text-[10px] uppercase transition " +
+            "flex h-6 items-center gap-1 rounded border px-1.5 font-mono text-[10px] uppercase tracking-wide transition " +
             (autoExplain
               ? "border-primary/60 bg-primary/10 text-primary"
               : "border-border/60 bg-background text-muted-foreground hover:border-primary/40")
           }
           title={
             autoExplain
-              ? "Auto-EXPLAIN is on — every Run also captures a plan"
-              : "Auto-EXPLAIN is off — only \"Run with plan\" captures a plan"
+              ? "Auto-EXPLAIN is on — every Run also captures a plan tab next to the data tab"
+              : "Auto-EXPLAIN is off — click to make every Run also capture a plan"
           }
         >
           <Activity className="size-3" />
-          Auto-EXPLAIN: {autoExplain ? "on" : "off"}
+          Auto {autoExplain ? "ON" : "OFF"}
         </button>
+      )}
+
+      <ToolbarSep />
+
+      {/* DB / schema picker — back in the toolbar where it sits
+          right next to Run. Earlier I'd moved it to the status bar
+          with the connection chip, but that put 'pick which DB
+          you're targeting' too far from 'click to run' and the
+          user lost track of it. Toolbar is the right home: the
+          picker IS the action context. */}
+      {connection && (
+        <ContextPicker connection={connection} isConnected={isConnected} />
       )}
 
       <span className="flex-1" />
@@ -201,4 +210,15 @@ export function RunToolbar({
       <LogsButton />
     </div>
   );
+}
+
+/**
+ * One-pixel vertical hairline used between toolbar groups. The
+ * subtle margin-x keeps it from kissing its neighbouring controls,
+ * and `bg-border/60` matches the editor + tab-strip seam colour so
+ * the rule reads as a continuation of the surrounding chrome
+ * rather than a heavy divider.
+ */
+function ToolbarSep() {
+  return <span aria-hidden className="mx-0.5 h-4 w-px bg-border/60" />;
 }

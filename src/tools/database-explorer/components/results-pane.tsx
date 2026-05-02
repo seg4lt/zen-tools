@@ -121,7 +121,11 @@ function TabStrip({
   onClose,
 }: TabStripProps) {
   return (
-    <div className="flex shrink-0 items-stretch border-b border-border/60 bg-muted/20">
+    // `bg-muted/60` matches the connection-tab + editor-tab strip
+    // vocabulary so the eye groups all three "tab rails" as the
+    // same kind of surface — and the active tab's `bg-background`
+    // visibly lifts up out of it, same lift as the other strips.
+    <div className="flex shrink-0 items-stretch border-b border-border/60 bg-muted/60">
       {/* Scrollable tab strip — narrow viewports overflow-scroll
           horizontally without pushing the maximize button off. */}
       <div className="flex min-w-0 flex-1 items-stretch gap-0.5 overflow-x-auto px-1">

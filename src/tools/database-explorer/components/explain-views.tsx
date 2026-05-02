@@ -184,33 +184,50 @@ function SubTabStrip({
       </div>
 
       {/* Header summary — visible across all sub-tabs so the user
-          always knows what they're looking at. The "estimates only"
-          chip is the visible signal that no execution happened
-          (plan-only `EXPLAIN` / `SHOWPLAN_XML`); when ANALYZE ran,
-          per-node actuals/timing/buffers are populated and the
-          chip is hidden. We use absence-of-totalTime as the proxy
-          for "this is an estimate-only plan" — both Postgres
-          (`Execution Time` only fires under ANALYZE) and MSSQL
-          (no per-node timing in any flavour, so a populated top-
-          node `Actual Total Time` is the giveaway) work under that
-          rule. */}
+          always knows what they're looking at.
+
+          Whether the query *executed* and whether per-node *timing*
+          was captured are two separate questions:
+            - Postgres ANALYZE ⇒ executed + timing.
+            - Postgres EXPLAIN  ⇒ neither.
+            - MSSQL STATISTICS  ⇒ executed but NO per-node time.
+            - MSSQL SHOWPLAN     ⇒ neither.
+
+          So the "estimates only" badge keys off `actualRows` on the
+          top node (universal "did it run?" signal), and we surface
+          timing separately when it's available. For MSSQL with
+          actuals, we fall back to the wall-clock `explain.durationMs`
+          since per-node times don't exist in showplan XML. */}
       <div className="flex flex-1 items-center gap-3 text-muted-foreground">
         <span className="rounded border border-border/60 bg-background px-1.5 py-0.5 font-mono uppercase">
           {explain.format}
         </span>
+        {plan && plan.topNode.actualRows === undefined ? (
+          <span
+            className="rounded border border-amber-500/60 bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium text-amber-600 dark:text-amber-400"
+            title="The query was not actually executed — these are planner estimates only. Toggle 'actuals' in the toolbar to run EXPLAIN ANALYZE (Postgres) / SET STATISTICS XML ON (MSSQL)."
+          >
+            estimates only
+          </span>
+        ) : null}
         {plan?.totalTimeMs !== undefined ? (
           <span className="flex items-center gap-1">
             <Clock className="size-3" />
             {plan.totalTimeMs.toFixed(2)} ms
           </span>
-        ) : (
+        ) : plan && plan.topNode.actualRows !== undefined ? (
+          // Executed but no per-node timing (MSSQL STATISTICS XML).
+          // Surface the wall-clock duration so the user has *some*
+          // timing to work with; tooltip explains the caveat.
           <span
-            className="rounded border border-amber-500/60 bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium text-amber-600 dark:text-amber-400"
-            title="No execution timing in this plan — the query was not actually run. Toggle 'actuals' in the toolbar to capture EXPLAIN ANALYZE / STATISTICS XML."
+            className="flex items-center gap-1"
+            title="Wall-clock for the explain round-trip — MSSQL ShowPlanXML doesn't carry per-node Actual Total Time, so this is what you get."
           >
-            estimates only
+            <Clock className="size-3" />
+            {explain.durationMs} ms
+            <span className="text-[10px] opacity-70">(wall-clock)</span>
           </span>
-        )}
+        ) : null}
         {plan?.planningTimeMs !== undefined && plan.executionTimeMs !== undefined ? (
           <span className="text-[10px]">
             plan {plan.planningTimeMs.toFixed(1)} · exec {plan.executionTimeMs.toFixed(1)}

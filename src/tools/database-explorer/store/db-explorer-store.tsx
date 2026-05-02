@@ -122,6 +122,16 @@ export interface DbExplorerState {
   formOpen: false | "new" | { editId: string };
   /** Currently-open SQL file (absolute path) — drives the editor. */
   selectedFilePath: string | null;
+  /**
+   * The list of files open as **editor tabs**, in left-to-right
+   * tab order. `selectedFilePath` is always one of these (or
+   * `null` when the strip is empty). Distinct from
+   * `bufferByPath`, which is the larger LRU-ish cache of every
+   * buffer ever loaded — closing a tab keeps the buffer (so
+   * re-opening preserves edits) while removing the path from
+   * this list.
+   */
+  openFilePaths: string[];
   /** Buffer per file path. Survives file-tree navigation. */
   bufferByPath: Record<string, string>;
   /** Per-file "buffer differs from disk" flag. */
@@ -205,6 +215,8 @@ type Action =
   | { type: "open-form"; mode: "new" | { editId: string } }
   | { type: "close-form" }
   | { type: "select-file"; path: string | null }
+  | { type: "open-file"; path: string }
+  | { type: "close-editor-tab"; path: string }
   | { type: "set-buffer"; path: string; content: string; dirty: boolean }
   | { type: "mark-clean"; path: string }
   | { type: "drop-buffer"; path: string }
@@ -236,6 +248,7 @@ const initial: DbExplorerState = {
   activeSchemaByConnection: {},
   formOpen: false,
   selectedFilePath: null,
+  openFilePaths: [],
   bufferByPath: {},
   dirtyByPath: {},
   editing: null,
@@ -499,6 +512,41 @@ function reducer(state: DbExplorerState, action: Action): DbExplorerState {
 
     case "select-file":
       return { ...state, selectedFilePath: action.path };
+
+    case "open-file": {
+      // Idempotent: opening an already-open file just makes it
+      // active. We **don't** dedupe by reference equality alone —
+      // sometimes the same path arrives twice in quick succession
+      // (file-tree double-click → select-file + open-file race),
+      // so we explicitly check the path list.
+      const already = state.openFilePaths.includes(action.path);
+      return {
+        ...state,
+        openFilePaths: already
+          ? state.openFilePaths
+          : [...state.openFilePaths, action.path],
+        selectedFilePath: action.path,
+      };
+    }
+
+    case "close-editor-tab": {
+      const idx = state.openFilePaths.indexOf(action.path);
+      if (idx < 0) return state;
+      const next = state.openFilePaths.filter((p) => p !== action.path);
+      // If we closed the active tab, fall back to the tab that was
+      // immediately to the left (or right when we closed index 0).
+      // This matches VS Code's behaviour and avoids the "blank
+      // editor flash" that pops if we just null'd it out.
+      const wasActive = state.selectedFilePath === action.path;
+      const nextActive = wasActive
+        ? next[Math.max(0, idx - 1)] ?? null
+        : state.selectedFilePath;
+      return {
+        ...state,
+        openFilePaths: next,
+        selectedFilePath: nextActive,
+      };
+    }
 
     case "set-buffer":
       return {

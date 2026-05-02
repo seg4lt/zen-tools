@@ -169,9 +169,13 @@ export function SqlFileTree({
                 dispatch({ type: "cancel-editing" })
               }
               onAfterMutate={() => void refresh()}
-              onPathDeleted={(path) =>
-                dispatch({ type: "drop-buffer", path })
-              }
+              onPathDeleted={(path) => {
+                // Path is gone from disk → buffer + tab need to go
+                // with it. close-editor-tab handles the active-fallback
+                // when the deleted file was the visible one.
+                dispatch({ type: "close-editor-tab", path });
+                dispatch({ type: "drop-buffer", path });
+              }}
               onPathRenamed={(oldPath, newPath) => {
                 if (state.bufferByPath[oldPath] !== undefined) {
                   dispatch({
@@ -181,7 +185,14 @@ export function SqlFileTree({
                     dirty: !!state.dirtyByPath[oldPath],
                   });
                   dispatch({ type: "drop-buffer", path: oldPath });
-                  if (state.selectedFilePath === oldPath) {
+                  // If the renamed file was open as an editor tab,
+                  // swap it out so the strip reflects the new path.
+                  // close-editor-tab handles the active-fallback;
+                  // open-file restores the editor onto the new path.
+                  if (state.openFilePaths.includes(oldPath)) {
+                    dispatch({ type: "close-editor-tab", path: oldPath });
+                    dispatch({ type: "open-file", path: newPath });
+                  } else if (state.selectedFilePath === oldPath) {
                     dispatch({ type: "select-file", path: newPath });
                   }
                 }

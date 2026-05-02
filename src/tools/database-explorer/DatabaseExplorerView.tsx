@@ -1,32 +1,43 @@
 /**
- * Top-level layout for the Database Explorer:
+ * Top-level layout for the Database Explorer (post-revamp):
  *
  *   ┌──────────────┬──────────────────────────────┬────────────────┐
- *   │ SQL Files    │ Connection tabs              │ Connections    │
+ *   │ SQL Files    │ Connection tabs   [+Manage]  │ Cache badge    │
  *   │ (project     ├──────────────────────────────┤ + DB tree      │
  *   │  tree)       │ Run toolbar                  │  (schema       │
  *   │              ├──────────────────────────────┤   browser)     │
+ *   │              │ Editor tab strip (open files)│                │
+ *   │              ├──────────────────────────────┤                │
  *   │              │ SQL editor                   │                │
  *   │              ├──────────────────────────────┤                │
  *   │              │ Results grid                 │                │
+ *   │              ├──────────────────────────────┤                │
+ *   │              │ Status bar (conn · file)     │                │
  *   └──────────────┴──────────────────────────────┴────────────────┘
  *
- * - **Left**: project folders + their `.sql` files. Click a file to
- *   open it in the editor.
- * - **Centre**: tabs for currently-connected DBs, a Run toolbar with
- *   the database/schema picker, the SQL editor (whose content IS the
- *   selected file's content), and the results grid.
- * - **Right**: connection list + database/schema/table tree
- *   (read-only schema browser).
+ * Six clearly-tiered horizontal surfaces in the centre column:
+ * connection tabs (deep) → toolbar (raised) → editor tabs (deep) →
+ * editor (raised) → result tabs (deep) → results (raised) → status
+ * bar (chrome). The eye finds seams between zones at a glance — the
+ * old "everything is bg-muted/30" smear is gone.
+ *
+ * - **Left**: project folders + their `.sql` files.
+ * - **Centre**: connection tabs (with +Manage popover), Run
+ *   toolbar (action-only), editor-tab strip naming the open file,
+ *   SQL editor, results, status bar pinning connection identity +
+ *   open-file path.
+ * - **Right**: schema browser only — connection management lives
+ *   in the +Manage popover up top, not in this rail.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CacheStatusBadge } from "./components/cache-status-badge";
-import { ConnectionList } from "./components/connection-list";
 import { ConnectionForm } from "./components/connection-form";
 import { ConnectionTabs } from "./components/connection-tabs";
 import { DbTree } from "./components/db-tree";
+import { EditorTabStrip } from "./components/editor-tab-strip";
 import { SqlFileTree } from "./components/sql-file-tree";
+import { StatusBar } from "./components/status-bar";
 import { DragHandle } from "@/components/drag-handle";
 import { Button } from "@/components/ui/button";
 import { PanelLeftOpen, PanelRightOpen } from "lucide-react";
@@ -147,7 +158,15 @@ export function DatabaseExplorerView() {
   const handleSelectFile = useCallback(
     (item: SqlFileTreeItem) => {
       if (item.isDir) return;
-      dispatch({ type: "select-file", path: item.path });
+      // `open-file` is the post-revamp door: it appends the file to
+      // `state.openFilePaths` (if not already present) AND sets
+      // `selectedFilePath`. The editor tab strip reads from that
+      // list. Old `select-file` only flipped the active path,
+      // which now means "I want to look at this buffer without
+      // surfacing it as a tab" — keep it for programmatic
+      // close-fallback in the reducer; UI callers should hit
+      // `open-file`.
+      dispatch({ type: "open-file", path: item.path });
     },
     [dispatch],
   );
@@ -539,6 +558,12 @@ export function DatabaseExplorerView() {
           analyzeOnExplain={analyzeOnExplain}
           onToggleAnalyzeOnExplain={handleToggleAnalyze}
         />
+        {/* Editor-tab strip — the most prominent "what file am I
+            looking at?" affordance. Sits between the toolbar
+            (raised, action-coloured) and the editor body so it
+            visually anchors the editor to its file. Hidden when
+            no files are open; the empty-editor state takes over. */}
+        <EditorTabStrip />
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           {!resultsMaximized && (
             <>
@@ -570,7 +595,6 @@ export function DatabaseExplorerView() {
                   <EmptyEditor />
                 )}
               </div>
-              <FileFooter path={selectedPath} dirty={isDirty} />
               <DragHandle
                 direction="y"
                 inverse
@@ -603,13 +627,22 @@ export function DatabaseExplorerView() {
             />
           </div>
         </div>
+        {/* Bottom status bar — replaces the old FileFooter. Carries
+            connection identity (driver-coloured dot + name) + the
+            relocated db/schema picker + open-file path + dirty
+            marker + a one-line cache-progress mirror. The previous
+            footer was a 10-px muted strip showing only the path
+            and `saved/unsaved`; the new bar earns its keep by
+            making *both* "where am I" and "what's running" visible
+            in the same row. */}
+        <StatusBar />
       </section>
 
       {effectiveRightCollapsed ? (
         !resultsMaximized && (
           <CollapsedRail
             side="right"
-            title="Show Connections"
+            title="Show Schema"
             onExpand={() => setRightCollapsed(false)}
           />
         )
@@ -623,18 +656,33 @@ export function DatabaseExplorerView() {
             max={520}
             onResize={setRightWidth}
           />
-          {/* Right: connections + schema browser */}
+          {/* Right rail post-revamp: schema browser only.
+              ConnectionList moved into the +Manage popover spawned
+              from the connection-tab strip; the rail no longer
+              splits its vertical space three ways. */}
           <aside
-            className="flex shrink-0 flex-col border-l border-border/60"
+            className="flex shrink-0 flex-col border-l border-border/60 bg-muted/40"
             style={{ width: rightWidth }}
           >
-            <div className="shrink-0 border-b border-border/60">
-              <ConnectionList onCollapse={() => setRightCollapsed(true)} />
+            {/* Header strip: "Schema" label + collapse-rail button.
+                Replaces the ConnectionList header that used to sit
+                here and own the rail's identity. */}
+            <div className="flex shrink-0 items-center justify-between border-b border-border/60 px-2 py-1.5 text-[11px] uppercase tracking-wide text-muted-foreground">
+              <span>Schema</span>
+              <Button
+                size="sm"
+                variant="ghost"
+                className="h-5 w-5 p-0"
+                onClick={() => setRightCollapsed(true)}
+                title="Collapse panel"
+              >
+                <PanelRightOpen className="size-3 rotate-180" />
+              </Button>
             </div>
-            {/* Schema-cache status — pinned to the right rail above
-                the DB tree so the user always has a fixed place to
-                see "X/Y tables indexed" and watch live indexing
-                progress. Hides itself when no connection is live. */}
+            {/* Schema-cache status — pinned above the DB tree as a
+                fixed place to read "X/Y tables indexed" and watch
+                live indexing progress. Hides when no connection is
+                live. */}
             <div className="shrink-0 border-b border-border/60 px-2 py-1.5">
               <CacheStatusBadge />
             </div>
@@ -699,27 +747,6 @@ function CollapsedRail({
   );
 }
 
-function FileFooter({
-  path,
-  dirty,
-}: {
-  path: string | null;
-  dirty: boolean;
-}) {
-  if (!path) return null;
-  return (
-    <div className="flex shrink-0 items-center justify-between border-b border-border/60 bg-muted/20 px-3 py-0.5 text-[10px] text-muted-foreground">
-      <span className="truncate font-mono" title={path}>
-        {path}
-      </span>
-      <span>
-        {dirty ? (
-          <span className="text-foreground/80">● unsaved</span>
-        ) : (
-          <span>saved</span>
-        )}
-        <span className="ml-2 opacity-60">⌘S</span>
-      </span>
-    </div>
-  );
-}
+// `FileFooter` was removed — its job (file path + dirty marker)
+// moved into the new `StatusBar` component so connection identity
+// and file context share one well-tiered chrome strip.
