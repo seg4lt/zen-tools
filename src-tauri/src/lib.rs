@@ -175,6 +175,8 @@ pub fn run() {
             commands::process_monitor::pm_get_config,
             commands::process_monitor::pm_get_history,
             commands::process_monitor::pm_set_poll_interval,
+            commands::process_monitor::pm_popover_close,
+            commands::process_monitor::pm_show_main_window,
             // cleaner
             commands::cleaner::cleaner_list_scan_folders,
             commands::cleaner::cleaner_add_scan_folder,

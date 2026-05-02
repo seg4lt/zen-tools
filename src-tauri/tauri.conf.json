@@ -13,6 +13,7 @@
     "withGlobalTauri": false,
     "windows": [
       {
+        "label": "main",
         "title": "Zen Tools",
         "width": 1280,
         "height": 800,
@@ -22,6 +23,21 @@
         "fullscreen": false,
         "titleBarStyle": "Overlay",
         "hiddenTitle": true
+      },
+      {
+        "label": "pm-popover",
+        "url": "index.html?window=pm-popover",
+        "title": "Process Monitor",
+        "width": 340,
+        "height": 280,
+        "resizable": false,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "focus": false,
+        "visible": false,
+        "shadow": true
       }
     ],
     "security": {

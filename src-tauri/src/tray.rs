@@ -35,12 +35,17 @@ use tauri::{
     image::Image,
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{TrayIconBuilder, TrayIconEvent},
-    AppHandle, Emitter, Manager,
+    AppHandle, Emitter, Manager, PhysicalPosition, Position, Size,
 };
 use tokio::sync::Mutex;
 
 /// Stable id used by [`AppHandle::remove_tray_by_id`].
 const TRAY_ID: &str = "zen-tools";
+
+/// Window label of the small popover spawned by left-clicking the tray.
+/// Declared in `tauri.conf.json` (hidden by default) so we can just
+/// reposition + show it on demand without going through `WebviewWindowBuilder`.
+const POPOVER_LABEL: &str = "pm-popover";
 
 /// Embedded template PNG (auto-inverts for light/dark menu bars).
 const TRAY_ICON_PNG: &[u8] = include_bytes!("../icons/tray-icon.png");
@@ -148,16 +153,64 @@ fn build_tray(
             if let TrayIconEvent::Click {
                 button,
                 button_state,
+                rect,
                 ..
             } = event
             {
                 use tauri::tray::{MouseButton, MouseButtonState};
                 if button == MouseButton::Left && button_state == MouseButtonState::Up {
-                    focus_main_window(tray.app_handle());
+                    toggle_popover(tray.app_handle(), rect.position, rect.size);
                 }
             }
         })
         .build(app)
+}
+
+/// Show or hide the mini popover window. Positioned just below the tray
+/// icon so it reads as an attached panel rather than a free-floating
+/// window. If the popover is already visible, a second click hides it.
+fn toggle_popover(app: &AppHandle, tray_pos: Position, tray_size: Size) {
+    let Some(win) = app.get_webview_window(POPOVER_LABEL) else {
+        tracing::warn!("popover window '{}' not found", POPOVER_LABEL);
+        return;
+    };
+
+    // If already visible, treat the click as a "dismiss" gesture so the
+    // tray feels like a togglable status item.
+    if win.is_visible().unwrap_or(false) {
+        let _ = win.hide();
+        return;
+    }
+
+    // Normalise the tray rect into physical pixels regardless of
+    // which Position/Size variant the platform returns; window
+    // metrics from `outer_size()` are also physical.
+    let scale = win.scale_factor().unwrap_or(1.0);
+    let icon_phys = match tray_pos {
+        Position::Physical(p) => PhysicalPosition::new(p.x as f64, p.y as f64),
+        Position::Logical(p) => PhysicalPosition::new(p.x * scale, p.y * scale),
+    };
+    let icon_size_phys = match tray_size {
+        Size::Physical(s) => (s.width as f64, s.height as f64),
+        Size::Logical(s) => (s.width * scale, s.height * scale),
+    };
+
+    let win_w = win.outer_size().map(|s| s.width as f64).unwrap_or(340.0);
+    let icon_centre_x = icon_phys.x + icon_size_phys.0 / 2.0;
+    let target_x = icon_centre_x - win_w / 2.0;
+    let target_y = icon_phys.y + icon_size_phys.1 + 4.0;
+
+    let _ = win.set_position(PhysicalPosition::new(target_x, target_y));
+    let _ = win.show();
+    let _ = win.set_focus();
+}
+
+/// Hide the popover (called from the popover's "Open Full Window" button
+/// via the `pm_popover_close` command).
+pub fn hide_popover(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window(POPOVER_LABEL) {
+        let _ = win.hide();
+    }
 }
 
 /// Bring the main webview window forward, unminimising and focusing it.
