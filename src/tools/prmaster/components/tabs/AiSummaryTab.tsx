@@ -84,6 +84,27 @@ import { MarkdownReader } from "../shared/MarkdownReader";
  *  is reachable via the "+ Year" picker. */
 const DEFAULT_LOOKBACK_YEARS = 5;
 
+/** A week is "generatable" only when it sits **strictly in the past** —
+ *  the current ISO week itself is excluded because work that's still
+ *  unfolding shouldn't be summarised mid-stream (commits land
+ *  throughout, the report would go stale instantly). Future weeks are
+ *  excluded for the obvious reason. So:
+ *
+ *    year < todayYear       → past, eligible
+ *    year > todayYear       → future, locked
+ *    year === todayYear     → eligible only when week < todayWeek
+ */
+function isPastWeek(
+  year: number,
+  week: number,
+  todayYear: number,
+  todayWeek: number,
+): boolean {
+  if (year < todayYear) return true;
+  if (year > todayYear) return false;
+  return week < todayWeek;
+}
+
 // ────────────────────────────────────────────────────────────────────────
 // Types
 // ────────────────────────────────────────────────────────────────────────
@@ -319,14 +340,16 @@ export function AiSummaryTab() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedYear]);
 
-  // ── Pending count for the toolbar (selected year, weeks <= today) ───
+  // ── Pending count for the toolbar (selected year, strictly-past weeks)
   const pendingCount = useMemo(() => {
     if (mappedRepos.length === 0) return 0;
     const total = weeksInYear(selectedYear);
     let n = 0;
     for (let w = 1; w <= total; w++) {
-      // Skip future weeks in the current year.
-      if (selectedYear === todayIso.year && w > todayIso.week) continue;
+      // Only count strictly-past weeks. The current week is still
+      // running so its commit set isn't final, and future weeks
+      // obviously don't have commits to summarise yet.
+      if (!isPastWeek(selectedYear, w, todayIso.year, todayIso.week)) continue;
       for (const repo of mappedRepos) {
         if (!cardIndex.has(weekKey(repo, selectedYear, w))) n += 1;
       }
@@ -359,7 +382,9 @@ export function AiSummaryTab() {
     const total = weeksInYear(selectedYear);
     const queue: Array<{ repo: string; year: number; week: number }> = [];
     for (let w = 1; w <= total; w++) {
-      if (selectedYear === todayIso.year && w > todayIso.week) continue;
+      // Only queue strictly-past weeks (matches `pendingCount` and
+      // `isPastWeek`). The current and future weeks are locked.
+      if (!isPastWeek(selectedYear, w, todayIso.year, todayIso.week)) continue;
       for (const repo of mappedRepos) {
         if (!cardIndex.has(weekKey(repo, selectedYear, w))) {
           queue.push({ repo, year: selectedYear, week: w });
@@ -443,6 +468,12 @@ export function AiSummaryTab() {
 
   // ── Per-cell ops (in the focused-week panel) ────────────────────────
   async function regenerateCell(repo: string, year: number, week: number) {
+    if (!isPastWeek(year, week, todayIso.year, todayIso.week)) {
+      setError(
+        "AI summaries only run on fully-past weeks. Wait until this week ends before generating.",
+      );
+      return;
+    }
     const r = weekToRange(year, week);
     const sinceIso = `${isoDate(r.since)}T00:00:00Z`;
     const untilIso = `${isoDate(r.until)}T23:59:59Z`;
@@ -484,6 +515,12 @@ export function AiSummaryTab() {
     if (selectedWeek == null || generating) return;
     const year = selectedYear;
     const week = selectedWeek;
+    if (!isPastWeek(year, week, todayIso.year, todayIso.week)) {
+      setError(
+        "AI summaries only run on fully-past weeks. Wait until this week ends before generating.",
+      );
+      return;
+    }
 
     const r = weekToRange(year, week);
     const sinceIso = `${isoDate(r.since)}T00:00:00Z`;
@@ -745,6 +782,14 @@ export function AiSummaryTab() {
                   mappedRepos={mappedRepos}
                   cellStatus={cellStatus}
                   generating={generating}
+                  locked={
+                    !isPastWeek(
+                      selectedYear,
+                      selectedWeek,
+                      todayIso.year,
+                      todayIso.week,
+                    )
+                  }
                   onRegenerateWeek={() => void regenerateFocusedWeek()}
                   onRegenerate={(repo) =>
                     void regenerateCell(repo, selectedYear, selectedWeek)
@@ -1061,6 +1106,7 @@ function FocusedWeekPanel({
   mappedRepos,
   cellStatus,
   generating,
+  locked,
   onRegenerateWeek,
   onRegenerate,
   onDelete,
@@ -1073,6 +1119,10 @@ function FocusedWeekPanel({
   mappedRepos: string[];
   cellStatus: Map<string, CellStatus>;
   generating: boolean;
+  /** True when this week is the *current* ISO week or in the future.
+   *  Generation buttons render disabled with a tooltip explaining
+   *  that summaries only run on fully-past weeks. */
+  locked: boolean;
   onRegenerateWeek: () => void;
   onRegenerate: (repo: string) => void;
   onDelete: (repo: string) => void;
@@ -1146,6 +1196,17 @@ function FocusedWeekPanel({
             <Loader2 className="size-3 animate-spin" />
             Generating…
           </Button>
+        ) : locked ? (
+          <Button
+            size="xs"
+            variant="ghost"
+            disabled
+            className="text-muted-foreground"
+            title="AI summaries only run on fully-past weeks. Wait until this week ends."
+          >
+            <Sparkles className="size-3" />
+            Wait until week ends
+          </Button>
         ) : complete ? (
           <Button
             size="xs"
@@ -1188,6 +1249,7 @@ function FocusedWeekPanel({
                   status={status}
                   isStaleMapping={isStaleMapping}
                   mappedRepos={mappedRepos}
+                  locked={locked}
                   onRegenerate={() => onRegenerate(repo)}
                   onDelete={card ? () => onDelete(repo) : undefined}
                   onEdit={
@@ -1217,6 +1279,7 @@ function FocusedWeekPanel({
                       cardKey(repo, range.since, range.until),
                     )}
                     isStaleMapping={isStale}
+                    locked={locked}
                     onRegenerate={() => onRegenerate(repo)}
                     onDelete={() => onDelete(repo)}
                   />
@@ -1241,12 +1304,17 @@ function EmptyRepoChip({
   repo,
   cellStatus,
   isStaleMapping,
+  locked,
   onRegenerate,
   onDelete,
 }: {
   repo: string;
   cellStatus: CellStatus | undefined;
   isStaleMapping: boolean;
+  /** Whether the parent week is the current ISO week or in the
+   *  future — the regen button is hidden in that case (only past
+   *  weeks can be re-checked). */
+  locked: boolean;
   onRegenerate: () => void;
   onDelete: () => void;
 }) {
@@ -1264,20 +1332,22 @@ function EmptyRepoChip({
       }
     >
       <span className="truncate">{repo}</span>
-      <button
-        type="button"
-        disabled={isLoading}
-        onClick={onRegenerate}
-        className="cursor-pointer rounded p-0.5 hover:bg-muted disabled:cursor-not-allowed disabled:opacity-60"
-        aria-label={`Regenerate ${repo}`}
-        title="Re-check for commits"
-      >
-        {isLoading ? (
-          <Loader2 className="size-2.5 animate-spin" />
-        ) : (
-          <RotateCcw className="size-2.5" />
-        )}
-      </button>
+      {!locked && (
+        <button
+          type="button"
+          disabled={isLoading}
+          onClick={onRegenerate}
+          className="cursor-pointer rounded p-0.5 hover:bg-muted disabled:cursor-not-allowed disabled:opacity-60"
+          aria-label={`Regenerate ${repo}`}
+          title="Re-check for commits"
+        >
+          {isLoading ? (
+            <Loader2 className="size-2.5 animate-spin" />
+          ) : (
+            <RotateCcw className="size-2.5" />
+          )}
+        </button>
+      )}
       <button
         type="button"
         onClick={onDelete}
@@ -1301,6 +1371,7 @@ function RepoCardRow({
   status,
   isStaleMapping,
   mappedRepos,
+  locked,
   onRegenerate,
   onDelete,
   onEdit,
@@ -1310,6 +1381,10 @@ function RepoCardRow({
   status: CellStatus | undefined;
   isStaleMapping: boolean;
   mappedRepos: string[];
+  /** True when the parent week is the current ISO week or in the
+   *  future. Hides the regenerate button — only past weeks are
+   *  generatable. Existing summaries stay readable. */
+  locked: boolean;
   onRegenerate: () => void;
   onDelete?: () => void;
   onEdit?: (nextRepo: string) => void;
@@ -1366,27 +1441,29 @@ function RepoCardRow({
               )}
             </Button>
           )}
-          {card && onEdit && (
+          {!locked && card && onEdit && (
             <RepoEditPopoverButton
               currentRepo={card.repo}
               mappedRepos={mappedRepos}
               onSubmit={onEdit}
             />
           )}
-          <Button
-            size="icon-xs"
-            variant="ghost"
-            disabled={isLoading}
-            onClick={onRegenerate}
-            aria-label={card ? "Regenerate" : "Generate"}
-            title={card ? "Regenerate" : "Generate"}
-          >
-            {isLoading ? (
-              <Loader2 className="size-3 animate-spin" />
-            ) : (
-              <RotateCcw className="size-3" />
-            )}
-          </Button>
+          {!locked && (
+            <Button
+              size="icon-xs"
+              variant="ghost"
+              disabled={isLoading}
+              onClick={onRegenerate}
+              aria-label={card ? "Regenerate" : "Generate"}
+              title={card ? "Regenerate" : "Generate"}
+            >
+              {isLoading ? (
+                <Loader2 className="size-3 animate-spin" />
+              ) : (
+                <RotateCcw className="size-3" />
+              )}
+            </Button>
+          )}
           {onDelete && (
             <Button
               size="icon-xs"

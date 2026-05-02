@@ -99,8 +99,14 @@ export function YearHeatmap({
                 mapped: 0,
               };
               const isSelected = selectedWeek === week;
-              const isFuture =
-                todayWeek != null && week > todayWeek;
+              // A week is "locked" when it's still ongoing or in the
+              // future — generation only runs on fully-past weeks
+              // (isPastWeek in AiSummaryTab). Both the current week
+              // and future weeks render dimmer to signal that.
+              const isLocked =
+                todayWeek != null && week >= todayWeek;
+              const isCurrent =
+                todayWeek != null && week === todayWeek;
               return (
                 <HeatCell
                   key={week}
@@ -108,7 +114,8 @@ export function YearHeatmap({
                   week={week}
                   info={info}
                   isSelected={isSelected}
-                  isFuture={isFuture}
+                  isLocked={isLocked}
+                  isCurrent={isCurrent}
                   onClick={() => onSelectWeek(week)}
                 />
               );
@@ -126,28 +133,40 @@ function HeatCell({
   week,
   info,
   isSelected,
-  isFuture,
+  isLocked,
+  isCurrent,
   onClick,
 }: {
   year: number;
   week: number;
   info: HeatCellInfo;
   isSelected: boolean;
-  isFuture: boolean;
+  /** Current week or any future week — not eligible for AI generation
+   *  yet (only fully-past weeks are). Renders dimmer + the tooltip
+   *  explains why. */
+  isLocked: boolean;
+  /** Specifically the current ISO week. Gets a faint outline so it's
+   *  recognisable as "you're here" alongside the dim. */
+  isCurrent: boolean;
   onClick: () => void;
 }) {
   const range = weekToRange(year, week);
   const tipDate = `${formatRangeShort(range.since, range.until)}`;
+  const lockNote = isLocked
+    ? isCurrent
+      ? " · current week (wait until it ends to generate)"
+      : " · future week (locked)"
+    : "";
   const tip = (() => {
     switch (info.state) {
       case "inFlight":
         return `${formatWeekTag(week)} · ${tipDate} · generating…`;
       case "complete":
-        return `${formatWeekTag(week)} · ${tipDate} · ${info.commits} commits across ${info.cached}/${info.mapped} repos`;
+        return `${formatWeekTag(week)} · ${tipDate} · ${info.commits} commits across ${info.cached}/${info.mapped} repos${lockNote}`;
       case "partial":
-        return `${formatWeekTag(week)} · ${tipDate} · partial (${info.cached}/${info.mapped} repos cached)`;
+        return `${formatWeekTag(week)} · ${tipDate} · partial (${info.cached}/${info.mapped} repos cached)${lockNote}`;
       default:
-        return `${formatWeekTag(week)} · ${tipDate} · not generated`;
+        return `${formatWeekTag(week)} · ${tipDate} · not generated${lockNote}`;
     }
   })();
 
@@ -178,11 +197,15 @@ function HeatCell({
           "bg-emerald-300/80 hover:bg-emerald-300 dark:bg-emerald-700/70 dark:hover:bg-emerald-700/90",
         info.state === "inFlight" &&
           "animate-pulse bg-primary/40 hover:bg-primary/60",
-        // Selection ring + future-week dim layered last so they win.
+        // Selection ring + locked-week dim layered last so they win.
         isSelected && "ring-1 ring-primary ring-offset-1 ring-offset-card",
-        // Future weeks in the current year stay visible but clearly
-        // less prominent than past empty weeks.
-        isFuture && info.state === "empty" && "opacity-50",
+        // Current + future weeks aren't generatable yet — dim them so
+        // the past-vs-pending split is obvious at a glance.
+        isLocked && info.state === "empty" && "opacity-50",
+        // The current week additionally gets a hairline outline so
+        // users can tell "you're here" from a future week.
+        isCurrent &&
+          "outline outline-1 outline-dashed outline-offset-[-2px] outline-primary/60",
       )}
     >
       {info.state === "inFlight" && (
