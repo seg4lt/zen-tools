@@ -14,19 +14,12 @@ import { ChevronsUpDown, Loader2, RefreshCw, X } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Input } from "@/components/ui/input";
 import {
-  Command,
-  CommandEmpty,
-  CommandGroup,
-  CommandInput,
-  CommandItem,
-  CommandList,
-} from "@/components/ui/command";
-import {
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from "@/components/ui/popover";
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
 
 interface Props {
@@ -51,14 +44,27 @@ export function RepoPicker({
   onClear,
   onReload,
 }: Props) {
-  const [open, setOpen] = useState(false);
+  const [search, setSearch] = useState("");
   const selectedList = useMemo(() => [...selected], [selected]);
   const overflow = Math.max(0, selectedList.length - MAX_CHIPS);
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    const list = q ? repos.filter((r) => r.toLowerCase().includes(q)) : repos;
+    // Selected first, then alphabetic — same ordering as Swift RepoListPicker.
+    return [...list].sort((a, b) => {
+      const aSel = selected.has(a);
+      const bSel = selected.has(b);
+      if (aSel !== bSel) return aSel ? -1 : 1;
+      return a.localeCompare(b);
+    });
+  }, [repos, search, selected]);
 
   const trigger = compact ? (
     <Button
       variant="outline"
       size="sm"
+      type="button"
       className={cn(
         "h-8 w-full justify-between gap-2 px-2 font-normal",
         selectedList.length === 0 && "text-muted-foreground",
@@ -66,7 +72,11 @@ export function RepoPicker({
     >
       <span className="flex items-center gap-2 truncate">
         {selectedList.length === 0
-          ? "Pick repositories…"
+          ? loading
+            ? "Loading repositories…"
+            : repos.length === 0
+              ? "No repositories — click Reload"
+              : "Pick repositories…"
           : selectedList.length === 1
             ? selectedList[0]
             : `${selectedList.length} repos`}
@@ -76,12 +86,17 @@ export function RepoPicker({
   ) : (
     <Button
       variant="outline"
+      type="button"
       className="h-auto min-h-9 w-full justify-between gap-2 px-2 py-1.5 font-normal"
     >
       <div className="flex flex-1 flex-wrap items-center gap-1">
         {selectedList.length === 0 ? (
           <span className="text-sm text-muted-foreground">
-            Pick repositories…
+            {loading
+              ? "Loading repositories…"
+              : repos.length === 0
+                ? "No repositories — click Reload"
+                : "Pick repositories…"}
           </span>
         ) : (
           <>
@@ -107,62 +122,82 @@ export function RepoPicker({
 
   return (
     <div className={cn("grid", compact ? "" : "gap-1.5")}>
-      <Popover open={open} onOpenChange={setOpen}>
-        <PopoverTrigger asChild>{trigger}</PopoverTrigger>
-        <PopoverContent align="start" className="w-[420px] p-0">
-          <Command>
-            <CommandInput placeholder="Filter repos…" />
-            <CommandList className="max-h-72">
-              <CommandEmpty>No repos match.</CommandEmpty>
-              <CommandGroup>
-                {repos.map((repo) => {
-                  const isSelected = selected.has(repo);
-                  return (
-                    <CommandItem
-                      key={repo}
-                      value={repo}
-                      onSelect={() => onToggle(repo)}
-                      className="gap-2 font-mono text-xs"
-                    >
-                      <Checkbox
-                        checked={isSelected}
-                        tabIndex={-1}
-                        className="pointer-events-none"
-                      />
-                      <span className="flex-1 truncate">{repo}</span>
-                    </CommandItem>
-                  );
-                })}
-              </CommandGroup>
-            </CommandList>
-            <div className="flex items-center justify-between border-t px-2 py-1.5 text-xs text-muted-foreground">
-              <span>
-                {selectedList.length} selected · {repos.length} available
-              </span>
-              <div className="flex items-center gap-1">
-                {selectedList.length > 0 && (
-                  <Button size="sm" variant="ghost" onClick={onClear}>
-                    Clear
-                  </Button>
-                )}
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  disabled={loading}
-                  onClick={onReload}
-                >
-                  {loading ? (
-                    <Loader2 className="size-3.5 animate-spin" />
-                  ) : (
-                    <RefreshCw className="size-3.5" />
-                  )}
-                  Reload
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>{trigger}</DropdownMenuTrigger>
+        <DropdownMenuContent
+          align="start"
+          className="w-[420px] p-0"
+          // Don't auto-close after each item — multi-select needs to stay open.
+          onCloseAutoFocus={(e) => e.preventDefault()}
+        >
+          <div className="border-b p-2">
+            <Input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Filter repos…"
+              className="h-7 text-xs"
+              autoFocus
+            />
+          </div>
+          <div className="max-h-72 overflow-y-auto p-1">
+            {filtered.length === 0 ? (
+              <p className="p-3 text-center text-xs text-muted-foreground">
+                {repos.length === 0
+                  ? "No repositories returned by gh — click Reload."
+                  : "No repos match your search."}
+              </p>
+            ) : (
+              filtered.map((repo) => {
+                const isOn = selected.has(repo);
+                return (
+                  <button
+                    key={repo}
+                    type="button"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      onToggle(repo);
+                    }}
+                    className="flex w-full cursor-pointer items-center gap-2 rounded px-2 py-1 text-left text-xs hover:bg-accent"
+                  >
+                    <Checkbox
+                      checked={isOn}
+                      tabIndex={-1}
+                      className="pointer-events-none"
+                    />
+                    <span className="flex-1 truncate font-mono">{repo}</span>
+                  </button>
+                );
+              })
+            )}
+          </div>
+          <div className="flex items-center justify-between border-t px-2 py-1.5 text-xs text-muted-foreground">
+            <span>
+              {selectedList.length} selected · {repos.length} available
+            </span>
+            <div className="flex items-center gap-1">
+              {selectedList.length > 0 && (
+                <Button size="sm" variant="ghost" onClick={onClear}>
+                  Clear
                 </Button>
-              </div>
+              )}
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={loading}
+                onClick={onReload}
+              >
+                {loading ? (
+                  <Loader2 className="size-3.5 animate-spin" />
+                ) : (
+                  <RefreshCw className="size-3.5" />
+                )}
+                Reload
+              </Button>
             </div>
-          </Command>
-        </PopoverContent>
-      </Popover>
+          </div>
+        </DropdownMenuContent>
+      </DropdownMenu>
 
       {!compact && (
         <div className="flex items-center justify-between text-xs text-muted-foreground">

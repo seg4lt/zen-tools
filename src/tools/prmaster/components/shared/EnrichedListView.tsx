@@ -25,6 +25,8 @@ interface Props {
   error: string | null;
   emptyText: string;
   onRefresh: () => void;
+  /** Optional filter strip rendered as its own band beneath the header. */
+  filterBar?: React.ReactNode;
 }
 
 export function EnrichedListView({
@@ -34,6 +36,7 @@ export function EnrichedListView({
   error,
   emptyText,
   onRefresh,
+  filterBar,
 }: Props) {
   const { state, dispatch } = usePrMasterStore();
 
@@ -60,6 +63,12 @@ export function EnrichedListView({
           Refresh
         </Button>
       </header>
+
+      {filterBar && (
+        <div className="shrink-0 border-b bg-card/20 px-3 py-1.5">
+          {filterBar}
+        </div>
+      )}
 
       <div className="flex min-h-0 flex-1 flex-col overflow-y-auto p-3">
         {error && (

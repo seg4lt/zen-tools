@@ -522,8 +522,49 @@ function RepoMappingsEditor({
   mappings: LocalRepoMapping[];
   onChange: (next: LocalRepoMapping[]) => void;
 }) {
-  async function pickDir(idx: number) {
-    const result = await openDialog({ directory: true, multiple: false });
+  const [availableRepos, setAvailableRepos] = useState<string[]>([]);
+  const [reposLoading, setReposLoading] = useState(false);
+  const [reposError, setReposError] = useState<string | null>(null);
+  const [pickRepo, setPickRepo] = useState<string>("");
+
+  async function reloadRepos() {
+    setReposLoading(true);
+    setReposError(null);
+    try {
+      setAvailableRepos(await prmasterTauri.listAccessibleRepos());
+    } catch (err) {
+      setReposError(formatError(err));
+    } finally {
+      setReposLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    void reloadRepos();
+  }, []);
+
+  const mappedSet = new Set(mappings.map((m) => m.repo));
+  const unmappedRepos = availableRepos.filter((r) => !mappedSet.has(r));
+
+  async function addMappingForSelected() {
+    if (!pickRepo) return;
+    const result = await openDialog({
+      directory: true,
+      multiple: false,
+      title: `Select local git folder for ${pickRepo}`,
+    });
+    if (typeof result === "string") {
+      onChange([...mappings, { repo: pickRepo, local_path: result }]);
+      setPickRepo("");
+    }
+  }
+
+  async function rePickDir(idx: number) {
+    const result = await openDialog({
+      directory: true,
+      multiple: false,
+      title: `Select local git folder for ${mappings[idx]?.repo ?? "repo"}`,
+    });
     if (typeof result === "string") {
       onChange(
         mappings.map((m, i) =>
@@ -532,62 +573,128 @@ function RepoMappingsEditor({
       );
     }
   }
-  function add() {
-    onChange([...mappings, { repo: "", local_path: "" }]);
-  }
+
   function remove(idx: number) {
     onChange(mappings.filter((_, i) => i !== idx));
   }
-  function update(idx: number, patch: Partial<LocalRepoMapping>) {
-    onChange(mappings.map((m, i) => (i === idx ? { ...m, ...patch } : m)));
-  }
+
   return (
-    <div className="grid gap-2">
-      {mappings.length === 0 && (
+    <div className="grid gap-3">
+      <p className="text-xs text-muted-foreground">
+        Map GitHub repositories to local clones for faster AI Summary
+        generation (5-10× speedup). Pick a repo, then choose its local folder.
+      </p>
+
+      {/* Add mapping row: [repo dropdown] [Browse for folder…] [Reload] */}
+      <div className="flex flex-wrap items-center gap-2 rounded-md border bg-background p-2">
+        <Select
+          value={pickRepo || undefined}
+          onValueChange={(v) => setPickRepo(v)}
+          disabled={reposLoading || unmappedRepos.length === 0}
+        >
+          <SelectTrigger size="sm" className="h-8 min-w-[18rem] flex-1">
+            <SelectValue
+              placeholder={
+                reposLoading
+                  ? "Loading repositories…"
+                  : unmappedRepos.length === 0
+                    ? availableRepos.length === 0
+                      ? "No repositories available"
+                      : "All repositories are mapped"
+                    : "Pick a repository to map…"
+              }
+            />
+          </SelectTrigger>
+          <SelectContent className="max-h-72">
+            {unmappedRepos.map((repo) => (
+              <SelectItem key={repo} value={repo} className="font-mono text-xs">
+                {repo}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <Button
+          size="sm"
+          variant="default"
+          disabled={!pickRepo}
+          onClick={() => void addMappingForSelected()}
+        >
+          <Plus className="size-3.5" />
+          Browse for folder…
+        </Button>
+        <Button
+          size="sm"
+          variant="ghost"
+          disabled={reposLoading}
+          onClick={() => void reloadRepos()}
+          aria-label="Reload repositories"
+        >
+          {reposLoading ? (
+            <Loader2 className="size-3.5 animate-spin" />
+          ) : (
+            <RefreshCw className="size-3.5" />
+          )}
+          Reload
+        </Button>
+      </div>
+
+      {reposError && (
+        <span className="text-xs text-destructive">{reposError}</span>
+      )}
+
+      {/* Existing mappings list */}
+      {mappings.length === 0 ? (
         <span className="text-xs italic text-muted-foreground">
-          No mappings — AI Summary reads commits via{" "}
+          No mappings yet — AI Summary will fall back to{" "}
           <code className="rounded bg-muted px-1 font-mono text-xs">
             gh api repos/&#123;owner/repo&#125;/commits
           </code>
           .
         </span>
-      )}
-      {mappings.map((m, idx) => (
-        <div
-          key={idx}
-          className="grid grid-cols-[12rem_1fr_auto_auto] items-center gap-2 rounded-md border bg-background p-2"
-        >
-          <Input
-            value={m.repo}
-            onChange={(e) => update(idx, { repo: e.target.value })}
-            placeholder="owner/repo"
-            className="h-8 font-mono"
-          />
-          <Input
-            value={m.local_path}
-            onChange={(e) => update(idx, { local_path: e.target.value })}
-            placeholder="/Users/me/Code/repo"
-            className="h-8 font-mono"
-          />
-          <Button size="sm" variant="outline" onClick={() => void pickDir(idx)}>
-            Browse…
-          </Button>
-          <Button
-            size="icon-sm"
-            variant="ghost"
-            onClick={() => remove(idx)}
-            aria-label="Remove mapping"
-          >
-            <Trash2 className="size-3.5" />
-          </Button>
+      ) : (
+        <div className="grid gap-1.5">
+          {mappings.map((m, idx) => (
+            <div
+              key={`${m.repo}-${idx}`}
+              className="grid grid-cols-[14rem_1fr_auto_auto] items-center gap-2 rounded-md border bg-background p-2"
+            >
+              <span className="truncate font-mono text-xs">{m.repo}</span>
+              <span
+                className="truncate font-mono text-xs text-muted-foreground"
+                title={m.local_path}
+              >
+                {tildify(m.local_path)}
+              </span>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => void rePickDir(idx)}
+              >
+                Change…
+              </Button>
+              <Button
+                size="icon-sm"
+                variant="ghost"
+                onClick={() => remove(idx)}
+                aria-label="Remove mapping"
+              >
+                <Trash2 className="size-3.5" />
+              </Button>
+            </div>
+          ))}
         </div>
-      ))}
-      <Button size="sm" variant="outline" onClick={add} className="w-fit">
-        <Plus className="size-3.5" />
-        Add mapping
-      </Button>
+      )}
     </div>
   );
+}
+
+function tildify(path: string): string {
+  // Best-effort home-dir collapse — works for the common macOS layout.
+  // The exact $HOME is not available to the renderer, so we match the
+  // first two leading segments of `/Users/<name>/`.
+  const m = /^(\/Users\/[^/]+)(\/.*)?$/.exec(path);
+  if (m) return "~" + (m[2] ?? "");
+  return path;
 }
 
 function formatError(err: unknown): string {

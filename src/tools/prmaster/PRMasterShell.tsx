@@ -89,7 +89,7 @@ export function PRMasterShell() {
 
   return (
     <div className="flex h-full min-h-0 w-full flex-col">
-      <Tabs defaultValue="mine" className="flex h-full min-h-0 flex-col">
+      <Tabs defaultValue="to-review" className="flex h-full min-h-0 flex-col">
         <div className="flex h-9 shrink-0 items-center gap-2 border-b bg-card/60 px-3">
           <TabsList className="h-7 gap-0.5 bg-transparent p-0">
             {visible.map((t) => (
