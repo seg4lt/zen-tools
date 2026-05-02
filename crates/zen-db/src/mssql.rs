@@ -14,9 +14,9 @@ use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 
 use crate::driver::{DbConnection, DbError, DbResult};
 use crate::types::{
-    Cell, CheckDescription, Column, ColumnDescription, ConnectionConfig, ForeignKeyDescription,
-    IndexDescription, KeyDescription, QueryResult, RoutineDescription, RoutineKind,
-    TableDescription, TableKind, TableSummary, TriggerDescription,
+    Cell, CheckDescription, Column, ColumnDescription, ConnectionConfig, ExplainFormat,
+    ExplainResult, ForeignKeyDescription, IndexDescription, KeyDescription, QueryResult,
+    RoutineDescription, RoutineKind, TableDescription, TableKind, TableSummary, TriggerDescription,
 };
 
 type MsClient = Client<Compat<TcpStream>>;
@@ -760,6 +760,95 @@ impl DbConnection for MsSqlConnection {
             .collect())
     }
 
+    async fn explain_query(
+        &mut self,
+        database: Option<&str>,
+        _schema: Option<&str>,
+        sql: &str,
+        analyze: bool,
+    ) -> DbResult<ExplainResult> {
+        // tiberius's `Client` is a single TCP session, so `USE [db]`,
+        // the SET, and the user query all share one logical session.
+        if let Some(db) = database {
+            let stmt = format!("USE [{}]", escape_ident(db));
+            self.client
+                .simple_query(stmt)
+                .await
+                .map_err(|e| DbError::Query(e.to_string()))?;
+        }
+
+        // Two flavours, very different result shapes:
+        //
+        // - `analyze = true`  →  `SET STATISTICS XML ON` + run the
+        //   query + `SET STATISTICS XML OFF`. Each SELECT yields
+        //   (data_set, plan_xml_set). We capture both — the data
+        //   surfaces as `ExplainResult.data`, the plan as `raw`.
+        //
+        // - `analyze = false` →  `SET SHOWPLAN_XML ON` then run the
+        //   query. SHOWPLAN_XML *replaces* execution: the only
+        //   thing returned is the estimated plan XML, no data.
+        //   Per MS docs, SHOWPLAN_XML must be the only statement in
+        //   its batch — so we send it as a separate `simple_query`
+        //   first, then run the user SQL on the same session.
+        //   `data` is `None` because nothing executed.
+        let trimmed = sql.trim_end_matches(&[' ', '\t', '\n', '\r', ';'][..]);
+
+        let start = Instant::now();
+        let (sets, expect_data) = if analyze {
+            let wrapped = format!(
+                "SET STATISTICS XML ON; {trimmed}; SET STATISTICS XML OFF;"
+            );
+            (run_capturing_all_sets(&mut self.client, &wrapped).await?, true)
+        } else {
+            // Toggle SHOWPLAN_XML in its own batch; tiberius's
+            // `simple_query` is one batch per call.
+            self.client
+                .simple_query("SET SHOWPLAN_XML ON")
+                .await
+                .map_err(|e| DbError::Query(e.to_string()))?;
+            // The query batch is now redirected — output is the
+            // estimated plan XML, not row data.
+            let plan_sets = run_capturing_all_sets(&mut self.client, trimmed).await;
+            // Always turn it back off, even on error, so the session
+            // doesn't stay wedged in plan-emit mode for follow-up
+            // queries on this connection.
+            let _ = self.client.simple_query("SET SHOWPLAN_XML OFF").await;
+            (plan_sets?, false)
+        };
+        let duration_ms = start.elapsed().as_millis() as u64;
+
+        // Pull the *last* plan + the *last* data set: matches what
+        // the user clicked Run on if they batched several
+        // statements.
+        let mut plan: Option<String> = None;
+        let mut data: Option<QueryResult> = None;
+        for set in sets.into_iter() {
+            if is_showplan_set(&set) {
+                if let Some(Cell::Text(s)) = set.rows.first().and_then(|r| r.first()) {
+                    plan = Some(s.clone());
+                }
+            } else if expect_data && !set.columns.is_empty() {
+                data = Some(set);
+            }
+        }
+
+        let raw = plan.ok_or_else(|| {
+            DbError::Query(if analyze {
+                "STATISTICS XML did not return a Showplan result set".to_string()
+            } else {
+                "SHOWPLAN_XML did not return a plan result set".to_string()
+            })
+        })?;
+
+        Ok(ExplainResult {
+            format: ExplainFormat::Xml,
+            raw,
+            statement: sql.to_string(),
+            duration_ms,
+            data,
+        })
+    }
+
     async fn execute_batch(
         &mut self,
         database: Option<&str>,
@@ -1014,6 +1103,91 @@ fn collapse_foreign_keys(
         });
     }
     out
+}
+
+/// Run a multi-result-set batch and capture every result set into a
+/// `Vec<QueryResult>`. Used by `explain_query` to receive the
+/// `STATISTICS XML` ShowPlan row as a separate set after the actual
+/// data. The base `execute()` path collapses everything into one
+/// columns/rows pair, which is fine for normal queries but loses
+/// ShowPlan information.
+async fn run_capturing_all_sets(
+    client: &mut MsClient,
+    sql: &str,
+) -> DbResult<Vec<QueryResult>> {
+    let mut stream = client
+        .simple_query(sql.to_string())
+        .await
+        .map_err(|e| DbError::Query(e.to_string()))?;
+
+    let mut sets: Vec<QueryResult> = Vec::new();
+    let mut cur_columns: Vec<Column> = Vec::new();
+    let mut cur_rows: Vec<Vec<Cell>> = Vec::new();
+    let mut have_set = false;
+
+    let flush = |sets: &mut Vec<QueryResult>,
+                 columns: &mut Vec<Column>,
+                 rows: &mut Vec<Vec<Cell>>| {
+        sets.push(QueryResult {
+            statement: String::new(),
+            columns: std::mem::take(columns),
+            rows: std::mem::take(rows),
+            rows_affected: None,
+            duration_ms: 0,
+        });
+    };
+
+    while let Some(item) = stream
+        .try_next()
+        .await
+        .map_err(|e| DbError::Query(e.to_string()))?
+    {
+        match item {
+            QueryItem::Metadata(meta) => {
+                if have_set {
+                    flush(&mut sets, &mut cur_columns, &mut cur_rows);
+                }
+                cur_columns = meta
+                    .columns()
+                    .iter()
+                    .map(|c| Column {
+                        name: c.name().to_string(),
+                        type_name: format!("{:?}", c.column_type()),
+                    })
+                    .collect();
+                cur_rows = Vec::new();
+                have_set = true;
+            }
+            QueryItem::Row(row) => {
+                let mut cells = Vec::with_capacity(row.len());
+                for col_data in row.into_iter() {
+                    cells.push(decode_cell(&col_data));
+                }
+                cur_rows.push(cells);
+            }
+        }
+    }
+
+    if have_set {
+        flush(&mut sets, &mut cur_columns, &mut cur_rows);
+    }
+
+    Ok(sets)
+}
+
+/// Whether a `QueryResult` looks like the single-cell ShowPlan row
+/// that `SET STATISTICS XML ON` injects after each SELECT. tiberius
+/// reports the column name as
+/// `"Microsoft SQL Server * XML Showplan"`; we match on the trailing
+/// "Showplan" substring so future SQL Server versions don't break
+/// the detection.
+fn is_showplan_set(set: &QueryResult) -> bool {
+    set.columns.len() == 1
+        && set
+            .columns
+            .first()
+            .map(|c| c.name.contains("Showplan"))
+            .unwrap_or(false)
 }
 
 /// Group a flat index row stream `(name, is_unique, column, ordinal)`

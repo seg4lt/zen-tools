@@ -11,9 +11,9 @@ use sqlx::{Column as _, Postgres, Row, TypeInfo, ValueRef};
 
 use crate::driver::{DbConnection, DbError, DbResult};
 use crate::types::{
-    Cell, CheckDescription, Column, ColumnDescription, ConnectionConfig, ForeignKeyDescription,
-    IndexDescription, KeyDescription, QueryResult, RoutineDescription, RoutineKind,
-    TableDescription, TableKind, TableSummary, TriggerDescription,
+    Cell, CheckDescription, Column, ColumnDescription, ConnectionConfig, ExplainFormat,
+    ExplainResult, ForeignKeyDescription, IndexDescription, KeyDescription, QueryResult,
+    RoutineDescription, RoutineKind, TableDescription, TableKind, TableSummary, TriggerDescription,
 };
 
 pub struct PostgresConnection {
@@ -490,6 +490,81 @@ impl DbConnection for PostgresConnection {
         run_one(&mut conn, sql).await
     }
 
+    async fn explain_query(
+        &mut self,
+        _database: Option<&str>,
+        schema: Option<&str>,
+        sql: &str,
+        analyze: bool,
+    ) -> DbResult<ExplainResult> {
+        // Always wrap the user's body with the canonical option set —
+        // `FORMAT JSON` is non-negotiable since the visualizer expects
+        // JSON it can parse. Whatever EXPLAIN the user typed is stripped
+        // before wrapping; otherwise we'd get
+        // `EXPLAIN (FORMAT JSON, …) EXPLAIN SELECT …` (Postgres rejects
+        // nested EXPLAIN), or — worse — we'd accept their bare
+        // `EXPLAIN SELECT …` and try to decode plain-text output as
+        // JSON.
+        //
+        // `analyze` toggles between two flavours:
+        //   - `true`  → execute + collect actual rows / timing /
+        //               buffers. Side effects happen.
+        //   - `false` → planner estimates only. No execution; safe
+        //               for destructive statements.
+        // ANALYZE / BUFFERS / TIMING are all execution-bound options
+        // — Postgres rejects them when the query isn't being run —
+        // so we drop them in the estimate-only path.
+        let body = strip_explain_prefix(sql);
+        let body = body.trim().trim_end_matches(';').trim();
+        if body.is_empty() {
+            return Err(DbError::Query("explain: empty SQL after wrapping".into()));
+        }
+        let opts = if analyze {
+            "FORMAT JSON, ANALYZE, BUFFERS, VERBOSE, TIMING"
+        } else {
+            "FORMAT JSON, VERBOSE"
+        };
+        let wrapped = format!("EXPLAIN ({opts}) {body}");
+
+        // Pin a single physical connection so `SET search_path`
+        // applies to the wrapped query — same reason `execute_batch`
+        // does it.
+        let mut conn = self
+            .pool
+            .acquire()
+            .await
+            .map_err(|e| DbError::Query(e.to_string()))?;
+        if let Some(s) = schema {
+            let safe = s.replace('"', "\"\"");
+            let stmt = format!("SET search_path TO \"{}\", public", safe);
+            sqlx::query(&stmt)
+                .execute(&mut *conn)
+                .await
+                .map_err(|e| DbError::Query(e.to_string()))?;
+        }
+
+        let start = Instant::now();
+        // EXPLAIN-JSON returns one row, one column whose type info
+        // says `json`. We decode through `serde_json::Value` so we
+        // can re-serialise pretty-printed for the Raw view.
+        let row: (serde_json::Value,) = sqlx::query_as(&wrapped)
+            .fetch_one(&mut *conn)
+            .await
+            .map_err(|e| DbError::Query(e.to_string()))?;
+        let duration_ms = start.elapsed().as_millis() as u64;
+
+        let raw = serde_json::to_string_pretty(&row.0)
+            .map_err(|e| DbError::Query(format!("explain serialise: {e}")))?;
+
+        Ok(ExplainResult {
+            format: ExplainFormat::Json,
+            raw,
+            statement: sql.to_string(),
+            duration_ms,
+            data: None,
+        })
+    }
+
     async fn execute_batch(
         &mut self,
         _database: Option<&str>,
@@ -638,4 +713,125 @@ fn hex_short(bytes: &[u8]) -> String {
         s.push_str("...");
     }
     s
+}
+
+/// Strip a leading `EXPLAIN [(opts…)] [ANALYZE|VERBOSE]*` prefix so
+/// the caller can re-wrap with a canonical option set. Returns the
+/// inner SQL body when an EXPLAIN was found, or the trimmed input
+/// when not.
+///
+/// Why we strip rather than respect: the visualizer parses
+/// `FORMAT JSON` output specifically. A user-typed `EXPLAIN SELECT …`
+/// (no options, defaults to text) would round-trip through the JSON
+/// decoder and panic. A user-typed `EXPLAIN ANALYZE …` similarly
+/// returns text. Always normalising means the user can paste any
+/// flavour of EXPLAIN and the perf view still works.
+fn strip_explain_prefix(sql: &str) -> &str {
+    // Trim leading whitespace + `;` (copy-paste artefacts).
+    let mut s = sql.trim_start_matches(&[' ', '\t', '\n', '\r', ';'][..]);
+
+    // Detect `EXPLAIN` token (case-insensitive). Whole-word check —
+    // we don't want to chew off the `EXPLAIN` of e.g.
+    // `SELECT 'EXPLAIN ME' …` (defensive, since SQL keywords
+    // shouldn't appear at the start of a literal).
+    if s.len() < 7
+        || !s[..7].eq_ignore_ascii_case("EXPLAIN")
+        || s.as_bytes()
+            .get(7)
+            .map(|b| (*b as char).is_ascii_alphanumeric() || *b == b'_')
+            .unwrap_or(false)
+    {
+        return s;
+    }
+    s = &s[7..];
+    s = s.trim_start_matches(&[' ', '\t', '\n', '\r'][..]);
+
+    // Optional `(option, option, …)` block. Postgres EXPLAIN options
+    // are simple identifiers + values, no nested parens / strings,
+    // so the first `)` ends the block.
+    if s.starts_with('(') {
+        if let Some(close) = s.find(')') {
+            s = &s[close + 1..];
+            s = s.trim_start_matches(&[' ', '\t', '\n', '\r'][..]);
+        } else {
+            // Unbalanced — give up and pass through as-is.
+            return s;
+        }
+    }
+
+    // Optional bare `ANALYZE` / `ANALYSE` / `VERBOSE` keywords (the
+    // legacy non-parenthesised form).
+    loop {
+        let next_word_end = s
+            .as_bytes()
+            .iter()
+            .position(|b| !((*b as char).is_ascii_alphabetic()))
+            .unwrap_or(s.len());
+        if next_word_end == 0 {
+            break;
+        }
+        let word = &s[..next_word_end];
+        match word.to_ascii_uppercase().as_str() {
+            "ANALYZE" | "ANALYSE" | "VERBOSE" => {
+                s = &s[next_word_end..];
+                s = s.trim_start_matches(&[' ', '\t', '\n', '\r'][..]);
+            }
+            _ => break,
+        }
+    }
+
+    s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_explain_prefix;
+
+    #[test]
+    fn passes_through_when_no_explain() {
+        assert_eq!(strip_explain_prefix("SELECT 1"), "SELECT 1");
+    }
+
+    #[test]
+    fn strips_bare_explain() {
+        assert_eq!(strip_explain_prefix("EXPLAIN SELECT 1"), "SELECT 1");
+    }
+
+    #[test]
+    fn strips_explain_with_parens() {
+        assert_eq!(
+            strip_explain_prefix("EXPLAIN (FORMAT JSON, ANALYZE) SELECT 1"),
+            "SELECT 1",
+        );
+    }
+
+    #[test]
+    fn strips_explain_analyze_legacy_form() {
+        assert_eq!(
+            strip_explain_prefix("EXPLAIN ANALYZE VERBOSE SELECT 1"),
+            "SELECT 1",
+        );
+    }
+
+    #[test]
+    fn case_insensitive() {
+        assert_eq!(strip_explain_prefix("explain select 1"), "select 1");
+    }
+
+    #[test]
+    fn ignores_explain_inside_word() {
+        // `EXPLAINER` is a column name, not the keyword.
+        assert_eq!(
+            strip_explain_prefix("EXPLAINER SELECT 1"),
+            "EXPLAINER SELECT 1",
+        );
+    }
+
+    #[test]
+    fn trims_leading_whitespace_and_semis() {
+        assert_eq!(
+            strip_explain_prefix("  ;\n EXPLAIN  SELECT 1"),
+            "SELECT 1",
+        );
+    }
 }

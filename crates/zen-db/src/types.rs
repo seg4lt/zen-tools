@@ -239,3 +239,42 @@ pub struct QueryResult {
     pub rows_affected: Option<u64>,
     pub duration_ms: u64,
 }
+
+/// Wire format for the explain payload. Each dialect carries one
+/// canonical shape:
+///
+/// - `Json` — Postgres `EXPLAIN (FORMAT JSON, ANALYZE, BUFFERS, …)`,
+///   a single-element array of objects with a `Plan` tree.
+/// - `Xml` — MSSQL `SET STATISTICS XML ON; <query>;`, a
+///   `<ShowPlanXML>` document with nested `<RelOp>` nodes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ExplainFormat {
+    Json,
+    Xml,
+}
+
+/// Result of `db_explain_query`. Drivers shape the user SQL into the
+/// dialect-appropriate plan-emitting wrapper, run it, and ship the
+/// payload + bookkeeping back. The frontend parses `raw` into the
+/// unified `PlanRoot` model used by the visualizer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExplainResult {
+    pub format: ExplainFormat,
+    /// The full plan payload — Postgres EXPLAIN-JSON, or MSSQL
+    /// ShowPlanXML.
+    pub raw: String,
+    /// Original SQL the user submitted, before the driver-specific
+    /// EXPLAIN/STATISTICS wrapping.
+    pub statement: String,
+    /// Wall-clock time for the whole "explain" round-trip
+    /// (includes any session-state SQL the wrapper added).
+    pub duration_ms: u64,
+    /// MSSQL only — the actual data the wrapped query returned.
+    /// `None` for Postgres, since `EXPLAIN ANALYZE` doesn't ship the
+    /// inner query's rows. Surfaced so the front-end can show data
+    /// alongside the plan in a single round-trip when running
+    /// against MSSQL.
+    pub data: Option<QueryResult>,
+}

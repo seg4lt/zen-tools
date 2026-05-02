@@ -15,12 +15,16 @@ import { AlertCircle, Copy, Maximize2, Minimize2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { ResultsGrid } from "./results-grid";
-import { useDbExplorerStore } from "../store/db-explorer-store";
-import type { DbQueryResult } from "../lib/tauri";
+import { ExplainViews } from "./explain-views";
+import {
+  useDbExplorerStore,
+  type ResultTab,
+} from "../store/db-explorer-store";
+import type { DbExplainResult, DbQueryResult } from "../lib/tauri";
 
 interface ResultsPaneProps {
   connectionId: string | null;
-  results: DbQueryResult[] | null;
+  results: ResultTab[] | null;
   /**
    * Latest error for the active connection, or `null` when the last
    * run succeeded. When set, the pane renders a full-text error card
@@ -86,14 +90,21 @@ export function ResultsPane({
           parent's width even when its inner header/body are wider. The
           grid's own `overflow-auto` then provides the scrollbar. */}
       <div className="relative min-h-0 min-w-0 flex-1 overflow-hidden">
-        <ResultsGrid result={active} />
+        {active.kind === "data" ? (
+          <ResultsGrid result={active.data} />
+        ) : (
+          <ExplainViews
+            connectionId={connectionId}
+            explain={active.explain}
+          />
+        )}
       </div>
     </div>
   );
 }
 
 interface TabStripProps {
-  results: DbQueryResult[];
+  results: ResultTab[];
   activeIdx: number;
   maximized: boolean;
   onToggleMaximize: () => void;
@@ -130,9 +141,13 @@ function TabStrip({
                 type="button"
                 className="flex items-center gap-1"
                 onClick={() => onSelect(idx)}
-                title={r.statement}
+                title={
+                  r.kind === "data" ? r.data.statement : r.explain.statement
+                }
               >
-                <span className="font-mono">{labelForTab(idx, r)}</span>
+                <span className="max-w-[12ch] truncate font-mono">
+                  {labelForTab(idx, r)}
+                </span>
                 <span className="text-[10px] text-muted-foreground/70">
                   {summaryFor(r)}
                 </span>
@@ -249,17 +264,46 @@ function ErrorCard({
   );
 }
 
-function labelForTab(idx: number, r: DbQueryResult): string {
-  // Use the first SQL keyword as a quick visual marker, falling back
-  // to "Result N".
-  const keyword = r.statement
-    .replace(/^[\s/*-]+/, "")
-    .split(/\s+/)[0]
-    ?.toUpperCase();
+function labelForTab(idx: number, r: ResultTab): string {
+  if (r.kind === "explain") {
+    return `PLAN #${idx + 1}`;
+  }
+  const keyword = firstSqlKeyword(r.data.statement);
   return keyword ? `${keyword} #${idx + 1}` : `Result ${idx + 1}`;
 }
 
-function summaryFor(r: DbQueryResult): string {
+/**
+ * Best-effort "what kind of statement is this?" label.
+ *
+ * The naive `split(/\s+/)[0]` we used before broke whenever the
+ * statement was preceded by an SQL comment using box-drawing
+ * characters (e.g. `-- ─────────…`) or non-breaking spaces — the
+ * regex's `[\s/*-]+` prefix didn't strip those, so the first "word"
+ * was a pile of dashes that the browser then tried to render in a
+ * mismatched encoding (the famous `Â Â Â …` mojibake).
+ *
+ * Strip block + line comments, then grab the first ASCII alpha
+ * identifier *anywhere* in what remains. That's what matters: SQL
+ * keywords are always plain Latin letters.
+ */
+function firstSqlKeyword(sql: string): string | null {
+  const cleaned = sql
+    .replace(/\/\*[\s\S]*?\*\//g, "") // /* … */ block comments
+    .replace(/--[^\n]*/g, ""); //        -- line comments
+  const m = cleaned.match(/[A-Za-z][A-Za-z0-9_]*/);
+  if (!m) return null;
+  const word = m[0].toUpperCase();
+  return word.length > 16 ? `${word.slice(0, 16)}…` : word;
+}
+
+function summaryFor(r: ResultTab): string {
+  if (r.kind === "explain") {
+    return summaryForExplain(r.explain);
+  }
+  return summaryForData(r.data);
+}
+
+function summaryForData(r: DbQueryResult): string {
   if (r.columns.length > 0) {
     return `${r.rows.length} row${r.rows.length === 1 ? "" : "s"} · ${r.durationMs} ms`;
   }
@@ -267,4 +311,8 @@ function summaryFor(r: DbQueryResult): string {
     return `${r.rowsAffected} affected · ${r.durationMs} ms`;
   }
   return `OK · ${r.durationMs} ms`;
+}
+
+function summaryForExplain(r: DbExplainResult): string {
+  return `${r.format.toUpperCase()} · ${r.durationMs} ms`;
 }

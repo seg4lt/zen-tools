@@ -13,7 +13,8 @@ use crate::driver::{DbConnection, DbError, DbResult};
 use crate::mssql::MsSqlConnection;
 use crate::postgres::PostgresConnection;
 use crate::types::{
-    ConnectionConfig, DbDriver, QueryResult, RoutineDescription, TableDescription, TableSummary,
+    ConnectionConfig, DbDriver, ExplainResult, QueryResult, RoutineDescription, TableDescription,
+    TableSummary,
 };
 
 type Slot = Arc<Mutex<Box<dyn DbConnection>>>;
@@ -131,6 +132,23 @@ impl ConnectionRegistry {
         let slot = self.slot(id)?;
         let mut conn = slot.lock().await;
         conn.execute(sql).await
+    }
+
+    /// Run the user query through the dialect's "execute + explain"
+    /// path and return the captured plan. See
+    /// [`crate::DbConnection::explain_query`] for the per-driver
+    /// behaviour.
+    pub async fn explain_query(
+        &self,
+        id: &str,
+        database: Option<&str>,
+        schema: Option<&str>,
+        sql: &str,
+        analyze: bool,
+    ) -> DbResult<ExplainResult> {
+        let slot = self.slot(id)?;
+        let mut conn = slot.lock().await;
+        conn.explain_query(database, schema, sql, analyze).await
     }
 
     /// Run a sequence of statements with optional database/schema

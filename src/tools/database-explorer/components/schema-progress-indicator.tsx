@@ -16,7 +16,7 @@
  *     user is exploring a stale schema.
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Loader2, AlertTriangle, CheckCircle2 } from "lucide-react";
 import {
   awaitProgressSubscribed,
@@ -38,7 +38,34 @@ export function SchemaProgressIndicator() {
     return unsub;
   }, []);
 
-  if (jobs.length === 0) return null;
+  // Background-refresh jobs are explicitly "subtle by design" — they
+  // fire on every stale-cache hit and aren't user-triggered, so we
+  // only surface them while *actively running*. Terminal states get
+  // hidden (errors are already non-fatal: the editor still has the
+  // previously-cached data, and the backend logs a `tracing::warn!`).
+  // We also collapse all in-flight background jobs into a single
+  // aggregated chip so the user doesn't see a stack of identical
+  // "Refreshing cache" rows when several schemas auto-load at once.
+  const visible = useMemo(() => {
+    const out: SchemaCacheProgressEvent[] = [];
+    const inFlightBackground: SchemaCacheProgressEvent[] = [];
+    for (const job of jobs) {
+      if (job.kind === "background") {
+        if (job.state === "started" || job.state === "progress") {
+          inFlightBackground.push(job);
+        }
+        // Drop background `done`/`error` entirely — see comment above.
+        continue;
+      }
+      out.push(job);
+    }
+    if (inFlightBackground.length > 0) {
+      out.push(aggregateBackground(inFlightBackground));
+    }
+    return out;
+  }, [jobs]);
+
+  if (visible.length === 0) return null;
 
   return (
     <div
@@ -49,11 +76,36 @@ export function SchemaProgressIndicator() {
       role="status"
       aria-live="polite"
     >
-      {jobs.map((job) => (
+      {visible.map((job) => (
         <ProgressChip key={job.jobId} job={job} />
       ))}
     </div>
   );
+}
+
+/**
+ * Fold N concurrent background jobs into a single chip whose
+ * total/current sums every contributor. Carries one of the
+ * job ids so React's `key` is stable enough to avoid remount churn
+ * across renders.
+ */
+function aggregateBackground(
+  jobs: SchemaCacheProgressEvent[],
+): SchemaCacheProgressEvent {
+  const total = jobs.reduce((s, j) => s + j.total, 0);
+  const current = jobs.reduce((s, j) => s + j.current, 0);
+  // Sort to keep the chosen jobId stable across renders.
+  const ids = jobs.map((j) => j.jobId).sort();
+  const head = jobs.find((j) => j.jobId === ids[0]) ?? jobs[0];
+  const currentItem =
+    jobs.length > 1 ? `${jobs.length} schemas` : head.currentItem;
+  return {
+    ...head,
+    jobId: `background-aggregate`,
+    total,
+    current,
+    currentItem,
+  };
 }
 
 function ProgressChip({ job }: { job: SchemaCacheProgressEvent }) {

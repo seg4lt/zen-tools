@@ -19,9 +19,19 @@ import {
 import {
   dbTauri,
   type DbConnectionPrefs,
+  type DbExplainResult,
   type DbQueryResult,
   type DbRoutineDescription,
 } from "../lib/tauri";
+
+/**
+ * One result tab in the results pane. Either the rows from a normal
+ * query (rendered as a data grid) or a captured EXPLAIN plan
+ * (rendered via the perf visualizer's Raw / Plan / Flame views).
+ */
+export type ResultTab =
+  | { kind: "data"; data: DbQueryResult }
+  | { kind: "explain"; explain: DbExplainResult };
 
 export type ConnectionStatus = "disconnected" | "connecting" | "connected" | "error";
 
@@ -46,8 +56,42 @@ export interface DbExplorerState {
   activeConnectionId: string | null;
   /** Editor buffer per-connection (so switching connections doesn't lose work). */
   sqlByConnection: Record<string, string>;
-  /** Latest run results per-connection. */
-  resultsByConnection: Record<string, DbQueryResult[] | null>;
+  /** Latest run results per-connection. Each entry is either a
+   * data result or a captured EXPLAIN plan; the results pane
+   * routes by `kind`. `null` means "no run has produced results
+   * yet" so the empty-state shows. */
+  resultsByConnection: Record<string, ResultTab[] | null>;
+  /**
+   * Last few captured EXPLAIN plans per-connection. Capped at
+   * `EXPLAIN_HISTORY_MAX`, FIFO-evicted. Drives the perf
+   * visualizer's "Compare with…" dropdown — pick a previous plan
+   * and the visualizer renders side-by-side flame views with synced
+   * hover.
+   */
+  explainHistoryByConnection: Record<string, DbExplainResult[]>;
+  /**
+   * Per-connection auto-EXPLAIN toggle. When `true`, `handleRun`
+   * fires `db_explain_query` alongside the regular query, and the
+   * Plan tab appears as a sibling of the data tab in the results
+   * pane. Session-only for v1; persisting to `user_config.db` is a
+   * follow-up if users want it sticky across launches.
+   */
+  autoExplainByConnection: Record<string, boolean>;
+  /**
+   * Per-connection toggle for the EXPLAIN-with-actuals checkbox in
+   * the toolbar.
+   *
+   * - `true`  (default) — "Run with plan" actually executes the
+   *                       query and captures actual rows / timing /
+   *                       buffers. DML statements modify data.
+   * - `false`           — planner-estimate-only. No execution; safe
+   *                       on `UPDATE` / `DELETE` / `INSERT`.
+   *
+   * Stored unset → `true` everywhere by callers (`?? true`); we
+   * never actually write `true` into this map, only `false` for
+   * connections the user has explicitly turned actuals off on.
+   */
+  analyzeOnExplainByConnection: Record<string, boolean>;
   /** Index of the active result tab per-connection. */
   activeResultIndexByConnection: Record<string, number>;
   /** Connection status per-connection. */
@@ -97,6 +141,12 @@ export interface DbExplorerState {
 /** Cap to keep the log panel responsive and bound memory use. */
 export const LOG_MAX = 500;
 
+/** Cap on per-connection EXPLAIN history — drives the "Compare
+ * with…" dropdown in the perf visualizer. Three is enough to
+ * track an iteration cycle (current, previous, baseline) without
+ * cluttering the UI; FIFO eviction. */
+export const EXPLAIN_HISTORY_MAX = 3;
+
 /** Discriminated union for the inline-edit state machine. */
 export type EditingState =
   | { kind: "rename"; path: string; seed: string }
@@ -127,7 +177,11 @@ type Action =
   | { type: "set-sql"; id: string; sql: string }
   | { type: "set-status"; id: string; status: ConnectionStatus; error?: string | null }
   | { type: "set-running"; id: string; running: boolean }
-  | { type: "set-results"; id: string; results: DbQueryResult[] | null }
+  | { type: "set-results"; id: string; results: ResultTab[] | null }
+  | { type: "append-result"; id: string; tab: ResultTab }
+  | { type: "push-explain-history"; id: string; explain: DbExplainResult }
+  | { type: "set-auto-explain"; id: string; enabled: boolean }
+  | { type: "set-analyze-on-explain"; id: string; enabled: boolean }
   | { type: "set-active-result-index"; id: string; index: number }
   | { type: "close-result-tab"; id: string; index: number }
   | { type: "set-error"; id: string; error: string | null }
@@ -169,6 +223,9 @@ const initial: DbExplorerState = {
   activeConnectionId: null,
   sqlByConnection: {},
   resultsByConnection: {},
+  explainHistoryByConnection: {},
+  autoExplainByConnection: {},
+  analyzeOnExplainByConnection: {},
   status: {},
   errors: {},
   running: {},
@@ -226,6 +283,52 @@ function reducer(state: DbExplorerState, action: Action): DbExplorerState {
         activeResultIndexByConnection: {
           ...state.activeResultIndexByConnection,
           [action.id]: 0,
+        },
+      };
+
+    case "append-result": {
+      // Used by the auto-EXPLAIN piggyback to add a Plan tab next to
+      // the data tab without reopening the result on tab 0. The
+      // active index stays where the user left it.
+      const cur = state.resultsByConnection[action.id] ?? [];
+      return {
+        ...state,
+        resultsByConnection: {
+          ...state.resultsByConnection,
+          [action.id]: [...cur, action.tab],
+        },
+      };
+    }
+
+    case "push-explain-history": {
+      const cur = state.explainHistoryByConnection[action.id] ?? [];
+      // FIFO eviction at the EXPLAIN_HISTORY_MAX cap. Most-recent
+      // first so the Compare dropdown reads naturally.
+      const next = [action.explain, ...cur].slice(0, EXPLAIN_HISTORY_MAX);
+      return {
+        ...state,
+        explainHistoryByConnection: {
+          ...state.explainHistoryByConnection,
+          [action.id]: next,
+        },
+      };
+    }
+
+    case "set-auto-explain":
+      return {
+        ...state,
+        autoExplainByConnection: {
+          ...state.autoExplainByConnection,
+          [action.id]: action.enabled,
+        },
+      };
+
+    case "set-analyze-on-explain":
+      return {
+        ...state,
+        analyzeOnExplainByConnection: {
+          ...state.analyzeOnExplainByConnection,
+          [action.id]: action.enabled,
         },
       };
 

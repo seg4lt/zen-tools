@@ -209,6 +209,32 @@ export interface SchemaCacheProgressEvent {
 /** Tauri channel name for the streaming progress event. */
 export const SCHEMA_CACHE_PROGRESS_EVENT = "schema-cache-progress";
 
+/** Wire format of the explain payload. Mirrors `zen_db::ExplainFormat`. */
+export type DbExplainFormat = "json" | "xml";
+
+/**
+ * Result of `db_explain_query`. The frontend parses `raw` into a
+ * unified `PlanRoot` model (see `lib/explain-plan.ts`) and renders
+ * Raw / Plan / Flame views in the result tab.
+ */
+export interface DbExplainResult {
+  format: DbExplainFormat;
+  /** Full plan payload — Postgres EXPLAIN-JSON, or MSSQL ShowPlanXML. */
+  raw: string;
+  /** Original SQL the user submitted (without the EXPLAIN/STATISTICS
+   * wrapping) so the UI can show what was profiled. */
+  statement: string;
+  /** Wall-clock for the whole explain round-trip. */
+  durationMs: number;
+  /**
+   * MSSQL only — the actual data the wrapped query returned.
+   * `null` for Postgres (EXPLAIN ANALYZE doesn't ship the inner
+   * rows). Surfaced so a single round-trip can serve both data and
+   * plan when running against MSSQL.
+   */
+  data: DbQueryResult | null;
+}
+
 /** Tagged-union cell — see `zen_db::types::Cell`. */
 export type DbCell =
   | { kind: "null" }
@@ -289,6 +315,39 @@ export const dbTauri = {
       sql,
       database: opts?.database ?? null,
       schema: opts?.schema ?? null,
+    }),
+
+  /**
+   * Run the user SQL through the dialect's "execute + explain"
+   * path and return the captured plan payload. Drives the perf
+   * visualizer's "Run with plan" toolbar button + the auto-EXPLAIN
+   * piggyback on a regular Run.
+   */
+  explainQuery: (
+    id: string,
+    sql: string,
+    opts?: {
+      database?: string | null;
+      schema?: string | null;
+      /**
+       * `true` (default) → execute the query and capture actual rows
+       * / timing / buffers (Postgres `ANALYZE`, MSSQL
+       * `STATISTICS XML`). Side effects happen — DML statements
+       * modify data unless wrapped in a transaction.
+       *
+       * `false` → planner-estimate only. No execution; no actual
+       * rows, no timing, no buffers. Safe for destructive
+       * statements.
+       */
+      analyze?: boolean;
+    },
+  ) =>
+    invoke<DbExplainResult>("db_explain_query", {
+      id,
+      sql,
+      database: opts?.database ?? null,
+      schema: opts?.schema ?? null,
+      analyze: opts?.analyze ?? true,
     }),
 
   // ── Schema cache (autocomplete) ──────────────────────────────────────

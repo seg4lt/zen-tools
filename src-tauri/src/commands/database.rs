@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::Mutex;
 use zen_db::{
-    secrets, ConnectionConfig, ConnectionRegistry, DbDriver, QueryResult, RoutineDescription,
-    TableDescription, TableSummary,
+    secrets, ConnectionConfig, ConnectionRegistry, DbDriver, ExplainResult, QueryResult,
+    RoutineDescription, TableDescription, TableSummary,
 };
 
 use crate::commands::preferences::{
@@ -365,6 +365,44 @@ pub async fn db_query(
 
     Ok(registry
         .execute_batch(&id, database.as_deref(), schema.as_deref(), &trimmed)
+        .await?)
+}
+
+/// Run the user SQL through the dialect's "explain + analyze" path
+/// and return the captured plan. Drives the perf-visualizer "Run
+/// with plan" toolbar button + the auto-EXPLAIN piggyback. The
+/// front-end parses `result.raw` into a unified `PlanRoot` model
+/// and renders Raw / Plan / Flame views.
+// `analyze`:
+//   - `true`  → execute and gather actual rows / timings / buffers
+//                (Postgres `ANALYZE`, MSSQL `STATISTICS XML`).
+//   - `false` → planner-estimate only — no execution, safe for
+//                destructive statements (Postgres `EXPLAIN`, MSSQL
+//                `SHOWPLAN_XML`).
+// `Option<bool>` defaulting to `true` preserves the original
+// `db_explain_query` behaviour for callers (the auto-EXPLAIN
+// piggyback in `handleRun`) that don't bother to pass the flag.
+#[tauri::command]
+pub async fn db_explain_query(
+    id: String,
+    sql: String,
+    database: Option<String>,
+    schema: Option<String>,
+    analyze: Option<bool>,
+    state: tauri::State<'_, Mutex<AppState>>,
+) -> AppResult<ExplainResult> {
+    let registry = {
+        let s = state.lock().await;
+        registry(&s)
+    };
+    Ok(registry
+        .explain_query(
+            &id,
+            database.as_deref(),
+            schema.as_deref(),
+            &sql,
+            analyze.unwrap_or(true),
+        )
         .await?)
 }
 

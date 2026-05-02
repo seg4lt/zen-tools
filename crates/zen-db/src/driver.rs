@@ -3,7 +3,9 @@
 use async_trait::async_trait;
 use thiserror::Error;
 
-use crate::types::{QueryResult, RoutineDescription, TableDescription, TableSummary};
+use crate::types::{
+    ExplainResult, QueryResult, RoutineDescription, TableDescription, TableSummary,
+};
 
 #[derive(Debug, Error)]
 pub enum DbError {
@@ -76,6 +78,30 @@ pub trait DbConnection: Send + Sync {
 
     /// Execute a single SQL statement and materialise the result.
     async fn execute(&mut self, sql: &str) -> DbResult<QueryResult>;
+
+    /// Run the user query through the dialect-appropriate
+    /// "execute + explain" path and return the captured plan.
+    ///
+    /// `analyze`:
+    /// - `true`  — actually execute the query and capture per-node
+    ///   actual rows + timing + buffer counts (Postgres
+    ///   `EXPLAIN (… ANALYZE, BUFFERS, TIMING …)`, MSSQL
+    ///   `SET STATISTICS XML ON`). **Side effects happen** — DML
+    ///   statements modify data unless wrapped in a transaction.
+    /// - `false` — plan-only mode. Postgres `EXPLAIN (FORMAT JSON,
+    ///   VERBOSE)`; MSSQL `SET SHOWPLAN_XML ON`. No execution, no
+    ///   actual rows, no timing — just the planner's estimates.
+    ///   Safe for destructive statements.
+    ///
+    /// Used by the `db_explain_query` Tauri command for the
+    /// performance-visualizer "Run with plan" path.
+    async fn explain_query(
+        &mut self,
+        database: Option<&str>,
+        schema: Option<&str>,
+        sql: &str,
+        analyze: bool,
+    ) -> DbResult<ExplainResult>;
 
     /// Execute a sequence of statements with optional session context.
     ///

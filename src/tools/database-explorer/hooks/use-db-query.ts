@@ -47,7 +47,15 @@ export function useDbQuery() {
       dispatch({ type: "set-error", id: connectionId, error: null });
       try {
         const results = await dbTauri.query(connectionId, trimmed, opts);
-        dispatch({ type: "set-results", id: connectionId, results });
+        // Wrap each query result as a `data` ResultTab so the
+        // results pane can route to the data grid. Plan tabs come
+        // through the `append-result` action via the auto-EXPLAIN
+        // piggyback in `DatabaseExplorerView.handleRun`.
+        dispatch({
+          type: "set-results",
+          id: connectionId,
+          results: results.map((r) => ({ kind: "data" as const, data: r })),
+        });
         const totalMs = results.reduce(
           (acc, r) => acc + (r.durationMs ?? 0),
           0,

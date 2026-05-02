@@ -40,11 +40,12 @@ import { ResultsPane } from "./components/results-pane";
 import { useDbExplorerStore } from "./store/db-explorer-store";
 import { useDbQuery } from "./hooks/use-db-query";
 import { useSqlProjectsBootstrap } from "./hooks/use-sql-workspace";
-import { sqlWorkspaceTauri, type SqlFileTreeItem } from "./lib/tauri";
+import { dbTauri, sqlWorkspaceTauri, type SqlFileTreeItem } from "./lib/tauri";
 import { formatError } from "./lib/format-error";
 import { statementAtCursor } from "./lib/sql-statements";
 import { ensureTablesForSql } from "./lib/schema-cache";
 import { useAutoSave } from "@/hooks/use-auto-save";
+import { useShortcut } from "@/lib/keyboard";
 import { useVimMode } from "@/tools/http-runner/hooks/use-vim-mode";
 
 export function DatabaseExplorerView() {
@@ -242,25 +243,164 @@ export function DatabaseExplorerView() {
     [activeId, activeDatabase, cacheDefaultSchema],
   );
 
-  const handleRun = useCallback(() => {
-    if (!activeId) return;
+  /** Whether auto-EXPLAIN is on for the active connection — drives
+   * the toolbar pill + the piggyback in `handleRun`. */
+  const autoExplain = activeId
+    ? state.autoExplainByConnection[activeId] ?? false
+    : false;
+
+  /** Whether "Run with plan" runs `EXPLAIN ANALYZE` (executes the
+   * query, gathers actuals/timing/buffers) or plan-only `EXPLAIN`
+   * (estimates, no execution — safe for destructive statements).
+   * Default `true` matches the original behaviour for users who
+   * never touch the toolbar checkbox. */
+  const analyzeOnExplain = activeId
+    ? state.analyzeOnExplainByConnection[activeId] ?? true
+    : true;
+
+  /** Loose detection — DDL doesn't ANALYZE cleanly so we skip the
+   * auto-EXPLAIN piggyback for it. The user can still hit "Run with
+   * plan" deliberately. */
+  const isAnalyzableSql = useCallback((sqlText: string): boolean => {
+    const head = sqlText.trim().toUpperCase();
+    if (!head) return false;
+    return (
+      head.startsWith("SELECT") ||
+      head.startsWith("WITH") ||
+      head.startsWith("INSERT") ||
+      head.startsWith("UPDATE") ||
+      head.startsWith("DELETE") ||
+      head.startsWith("VALUES") ||
+      head.startsWith("TABLE")
+    );
+  }, []);
+
+  /**
+   * Fire `db_explain_query` for `sqlText` and route the result.
+   *
+   * `mode: "replace"` (Run with plan) — calls `set-results` so the
+   * plan tab opens fresh, replacing any previous run's tabs.
+   *
+   * `mode: "append"` (Auto-EXPLAIN piggyback) — calls
+   * `append-result` so the plan tab lands next to the data tab
+   * `runQuery` just produced.
+   *
+   * Errors are surfaced to the toolbar via `set-error` (cleared on
+   * the next successful Run) so the user knows when EXPLAIN failed —
+   * the most common cause is a multi-statement / DDL input that
+   * Postgres won't EXPLAIN.
+   */
+  const captureExplain = useCallback(
+    async (
+      sqlText: string,
+      mode: "replace" | "append",
+      // Auto-EXPLAIN piggyback runs *after* the user's data has
+      // already been computed by `runQuery`, so re-running with
+      // ANALYZE just to capture a plan would double-execute. We
+      // default piggybacks to `analyze: false` (plan-only). The
+      // explicit "Run with plan" path still respects the toolbar
+      // checkbox (which defaults to `true`).
+      analyze: boolean,
+    ) => {
+      if (!activeId) return;
+      try {
+        const explain = await dbTauri.explainQuery(activeId, sqlText, {
+          ...ctxOpts,
+          analyze,
+        });
+        if (mode === "replace") {
+          dispatch({
+            type: "set-results",
+            id: activeId,
+            results: [{ kind: "explain", explain }],
+          });
+          dispatch({ type: "set-error", id: activeId, error: null });
+        } else {
+          dispatch({
+            type: "append-result",
+            id: activeId,
+            tab: { kind: "explain", explain },
+          });
+        }
+        dispatch({
+          type: "push-explain-history",
+          id: activeId,
+          explain,
+        });
+      } catch (err) {
+        const message = formatError(err);
+        if (mode === "replace") {
+          // Treat "Run with plan" failures like a normal-Run error —
+          // surface in the toolbar's red one-liner + the full
+          // ErrorCard in the results pane.
+          dispatch({ type: "set-error", id: activeId, error: message });
+          dispatch({
+            type: "set-results",
+            id: activeId,
+            results: null,
+          });
+        } else {
+          // Auto-EXPLAIN piggyback failure — log only; the user got
+          // their data tab, no need to clobber it with a plan error.
+          // eslint-disable-next-line no-console
+          console.warn("auto-EXPLAIN failed", message);
+        }
+      }
+    },
+    [activeId, ctxOpts, dispatch],
+  );
+
+  /**
+   * Cursor / selection target shared by `handleRun` and
+   * `handleRunWithPlan`. Returns the SQL the user actually wants to
+   * run + a tag of how we resolved it. Falls back to the
+   * statement-at-cursor when there's no selection.
+   */
+  const resolveTarget = useCallback((): { sql: string } | null => {
     const editor = editorRef.current;
-    if (!editor) return;
+    if (!editor) return null;
     const selection = editor.getSelection();
     if (selection.trim().length > 0) {
-      ensureCacheForSql(selection);
-      runQuery(activeId, selection, ctxOpts);
-      return;
+      return { sql: selection };
     }
     const buffer = editor.getValue();
     const cursor = editor.getCursorOffset();
     const stmt = statementAtCursor(buffer, cursor);
-    if (!stmt) return;
-    ensureCacheForSql(stmt.sql);
-    runQuery(activeId, stmt.sql, ctxOpts);
-  }, [activeId, runQuery, ctxOpts, ensureCacheForSql]);
+    return stmt ? { sql: stmt.sql } : null;
+  }, []);
 
-  /** Explicit "run every statement in the buffer". */
+  const handleRun = useCallback(async () => {
+    if (!activeId) return;
+    const target = resolveTarget();
+    if (!target) return;
+    ensureCacheForSql(target.sql);
+    // **Awaited** so the auto-EXPLAIN piggyback runs strictly after
+    // the data result is already in place. Without this chain a
+    // fast EXPLAIN could resolve before the slow data query and
+    // get clobbered by the data's `set-results`.
+    await runQuery(activeId, target.sql, ctxOpts);
+    if (autoExplain && isAnalyzableSql(target.sql)) {
+      // Plan-only on the piggyback path: we just executed the user's
+      // SQL via `runQuery`, doing it again with ANALYZE for a plan
+      // is double-work and (worse) double-side-effects on DML.
+      void captureExplain(target.sql, "append", false);
+    }
+  }, [
+    activeId,
+    runQuery,
+    ctxOpts,
+    ensureCacheForSql,
+    autoExplain,
+    captureExplain,
+    isAnalyzableSql,
+    resolveTarget,
+  ]);
+
+  /** Explicit "run every statement in the buffer". Auto-EXPLAIN is
+   * deliberately skipped here — Postgres EXPLAIN doesn't accept
+   * multi-statement input, and DDL among the statements would
+   * surface a confusing error. The user can still click "Run with
+   * plan" on a single statement after Run All. */
   const handleRunAll = useCallback(() => {
     if (!activeId) return;
     const editor = editorRef.current;
@@ -270,6 +410,69 @@ export function DatabaseExplorerView() {
     ensureCacheForSql(buffer);
     runQuery(activeId, buffer, ctxOpts);
   }, [activeId, runQuery, ctxOpts, ensureCacheForSql]);
+
+  /**
+   * Explicit "Run with plan" — drives the perf visualizer. Uses the
+   * same target shape as `handleRun` (selection > cursor statement)
+   * and routes through `db_explain_query` in `replace` mode so the
+   * plan tab is the first / only result tab in the pane.
+   *
+   * Important: on Postgres, EXPLAIN ANALYZE doesn't ship the
+   * inner query's rows — only the plan. If you need the data
+   * alongside, enable Auto-EXPLAIN and click Run instead.
+   */
+  const handleRunWithPlan = useCallback(() => {
+    if (!activeId) return;
+    const target = resolveTarget();
+    if (!target) return;
+    ensureCacheForSql(target.sql);
+    void captureExplain(target.sql, "replace", analyzeOnExplain);
+  }, [activeId, ensureCacheForSql, captureExplain, resolveTarget, analyzeOnExplain]);
+
+  /**
+   * Cmd+W / Ctrl+W — close the active result tab.
+   *
+   * Only registered when there's at least one result tab to close;
+   * otherwise the chord falls through to the OS default (which on
+   * macOS/Tauri closes the window). `fireInInputs: true` so the
+   * shortcut still works when the user's cursor is parked in the
+   * SQL editor — that's where they almost always are when they
+   * want to dismiss the last result.
+   */
+  const closeActiveResultTab = useCallback(() => {
+    if (!activeId) return;
+    const tabs = state.resultsByConnection[activeId];
+    if (!tabs || tabs.length === 0) return;
+    const idx = Math.min(
+      state.activeResultIndexByConnection[activeId] ?? 0,
+      tabs.length - 1,
+    );
+    dispatch({ type: "close-result-tab", id: activeId, index: idx });
+  }, [activeId, state.resultsByConnection, state.activeResultIndexByConnection, dispatch]);
+  useShortcut(
+    "mod+w",
+    closeActiveResultTab,
+    !!(activeId && (state.resultsByConnection[activeId]?.length ?? 0) > 0),
+    { fireInInputs: true },
+  );
+
+  const handleToggleAutoExplain = useCallback(() => {
+    if (!activeId) return;
+    dispatch({
+      type: "set-auto-explain",
+      id: activeId,
+      enabled: !autoExplain,
+    });
+  }, [activeId, autoExplain, dispatch]);
+
+  const handleToggleAnalyze = useCallback(() => {
+    if (!activeId) return;
+    dispatch({
+      type: "set-analyze-on-explain",
+      id: activeId,
+      enabled: !analyzeOnExplain,
+    });
+  }, [activeId, analyzeOnExplain, dispatch]);
 
   return (
     <div className="flex h-full min-h-0 w-full min-w-0 flex-1 overflow-hidden">
@@ -330,6 +533,11 @@ export function DatabaseExplorerView() {
           error={error}
           onRun={handleRun}
           onRunAll={handleRunAll}
+          onRunWithPlan={handleRunWithPlan}
+          autoExplain={autoExplain}
+          onToggleAutoExplain={handleToggleAutoExplain}
+          analyzeOnExplain={analyzeOnExplain}
+          onToggleAnalyzeOnExplain={handleToggleAnalyze}
         />
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           {!resultsMaximized && (
@@ -340,9 +548,18 @@ export function DatabaseExplorerView() {
                     key={selectedPath}
                     imperativeRef={editorRef}
                     driver={active?.driver ?? "postgres"}
-                    connectionId={activeId}
-                    database={activeDatabase}
-                    schema={activeSchema}
+                    // Gate connection-aware features on the live
+                    // status. Without this, the editor's eager
+                    // catalog + column prefetch fires the moment
+                    // the user picks a saved connection — racing
+                    // `db_connect` and producing a stack of
+                    // "connection not found" progress chips. The
+                    // editor still mounts (so the user can type),
+                    // it just runs in keywords-only mode until the
+                    // connection actually comes online.
+                    connectionId={isConnected ? activeId : null}
+                    database={isConnected ? activeDatabase : null}
+                    schema={isConnected ? activeSchema : null}
                     value={buffer}
                     onChange={handleEditorChange}
                     onSave={handleSave}
