@@ -8,6 +8,7 @@
 //! are stored in the OS keychain via the [`secrets`] module.
 
 pub mod driver;
+pub mod locks;
 pub mod mssql;
 pub mod postgres;
 pub mod registry;
@@ -17,7 +18,8 @@ pub mod types;
 pub use driver::{DbConnection, DbError, DbResult};
 pub use registry::ConnectionRegistry;
 pub use types::{
-    Cell, CheckDescription, Column, ColumnDescription, ConnectionConfig, DbDriver, ExplainFormat,
-    ExplainResult, ForeignKeyDescription, IndexDescription, KeyDescription, QueryResult,
+    BlockerInfo, Cell, CheckDescription, Column, ColumnDescription, ConnectionConfig, DbDriver,
+    ExecuteOptions, ExplainFormat, ExplainResult, ForeignKeyDescription, IndexDescription,
+    KeyDescription, LockGranularity, LockSample, LockSummary, ObjectLockRow, QueryResult,
     RoutineDescription, RoutineKind, TableDescription, TableKind, TableSummary, TriggerDescription,
 };

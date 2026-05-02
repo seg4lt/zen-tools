@@ -46,14 +46,14 @@ import {
   type SqlEditorHandle,
 } from "./components/sql-editor";
 import { SchemaProgressIndicator } from "./components/schema-progress-indicator";
-import { RunToolbar } from "./components/run-toolbar";
+import { RunToolbar, type RunModes } from "./components/run-toolbar";
 import { ResultsPane } from "./components/results-pane";
 import { useDbExplorerStore } from "./store/db-explorer-store";
 import { useDbQuery } from "./hooks/use-db-query";
 import { useSqlProjectsBootstrap } from "./hooks/use-sql-workspace";
 import { dbTauri, sqlWorkspaceTauri, type SqlFileTreeItem } from "./lib/tauri";
 import { formatError } from "./lib/format-error";
-import { statementAtCursor } from "./lib/sql-statements";
+import { splitStatements, statementAtCursor } from "./lib/sql-statements";
 import { ensureTablesForSql } from "./lib/schema-cache";
 import { useAutoSave } from "@/hooks/use-auto-save";
 import { useShortcut } from "@/lib/keyboard";
@@ -312,7 +312,29 @@ export function DatabaseExplorerView() {
   const captureExplain = useCallback(
     async (
       sqlText: string,
-      mode: "replace" | "append",
+      // Routing for the resulting plan + how loud to be on failure:
+      //
+      //   • `"replace"`         — explicit "Plan only" run
+      //                            (locks not selected). Replaces the
+      //                            result set with the plan tab and
+      //                            surfaces failures as a full error
+      //                            card.
+      //   • `"append-explicit"` — explicit "Plan + Locks" combo from
+      //                            the dropdown. User asked for both,
+      //                            so we append a plan tab next to
+      //                            the data tab AND auto-switch to it
+      //                            so the flamegraph is visible
+      //                            without an extra click. Failures
+      //                            surface visibly via the toolbar's
+      //                            red one-liner — silent failure
+      //                            here was the bug behind "I picked
+      //                            all options and saw no plan".
+      //   • `"append-silent"`   — auto-EXPLAIN piggyback fired by a
+      //                            regular Run. The user didn't ask
+      //                            for the plan explicitly; failures
+      //                            are logged only so a bad EXPLAIN
+      //                            doesn't clobber a good data tab.
+      mode: "replace" | "append-explicit" | "append-silent",
       // Auto-EXPLAIN piggyback runs *after* the user's data has
       // already been computed by `runQuery`, so re-running with
       // ANALYZE just to capture a plan would double-execute. We
@@ -335,10 +357,19 @@ export function DatabaseExplorerView() {
           });
           dispatch({ type: "set-error", id: activeId, error: null });
         } else {
+          // Append-* paths: add as a sibling tab. For the
+          // explicit case (user picked Plan + Locks), the
+          // reducer also flips the active index atomically so
+          // the flamegraph is immediately visible — earlier we
+          // tried this with a follow-up dispatch and reading
+          // `state.resultsByConnection`, but that closure value
+          // goes stale across the await and we'd land on the
+          // wrong tab.
           dispatch({
             type: "append-result",
             id: activeId,
             tab: { kind: "explain", explain },
+            activate: mode === "append-explicit",
           });
         }
         dispatch({
@@ -348,19 +379,29 @@ export function DatabaseExplorerView() {
         });
       } catch (err) {
         const message = formatError(err);
-        if (mode === "replace") {
-          // Treat "Run with plan" failures like a normal-Run error —
-          // surface in the toolbar's red one-liner + the full
-          // ErrorCard in the results pane.
-          dispatch({ type: "set-error", id: activeId, error: message });
+        if (mode === "replace" || mode === "append-explicit") {
+          // User explicitly asked for a plan — make the failure
+          // visible. For `replace` we wipe the tabs (there's
+          // nothing else to show); for `append-explicit` we
+          // KEEP the data tab the user just got and surface the
+          // plan failure in the toolbar's error one-liner so
+          // they know *why* the plan tab didn't appear.
           dispatch({
-            type: "set-results",
+            type: "set-error",
             id: activeId,
-            results: null,
+            error: `EXPLAIN failed: ${message}`,
           });
+          if (mode === "replace") {
+            dispatch({
+              type: "set-results",
+              id: activeId,
+              results: null,
+            });
+          }
         } else {
-          // Auto-EXPLAIN piggyback failure — log only; the user got
-          // their data tab, no need to clobber it with a plan error.
+          // Auto-EXPLAIN piggyback failure — log only; the user
+          // got their data tab, no need to clobber it with a
+          // plan error they didn't ask for.
           // eslint-disable-next-line no-console
           console.warn("auto-EXPLAIN failed", message);
         }
@@ -402,7 +443,10 @@ export function DatabaseExplorerView() {
       // Plan-only on the piggyback path: we just executed the user's
       // SQL via `runQuery`, doing it again with ANALYZE for a plan
       // is double-work and (worse) double-side-effects on DML.
-      void captureExplain(target.sql, "append", false);
+      // `append-silent` so a flaky EXPLAIN doesn't clobber a good
+      // data tab with a scary error — auto-EXPLAIN is a sticky
+      // toggle, the user didn't ask for *this* particular run.
+      void captureExplain(target.sql, "append-silent", false);
     }
   }, [
     activeId,
@@ -440,13 +484,140 @@ export function DatabaseExplorerView() {
    * inner query's rows — only the plan. If you need the data
    * alongside, enable Auto-EXPLAIN and click Run instead.
    */
-  const handleRunWithPlan = useCallback(() => {
-    if (!activeId) return;
-    const target = resolveTarget();
-    if (!target) return;
-    ensureCacheForSql(target.sql);
-    void captureExplain(target.sql, "replace", analyzeOnExplain);
-  }, [activeId, ensureCacheForSql, captureExplain, resolveTarget, analyzeOnExplain]);
+  /**
+   * Selected modes for the toolbar's "Run with…" multi-select.
+   * Persisted per-connection in the store so the user keeps their
+   * combo (e.g. "Plan + Locks") across editor focus changes.
+   * `actuals` lives in `analyzeOnExplain` (legacy slice — drives
+   * the auto-EXPLAIN piggyback too) and gets stitched in here.
+   */
+  const runModesSel = activeId
+    ? state.runModesByConnection[activeId] ?? { plan: false, locks: false }
+    : { plan: false, locks: false };
+  const runModes: RunModes = {
+    plan: runModesSel.plan,
+    locks: runModesSel.locks,
+    actuals: analyzeOnExplain,
+  };
+  const handleChangeRunModes = useCallback(
+    (next: RunModes) => {
+      if (!activeId) return;
+      // Split: `plan` + `locks` go into the dropdown slice;
+      // `actuals` rides on the legacy `analyzeOnExplain` flag so
+      // the auto-EXPLAIN piggyback path keeps reading the same
+      // source of truth.
+      dispatch({
+        type: "set-run-modes",
+        id: activeId,
+        modes: { plan: next.plan, locks: next.locks },
+      });
+      if (next.actuals !== analyzeOnExplain) {
+        dispatch({
+          type: "set-analyze-on-explain",
+          id: activeId,
+          enabled: next.actuals,
+        });
+      }
+    },
+    [activeId, analyzeOnExplain, dispatch],
+  );
+
+  /**
+   * Combined "Run with…" handler. Fires whatever modes the user
+   * has checked in the dropdown, in parallel where possible:
+   *
+   *   • locks=true                       → `db_query` with
+   *                                        `captureLocks` so each
+   *                                        result tab gains a
+   *                                        Locks sub-tab.
+   *   • plan=true (alone)                → `db_explain_query` in
+   *                                        `replace` mode — opens
+   *                                        the perf visualizer in
+   *                                        place of the data grid.
+   *   • plan=true AND locks=true         → run the query for data
+   *                                        with locks AND fire an
+   *                                        EXPLAIN piggyback that
+   *                                        appends a plan tab next
+   *                                        to it.
+   *   • actuals (only with plan)         → toggles
+   *                                        `EXPLAIN ANALYZE` vs
+   *                                        plain `EXPLAIN`.
+   *   • all flags off                    → no-op (the dropdown
+   *                                        button is disabled
+   *                                        upstream when this
+   *                                        happens).
+   */
+  const handleRunWithModes = useCallback(
+    async (modes: RunModes) => {
+      if (!activeId) return;
+      const target = resolveTarget();
+      if (!target) return;
+      ensureCacheForSql(target.sql);
+
+      const wantsData = modes.locks; // need data tab to host the Locks sub-tab
+      const wantsPlanOnly = modes.plan && !modes.locks;
+
+      if (wantsPlanOnly) {
+        // Plan with no data side — replace the result set with the
+        // plan tab. Mirrors the original "Run with plan" path.
+        void captureExplain(target.sql, "replace", modes.actuals);
+        return;
+      }
+
+      if (wantsData) {
+        // Run the query for data (with optional lock telemetry),
+        // then if the user also wants a plan, fire the piggyback
+        // and append it as a sibling tab.
+        await runQuery(activeId, target.sql, {
+          ...ctxOpts,
+          captureLocks: modes.locks,
+        });
+        if (modes.plan) {
+          // **Explicit** Plan + Locks combo from the dropdown.
+          //
+          // Multi-statement input gotcha: Postgres `EXPLAIN`
+          // (and MSSQL `SHOWPLAN_XML`) only accept a single
+          // statement as the body. If the user dragged-selected
+          // a transaction block like
+          // `BEGIN; CREATE INDEX ...; pg_sleep(...); ROLLBACK;`
+          // the data + locks path runs all of it as a batch
+          // (locks attach per-statement), but the explain path
+          // chokes with `syntax error at or near "BEGIN"`.
+          //
+          // Pick the most-interesting statement out of the
+          // selection and EXPLAIN that one. Heuristic:
+          //   • Skip transaction control + session-state +
+          //     waiting statements (BEGIN, COMMIT, ROLLBACK,
+          //     SET, SAVEPOINT, WAITFOR, SELECT pg_sleep(…)).
+          //   • Take the first statement that survives.
+          //   • If nothing survives (the entire selection is
+          //     control statements), skip Plan with a soft
+          //     toolbar note — running EXPLAIN would only
+          //     surface a syntax error.
+          const planTarget = pickPlanTarget(target.sql);
+          if (planTarget) {
+            void captureExplain(planTarget, "append-explicit", modes.actuals);
+          } else {
+            dispatch({
+              type: "set-error",
+              id: activeId,
+              error:
+                "Plan skipped: selection has no statement EXPLAIN can profile (only BEGIN/COMMIT/ROLLBACK/SET/sleep statements were selected).",
+            });
+          }
+        }
+      }
+    },
+    [
+      activeId,
+      runQuery,
+      ctxOpts,
+      ensureCacheForSql,
+      resolveTarget,
+      captureExplain,
+      dispatch,
+    ],
+  );
 
   /**
    * Cmd+W / Ctrl+W — close the active result tab.
@@ -484,14 +655,6 @@ export function DatabaseExplorerView() {
     });
   }, [activeId, autoExplain, dispatch]);
 
-  const handleToggleAnalyze = useCallback(() => {
-    if (!activeId) return;
-    dispatch({
-      type: "set-analyze-on-explain",
-      id: activeId,
-      enabled: !analyzeOnExplain,
-    });
-  }, [activeId, analyzeOnExplain, dispatch]);
 
   return (
     <div className="flex h-full min-h-0 w-full min-w-0 flex-1 overflow-hidden">
@@ -552,11 +715,11 @@ export function DatabaseExplorerView() {
           error={error}
           onRun={handleRun}
           onRunAll={handleRunAll}
-          onRunWithPlan={handleRunWithPlan}
+          onRunWithModes={handleRunWithModes}
+          runModes={runModes}
+          onChangeRunModes={handleChangeRunModes}
           autoExplain={autoExplain}
           onToggleAutoExplain={handleToggleAutoExplain}
-          analyzeOnExplain={analyzeOnExplain}
-          onToggleAnalyzeOnExplain={handleToggleAnalyze}
         />
         {/* Editor-tab strip — the most prominent "what file am I
             looking at?" affordance. Sits between the toolbar
@@ -696,6 +859,53 @@ export function DatabaseExplorerView() {
       <ConnectionForm />
     </div>
   );
+}
+
+/**
+ * Pick the single most-interesting statement out of a multi-statement
+ * selection for the EXPLAIN piggyback.
+ *
+ * Postgres `EXPLAIN` and MSSQL `SHOWPLAN_XML` only accept one
+ * statement as the body. When the user dragged-selected a transaction
+ * block (`BEGIN; …; ROLLBACK;`), passing the whole thing to the
+ * explain path errors with `syntax error at or near "BEGIN"`.
+ *
+ * The heuristic:
+ *   1. Tokenize on `;` using the existing `splitStatements` (same
+ *      rules the backend uses, so what we pick will round-trip).
+ *   2. Drop transaction-control + session-state + waiting statements
+ *      that EXPLAIN either refuses or finds uninteresting (they have
+ *      no plan to surface).
+ *   3. Take the first remaining statement. Picking the *first* user
+ *      statement matches what people usually want — the lead query
+ *      that actually does work, before the WAITFOR/sleep that's just
+ *      there to give the lock sampler a window.
+ *
+ * Returns `null` when nothing survives (the entire selection is
+ * control/sleep statements). Caller should skip Plan rather than
+ * fire EXPLAIN against junk.
+ */
+function pickPlanTarget(sql: string): string | null {
+  const stmts = splitStatements(sql);
+  if (stmts.length === 0) return null;
+  // Single-statement input: pass through unchanged. Common case.
+  if (stmts.length === 1) return stmts[0].sql;
+
+  // Skip patterns. Match against the first ~80 chars uppercased so
+  // we catch `BEGIN`, `BEGIN TRAN`, `BEGIN TRANSACTION ISOLATION
+  // LEVEL …`, etc. without writing a real parser. The list covers
+  // both PG and MSSQL dialects so this helper is engine-agnostic.
+  const skipRegex =
+    /^\s*(BEGIN|START\s+TRANSACTION|COMMIT|END(?:\s+TRAN)?|ROLLBACK|SAVEPOINT|RELEASE\s+SAVEPOINT|SET|USE|WAITFOR|DECLARE|GO)\b/i;
+  // pg_sleep is wrapped in SELECT — has to be matched on body.
+  const sleepRegex = /^\s*SELECT\s+pg_sleep\s*\(/i;
+
+  for (const s of stmts) {
+    if (skipRegex.test(s.sql)) continue;
+    if (sleepRegex.test(s.sql)) continue;
+    return s.sql;
+  }
+  return null;
 }
 
 function EmptyEditor() {

@@ -1,19 +1,50 @@
 /**
  * Toolbar with the Run buttons + dialect badge + last-query timing.
  *
- * Two run buttons: **Run** (cursor / selection) and **Run with plan**
- * (same target, but routed through `db_explain_query` so the result
- * tab opens the perf visualizer instead of the data grid). An
- * **Auto-EXPLAIN** toggle pill on the right makes every regular Run
- * also fire `db_explain_query` in the background, adding a Plan tab
- * next to the data tab automatically.
+ * Two primary buttons — **Run** (cursor / selection) and **Run all**
+ * (every statement in the buffer) — plus a single "**Run with…**"
+ * split control that bundles the three opt-in execution modes
+ * (Plan, Actuals, Locks) into one multi-select dropdown. The
+ * checkboxes persist for the connection so power users only have to
+ * pick their combo once per session.
+ *
+ * The Auto-EXPLAIN pill stays separate: it changes what the
+ * **regular Run** button does (always-on plan piggyback), so it
+ * doesn't belong inside the per-execution mode picker.
  */
 
-import { Activity, Loader2, Play, PlaySquare } from "lucide-react";
+import { Activity, ChevronDown, Loader2, Play, PlaySquare } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuCheckboxItem,
+  DropdownMenuContent,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { cn } from "@/lib/utils";
 import { LogsButton } from "./logs-button";
 import type { DbConnectionPrefs } from "../lib/tauri";
 import type { ResultTab } from "../store/db-explorer-store";
+
+/**
+ * Set of opt-in modes selectable from the "Run with…" dropdown.
+ * Multiple modes can be combined: e.g. `{ plan: true, locks: true }`
+ * runs the query with both a captured EXPLAIN tab and a Locks
+ * sub-tab on the data result.
+ *
+ * `actuals` is meaningful only when `plan` is on — it toggles
+ * `EXPLAIN ANALYZE` (executes + captures actuals) vs plain
+ * `EXPLAIN` (planner estimates, safe on DML). The dropdown
+ * disables the Actuals checkbox when Plan is unchecked so the
+ * combination stays intuitive.
+ */
+export interface RunModes {
+  plan: boolean;
+  actuals: boolean;
+  locks: boolean;
+}
 
 interface RunToolbarProps {
   connection: DbConnectionPrefs | null;
@@ -25,23 +56,22 @@ interface RunToolbarProps {
   onRun: () => void;
   /** Run every statement in the buffer. */
   onRunAll: () => void;
-  /** Run cursor / selection through `db_explain_query` and open the
-   * perf visualizer in the result pane. Same target shape as
-   * `onRun`. */
-  onRunWithPlan: () => void;
+  /**
+   * Run cursor / selection with the modes the user has selected
+   * in the "Run with…" dropdown. Implementations decide how to
+   * combine the modes — the typical case is to run the query for
+   * data (with `captureLocks` if `locks`) and, if `plan`, fire a
+   * piggyback `db_explain_query` that appends a plan tab.
+   */
+  onRunWithModes: (modes: RunModes) => void;
+  /** Currently-selected modes for the "Run with…" dropdown. */
+  runModes: RunModes;
+  /** Replace the current `RunModes` selection (e.g. checkbox toggle). */
+  onChangeRunModes: (next: RunModes) => void;
   /** Whether auto-EXPLAIN is on for the active connection. */
   autoExplain: boolean;
   /** Toggle the auto-EXPLAIN flag for the active connection. */
   onToggleAutoExplain: () => void;
-  /**
-   * Whether "Run with plan" runs `EXPLAIN ANALYZE` (executes the
-   * query, captures actual rows / timing / buffers) or plan-only
-   * `EXPLAIN` (estimates only — no execution, safe on DML).
-   * Defaults to `true` upstream.
-   */
-  analyzeOnExplain: boolean;
-  /** Flip the analyze-on-explain flag for the active connection. */
-  onToggleAnalyzeOnExplain: () => void;
 }
 
 export function RunToolbar({
@@ -52,11 +82,11 @@ export function RunToolbar({
   error,
   onRun,
   onRunAll,
-  onRunWithPlan,
+  onRunWithModes,
+  runModes,
+  onChangeRunModes,
   autoExplain,
   onToggleAutoExplain,
-  analyzeOnExplain,
-  onToggleAnalyzeOnExplain,
 }: RunToolbarProps) {
   // Roll up timing across data + plan tabs so the right-hand summary
   // still works after the ResultTab discriminated-union refactor.
@@ -73,15 +103,21 @@ export function RunToolbar({
   const lastDataRows =
     lastDataTab && lastDataTab.kind === "data" ? lastDataTab.data.rows.length : 0;
 
+  // Are *any* opt-in modes selected? Drives the "Run with…" button's
+  // tone — when nothing is checked, clicking it is a no-op (so we
+  // disable it instead of running the same query as plain Run).
+  const anyModeOn = runModes.plan || runModes.locks;
+  const modeChips = describeModes(runModes);
+
   return (
     // Toolbar surface: explicitly `bg-background` so it reads as a
     // "raised" strip between the deeper-tinted connection tabs above
     // and the editor below. The thin separators (`border-r border-
     // border/40`) carve the row into logical groups — Run actions,
-    // Plan actions, Connection context, status — instead of one long
-    // chain where everything blurs together.
+    // Run-with picker, Auto-EXPLAIN pill, status — instead of one
+    // long chain where everything blurs together.
     <div className="flex items-center gap-1.5 border-b border-border bg-background px-3 py-1.5 text-xs">
-      {/* Group 1 — Run actions. */}
+      {/* Group 1 — primary Run actions. */}
       <Button
         variant="ghost"
         size="sm"
@@ -112,49 +148,134 @@ export function RunToolbar({
 
       <ToolbarSep />
 
-      {/* Group 2 — Plan actions. The two pieces (button + actuals
-          toggle) belong together: the toggle decides which flavour
-          of EXPLAIN the button runs. */}
-      <Button
-        variant="ghost"
-        size="sm"
-        onClick={onRunWithPlan}
-        disabled={!isConnected || isRunning}
-        className="h-6 gap-1 px-1.5 text-[11px]"
-        title={
-          analyzeOnExplain
-            ? "Run the query and capture EXPLAIN ANALYZE (actual rows, timing, buffers). The query executes — DML modifies data."
-            : "Capture EXPLAIN only (planner estimates). The query is NOT executed — safe on UPDATE / DELETE / INSERT."
-        }
-      >
-        <Activity className="size-3" />
-        {analyzeOnExplain ? "Run with plan" : "Plan only"}
-      </Button>
-      <label
-        className={
-          "flex h-6 cursor-pointer items-center gap-1 rounded border px-1.5 text-[10px] uppercase tracking-wide transition " +
-          (analyzeOnExplain
-            ? "border-primary/60 bg-primary/10 text-primary"
-            : "border-border/60 bg-background text-muted-foreground hover:border-primary/40")
-        }
-        title={
-          analyzeOnExplain
-            ? "On: Run with plan executes the query and reports actual rows + timing + buffers (Postgres ANALYZE / MSSQL STATISTICS XML)."
-            : "Off: Run with plan returns the planner's estimated plan only — the query is not executed. Safe on destructive statements."
-        }
-      >
-        <input
-          type="checkbox"
-          className="size-3 cursor-pointer"
-          checked={analyzeOnExplain}
-          onChange={onToggleAnalyzeOnExplain}
-          disabled={!isConnected}
-        />
-        actuals
-      </label>
+      {/* Group 2 — combined "Run with…" picker.
+          Split-button pattern: clicking the body fires the run with
+          the currently-selected modes, clicking the chevron opens
+          the multi-select. The chips on the body summarise the
+          current selection so the user can see at a glance whether
+          clicking will get them Plan, Locks, or both. */}
+      <div className="inline-flex items-stretch overflow-hidden rounded border border-border/60">
+        <button
+          type="button"
+          onClick={() => onRunWithModes(runModes)}
+          disabled={!isConnected || isRunning || !anyModeOn}
+          className={cn(
+            "flex h-6 items-center gap-1 px-1.5 text-[11px] transition",
+            anyModeOn
+              ? "bg-primary/5 text-foreground hover:bg-primary/10"
+              : "bg-background text-muted-foreground",
+            "disabled:cursor-not-allowed disabled:opacity-60",
+          )}
+          title={
+            anyModeOn
+              ? `Run with: ${modeChips.join(" + ")}`
+              : "Pick at least one mode from the dropdown"
+          }
+        >
+          <Activity className="size-3" />
+          <span>Run with</span>
+          {modeChips.length > 0 && (
+            <span className="ml-1 inline-flex gap-1">
+              {modeChips.map((m) => (
+                <span
+                  key={m}
+                  className="rounded bg-primary/15 px-1 font-mono text-[10px] uppercase tracking-wide text-primary"
+                >
+                  {m}
+                </span>
+              ))}
+            </span>
+          )}
+        </button>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <button
+              type="button"
+              disabled={!isConnected}
+              className={cn(
+                "flex h-6 items-center border-l border-border/60 px-1 text-muted-foreground transition",
+                "hover:bg-muted/60 hover:text-foreground",
+                "disabled:cursor-not-allowed disabled:opacity-60",
+              )}
+              title="Pick which modes to run with"
+              aria-label="Choose run modes"
+            >
+              <ChevronDown className="size-3" />
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start" className="w-64">
+            <DropdownMenuLabel className="text-[10px] uppercase tracking-wide text-muted-foreground">
+              Run with…
+            </DropdownMenuLabel>
+            <DropdownMenuCheckboxItem
+              checked={runModes.plan}
+              onCheckedChange={(v) =>
+                onChangeRunModes({
+                  ...runModes,
+                  plan: !!v,
+                  // Reset actuals to a sensible default when the
+                  // user flips Plan on (most users want actuals
+                  // when they ask for a plan); leave as-is when
+                  // turning Plan off so re-enabling restores the
+                  // previous Actuals choice.
+                  actuals: v ? runModes.actuals || true : runModes.actuals,
+                })
+              }
+              onSelect={(e) => e.preventDefault()}
+            >
+              <div className="flex flex-col">
+                <span className="font-medium">Plan</span>
+                <span className="text-[10px] text-muted-foreground">
+                  Adds a plan tab via{" "}
+                  <code className="font-mono">EXPLAIN</code>
+                </span>
+              </div>
+            </DropdownMenuCheckboxItem>
+            <DropdownMenuCheckboxItem
+              checked={runModes.actuals}
+              disabled={!runModes.plan}
+              onCheckedChange={(v) =>
+                onChangeRunModes({ ...runModes, actuals: !!v })
+              }
+              onSelect={(e) => e.preventDefault()}
+              className="pl-8"
+            >
+              <div className="flex flex-col">
+                <span className="font-medium">Actuals</span>
+                <span className="text-[10px] text-muted-foreground">
+                  <code className="font-mono">EXPLAIN ANALYZE</code> —
+                  executes the query for real timings + buffers.
+                  Skips on destructive DML when off.
+                </span>
+              </div>
+            </DropdownMenuCheckboxItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuCheckboxItem
+              checked={runModes.locks}
+              onCheckedChange={(v) =>
+                onChangeRunModes({ ...runModes, locks: !!v })
+              }
+              onSelect={(e) => e.preventDefault()}
+            >
+              <div className="flex flex-col">
+                <span className="font-medium">Locks</span>
+                <span className="text-[10px] text-muted-foreground">
+                  Sidecar polls{" "}
+                  <code className="font-mono">pg_locks</code> /{" "}
+                  <code className="font-mono">sys.dm_tran_locks</code>
+                  ; adds a Locks sub-tab.
+                </span>
+              </div>
+            </DropdownMenuCheckboxItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
+
       {/* Auto-EXPLAIN: compact icon-pill — full label "Auto-EXPLAIN:
           off" was wrapping into 3 lines on narrow viewports. The
-          tooltip carries the long form. */}
+          tooltip carries the long form. Stays separate from the
+          Run-with picker because it modifies what regular Run does
+          rather than being a per-execution opt-in. */}
       {connection && (
         <button
           type="button"
@@ -201,6 +322,24 @@ export function RunToolbar({
       <LogsButton />
     </div>
   );
+}
+
+/**
+ * Render a `RunModes` selection as the short chip list shown on
+ * the split-button body. Examples:
+ *   {plan, actuals}          → ["PLAN", "ACTUALS"]
+ *   {plan} (no actuals)      → ["PLAN"]   (planner estimates only)
+ *   {locks}                  → ["LOCKS"]
+ *   {plan, actuals, locks}   → ["PLAN", "ACTUALS", "LOCKS"]
+ */
+function describeModes(m: RunModes): string[] {
+  const out: string[] = [];
+  if (m.plan) {
+    out.push("PLAN");
+    if (m.actuals) out.push("ACTUALS");
+  }
+  if (m.locks) out.push("LOCKS");
+  return out;
 }
 
 /**

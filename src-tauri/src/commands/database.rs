@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::Mutex;
 use zen_db::{
-    secrets, ConnectionConfig, ConnectionRegistry, DbDriver, ExplainResult, QueryResult,
-    RoutineDescription, TableDescription, TableSummary,
+    secrets, ConnectionConfig, ConnectionRegistry, DbDriver, ExecuteOptions, ExplainResult,
+    QueryResult, RoutineDescription, TableDescription, TableSummary,
 };
 
 use crate::commands::preferences::{
@@ -340,12 +340,20 @@ pub async fn db_list_all_tables(
 ///
 /// `database` (MSSQL only) and `schema` (Postgres only) apply session
 /// context once before the first user statement runs.
+///
+/// `captureLocks` (default: `false`) toggles the per-query lock
+/// telemetry sidecar — see [`zen_db::ExecuteOptions::capture_locks`].
+/// `lockSampleIntervalMs` (default: driver default, currently 25 ms)
+/// sets the polling cadence. The "Run with locks" UI button passes
+/// `captureLocks: true`.
 #[tauri::command]
 pub async fn db_query(
     id: String,
     sql: String,
     database: Option<String>,
     schema: Option<String>,
+    capture_locks: Option<bool>,
+    lock_sample_interval_ms: Option<u64>,
     state: tauri::State<'_, Mutex<AppState>>,
 ) -> AppResult<Vec<QueryResult>> {
     let registry = {
@@ -363,8 +371,19 @@ pub async fn db_query(
         return Ok(Vec::new());
     }
 
+    let options = ExecuteOptions {
+        capture_locks: capture_locks.unwrap_or(false),
+        lock_sample_interval_ms,
+    };
+
     Ok(registry
-        .execute_batch(&id, database.as_deref(), schema.as_deref(), &trimmed)
+        .execute_batch_with_options(
+            &id,
+            database.as_deref(),
+            schema.as_deref(),
+            &trimmed,
+            &options,
+        )
         .await?)
 }
 

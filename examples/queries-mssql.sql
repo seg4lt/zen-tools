@@ -15,8 +15,10 @@
 --     plan" button wraps this automatically)
 --
 -- Open this file in the SQL editor, place the cursor on any
--- statement, hit Cmd+Enter. Click "Run with plan" on section-6
--- queries to open the perf visualizer.
+-- statement, hit Cmd+Enter. Use the **Run with…** dropdown for
+-- the section-6/7 queries (☑ Plan ☑ Actuals → perf visualizer)
+-- and the section-8 queries (☑ Locks → row/page/table lock
+-- telemetry).
 -- ─────────────────────────────────────────────────────────────────────
 
 
@@ -566,3 +568,130 @@ WHERE EXISTS (
 )
 GROUP BY c.id, c.full_name
 ORDER BY spent_90d_cents DESC;
+
+
+-- ─────────────────────────────────────────────────────────────────────
+-- 8. Lock telemetry scenarios — designed for the toolbar's
+--    "Run with…" → ☑ Locks button.
+--
+--    **HOW TO RUN: drag-select the entire 4-line block** for a
+--    scenario, then click "Run with…" → ☑ Locks. The toolbar's
+--    Run button only fires the statement at the cursor — without a
+--    selection you'd run just `BEGIN TRAN` (no interesting locks)
+--    or just the SELECT/UPDATE without the surrounding transaction
+--    (lock auto-released before the sampler ticks).
+--
+--    With a selection, `db_query` runs all four statements as one
+--    batch on the same pinned tiberius session, holding the lock
+--    for the full WAITFOR window. The backend runs **one sampler
+--    across the whole batch** and attaches the aggregated summary
+--    to the **first** result tab — which the UI auto-selects on
+--    Run, so the Locks sub-tab is right there. No tab-juggling.
+--
+--    The Locks sub-tab will show:
+--      • A `row` / `page` / `table` chip on the granularity bar
+--        (mapped from MSSQL's `KEY` / `RID` / `PAGE` / `OBJECT`
+--        resource types)
+--      • Per-mode counts (`S`, `X`, `IX`, `SIX`, `Sch-M`, …)
+--      • The locked `[schema].[table]` in the Objects list
+--      • A timeline sparkline of locks-over-time covering the
+--        entire batch from BEGIN to ROLLBACK
+--
+--    To demo BLOCKING locks, open a second connection in the
+--    explorer and run scenario (D) there first **without the
+--    ROLLBACK line** so the table stays locked. Then run scenario
+--    (A) here. The Locks panel will show `blocked_ms > 0` and the
+--    other session's SPID in the Blockers list. Re-run scenario
+--    (D) on the second connection (this time with ROLLBACK) to
+--    release.
+-- ─────────────────────────────────────────────────────────────────────
+
+-- (A) Row-level exclusive lock via UPDATE.
+--     Expect: `row` on the granularity bar (MSSQL `KEY` lock
+--     on the clustered index) plus an `IX` intent-exclusive on
+--     the parent `OBJECT`. Object: `shop.customers`.
+BEGIN TRAN;
+UPDATE shop.customers SET phone = phone WHERE id = 1;
+WAITFOR DELAY '00:00:00.400';
+ROLLBACK;
+
+-- (B) Explicit row lock via SELECT WITH (UPDLOCK, HOLDLOCK).
+--     The classic queue / job dispatcher pattern in T-SQL —
+--     `UPDLOCK` reserves the row for a follow-up UPDATE,
+--     `HOLDLOCK` keeps it until COMMIT.
+--     Expect: `row` (KEY) granularity, mode `U` (update lock),
+--     `IS` on the OBJECT.
+BEGIN TRAN;
+SELECT id, full_name FROM shop.customers WITH (UPDLOCK, HOLDLOCK) WHERE id = 1;
+WAITFOR DELAY '00:00:00.400';
+ROLLBACK;
+
+-- (C) Page-level lock via WITH (PAGLOCK, HOLDLOCK).
+--     Forces SQL Server to acquire `PAGE` locks instead of
+--     row locks for the matching rows.
+--     Expect: `page` granularity (MSSQL `PAGE` resource), mode
+--     `S` (shared), `IS` on the OBJECT.
+BEGIN TRAN;
+SELECT * FROM shop.orders WITH (PAGLOCK, HOLDLOCK)
+WHERE placed_at >= DATEADD(DAY, -7, SYSUTCDATETIME());
+WAITFOR DELAY '00:00:00.400';
+ROLLBACK;
+
+-- (D) Whole-table exclusive lock via WITH (TABLOCKX, HOLDLOCK).
+--     The most restrictive lock — blocks every other reader
+--     and writer. **Demo only; never use in production code.**
+--     Expect: a single `table` granularity hit on
+--     `shop.products`, mode `X`. This is also the lock that
+--     UPDATE on a table without an index ends up escalating to
+--     once it has touched > ~5000 rows.
+BEGIN TRAN;
+SELECT * FROM shop.products WITH (TABLOCKX, HOLDLOCK);
+WAITFOR DELAY '00:00:00.400';
+ROLLBACK;
+
+-- (E) Many-row UPDATE — see lock-count climb, then watch for
+--     **lock escalation**: SQL Server escalates from row → table
+--     locks once a single statement holds > ~5000 row locks. If
+--     you see `OBJECT` granularity show up uninvited, that's
+--     escalation in action.
+BEGIN TRAN;
+UPDATE shop.orders SET status = status
+WHERE placed_at >= DATEADD(DAY, -90, SYSUTCDATETIME());
+WAITFOR DELAY '00:00:00.400';
+ROLLBACK;
+
+-- (F) Application lock via sp_getapplock — coordination outside
+--     the row/page/table graph. Useful when you need cross-
+--     session mutex without locking a real object. Expect:
+--     `transaction` granularity (MSSQL `APPLICATION` resource),
+--     mode `X`, no object name.
+BEGIN TRAN;
+DECLARE @rc int;
+EXEC @rc = sp_getapplock @Resource = 'demo:job:42',
+                         @LockMode = 'Exclusive',
+                         @LockOwner = 'Transaction';
+WAITFOR DELAY '00:00:00.400';
+ROLLBACK;
+
+-- (G) Schema-modification lock via DDL.
+--     Combine "Plan + Locks" from the dropdown to see the same
+--     statement render `Sch-M` (schema-modification, the most
+--     restrictive metadata lock) in the Locks tab AND a
+--     CREATE INDEX shape in the Plan tab. Idempotent: the
+--     ROLLBACK undoes the index create.
+BEGIN TRAN;
+CREATE INDEX demo_events_actor_idx ON metrics.events (actor);
+WAITFOR DELAY '00:00:00.200';
+ROLLBACK;
+
+-- (H) Shared SELECT — the "no interesting locks" baseline.
+--     Under default READ COMMITTED isolation, shared locks are
+--     released as soon as the row is read, so a plain SELECT
+--     between BEGIN/ROLLBACK won't accumulate visible KEY
+--     locks. Wrap with `WITH (HOLDLOCK)` (= REPEATABLE READ)
+--     to see them stick around.
+BEGIN TRAN;
+SELECT TOP 100 * FROM metrics.events WITH (HOLDLOCK)
+WHERE happened >= DATEADD(HOUR, -1, SYSUTCDATETIME());
+WAITFOR DELAY '00:00:00.400';
+ROLLBACK;

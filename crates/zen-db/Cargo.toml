@@ -17,6 +17,14 @@ sqlx = { version = "0.8", default-features = false, features = ["postgres", "run
 tiberius = { version = "0.12", default-features = false, features = ["rustls", "chrono", "tds73"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 
+# Connection pool for tiberius. tiberius itself ships with no pool —
+# `bb8-tiberius` wraps the bb8 generic async pool around it. We pick
+# `default-features = false` and pin only the features we need so we
+# don't pull in `winauth` (Windows auth, irrelevant on macOS/Linux)
+# or async-std (we're tokio everywhere).
+bb8 = "0.9"
+bb8-tiberius = { version = "0.16", default-features = false, features = ["chrono", "tds73", "with-tokio", "tls"] }
+
 # Secrets
 keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native"] }
 

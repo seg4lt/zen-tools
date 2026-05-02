@@ -25,7 +25,14 @@ export function useDbQuery() {
     async (
       connectionId: string,
       sql: string,
-      opts?: { database?: string | null; schema?: string | null },
+      opts?: {
+        database?: string | null;
+        schema?: string | null;
+        /** Pass `true` from the "Run with locks" button to attach a
+         * `DbLockSummary` to every result tab. */
+        captureLocks?: boolean;
+        lockSampleIntervalMs?: number;
+      },
     ) => {
       const trimmed = sql.trim();
       if (!trimmed) return;

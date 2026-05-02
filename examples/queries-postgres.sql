@@ -9,8 +9,10 @@
 -- for the T-SQL equivalents.
 --
 -- Open this file in the SQL editor, place the cursor on any
--- statement, hit Cmd+Enter (or click Run). Click "Run with plan"
--- on section-6 queries to open the perf visualizer.
+-- statement, hit Cmd+Enter (or click Run). Use the **Run with…**
+-- dropdown for the section-6/7 queries (☑ Plan ☑ Actuals → perf
+-- visualizer) and the section-8 queries (☑ Locks → row/page/table
+-- lock telemetry).
 --
 -- Use cases the queries cover:
 --   1.  Smoke tests             — does the connection, the editor,
@@ -26,6 +28,14 @@
 --                                 button wraps them automatically).
 --   6.  Performance scenarios   — designed to render interestingly
 --                                 in the Plan / Flame views.
+--   7.  Complex multi-join      — bigger plan trees / flames.
+--   8.  Lock telemetry scenarios — designed for the "Run with…
+--                                  ☑ Locks" button. Each scenario
+--                                  acquires a different lock
+--                                  granularity (row / page / table /
+--                                  advisory) so the Locks sub-tab
+--                                  has something interesting to
+--                                  visualise.
 -- ─────────────────────────────────────────────────────────────────────
 
 
@@ -606,3 +616,128 @@ WHERE EXISTS (
 GROUP BY c.id, c.full_name
 ORDER BY spent_90d_cents DESC NULLS LAST
 LIMIT 30;
+
+
+-- ─────────────────────────────────────────────────────────────────────
+-- 8. Lock telemetry scenarios — designed for the toolbar's
+--    "Run with…" → ☑ Locks button. Each scenario is a
+--    multi-statement transaction (`BEGIN; <op>; pg_sleep(.4);
+--    ROLLBACK;`). The lock taken by `<op>` stays held until
+--    ROLLBACK; the backend runs **one sampler across the whole
+--    batch** and aggregates everything into a single summary.
+--
+--    **HOW TO RUN: drag-select the entire 4-line block first**,
+--    then click "Run with…" → ☑ Locks. The toolbar's Run
+--    button only fires the statement at the cursor — without
+--    a selection you'd run just the BEGIN (no locks) or just
+--    the UPDATE without the surrounding transaction (lock
+--    auto-released before the sampler ticks).
+--
+--    With a selection, `db_query` runs all four statements as
+--    one batch on the same Postgres pool connection. You get
+--    **four result tabs** (one per statement), and the
+--    aggregated **Locks sub-tab is on tab 0** (the `BEGIN`
+--    tab) — which the UI auto-selects on Run, so the locks
+--    panel is right there.
+--
+--    The Locks sub-tab will show:
+--      • A `row` / `page` / `table` chip on the granularity bar
+--      • Per-mode counts (AccessShareLock, RowExclusiveLock, …)
+--      • The locked schema.table in the Objects list
+--      • A timeline sparkline of locks-over-time covering the
+--        entire batch from BEGIN to ROLLBACK
+--
+--    To demo BLOCKING locks, open a second connection in the
+--    explorer and run scenario (B) there first (without the
+--    ROLLBACK), then run scenario (A) here. The Locks panel
+--    will show `blocked_ms > 0` and the other session's PID
+--    in the Blockers list.
+-- ─────────────────────────────────────────────────────────────────────
+
+-- (A) Single-row UPDATE — looks like "many TABLE locks" but isn't.
+--
+--     **Postgres naming gotcha**: a single-row UPDATE shows up as
+--     `TABLE` granularity with mode `RowExclusiveLock` on
+--     `shop.customers` PLUS one entry per index on customers
+--     (pkey, email_key, email_lower_idx, active_idx) PLUS
+--     `shop.audit_log` and its sequence (cascaded by the
+--     `customers_audit` trigger). All TABLE granularity. The
+--     panel will surface a "Why is everything TABLE?" explainer.
+--
+--     The actual row-level serialization is the
+--     `transactionid` lock visible under `transaction`
+--     granularity — that's the lock another session would block
+--     on if it tried to update the same row.
+--
+--     The Objects list visually de-emphasizes indexes /
+--     sequences / audit-cascade rows so your eye lands on
+--     `shop.customers` first.
+BEGIN;
+UPDATE shop.customers SET phone = phone WHERE id = 1;
+SELECT pg_sleep(0.4);  -- park so the sampler catches the held locks
+ROLLBACK;
+
+-- (B) Explicit row lock via SELECT ... FOR UPDATE.
+--     Expect: `transaction` (xid lock) + `RowShareLock` on the
+--     relation (TABLE granularity, despite the name) + a brief
+--     `tuple` (row granularity) that may or may not be sampled
+--     depending on timing. The classic queue / job dispatcher
+--     pattern. The xid lock is what other sessions queue on.
+BEGIN;
+SELECT id, full_name FROM shop.customers WHERE id = 1 FOR UPDATE;
+SELECT pg_sleep(0.4);
+ROLLBACK;
+
+-- (C) Many-row UPDATE — same pattern as (A), bigger blast radius.
+--     Expect: TABLE / RowExclusiveLock on `shop.orders` and
+--     every index on it. The `transaction` lock is one xid
+--     covering all the rows touched (Postgres serializes by xid,
+--     not per-row). For visible per-row locks you'd need
+--     `tuple` granularity to be sampled — which usually only
+--     fires on contention, not on uncontended bulk writes.
+BEGIN;
+UPDATE shop.orders SET status = status WHERE placed_at >= now() - interval '30 days';
+SELECT pg_sleep(0.4);
+ROLLBACK;
+
+-- (D) Whole-table exclusive lock (LOCK TABLE).
+--     Expect: a single `table` granularity hit with mode
+--     `AccessExclusiveLock` on `shop.products` — the most
+--     restrictive lock in Postgres. **Only DDL on a busy
+--     table reaches this; here it's explicit for the demo.**
+BEGIN;
+LOCK TABLE shop.products IN ACCESS EXCLUSIVE MODE;
+SELECT pg_sleep(0.4);
+ROLLBACK;
+
+-- (E) Advisory lock — application-level coordination, not a
+--     row/page/table lock. Useful when you need cross-session
+--     coordination outside the relational lock graph (e.g.
+--     "only one worker may run this job at a time").
+--     Expect: `advisory` granularity, mode `ExclusiveLock`,
+--     no object name (advisory locks aren't tied to a relation).
+BEGIN;
+SELECT pg_advisory_xact_lock(42);
+SELECT pg_sleep(0.4);
+ROLLBACK;
+
+-- (F) Shared SELECT — the "no interesting locks" baseline.
+--     Expect: only the implicit per-connection database lock
+--     plus an `AccessShareLock` on `metrics.events` for the
+--     duration of the read. The Locks panel will show the
+--     "this is background noise" banner if you don't include
+--     the join. Use this to confirm sampling actually works
+--     when there's nothing exciting to find.
+SELECT count(*) FROM metrics.events WHERE happened >= now() - interval '1 hour';
+
+-- (G) DDL on a hot table — combine "Plan + Locks" from the
+--     dropdown to see the same statement render an
+--     AccessExclusiveLock in the Locks tab AND a flat plan
+--     tree in the Plan tab. Idempotent: re-running rebuilds
+--     the index.
+BEGIN;
+CREATE INDEX IF NOT EXISTS demo_events_actor_idx ON metrics.events (actor);
+SELECT pg_sleep(0.2);
+DROP INDEX IF EXISTS metrics.demo_events_actor_idx;
+ROLLBACK;
+

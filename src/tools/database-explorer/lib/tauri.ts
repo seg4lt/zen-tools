@@ -249,6 +249,89 @@ export interface DbQueryResult {
   rows: DbCell[][];
   rowsAffected: number | null;
   durationMs: number;
+  /**
+   * Per-statement lock telemetry. Only present when the caller
+   * passed `captureLocks: true` (the "Run with locks" button) —
+   * otherwise the field is absent. See {@link DbLockSummary}.
+   */
+  locks?: DbLockSummary;
+}
+
+/**
+ * Engine-agnostic lock granularity vocabulary. See
+ * `zen_db::LockGranularity`. Drives the row/page/table chips in
+ * the Locks panel: the same row reads as `row` whether it came
+ * from a Postgres `tuple` or an MSSQL `KEY`/`RID`.
+ */
+export type DbLockGranularity =
+  | "row"
+  | "page"
+  | "table"
+  | "database"
+  | "transaction"
+  | "advisory"
+  | "metadata"
+  | "other";
+
+/** Mirrors `zen_db::LockSample`. */
+export interface DbLockSample {
+  /** Milliseconds since the user statement started. */
+  atMs: number;
+  granularity: DbLockGranularity;
+  /** Driver-native resource type ("relation", "tuple", "KEY", …). */
+  rawKind: string;
+  /** Engine mode ("AccessShareLock", "X", "IX", …). */
+  mode: string;
+  /** `false` means the session was waiting for this lock at sample
+   * time; `true` means it was held. */
+  granted: boolean;
+  /** Best-effort `schema.table` (or `[schema].[table]` for MSSQL). */
+  object: string | null;
+  blockerPid: number | null;
+}
+
+/** Mirrors `zen_db::ObjectLockRow`. */
+export interface DbObjectLockRow {
+  object: string;
+  granularities: DbLockGranularity[];
+  modes: string[];
+  /** Peak number of distinct lock rows observed for this object
+   * within a single sample window. */
+  peakLocks: number;
+  /** `true` if any sample showed us waiting on this object. */
+  waited: boolean;
+}
+
+/** Mirrors `zen_db::BlockerInfo`. */
+export interface DbBlockerInfo {
+  pid: number;
+  /** Engine wait-event reason ("Lock/transactionid", "LCK_M_X", …). */
+  reason: string | null;
+  /** Approximate wait time = blocked_samples * sample_interval_ms. */
+  waitMs: number;
+}
+
+/**
+ * Aggregated lock telemetry for one statement. Mirrors
+ * `zen_db::LockSummary`. When `error` is set, the sampler couldn't
+ * run — render the panel as "Lock capture unavailable: {error}"
+ * rather than as no-locks-found.
+ */
+export interface DbLockSummary {
+  sampleIntervalMs: number;
+  sampleCount: number;
+  blockedMs: number;
+  /** Object form: `{ row: 142, table: 1 }`. Engine-agnostic keys. */
+  peakByGranularity: Partial<Record<DbLockGranularity, number>>;
+  /** Engine-native mode → peak count map. */
+  peakByMode: Record<string, number>;
+  objects: DbObjectLockRow[];
+  blockers: DbBlockerInfo[];
+  /** Raw timeline samples — capped server-side. */
+  samples: DbLockSample[];
+  /** Set when sampling was unavailable (permission denied,
+   * sidecar connect failed, …). */
+  error?: string;
 }
 
 // ── Connections ─────────────────────────────────────────────────────────
@@ -308,13 +391,36 @@ export const dbTauri = {
   query: (
     id: string,
     sql: string,
-    opts?: { database?: string | null; schema?: string | null },
+    opts?: {
+      database?: string | null;
+      schema?: string | null;
+      /**
+       * When `true`, the backend opens a sidecar observer
+       * connection and polls `pg_locks` / `sys.dm_tran_locks`
+       * for the duration of every statement, attaching a
+       * {@link DbLockSummary} to each `DbQueryResult.locks`.
+       * Drives the "Run with locks" UI button.
+       *
+       * Off by default: opens a second connection + adds
+       * polling load on the server.
+       */
+      captureLocks?: boolean;
+      /**
+       * Polling interval in ms. Defaults server-side to 25 ms.
+       * Bump for queries you expect to run for many seconds; the
+       * trade-off is sub-interval lock acquisitions can escape
+       * observation.
+       */
+      lockSampleIntervalMs?: number;
+    },
   ) =>
     invoke<DbQueryResult[]>("db_query", {
       id,
       sql,
       database: opts?.database ?? null,
       schema: opts?.schema ?? null,
+      captureLocks: opts?.captureLocks ?? false,
+      lockSampleIntervalMs: opts?.lockSampleIntervalMs ?? null,
     }),
 
   /**

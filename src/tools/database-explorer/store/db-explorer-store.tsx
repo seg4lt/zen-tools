@@ -78,6 +78,18 @@ export interface DbExplorerState {
    */
   autoExplainByConnection: Record<string, boolean>;
   /**
+   * Per-connection selection for the toolbar's "Run with…"
+   * multi-select dropdown. Drives whether the next click of
+   * "Run with…" routes through `db_explain_query` (`plan`),
+   * captures lock telemetry alongside (`locks`), or both at
+   * once.
+   *
+   * `actuals` is intentionally NOT in this object — it lives in
+   * `analyzeOnExplainByConnection` so the legacy auto-EXPLAIN
+   * piggyback path keeps reading the same flag.
+   */
+  runModesByConnection: Record<string, { plan: boolean; locks: boolean }>;
+  /**
    * Per-connection toggle for the EXPLAIN-with-actuals checkbox in
    * the toolbar.
    *
@@ -188,10 +200,28 @@ type Action =
   | { type: "set-status"; id: string; status: ConnectionStatus; error?: string | null }
   | { type: "set-running"; id: string; running: boolean }
   | { type: "set-results"; id: string; results: ResultTab[] | null }
-  | { type: "append-result"; id: string; tab: ResultTab }
+  | {
+      type: "append-result";
+      id: string;
+      tab: ResultTab;
+      /**
+       * When `true`, also flip the active result index to the
+       * newly-appended tab so the user sees it immediately. Used
+       * by the explicit "Plan + Locks" combo so the flamegraph
+       * pops to the foreground after it lands. The auto-EXPLAIN
+       * piggyback omits this so the user's data tab stays
+       * focused.
+       */
+      activate?: boolean;
+    }
   | { type: "push-explain-history"; id: string; explain: DbExplainResult }
   | { type: "set-auto-explain"; id: string; enabled: boolean }
   | { type: "set-analyze-on-explain"; id: string; enabled: boolean }
+  | {
+      type: "set-run-modes";
+      id: string;
+      modes: { plan: boolean; locks: boolean };
+    }
   | { type: "set-active-result-index"; id: string; index: number }
   | { type: "close-result-tab"; id: string; index: number }
   | { type: "set-error"; id: string; error: string | null }
@@ -238,6 +268,7 @@ const initial: DbExplorerState = {
   explainHistoryByConnection: {},
   autoExplainByConnection: {},
   analyzeOnExplainByConnection: {},
+  runModesByConnection: {},
   status: {},
   errors: {},
   running: {},
@@ -302,14 +333,24 @@ function reducer(state: DbExplorerState, action: Action): DbExplorerState {
     case "append-result": {
       // Used by the auto-EXPLAIN piggyback to add a Plan tab next to
       // the data tab without reopening the result on tab 0. The
-      // active index stays where the user left it.
+      // active index stays where the user left it — unless
+      // `activate` was set (explicit Plan+Locks combo), in which
+      // case we flip the active index to the new tab atomically so
+      // the result is visible without an extra click.
       const cur = state.resultsByConnection[action.id] ?? [];
+      const next = [...cur, action.tab];
       return {
         ...state,
         resultsByConnection: {
           ...state.resultsByConnection,
-          [action.id]: [...cur, action.tab],
+          [action.id]: next,
         },
+        activeResultIndexByConnection: action.activate
+          ? {
+              ...state.activeResultIndexByConnection,
+              [action.id]: next.length - 1,
+            }
+          : state.activeResultIndexByConnection,
       };
     }
 
@@ -342,6 +383,15 @@ function reducer(state: DbExplorerState, action: Action): DbExplorerState {
         analyzeOnExplainByConnection: {
           ...state.analyzeOnExplainByConnection,
           [action.id]: action.enabled,
+        },
+      };
+
+    case "set-run-modes":
+      return {
+        ...state,
+        runModesByConnection: {
+          ...state.runModesByConnection,
+          [action.id]: action.modes,
         },
       };
 

@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use thiserror::Error;
 
 use crate::types::{
-    ExplainResult, QueryResult, RoutineDescription, TableDescription, TableSummary,
+    ExecuteOptions, ExplainResult, QueryResult, RoutineDescription, TableDescription, TableSummary,
 };
 
 #[derive(Debug, Error)]
@@ -119,4 +119,27 @@ pub trait DbConnection: Send + Sync {
         schema: Option<&str>,
         statements: &[&str],
     ) -> DbResult<Vec<QueryResult>>;
+
+    /// Like [`Self::execute_batch`], plus optional sidecar lock
+    /// telemetry. With [`ExecuteOptions::capture_locks`] off, this
+    /// is identical to `execute_batch` (zero overhead). With it
+    /// on, the driver opens a fresh observer connection against
+    /// the same database, captures the executing session's
+    /// PID/SPID, polls the engine's lock catalogue for the
+    /// duration of each statement, and attaches an aggregated
+    /// [`crate::LockSummary`] to the matching `QueryResult`.
+    ///
+    /// Default impl ignores the options and forwards to
+    /// `execute_batch`, so drivers without lock support are fine
+    /// not to override this method.
+    async fn execute_batch_with_options(
+        &mut self,
+        database: Option<&str>,
+        schema: Option<&str>,
+        statements: &[&str],
+        options: &ExecuteOptions,
+    ) -> DbResult<Vec<QueryResult>> {
+        let _ = options;
+        self.execute_batch(database, schema, statements).await
+    }
 }

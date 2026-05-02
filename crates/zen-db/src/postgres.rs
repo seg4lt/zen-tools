@@ -10,14 +10,20 @@ use sqlx::types::Uuid;
 use sqlx::{Column as _, Postgres, Row, TypeInfo, ValueRef};
 
 use crate::driver::{DbConnection, DbError, DbResult};
+use crate::locks::{PgLockSampler, DEFAULT_SAMPLE_INTERVAL_MS};
 use crate::types::{
-    Cell, CheckDescription, Column, ColumnDescription, ConnectionConfig, ExplainFormat,
-    ExplainResult, ForeignKeyDescription, IndexDescription, KeyDescription, QueryResult,
-    RoutineDescription, RoutineKind, TableDescription, TableKind, TableSummary, TriggerDescription,
+    Cell, CheckDescription, Column, ColumnDescription, ConnectionConfig, ExecuteOptions,
+    ExplainFormat, ExplainResult, ForeignKeyDescription, IndexDescription, KeyDescription,
+    LockSummary, QueryResult, RoutineDescription, RoutineKind, TableDescription, TableKind,
+    TableSummary, TriggerDescription,
 };
 
 pub struct PostgresConnection {
     pool: PgPool,
+    /// Stored so the lock sampler can spin up a sidecar pool with
+    /// the same auth without us holding a reference to the
+    /// (mutable) `ConnectionConfig`.
+    connect_opts: PgConnectOptions,
 }
 
 impl PostgresConnection {
@@ -29,14 +35,51 @@ impl PostgresConnection {
             .password(&cfg.password)
             .database(&cfg.database);
 
+        // Pool sizing notes:
+        //
+        // - `max_connections(4)` — small ceiling matches the per-
+        //   connection-id mutex in the registry. We only run one
+        //   user query at a time per connection-id; the extra
+        //   slots are for the autocomplete / catalog prefetch
+        //   side-channels that race with user queries.
+        //
+        // - `min_connections(1)` — **survives macOS sleep/wake
+        //   without "starting from scratch"**. Without this, every
+        //   connection idles back to zero after ~10 minutes, and
+        //   the first query after the user comes back from another
+        //   app pays a TCP+TLS+auth round-trip while sqlx
+        //   re-opens. Keeping one warm pins one socket so the
+        //   common path is hot. sqlx pings + reaps the warm
+        //   connection too if the server killed it server-side
+        //   (see `test_before_acquire` below), so we don't risk
+        //   handing out a dead one.
+        //
+        // - `test_before_acquire(true)` is sqlx's default in 0.8;
+        //   we set it explicitly because it's load-bearing for the
+        //   sleep/wake fix — sqlx fires `;` against any pool
+        //   connection before handing it out, and silently
+        //   replaces it if the ping fails. The user sees "first
+        //   query slightly slow" instead of "connection error".
+        //
+        // - `idle_timeout(10 min)` — recycles long-idle pool
+        //   connections proactively, so we don't have a fleet of
+        //   server-side `idle` backends piling up across days.
+        //   The min-connections one will be re-created on the
+        //   next reaper tick; that's a cheap one-time cost.
         let pool = PgPoolOptions::new()
             .max_connections(4)
+            .min_connections(1)
             .acquire_timeout(std::time::Duration::from_secs(8))
-            .connect_with(opts)
+            .idle_timeout(std::time::Duration::from_secs(10 * 60))
+            .test_before_acquire(true)
+            .connect_with(opts.clone())
             .await
             .map_err(|e| DbError::Connect(e.to_string()))?;
 
-        Ok(Self { pool })
+        Ok(Self {
+            pool,
+            connect_opts: opts,
+        })
     }
 }
 
@@ -599,9 +642,22 @@ impl DbConnection for PostgresConnection {
 
     async fn execute_batch(
         &mut self,
+        database: Option<&str>,
+        schema: Option<&str>,
+        statements: &[&str],
+    ) -> DbResult<Vec<QueryResult>> {
+        // Default options = no lock capture; same physical pinning
+        // logic lives in `execute_batch_with_options`.
+        self.execute_batch_with_options(database, schema, statements, &ExecuteOptions::default())
+            .await
+    }
+
+    async fn execute_batch_with_options(
+        &mut self,
         _database: Option<&str>,
         schema: Option<&str>,
         statements: &[&str],
+        options: &ExecuteOptions,
     ) -> DbResult<Vec<QueryResult>> {
         // Acquire **one** physical connection up-front so `SET
         // search_path` and every user statement share the same session.
@@ -622,10 +678,63 @@ impl DbConnection for PostgresConnection {
                 .map_err(|e| DbError::Query(e.to_string()))?;
         }
 
+        // If the caller wants lock telemetry, capture this
+        // session's backend pid up-front. We need it to filter
+        // pg_locks from the sidecar observer connection. If the
+        // pid query fails (extremely unlikely; would only happen
+        // on a truly broken cluster) we fall back to the no-locks
+        // path with an "unavailable" summary attached.
+        let pid: Option<i32> = if options.capture_locks {
+            match sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()")
+                .fetch_one(&mut *conn)
+                .await
+            {
+                Ok(p) => Some(p),
+                Err(e) => {
+                    tracing::warn!(?e, "lock-sampler: pg_backend_pid failed");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let interval_ms = options
+            .lock_sample_interval_ms
+            .unwrap_or(DEFAULT_SAMPLE_INTERVAL_MS);
+
+        // **Batch-wide sampler** — see the matching block in
+        // `mssql.rs::execute_batch_with_options` for the full
+        // rationale. tl;dr: for multi-statement transactions like
+        // `BEGIN; UPDATE …; pg_sleep(0.4); ROLLBACK;`, running
+        // one sampler across the whole batch produces a single
+        // timeline that covers the entire run, attached to the
+        // first result tab (which the UI auto-selects). Avoids
+        // the "you have to click the pg_sleep tab to see the
+        // UPDATE's row lock" cliff.
+        let sampler = pid.map(|p| {
+            PgLockSampler::start(self.connect_opts.clone(), p, interval_ms)
+        });
+
         let mut out = Vec::with_capacity(statements.len());
         for sql in statements {
-            out.push(run_one(&mut conn, sql).await?);
+            let result = run_one(&mut conn, sql).await?;
+            out.push(result);
         }
+
+        if let Some(s) = sampler {
+            let summary = s.stop().await;
+            if let Some(first) = out.first_mut() {
+                first.locks = Some(summary);
+            }
+        } else if options.capture_locks {
+            if let Some(first) = out.first_mut() {
+                first.locks = Some(LockSummary::unavailable(
+                    interval_ms,
+                    "could not capture pg_backend_pid()",
+                ));
+            }
+        }
+
         Ok(out)
     }
 }
@@ -669,6 +778,7 @@ async fn run_one(conn: &mut PoolConnection<Postgres>, sql: &str) -> DbResult<Que
         rows: out_rows,
         rows_affected: None,
         duration_ms: start.elapsed().as_millis() as u64,
+        locks: None,
     })
 }
 

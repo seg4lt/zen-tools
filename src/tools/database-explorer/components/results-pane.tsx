@@ -11,11 +11,12 @@
  */
 
 import { useState } from "react";
-import { AlertCircle, Copy, Maximize2, Minimize2, X } from "lucide-react";
+import { AlertCircle, Copy, Lock, Maximize2, Minimize2, Table as TableIcon, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { ResultsGrid } from "./results-grid";
 import { ExplainViews } from "./explain-views";
+import { LocksView } from "./locks-view";
 import {
   useDbExplorerStore,
   type ResultTab,
@@ -91,7 +92,7 @@ export function ResultsPane({
           grid's own `overflow-auto` then provides the scrollbar. */}
       <div className="relative min-h-0 min-w-0 flex-1 overflow-hidden">
         {active.kind === "data" ? (
-          <ResultsGrid result={active.data} />
+          <DataResultView result={active.data} />
         ) : (
           <ExplainViews
             connectionId={connectionId}
@@ -100,6 +101,73 @@ export function ResultsPane({
         )}
       </div>
     </div>
+  );
+}
+
+/**
+ * Wrapper around `ResultsGrid` that surfaces a Data / Locks sub-tab
+ * strip when the result carries lock telemetry (i.e. the user
+ * clicked "Run with locks"). Without locks, this is a transparent
+ * pass-through to the grid — zero visual change to the existing
+ * Run path.
+ */
+function DataResultView({ result }: { result: import("../lib/tauri").DbQueryResult }) {
+  const [view, setView] = useState<"data" | "locks">("data");
+  if (!result.locks) {
+    return <ResultsGrid result={result} />;
+  }
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="flex shrink-0 items-center gap-1 border-b border-border/40 bg-muted/30 px-2 py-1 text-[11px]">
+        <SubTabButton
+          active={view === "data"}
+          onClick={() => setView("data")}
+          icon={<TableIcon className="size-3" />}
+          label="Data"
+        />
+        <SubTabButton
+          active={view === "locks"}
+          onClick={() => setView("locks")}
+          icon={<Lock className="size-3" />}
+          label="Locks"
+        />
+      </div>
+      <div className="min-h-0 flex-1">
+        {view === "data" ? (
+          <ResultsGrid result={result} />
+        ) : (
+          <LocksView summary={result.locks} durationMs={result.durationMs} />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function SubTabButton({
+  active,
+  onClick,
+  icon,
+  label,
+}: {
+  active: boolean;
+  onClick: () => void;
+  icon: React.ReactNode;
+  label: string;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={cn(
+        "inline-flex items-center gap-1 rounded px-2 py-0.5 transition",
+        active
+          ? "bg-background text-foreground shadow-sm"
+          : "text-muted-foreground hover:bg-muted/60",
+      )}
+    >
+      {icon}
+      {label}
+    </button>
   );
 }
 

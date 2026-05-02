@@ -1,28 +1,66 @@
-//! MSSQL driver backed by tiberius.
+//! MSSQL driver backed by tiberius + a `bb8` connection pool.
 //!
-//! tiberius doesn't ship a connection pool, so each `MsSqlConnection`
-//! owns a single client. Concurrent queries on the same connection are
-//! serialised by the per-entry mutex in [`crate::ConnectionRegistry`].
+//! tiberius doesn't ship a pool itself; we layer `bb8-tiberius`
+//! around it so we get the same fault-tolerance + sleep/wake
+//! survival behaviour as the Postgres `sqlx::PgPool`. The pool
+//! transparently:
+//!
+//!   - **Replaces dead connections** between checkouts —
+//!     `bb8::Builder::test_on_check_out(true)` makes
+//!     `pool.get()` ping `SELECT 1` first; if the ping fails, bb8
+//!     drops the entry and creates a fresh one. No more
+//!     "connection closed" errors after macOS wake.
+//!   - **Keeps one warm connection** via `min_idle(Some(1))` so
+//!     the first query after the user comes back from another
+//!     app doesn't pay the full TCP+TLS+auth handshake.
+//!   - **Caps concurrency at 4** to match the Postgres setup —
+//!     the registry's per-id mutex still serialises user-visible
+//!     queries today, but having a pool ready means the lock
+//!     sampler and any future concurrent paths don't fight for a
+//!     single TCP socket.
+//!
+//! Per-batch session pinning is preserved: `execute_batch_with_options`
+//! checks out **one** connection from the pool up-front and runs every
+//! statement (including the leading `USE [db]` and the `@@SPID`
+//! capture for lock telemetry) on that one connection — same reason
+//! Postgres pins a `PgPool` connection: `USE` and other session-state
+//! sets don't carry across the pool boundary.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use bb8::Pool;
+use bb8_tiberius::ConnectionManager;
 use tiberius::numeric::Numeric;
 use tiberius::{AuthMethod, Client, ColumnData, Config, EncryptionLevel, QueryItem};
 use tokio::net::TcpStream;
-use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
+use tokio_util::compat::Compat;
 
 use crate::driver::{DbConnection, DbError, DbResult};
+use crate::locks::{MsSqlLockSampler, DEFAULT_SAMPLE_INTERVAL_MS};
 use crate::types::{
-    Cell, CheckDescription, Column, ColumnDescription, ConnectionConfig, ExplainFormat,
-    ExplainResult, ForeignKeyDescription, IndexDescription, KeyDescription, QueryResult,
-    RoutineDescription, RoutineKind, TableDescription, TableKind, TableSummary, TriggerDescription,
+    Cell, CheckDescription, Column, ColumnDescription, ConnectionConfig, ExecuteOptions,
+    ExplainFormat, ExplainResult, ForeignKeyDescription, IndexDescription, KeyDescription,
+    LockSummary, QueryResult, RoutineDescription, RoutineKind, TableDescription, TableKind,
+    TableSummary, TriggerDescription,
 };
 
+/// Concrete tiberius client type our pool yields. Matches what
+/// `bb8_tiberius::rt::Client` resolves to with the `with-tokio`
+/// feature: `Client<Compat<TcpStream>>`.
 type MsClient = Client<Compat<TcpStream>>;
 
+/// Convenience alias for our `bb8` pool of tiberius clients.
+type MsPool = Pool<ConnectionManager>;
+
 pub struct MsSqlConnection {
-    client: MsClient,
+    pool: MsPool,
+    /// Stored so the lock sampler can spin up its own sidecar
+    /// `tiberius::Client` against the same server. The sampler
+    /// intentionally does NOT use the user pool — sampling is a
+    /// sidecar by design and shouldn't compete with user queries
+    /// for pool slots.
+    cfg: ConnectionConfig,
 }
 
 impl MsSqlConnection {
@@ -38,37 +76,89 @@ impl MsSqlConnection {
         if cfg.trust_server_certificate {
             tib_cfg.trust_cert();
         }
-        // Azure SQL Edge / mssql-server containers default to TLS-on; keep
-        // encryption negotiated.
+        // Azure SQL Edge / mssql-server containers default to TLS-on;
+        // keep encryption negotiated.
         tib_cfg.encryption(EncryptionLevel::Required);
 
-        let tcp = TcpStream::connect(tib_cfg.get_addr())
+        // bb8-tiberius default sets `tcp.set_nodelay(true)` for us
+        // (see ConnectionManager::new in the upstream source). No
+        // extra `with_modify_tcp_stream` hook needed.
+        let mgr = ConnectionManager::new(tib_cfg);
+
+        // Pool sizing — mirrors the Postgres tuning rationale in
+        // `postgres.rs::PostgresConnection::connect`:
+        //
+        //   - `max_size(4)`           — small ceiling matches the
+        //                                per-id registry mutex; we
+        //                                only run one user query at a
+        //                                time per connection, the
+        //                                extra slots are headroom for
+        //                                catalog/sampler side-channels.
+        //   - `min_idle(Some(1))`     — keep one warm connection so
+        //                                the first query after macOS
+        //                                wake doesn't pay a full
+        //                                handshake.
+        //   - `connection_timeout(8s)`— same as PG `acquire_timeout`.
+        //   - `idle_timeout(10 min)`  — recycle long-idle pool conns
+        //                                proactively so we don't hold
+        //                                a fleet of server-side
+        //                                sleeping sessions.
+        //   - `test_on_check_out(true)`— PING `SELECT 1` before each
+        //                                handout; bb8-tiberius's
+        //                                `is_valid` impl does this.
+        //                                **Load-bearing for sleep/wake
+        //                                survival**: if the server
+        //                                killed our backend while we
+        //                                slept, the test fails and bb8
+        //                                replaces the entry silently.
+        let pool = Pool::builder()
+            .max_size(4)
+            .min_idle(Some(1))
+            .connection_timeout(Duration::from_secs(8))
+            .idle_timeout(Some(Duration::from_secs(10 * 60)))
+            .test_on_check_out(true)
+            .build(mgr)
             .await
             .map_err(|e| DbError::Connect(e.to_string()))?;
-        tcp.set_nodelay(true).ok();
 
-        let client = Client::connect(tib_cfg, tcp.compat_write())
+        Ok(Self { pool, cfg })
+    }
+
+    /// Pull one tiberius client out of the pool. The returned
+    /// `PooledConnection` derefs to `&mut Client<...>`; pass
+    /// `&mut conn` to helpers that want `&mut MsClient`. Drop
+    /// returns it to the pool automatically.
+    async fn acquire(&self) -> DbResult<bb8::PooledConnection<'_, ConnectionManager>> {
+        self.pool
+            .get()
             .await
-            .map_err(|e| DbError::Connect(e.to_string()))?;
-
-        Ok(Self { client })
+            .map_err(|e| DbError::Query(format!("pool: {e}")))
     }
 }
+
 
 #[async_trait]
 impl DbConnection for MsSqlConnection {
     async fn ping(&mut self) -> DbResult<()> {
-        let _ = self
-            .client
-            .simple_query("SELECT 1")
-            .await
-            .map_err(|e| DbError::Query(e.to_string()))?;
+        // Just acquiring from the pool runs `is_valid` (= `SELECT 1`)
+        // because we set `test_on_check_out(true)`. That is the
+        // ping. If the cached connection was stale, bb8 swaps it
+        // out before handing us a fresh one — so the user clicking
+        // Test never sees a "session timed out" failure for an
+        // idle connection.
+        let _conn = self.acquire().await?;
         Ok(())
     }
 
     async fn list_databases(&mut self) -> DbResult<Vec<String>> {
+        // The pool's `test_on_check_out(true)` setting makes every
+        // `acquire()` ping the connection first; if our cached
+        // session died (typical after macOS sleep) bb8 swaps it
+        // out silently. So we no longer need a manual
+        // ensure-alive probe — `acquire` IS the probe.
+        let mut conn = self.acquire().await?;
         run_string_column(
-            &mut self.client,
+            &mut conn,
             "SELECT name FROM sys.databases ORDER BY name",
             "name",
         )
@@ -76,14 +166,18 @@ impl DbConnection for MsSqlConnection {
     }
 
     async fn list_schemas(&mut self, database: &str) -> DbResult<Vec<String>> {
-        // Switch DB then list schemas.
+        let mut conn = self.acquire().await?;
+        // `USE [db]` only affects the connection it runs on, so we
+        // pin one connection across both statements. If we let the
+        // pool hand out a fresh one between calls, the SELECT below
+        // would land in whatever database that other connection
+        // happened to be in.
         let use_stmt = format!("USE [{}]", escape_ident(database));
-        self.client
-            .simple_query(use_stmt)
+        conn.simple_query(use_stmt)
             .await
             .map_err(|e| DbError::Query(e.to_string()))?;
         run_string_column(
-            &mut self.client,
+            &mut conn,
             "SELECT name FROM sys.schemas \
              WHERE name NOT IN ('sys','INFORMATION_SCHEMA','db_owner','db_accessadmin', \
                                 'db_securityadmin','db_ddladmin','db_backupoperator', \
@@ -95,9 +189,9 @@ impl DbConnection for MsSqlConnection {
     }
 
     async fn list_tables(&mut self, database: &str, schema: &str) -> DbResult<Vec<String>> {
+        let mut conn = self.acquire().await?;
         let use_stmt = format!("USE [{}]", escape_ident(database));
-        self.client
-            .simple_query(use_stmt)
+        conn.simple_query(use_stmt)
             .await
             .map_err(|e| DbError::Query(e.to_string()))?;
 
@@ -113,15 +207,15 @@ impl DbConnection for MsSqlConnection {
             schema.replace('\'', "''"),
             schema.replace('\'', "''"),
         );
-        run_string_column(&mut self.client, &q, "name").await
+        run_string_column(&mut conn, &q, "name").await
     }
 
     async fn list_all_tables(&mut self, database: &str) -> DbResult<Vec<TableSummary>> {
-        // tiberius shares one TCP session, so the `USE` plus the
-        // following query naturally run on the same db.
+        // Pin one pool connection so `USE` + the catalog query run
+        // on the same logical session.
+        let mut conn = self.acquire().await?;
         let use_stmt = format!("USE [{}]", escape_ident(database));
-        self.client
-            .simple_query(use_stmt)
+        conn.simple_query(use_stmt)
             .await
             .map_err(|e| DbError::Query(e.to_string()))?;
 
@@ -141,8 +235,7 @@ impl DbConnection for MsSqlConnection {
                  ORDER BY schema_name, table_name";
 
         let mut out: Vec<TableSummary> = Vec::new();
-        let mut stream = self
-            .client
+        let mut stream = conn
             .simple_query(q.to_string())
             .await
             .map_err(|e| DbError::Query(e.to_string()))?;
@@ -188,12 +281,12 @@ impl DbConnection for MsSqlConnection {
         schema: &str,
         table: &str,
     ) -> DbResult<TableDescription> {
-        // Pin the session to the requested database first; the column
-        // metadata queries below all reference the current DB's
-        // INFORMATION_SCHEMA / sys.* views.
+        // Pin one pool connection for the whole describe — `USE [db]`
+        // sets the database context per-connection, and the eight
+        // catalog queries below all assume that context.
+        let mut conn = self.acquire().await?;
         let use_stmt = format!("USE [{}]", escape_ident(database));
-        self.client
-            .simple_query(use_stmt)
+        conn.simple_query(use_stmt)
             .await
             .map_err(|e| DbError::Query(e.to_string()))?;
 
@@ -207,8 +300,7 @@ impl DbConnection for MsSqlConnection {
         let mut kind = TableKind::Table;
         let mut found = false;
         {
-            let mut stream = self
-                .client
+            let mut stream = conn
                 .simple_query(kind_q)
                 .await
                 .map_err(|e| DbError::Query(e.to_string()))?;
@@ -273,8 +365,7 @@ impl DbConnection for MsSqlConnection {
         // `&mut Client` for its whole lifetime; sequential queries
         // need scoped streams.
         {
-            let mut stream = self
-                .client
+            let mut stream = conn
                 .simple_query(q)
                 .await
                 .map_err(|e| DbError::Query(e.to_string()))?;
@@ -352,8 +443,7 @@ impl DbConnection for MsSqlConnection {
         );
         let mut keys_acc: Vec<(String, String, String, i32)> = Vec::new();
         {
-            let mut stream = self
-                .client
+            let mut stream = conn
                 .simple_query(q_keys)
                 .await
                 .map_err(|e| DbError::Query(e.to_string()))?;
@@ -408,8 +498,7 @@ impl DbConnection for MsSqlConnection {
         );
         let mut fk_acc: Vec<(String, String, String, String, String, i32)> = Vec::new();
         {
-            let mut stream = self
-                .client
+            let mut stream = conn
                 .simple_query(q_fks)
                 .await
                 .map_err(|e| DbError::Query(e.to_string()))?;
@@ -467,8 +556,7 @@ impl DbConnection for MsSqlConnection {
         );
         let mut checks: Vec<CheckDescription> = Vec::new();
         {
-            let mut stream = self
-                .client
+            let mut stream = conn
                 .simple_query(q_checks)
                 .await
                 .map_err(|e| DbError::Query(e.to_string()))?;
@@ -519,8 +607,7 @@ impl DbConnection for MsSqlConnection {
         );
         let mut idx_acc: Vec<(String, bool, String, i32)> = Vec::new();
         {
-            let mut stream = self
-                .client
+            let mut stream = conn
                 .simple_query(q_indexes)
                 .await
                 .map_err(|e| DbError::Query(e.to_string()))?;
@@ -567,8 +654,7 @@ impl DbConnection for MsSqlConnection {
         );
         let mut triggers: Vec<TriggerDescription> = Vec::new();
         {
-            let mut stream = self
-                .client
+            let mut stream = conn
                 .simple_query(q_triggers)
                 .await
                 .map_err(|e| DbError::Query(e.to_string()))?;
@@ -633,9 +719,11 @@ impl DbConnection for MsSqlConnection {
         database: &str,
         schema: &str,
     ) -> DbResult<Vec<RoutineDescription>> {
+        // Pin one pool connection — `USE [db]` is per-connection so
+        // both queries below need to share the same session.
+        let mut conn = self.acquire().await?;
         let use_stmt = format!("USE [{}]", escape_ident(database));
-        self.client
-            .simple_query(use_stmt)
+        conn.simple_query(use_stmt)
             .await
             .map_err(|e| DbError::Query(e.to_string()))?;
 
@@ -666,8 +754,7 @@ impl DbConnection for MsSqlConnection {
         // (object_id, name, kind, return_type)
         let mut objs: Vec<(i32, String, String, Option<String>)> = Vec::new();
         {
-            let mut stream = self
-                .client
+            let mut stream = conn
                 .simple_query(q_objs)
                 .await
                 .map_err(|e| DbError::Query(e.to_string()))?;
@@ -718,8 +805,7 @@ impl DbConnection for MsSqlConnection {
         );
         let mut args: std::collections::HashMap<i32, Vec<String>> = std::collections::HashMap::new();
         {
-            let mut stream = self
-                .client
+            let mut stream = conn
                 .simple_query(q_args)
                 .await
                 .map_err(|e| DbError::Query(e.to_string()))?;
@@ -767,12 +853,14 @@ impl DbConnection for MsSqlConnection {
         sql: &str,
         analyze: bool,
     ) -> DbResult<ExplainResult> {
-        // tiberius's `Client` is a single TCP session, so `USE [db]`,
-        // the SET, and the user query all share one logical session.
+        // Pin one pool connection for the duration of the explain
+        // round-trip — `USE [db]`, the `SET STATISTICS / SHOWPLAN`
+        // toggle, and the user query all need to share one logical
+        // session.
+        let mut conn = self.acquire().await?;
         if let Some(db) = database {
             let stmt = format!("USE [{}]", escape_ident(db));
-            self.client
-                .simple_query(stmt)
+            conn.simple_query(stmt)
                 .await
                 .map_err(|e| DbError::Query(e.to_string()))?;
         }
@@ -817,21 +905,20 @@ impl DbConnection for MsSqlConnection {
             let wrapped = format!(
                 "SET STATISTICS XML ON; {trimmed}; SET STATISTICS XML OFF;"
             );
-            (run_capturing_all_sets(&mut self.client, &wrapped).await?, true)
+            (run_capturing_all_sets(&mut conn, &wrapped).await?, true)
         } else {
             // Toggle SHOWPLAN_XML in its own batch; tiberius's
             // `simple_query` is one batch per call.
-            self.client
-                .simple_query("SET SHOWPLAN_XML ON")
+            conn.simple_query("SET SHOWPLAN_XML ON")
                 .await
                 .map_err(|e| DbError::Query(e.to_string()))?;
             // The query batch is now redirected — output is the
             // estimated plan XML, not row data.
-            let plan_sets = run_capturing_all_sets(&mut self.client, trimmed).await;
+            let plan_sets = run_capturing_all_sets(&mut conn, trimmed).await;
             // Always turn it back off, even on error, so the session
             // doesn't stay wedged in plan-emit mode for follow-up
             // queries on this connection.
-            let _ = self.client.simple_query("SET SHOWPLAN_XML OFF").await;
+            let _ = conn.simple_query("SET SHOWPLAN_XML OFF").await;
             (plan_sets?, false)
         };
         let duration_ms = start.elapsed().as_millis() as u64;
@@ -871,30 +958,135 @@ impl DbConnection for MsSqlConnection {
     async fn execute_batch(
         &mut self,
         database: Option<&str>,
-        _schema: Option<&str>,
+        schema: Option<&str>,
         statements: &[&str],
     ) -> DbResult<Vec<QueryResult>> {
-        // tiberius's Client is a single live TCP connection, so the
-        // `USE` and every subsequent statement naturally share session
-        // state. No pinning required.
+        self.execute_batch_with_options(database, schema, statements, &ExecuteOptions::default())
+            .await
+    }
+
+    async fn execute_batch_with_options(
+        &mut self,
+        database: Option<&str>,
+        _schema: Option<&str>,
+        statements: &[&str],
+        options: &ExecuteOptions,
+    ) -> DbResult<Vec<QueryResult>> {
+        // Pin one pool connection for the whole batch. This is
+        // load-bearing for transaction semantics: `BEGIN TRAN; …;
+        // COMMIT;` only works if every statement lands on the
+        // same TDS session. Calling `self.execute(sql)` per
+        // statement would let bb8 hand out different connections
+        // and silently break user transactions.
+        //
+        // The pool's `test_on_check_out(true)` setting (see
+        // `connect`) doubles as the sleep/wake guard — `acquire`
+        // pings before handing us the connection, and bb8 swaps
+        // out a stale entry transparently. So no manual
+        // ensure-alive probe is needed any more.
+        let mut conn = self.acquire().await?;
+
         if let Some(db) = database {
             let stmt = format!("USE [{}]", escape_ident(db));
-            self.client
-                .simple_query(stmt)
+            conn.simple_query(stmt)
                 .await
                 .map_err(|e| DbError::Query(e.to_string()))?;
         }
+
+        // For lock telemetry: capture @@SPID on the pinned
+        // connection. The SPID belongs to this specific TDS
+        // session — every statement in the batch runs on this
+        // same session, so the sampler can filter
+        // `sys.dm_tran_locks WHERE request_session_id = <spid>`
+        // and reliably observe locks held by this batch.
+        let spid: Option<i32> = if options.capture_locks {
+            match capture_spid(&mut conn).await {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    tracing::warn!(?e, "lock-sampler: @@SPID capture failed");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let interval_ms = options
+            .lock_sample_interval_ms
+            .unwrap_or(DEFAULT_SAMPLE_INTERVAL_MS);
+
+        // **Batch-wide sampler** (was: one sampler per statement).
+        //
+        // Why one sampler for the whole batch? Multi-statement
+        // transactions like
+        //   `BEGIN TRAN; UPDATE …; WAITFOR DELAY 0.4; ROLLBACK;`
+        // hold the UPDATE's row lock from the moment UPDATE runs
+        // until ROLLBACK. With per-statement sampling, that lock
+        // showed up on the WAITFOR tab (because that's the
+        // statement that lasted long enough for the sampler to
+        // tick) — leaving the UPDATE tab "empty" and forcing the
+        // user to click around to find their locks.
+        //
+        // Running ONE sampler across the entire batch produces a
+        // single timeline that covers BEGIN → UPDATE → WAITFOR →
+        // ROLLBACK end-to-end. We attach the resulting summary to
+        // the FIRST result tab, which the UI auto-selects on Run.
+        // So: drag-select a transaction block, hit Run with locks,
+        // land on tab 0, see the entire batch's lock timeline. No
+        // tab-juggling, no `sp_executesql` hack.
+        let sampler = spid.map(|s| {
+            MsSqlLockSampler::start(self.cfg.clone(), s, interval_ms)
+        });
+
         let mut out = Vec::with_capacity(statements.len());
         for sql in statements {
-            out.push(self.execute(sql).await?);
+            // `execute_on` runs the statement on the pinned
+            // connection — NOT on a fresh pool checkout —
+            // preserving session state (transactions, USE, SET).
+            let result = execute_on(&mut conn, sql).await?;
+            out.push(result);
         }
+
+        // Stop the sampler now that every statement has run, and
+        // attach the aggregated summary to results[0]. Other
+        // result tabs leave `locks = None` so the LocksView
+        // sub-tab only renders on tab 0.
+        if let Some(s) = sampler {
+            let summary = s.stop().await;
+            if let Some(first) = out.first_mut() {
+                first.locks = Some(summary);
+            }
+        } else if options.capture_locks {
+            if let Some(first) = out.first_mut() {
+                first.locks = Some(LockSummary::unavailable(
+                    interval_ms,
+                    "could not capture @@SPID",
+                ));
+            }
+        }
+
         Ok(out)
     }
 
     async fn execute(&mut self, sql: &str) -> DbResult<QueryResult> {
+        // Standalone single-statement path — fresh pool checkout,
+        // no session state to preserve. `execute_batch_with_options`
+        // is what user-visible Run goes through; this method is
+        // only used for ad-hoc one-shots (registry::execute and
+        // similar test paths).
+        let mut conn = self.acquire().await?;
+        execute_on(&mut conn, sql).await
+    }
+}
+
+/// Run one tiberius statement on the given client, materialise
+/// the result into a `QueryResult`. Pulled out of the trait
+/// `execute` impl so `execute_batch_with_options` can call it on
+/// the **pinned** pool connection rather than `self.execute()`,
+/// which would acquire a fresh checkout each call and lose
+/// transaction state.
+async fn execute_on(client: &mut MsClient, sql: &str) -> DbResult<QueryResult> {
         let start = Instant::now();
-        let mut stream = self
-            .client
+        let mut stream = client
             .simple_query(sql.to_string())
             .await
             .map_err(|e| DbError::Query(e.to_string()))?;
@@ -941,8 +1133,31 @@ impl DbConnection for MsSqlConnection {
             rows,
             rows_affected: None,
             duration_ms: start.elapsed().as_millis() as u64,
+            locks: None,
         })
+}
+
+/// Pull `@@SPID` off the user session. Used by the lock sampler so
+/// the sidecar observer connection can scope `sys.dm_tran_locks`
+/// down to the session running the user statement.
+async fn capture_spid(client: &mut MsClient) -> DbResult<i32> {
+    let mut stream = client
+        .simple_query("SELECT @@SPID AS spid".to_string())
+        .await
+        .map_err(|e| DbError::Query(e.to_string()))?;
+    while let Some(item) = stream
+        .try_next()
+        .await
+        .map_err(|e| DbError::Query(e.to_string()))?
+    {
+        if let QueryItem::Row(row) = item {
+            // @@SPID is a `smallint` in T-SQL; tiberius ships it as i16.
+            if let Some(v) = row.try_get::<i16, _>(0).ok().flatten() {
+                return Ok(v as i32);
+            }
+        }
     }
+    Err(DbError::Query("@@SPID returned no row".into()))
 }
 
 async fn run_string_column(
@@ -1153,6 +1368,7 @@ async fn run_capturing_all_sets(
             rows: std::mem::take(rows),
             rows_affected: None,
             duration_ms: 0,
+            locks: None,
         });
     };
 

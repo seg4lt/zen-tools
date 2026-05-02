@@ -13,8 +13,8 @@ use crate::driver::{DbConnection, DbError, DbResult};
 use crate::mssql::MsSqlConnection;
 use crate::postgres::PostgresConnection;
 use crate::types::{
-    ConnectionConfig, DbDriver, ExplainResult, QueryResult, RoutineDescription, TableDescription,
-    TableSummary,
+    ConnectionConfig, DbDriver, ExecuteOptions, ExplainResult, QueryResult, RoutineDescription,
+    TableDescription, TableSummary,
 };
 
 type Slot = Arc<Mutex<Box<dyn DbConnection>>>;
@@ -165,5 +165,21 @@ impl ConnectionRegistry {
         let slot = self.slot(id)?;
         let mut conn = slot.lock().await;
         conn.execute_batch(database, schema, statements).await
+    }
+
+    /// `execute_batch` with side-channel knobs (currently: per-query
+    /// lock telemetry capture). Drives the "Run with locks" UI path.
+    pub async fn execute_batch_with_options(
+        &self,
+        id: &str,
+        database: Option<&str>,
+        schema: Option<&str>,
+        statements: &[&str],
+        options: &ExecuteOptions,
+    ) -> DbResult<Vec<QueryResult>> {
+        let slot = self.slot(id)?;
+        let mut conn = slot.lock().await;
+        conn.execute_batch_with_options(database, schema, statements, options)
+            .await
     }
 }
