@@ -258,13 +258,44 @@ impl PrMasterEngine {
             }
         }
 
-        // Bump the badge.
+        // Pre-compute filter counts only if any badge entry actually
+        // requests one. Each match runs against the To Review bucket
+        // (mirrors the Swift `MenuBarLabel.countFor("filter:…")`).
+        let needs_filters = settings
+            .badge_configs
+            .iter()
+            .any(|c| matches!(c.source, BadgeSource::Filter) && c.enabled);
+        let filters: Vec<NotificationFilter> = if needs_filters {
+            self.list_filters().unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
+        let filter_count = |id: &str| -> usize {
+            let Some(filter) = filters.iter().find(|f| f.id == id && f.enabled) else {
+                return 0;
+            };
+            snapshot
+                .to_review
+                .iter()
+                .filter(|enriched| {
+                    let file_paths: Vec<String> = enriched
+                        .detail
+                        .as_ref()
+                        .and_then(|d| d.files.as_ref())
+                        .map(|f| f.nodes.iter().map(|n| n.path.clone()).collect())
+                        .unwrap_or_default();
+                    filter.matches(&enriched.pr, &file_paths)
+                })
+                .count()
+        };
+
         let badge = render_badge(
             &settings.badge_configs,
             snapshot.to_review.len(),
             snapshot.reviewed.len(),
             snapshot.mine.len(),
-            |_| 0,
+            filter_count,
         );
         let _ = self.inner.tx.send(PrMasterEvent::BadgeChanged(badge));
 

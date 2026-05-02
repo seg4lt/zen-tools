@@ -52,8 +52,10 @@ import {
   type BadgeSourceKind,
   type GhStatus,
   type LocalRepoMapping,
+  type NotificationFilter,
   type PrMasterSettings,
 } from "../../lib/tauri";
+import { SearchableRepoDropdown } from "../shared/SearchableRepoDropdown";
 
 export function SettingsTab() {
   const [status, setStatus] = useState<GhStatus | null>(null);
@@ -438,6 +440,24 @@ function BadgeEditor({
   configs: BadgeSourceConfig[];
   onChange: (next: BadgeSourceConfig[]) => void;
 }) {
+  const [savedFilters, setSavedFilters] = useState<NotificationFilter[]>([]);
+
+  useEffect(() => {
+    let alive = true;
+    void (async () => {
+      try {
+        const list = await prmasterTauri.listFilters();
+        if (alive) setSavedFilters(list);
+      } catch {
+        // Filters tab surfaces failures on its own; the badge editor
+        // simply hides the saved-filter picker when nothing loads.
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, []);
+
   function update(idx: number, patch: Partial<BadgeSourceConfig>) {
     onChange(configs.map((c, i) => (i === idx ? { ...c, ...patch } : c)));
   }
@@ -452,6 +472,17 @@ function BadgeEditor({
   }
   return (
     <div className="grid gap-2">
+      <p className="text-xs text-muted-foreground">
+        Each row contributes <code className="font-mono">prefix + N + suffix</code>{" "}
+        to the menu-bar text when its count is non-zero. Prefix/suffix accept
+        emoji ({" "}
+        <span className="font-mono">"👀 "</span>,{" "}
+        <span className="font-mono">"✅ "</span>,{" "}
+        <span className="font-mono">"🚀 "</span> ). Pick{" "}
+        <em>Saved filter</em> to badge against a stored filter from the
+        Filters tab.
+      </p>
+
       {configs.length === 0 && (
         <span className="text-xs italic text-muted-foreground">
           No badge sources — the menu-bar icon will display no count.
@@ -460,51 +491,95 @@ function BadgeEditor({
       {configs.map((cfg, idx) => (
         <div
           key={idx}
-          className="grid grid-cols-[auto_1fr_auto_auto_auto_auto] items-center gap-2 rounded-md border bg-background p-2"
+          className="grid gap-2 rounded-md border bg-background p-2"
         >
-          <Switch
-            checked={cfg.enabled}
-            onCheckedChange={(v) => update(idx, { enabled: v })}
-          />
-          <Select
-            value={cfg.source}
-            onValueChange={(v) =>
-              update(idx, { source: v as BadgeSourceKind })
-            }
-          >
-            <SelectTrigger size="sm" className="h-8 w-full">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="to_review">To Review</SelectItem>
-              <SelectItem value="reviewed">Done</SelectItem>
-              <SelectItem value="my_prs">My PRs</SelectItem>
-              <SelectItem value="filter">Filter</SelectItem>
-            </SelectContent>
-          </Select>
-          <Input
-            value={cfg.prefix}
-            onChange={(e) => update(idx, { prefix: e.target.value })}
-            placeholder="prefix"
-            className="h-8 w-16 font-mono"
-          />
-          <Badge variant="outline" className="font-mono">
-            {cfg.prefix}N{cfg.suffix}
-          </Badge>
-          <Input
-            value={cfg.suffix}
-            onChange={(e) => update(idx, { suffix: e.target.value })}
-            placeholder="suffix"
-            className="h-8 w-16 font-mono"
-          />
-          <Button
-            size="icon-sm"
-            variant="ghost"
-            onClick={() => remove(idx)}
-            aria-label="Remove badge source"
-          >
-            <Trash2 className="size-3.5" />
-          </Button>
+          {/* Row 1 — source + prefix/suffix preview + remove */}
+          <div className="grid grid-cols-[auto_1fr_auto_auto_auto_auto] items-center gap-2">
+            <Switch
+              checked={cfg.enabled}
+              onCheckedChange={(v) => update(idx, { enabled: v })}
+            />
+            <Select
+              value={cfg.source}
+              onValueChange={(v) => {
+                const source = v as BadgeSourceKind;
+                update(idx, {
+                  source,
+                  // Reset filter_id when leaving the filter source.
+                  filter_id: source === "filter" ? cfg.filter_id ?? null : null,
+                });
+              }}
+            >
+              <SelectTrigger size="sm" className="h-8 w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="to_review">To Review</SelectItem>
+                <SelectItem value="reviewed">Done</SelectItem>
+                <SelectItem value="my_prs">My PRs</SelectItem>
+                <SelectItem value="filter">Saved filter</SelectItem>
+              </SelectContent>
+            </Select>
+            <Input
+              value={cfg.prefix}
+              onChange={(e) => update(idx, { prefix: e.target.value })}
+              placeholder="prefix"
+              className="h-8 w-20 font-mono"
+              title="Prefix (supports emoji)"
+            />
+            <Badge variant="outline" className="font-mono">
+              {cfg.prefix}N{cfg.suffix}
+            </Badge>
+            <Input
+              value={cfg.suffix}
+              onChange={(e) => update(idx, { suffix: e.target.value })}
+              placeholder="suffix"
+              className="h-8 w-20 font-mono"
+              title="Suffix (supports emoji)"
+            />
+            <Button
+              size="icon-sm"
+              variant="ghost"
+              onClick={() => remove(idx)}
+              aria-label="Remove badge source"
+            >
+              <Trash2 className="size-3.5" />
+            </Button>
+          </div>
+
+          {/* Row 2 — saved-filter dropdown only when source = filter */}
+          {cfg.source === "filter" && (
+            <div className="ml-10 flex items-center gap-2">
+              <span className="text-xs text-muted-foreground">Filter</span>
+              <Select
+                value={cfg.filter_id ?? undefined}
+                onValueChange={(v) => update(idx, { filter_id: v })}
+              >
+                <SelectTrigger size="sm" className="h-8 flex-1">
+                  <SelectValue
+                    placeholder={
+                      savedFilters.length === 0
+                        ? "No saved filters — add one in Filters tab"
+                        : "Pick a saved filter…"
+                    }
+                  />
+                </SelectTrigger>
+                <SelectContent>
+                  {savedFilters.map((f) => (
+                    <SelectItem key={f.id} value={f.id}>
+                      {f.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              {cfg.filter_id &&
+                !savedFilters.some((f) => f.id === cfg.filter_id) && (
+                  <span className="text-xs text-amber-600 dark:text-amber-400">
+                    filter no longer exists
+                  </span>
+                )}
+            </div>
+          )}
         </div>
       ))}
       <Button size="sm" variant="outline" onClick={add} className="w-fit">
@@ -524,18 +599,39 @@ function RepoMappingsEditor({
 }) {
   const [availableRepos, setAvailableRepos] = useState<string[]>([]);
   const [reposLoading, setReposLoading] = useState(false);
+  const [reposFetching, setReposFetching] = useState(false);
+  const [reposCachedAt, setReposCachedAt] = useState<number | null>(null);
+  const [reposStale, setReposStale] = useState(false);
   const [reposError, setReposError] = useState<string | null>(null);
-  const [pickRepo, setPickRepo] = useState<string>("");
+  const [pickRepo, setPickRepo] = useState<string | null>(null);
 
   async function reloadRepos() {
     setReposLoading(true);
     setReposError(null);
     try {
-      setAvailableRepos(await prmasterTauri.listAccessibleRepos());
+      const result = await prmasterTauri.listAccessibleRepos();
+      setAvailableRepos(result.repos);
+      setReposCachedAt(result.cached_at_ms);
+      setReposStale(result.stale);
     } catch (err) {
       setReposError(formatError(err));
     } finally {
       setReposLoading(false);
+    }
+  }
+
+  async function fetchRepos() {
+    setReposFetching(true);
+    setReposError(null);
+    try {
+      const result = await prmasterTauri.fetchRepos();
+      setAvailableRepos(result.repos);
+      setReposCachedAt(result.cached_at_ms);
+      setReposStale(result.stale);
+    } catch (err) {
+      setReposError(formatError(err));
+    } finally {
+      setReposFetching(false);
     }
   }
 
@@ -555,7 +651,7 @@ function RepoMappingsEditor({
     });
     if (typeof result === "string") {
       onChange([...mappings, { repo: pickRepo, local_path: result }]);
-      setPickRepo("");
+      setPickRepo(null);
     }
   }
 
@@ -578,41 +674,39 @@ function RepoMappingsEditor({
     onChange(mappings.filter((_, i) => i !== idx));
   }
 
+  const cacheFooter =
+    reposCachedAt == null
+      ? `${availableRepos.length} repositories cached`
+      : `${availableRepos.length} cached · ${formatCacheAge(reposCachedAt)}${reposStale ? " (stale, click Fetch)" : ""}`;
+
   return (
     <div className="grid gap-3">
       <p className="text-xs text-muted-foreground">
         Map GitHub repositories to local clones for faster AI Summary
-        generation (5-10× speedup). Pick a repo, then choose its local folder.
+        generation (5-10× speedup). The list caches for 7 days — use{" "}
+        <strong>Fetch</strong> to refresh from GitHub on demand.
       </p>
 
-      {/* Add mapping row: [repo dropdown] [Browse for folder…] [Reload] */}
+      {/* Add mapping row: [searchable repo dropdown] [Browse for folder…] */}
       <div className="flex flex-wrap items-center gap-2 rounded-md border bg-background p-2">
-        <Select
-          value={pickRepo || undefined}
-          onValueChange={(v) => setPickRepo(v)}
-          disabled={reposLoading || unmappedRepos.length === 0}
-        >
-          <SelectTrigger size="sm" className="h-8 min-w-[18rem] flex-1">
-            <SelectValue
-              placeholder={
-                reposLoading
-                  ? "Loading repositories…"
-                  : unmappedRepos.length === 0
-                    ? availableRepos.length === 0
-                      ? "No repositories available"
-                      : "All repositories are mapped"
-                    : "Pick a repository to map…"
-              }
-            />
-          </SelectTrigger>
-          <SelectContent className="max-h-72">
-            {unmappedRepos.map((repo) => (
-              <SelectItem key={repo} value={repo} className="font-mono text-xs">
-                {repo}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+        <SearchableRepoDropdown
+          items={unmappedRepos}
+          value={pickRepo}
+          onChange={setPickRepo}
+          loading={reposLoading}
+          fetching={reposFetching}
+          onReload={() => void reloadRepos()}
+          onFetch={() => void fetchRepos()}
+          footer={cacheFooter}
+          placeholder={
+            unmappedRepos.length === 0
+              ? availableRepos.length === 0
+                ? "No repositories cached — click Fetch"
+                : "All repositories are mapped"
+              : "Pick a repository to map…"
+          }
+          disabled={availableRepos.length === 0 && !reposFetching}
+        />
         <Button
           size="sm"
           variant="default"
@@ -621,20 +715,6 @@ function RepoMappingsEditor({
         >
           <Plus className="size-3.5" />
           Browse for folder…
-        </Button>
-        <Button
-          size="sm"
-          variant="ghost"
-          disabled={reposLoading}
-          onClick={() => void reloadRepos()}
-          aria-label="Reload repositories"
-        >
-          {reposLoading ? (
-            <Loader2 className="size-3.5 animate-spin" />
-          ) : (
-            <RefreshCw className="size-3.5" />
-          )}
-          Reload
         </Button>
       </div>
 
@@ -702,4 +782,15 @@ function formatError(err: unknown): string {
     return String((err as { message: unknown }).message);
   }
   return String(err);
+}
+
+function formatCacheAge(cachedAtMs: number): string {
+  const ageMs = Date.now() - cachedAtMs;
+  if (ageMs < 60_000) return "fetched just now";
+  const mins = Math.round(ageMs / 60_000);
+  if (mins < 60) return `fetched ${mins}m ago`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return `fetched ${hours}h ago`;
+  const days = Math.round(hours / 24);
+  return `fetched ${days}d ago`;
 }

@@ -7,13 +7,14 @@
  *   `prmaster_list_filters`). Selecting one applies that filter's
  *   author / repo / glob / title-regex predicate.
  * - **Author / Repo**: derived from the rows the bar is filtering;
- *   each opens a multi-select popover.
+ *   each opens a multi-select dropdown (substring/wildcard search,
+ *   stays open while you toggle multiple items).
  * - **Search**: free-text title / author substring match.
  *
- * Used as the `filterBar` slot of `EnrichedListView` on the Review and
- * Done tabs.
+ * Wired up as the `filterBar` slot of `EnrichedListView` on the Review
+ * and Done tabs.
  */
-import { useEffect, useMemo, useState } from "react";
+import { forwardRef, useEffect, useMemo, useState } from "react";
 import {
   ChevronDown,
   Filter,
@@ -26,11 +27,6 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
-import {
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from "@/components/ui/popover";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -90,7 +86,6 @@ export function applyPrFilters(
           /* invalid regex -> skip the regex filter */
         }
       }
-      // file_globs intentionally not enforced client-side here.
       return true;
     });
   }
@@ -291,20 +286,22 @@ export function PrFilterBar({
   );
 }
 
-function FilterChipButton({
-  icon: Icon,
-  label,
-  active,
-  ...rest
-}: {
-  icon: React.ComponentType<{ className?: string }>;
-  label: string;
-  active: boolean;
-} & React.ComponentProps<typeof Button>) {
+/** A chip-style trigger button that forwards refs so it can sit inside
+ *  Radix `*Trigger asChild` slots without losing event wiring. */
+const FilterChipButton = forwardRef<
+  HTMLButtonElement,
+  {
+    icon: React.ComponentType<{ className?: string }>;
+    label: string;
+    active: boolean;
+  } & React.ComponentProps<typeof Button>
+>(function FilterChipButton({ icon: Icon, label, active, ...rest }, ref) {
   return (
     <Button
+      ref={ref}
       variant={active ? "secondary" : "outline"}
       size="sm"
+      type="button"
       className={cn("h-7 gap-1 px-2 text-xs font-normal")}
       {...rest}
     >
@@ -313,7 +310,7 @@ function FilterChipButton({
       <ChevronDown className="size-3 text-muted-foreground" />
     </Button>
   );
-}
+});
 
 function MultiSelectChip({
   icon,
@@ -339,17 +336,29 @@ function MultiSelectChip({
   wide?: boolean;
 }) {
   const [search, setSearch] = useState("");
-  const filtered = search
-    ? items.filter((i) => i.toLowerCase().includes(search.toLowerCase()))
-    : items;
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    const list = q ? items.filter((i) => i.toLowerCase().includes(q)) : items;
+    // Selected first, then alphabetic — same ordering as Swift RepoListPicker.
+    return [...list].sort((a, b) => {
+      const aSel = selected.has(a);
+      const bSel = selected.has(b);
+      if (aSel !== bSel) return aSel ? -1 : 1;
+      return a.localeCompare(b);
+    });
+  }, [items, search, selected]);
+
   return (
-    <Popover>
-      <PopoverTrigger asChild>
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
         <FilterChipButton icon={icon} label={label} active={active} />
-      </PopoverTrigger>
-      <PopoverContent
+      </DropdownMenuTrigger>
+      <DropdownMenuContent
         align="start"
         className={cn("p-0", wide ? "w-72" : "w-60")}
+        // Multi-select: keep the menu open while toggling items + don't
+        // steal focus back to the trigger after every click.
+        onCloseAutoFocus={(e) => e.preventDefault()}
       >
         <div className="border-b p-2">
           <Input
@@ -357,13 +366,26 @@ function MultiSelectChip({
             onChange={(e) => setSearch(e.target.value)}
             placeholder={placeholder}
             className="h-7 text-xs"
-            autoFocus
+            // Don't autofocus inside DropdownMenu — Radix's focus
+            // management fights the Input which leads to "click does
+            // nothing" on items below.
+            onKeyDown={(e) => {
+              // Stop the menu's roving-focus from hijacking arrow keys.
+              if (
+                e.key === "ArrowDown" ||
+                e.key === "ArrowUp" ||
+                e.key === "ArrowLeft" ||
+                e.key === "ArrowRight"
+              ) {
+                e.stopPropagation();
+              }
+            }}
           />
         </div>
         <div className="max-h-64 overflow-y-auto p-1">
           {filtered.length === 0 ? (
             <p className="p-3 text-center text-xs text-muted-foreground">
-              No matches.
+              {items.length === 0 ? "Nothing to filter on yet." : "No matches."}
             </p>
           ) : (
             filtered.map((item) => {
@@ -372,7 +394,11 @@ function MultiSelectChip({
                 <button
                   key={item}
                   type="button"
-                  onClick={() => onToggle(item)}
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    onToggle(item);
+                  }}
                   className="flex w-full cursor-pointer items-center gap-2 rounded px-2 py-1 text-left text-xs hover:bg-accent"
                 >
                   <Checkbox
@@ -398,7 +424,7 @@ function MultiSelectChip({
             </Button>
           )}
         </div>
-      </PopoverContent>
-    </Popover>
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }

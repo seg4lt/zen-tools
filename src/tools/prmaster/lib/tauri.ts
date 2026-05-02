@@ -278,8 +278,17 @@ export const prmasterTauri = {
     invoke<SummaryCard>("prmaster_ai_summary", { params }),
   aiListModels: () => invoke<string[]>("prmaster_ai_list_models"),
   clearAiCache: () => invoke<void>("prmaster_clear_ai_cache"),
-  listAccessibleRepos: () => invoke<string[]>("prmaster_list_repos"),
+  listAccessibleRepos: () => invoke<RepoListResult>("prmaster_list_repos"),
+  fetchRepos: () => invoke<RepoListResult>("prmaster_fetch_repos"),
 };
+
+export interface RepoListResult {
+  repos: string[];
+  /** UNIX millis when the cache was last refreshed (null if never). */
+  cached_at_ms: number | null;
+  /** True when the cache is older than the 7-day TTL. */
+  stale: boolean;
+}
 
 export interface AiSummaryParams {
   repo: string;

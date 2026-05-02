@@ -379,17 +379,102 @@ pub async fn prmaster_clear_ai_cache(
         .map_err(|e| crate::error::AppError::Io(e))
 }
 
-/// Personal + every-org repo enumeration. Drives the AI Summary repo
-/// picker.
+/// Result shape for `prmaster_list_repos` / `prmaster_fetch_repos` —
+/// returns the cached list, when it was last refreshed, and whether the
+/// cache has aged past the 7-day TTL (so the UI can prompt for a Fetch).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RepoListResult {
+    /// The cached repository list (`owner/repo`).
+    pub repos: Vec<String>,
+    /// UNIX millis of the last successful fetch (`None` until first fetch).
+    pub cached_at_ms: Option<i64>,
+    /// `true` when the cached list is older than [`REPO_CACHE_TTL_MS`].
+    pub stale: bool,
+}
+
+/// 7-day cache TTL for the accessible-repo list. Beyond this we mark
+/// the cache as `stale` so the UI can highlight the Fetch button.
+const REPO_CACHE_TTL_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+
+fn is_stale(cached_at_ms: Option<i64>) -> bool {
+    match cached_at_ms {
+        None => true,
+        Some(ts) => {
+            let now = chrono::Utc::now().timestamp_millis();
+            (now - ts) > REPO_CACHE_TTL_MS
+        }
+    }
+}
+
+/// Read the cached accessible-repo list. If nothing has been cached yet
+/// **or** the cache is older than 7 days, this transparently fetches
+/// fresh data from GitHub and updates the cache. Otherwise it returns
+/// the cached list immediately (no network).
 #[tauri::command]
 pub async fn prmaster_list_repos(
     state: State<'_, Mutex<AppState>>,
-) -> AppResult<Vec<String>> {
+    config: State<'_, UserConfig>,
+) -> AppResult<RepoListResult> {
+    let mut settings = config
+        .get::<PrMasterSettings>(PRMASTER_SETTINGS_KEY)?
+        .unwrap_or_default();
+
+    // Cold cache or stale cache → re-fetch transparently.
+    if settings.cached_repos.is_empty() || is_stale(settings.cached_repos_at_ms) {
+        let engine = {
+            let s = state.lock().await;
+            engine(&s)
+        };
+        match engine.list_accessible_repos().await {
+            Ok(fresh) => {
+                settings.cached_repos = fresh;
+                settings.cached_repos_at_ms =
+                    Some(chrono::Utc::now().timestamp_millis());
+                config.set(PRMASTER_SETTINGS_KEY, &settings)?;
+            }
+            Err(e) => {
+                // Network/auth failure: fall back to whatever's cached
+                // (possibly empty). Don't error — the UI will surface
+                // an empty list rather than a hard failure.
+                tracing::warn!(error = %e, "list_accessible_repos failed; returning cache");
+            }
+        }
+    }
+
+    Ok(RepoListResult {
+        repos: settings.cached_repos.clone(),
+        cached_at_ms: settings.cached_repos_at_ms,
+        stale: is_stale(settings.cached_repos_at_ms),
+    })
+}
+
+/// Force re-fetch the accessible-repo list from GitHub, ignoring the
+/// 7-day cache. Surfaced behind a "Fetch from GitHub" button in
+/// Settings and on the AI Summary tab.
+#[tauri::command]
+pub async fn prmaster_fetch_repos(
+    state: State<'_, Mutex<AppState>>,
+    config: State<'_, UserConfig>,
+) -> AppResult<RepoListResult> {
     let engine = {
         let s = state.lock().await;
         engine(&s)
     };
-    Ok(engine.list_accessible_repos().await?)
+    let fresh = engine.list_accessible_repos().await?;
+    let now = chrono::Utc::now().timestamp_millis();
+
+    let mut settings = config
+        .get::<PrMasterSettings>(PRMASTER_SETTINGS_KEY)?
+        .unwrap_or_default();
+    settings.cached_repos = fresh.clone();
+    settings.cached_repos_at_ms = Some(now);
+    config.set(PRMASTER_SETTINGS_KEY, &settings)?;
+
+    Ok(RepoListResult {
+        repos: fresh,
+        cached_at_ms: Some(now),
+        stale: false,
+    })
 }
 
 /// Quit the entire application. Surfaced as a command so the

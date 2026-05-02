@@ -39,6 +39,8 @@ export function AiSummaryTab() {
 
   const [repos, setRepos] = useState<string[]>([]);
   const [reposLoading, setReposLoading] = useState(false);
+  const [reposFetching, setReposFetching] = useState(false);
+  const [reposCachedAt, setReposCachedAt] = useState<number | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [cards, setCards] = useState<Record<string, CardState>>({});
   const [generating, setGenerating] = useState(false);
@@ -46,12 +48,26 @@ export function AiSummaryTab() {
   async function refreshRepos() {
     setReposLoading(true);
     try {
-      const list = await prmasterTauri.listAccessibleRepos();
-      setRepos(list);
+      const result = await prmasterTauri.listAccessibleRepos();
+      setRepos(result.repos);
+      setReposCachedAt(result.cached_at_ms);
     } catch (err) {
       console.warn("[ai-summary] listAccessibleRepos failed:", err);
     } finally {
       setReposLoading(false);
+    }
+  }
+
+  async function fetchRepos() {
+    setReposFetching(true);
+    try {
+      const result = await prmasterTauri.fetchRepos();
+      setRepos(result.repos);
+      setReposCachedAt(result.cached_at_ms);
+    } catch (err) {
+      console.warn("[ai-summary] fetchRepos failed:", err);
+    } finally {
+      setReposFetching(false);
     }
   }
 
@@ -114,6 +130,8 @@ export function AiSummaryTab() {
         onForce={setForce}
         repos={repos}
         reposLoading={reposLoading}
+        reposFetching={reposFetching}
+        reposCachedAt={reposCachedAt}
         selected={selected}
         onToggleRepo={(repo) =>
           setSelected((prev) => {
@@ -125,6 +143,7 @@ export function AiSummaryTab() {
         }
         onClearRepos={() => setSelected(new Set())}
         onReloadRepos={() => void refreshRepos()}
+        onFetchRepos={() => void fetchRepos()}
         onGenerate={() => void generate()}
         onCopyAll={() => void copyAll()}
         onClearCache={() => void clearCache()}
@@ -155,10 +174,13 @@ function Toolbar({
   onForce,
   repos,
   reposLoading,
+  reposFetching,
+  reposCachedAt,
   selected,
   onToggleRepo,
   onClearRepos,
   onReloadRepos,
+  onFetchRepos,
   onGenerate,
   onCopyAll,
   onClearCache,
@@ -172,10 +194,13 @@ function Toolbar({
   onForce: (v: boolean) => void;
   repos: string[];
   reposLoading: boolean;
+  reposFetching: boolean;
+  reposCachedAt: number | null;
   selected: Set<string>;
   onToggleRepo: (repo: string) => void;
   onClearRepos: () => void;
   onReloadRepos: () => void;
+  onFetchRepos: () => void;
   onGenerate: () => void;
   onCopyAll: () => void;
   onClearCache: () => void;
@@ -209,10 +234,13 @@ function Toolbar({
           repos={repos}
           selected={selected}
           loading={reposLoading}
+          fetching={reposFetching}
+          cachedAtMs={reposCachedAt}
           compact
           onToggle={onToggleRepo}
           onClear={onClearRepos}
           onReload={onReloadRepos}
+          onFetch={onFetchRepos}
         />
       </div>
 

@@ -222,15 +222,44 @@ pub fn run() {
             // whether `setup` runs inside a tokio worker — `tokio::spawn`
             // panics when called from the AppKit main thread that Tauri
             // hands `setup` to during launch.
+            //
+            // Also kicks an immediate refresh so the menu-bar badge isn't
+            // empty until the user opens the popover.
             let bg_engine = prmaster_engine.clone();
+            let bg_app = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 use std::time::Duration;
+
+                // Immediate first refresh — load whatever settings the
+                // user has already saved (badge configs included), so the
+                // tray populates as soon as gh data lands.
+                let initial_settings = {
+                    let cfg = bg_app.state::<crate::user_config::UserConfig>();
+                    cfg.get::<zen_prmaster::PrMasterSettings>("prmaster")
+                        .ok()
+                        .flatten()
+                        .unwrap_or_default()
+                };
+                if let Err(e) = bg_engine
+                    .refresh_lists_and_notify(&initial_settings)
+                    .await
+                {
+                    tracing::warn!(error = %e, "initial refresh failed");
+                }
+
                 let mut tick = tokio::time::interval(Duration::from_secs(300));
                 tick.tick().await; // skip immediate first tick
                 loop {
                     tick.tick().await;
+                    let settings = {
+                        let cfg = bg_app.state::<crate::user_config::UserConfig>();
+                        cfg.get::<zen_prmaster::PrMasterSettings>("prmaster")
+                            .ok()
+                            .flatten()
+                            .unwrap_or_default()
+                    };
                     if let Err(e) = bg_engine
-                        .refresh_lists_and_notify(&zen_prmaster::PrMasterSettings::default())
+                        .refresh_lists_and_notify(&settings)
                         .await
                     {
                         tracing::warn!(error = %e, "background refresh failed");
@@ -410,6 +439,7 @@ pub fn run() {
             commands::prmaster::prmaster_ai_list_models,
             commands::prmaster::prmaster_clear_ai_cache,
             commands::prmaster::prmaster_list_repos,
+            commands::prmaster::prmaster_fetch_repos,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -10,7 +10,7 @@
  */
 
 import { useMemo, useState } from "react";
-import { ChevronsUpDown, Loader2, RefreshCw, X } from "lucide-react";
+import { ChevronsUpDown, Download, Loader2, RefreshCw, X } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -26,11 +26,17 @@ interface Props {
   repos: string[];
   selected: Set<string>;
   loading?: boolean;
+  /** True while a force-refetch is in flight (separate spinner from `loading`). */
+  fetching?: boolean;
+  /** UNIX millis of the last cache update (drives the footer hint). */
+  cachedAtMs?: number | null;
   /** Render a single-line trigger that fits inside a horizontal toolbar. */
   compact?: boolean;
   onToggle: (repo: string) => void;
   onClear: () => void;
   onReload: () => void;
+  /** Force re-fetch from GitHub (ignores cache). Optional. */
+  onFetch?: () => void;
 }
 
 const MAX_CHIPS = 4;
@@ -39,10 +45,13 @@ export function RepoPicker({
   repos,
   selected,
   loading,
+  fetching,
+  cachedAtMs,
   compact = false,
   onToggle,
   onClear,
   onReload,
+  onFetch,
 }: Props) {
   const [search, setSearch] = useState("");
   const selectedList = useMemo(() => [...selected], [selected]);
@@ -171,11 +180,12 @@ export function RepoPicker({
               })
             )}
           </div>
-          <div className="flex items-center justify-between border-t px-2 py-1.5 text-xs text-muted-foreground">
-            <span>
+          <div className="flex items-center justify-between gap-2 border-t px-2 py-1.5 text-xs text-muted-foreground">
+            <span className="truncate">
               {selectedList.length} selected · {repos.length} available
+              {cachedAtMs ? ` · ${formatCacheAge(cachedAtMs)}` : ""}
             </span>
-            <div className="flex items-center gap-1">
+            <div className="flex shrink-0 items-center gap-1">
               {selectedList.length > 0 && (
                 <Button size="sm" variant="ghost" onClick={onClear}>
                   Clear
@@ -184,8 +194,9 @@ export function RepoPicker({
               <Button
                 size="sm"
                 variant="ghost"
-                disabled={loading}
+                disabled={loading || fetching}
                 onClick={onReload}
+                title="Reload from local cache"
               >
                 {loading ? (
                   <Loader2 className="size-3.5 animate-spin" />
@@ -194,6 +205,22 @@ export function RepoPicker({
                 )}
                 Reload
               </Button>
+              {onFetch && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={fetching}
+                  onClick={onFetch}
+                  title="Fetch the full repo list from GitHub (ignores cache)"
+                >
+                  {fetching ? (
+                    <Loader2 className="size-3.5 animate-spin" />
+                  ) : (
+                    <Download className="size-3.5" />
+                  )}
+                  Fetch
+                </Button>
+              )}
             </div>
           </div>
         </DropdownMenuContent>
@@ -250,4 +277,15 @@ function Chip({
       </button>
     </Badge>
   );
+}
+
+function formatCacheAge(cachedAtMs: number): string {
+  const ageMs = Date.now() - cachedAtMs;
+  if (ageMs < 60_000) return "cached just now";
+  const mins = Math.round(ageMs / 60_000);
+  if (mins < 60) return `cached ${mins}m ago`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return `cached ${hours}h ago`;
+  const days = Math.round(hours / 24);
+  return `cached ${days}d ago`;
 }
