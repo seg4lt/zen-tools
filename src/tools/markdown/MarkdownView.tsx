@@ -227,7 +227,7 @@ export function MarkdownView() {
       // drawing canvas).  Plain images would render as garbage in
       // CodeMirror, so they remain ignored.
       const isMarkdownLike = /\.(md|markdown|mdown|mkd)$/i.test(target);
-      const isExcalidrawLink = /\.excalidraw\.svg$/i.test(target);
+      const isExcalidrawLink = /\.excalidraw\.(svg|png)$/i.test(target);
       if (!isMarkdownLike && !isExcalidrawLink) {
         console.info(
           "[markdown] non-text link click ignored (no app handler yet):",
@@ -351,7 +351,10 @@ export function MarkdownView() {
                       doc: "__excalidraw_dirty__",
                     })
                   }
-                  onSave={(svg) => void saveCurrent(svg)}
+                  // Excalidraw hands us either a serialised SVG
+                  // string or PNG `Uint8Array` depending on the
+                  // file's extension — `saveCurrent` routes both.
+                  onSave={(data) => void saveCurrent(data)}
                 />
               </Suspense>
             ) : (

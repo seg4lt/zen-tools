@@ -8,18 +8,23 @@
  * in the main bundle.
  *
  * Lifecycle:
- * 1. On mount: `markdownTauri.readFile(path)` for the SVG bytes.
- *    Empty file → fresh empty scene.  Otherwise → `loadFromBlob` to
+ * 1. On mount: `fetch(convertFileSrc(path))` for the file's bytes
+ *    (works for both `.excalidraw.svg` text and `.excalidraw.png`
+ *    binary; `loadFromBlob` inspects the MIME type itself).  Empty
+ *    file → fresh empty scene.  Otherwise → `loadFromBlob` to
  *    restore the embedded scene.
  * 2. The `<Excalidraw>` component drives the canvas.  Its
  *    `onChange` callback hands us the live `{ elements, appState,
  *    files }` triplet, which we stash in a ref so the Cmd+S handler
  *    can serialise on demand without forcing React re-renders.
  * 3. First user edit fires `onDirty()` to flip the header dirty dot.
- * 4. Cmd+S calls `exportToSvg({ ..., appState: { ..., exportEmbedScene: true } })`,
- *    serialises the resulting `<svg>` element, and hands it to
- *    `onSave(svg)`.  The store's `saveCurrent(overrideContent)`
- *    writes those bytes to disk and dispatches `markSaved`.
+ * 4. Cmd+S calls either `exportToSvg` (for `.excalidraw.svg` paths)
+ *    or `exportToBlob({ mimeType: "image/png" })` (for
+ *    `.excalidraw.png` paths) with `appState.exportEmbedScene: true`.
+ *    The serialised result — a string for SVG or a `Uint8Array` for
+ *    PNG — is handed to `onSave(...)`; the store's
+ *    `saveCurrent(overrideContent)` routes it to `writeFile` /
+ *    `writeBytes` accordingly.
  *
  * The drawing data never lives in `tab.doc` — that string would
  * bounce through the reducer on every reducer pass and cost megabytes
@@ -29,6 +34,7 @@
 
 import {
   Excalidraw,
+  exportToBlob,
   exportToSvg,
   loadFromBlob,
 } from "@excalidraw/excalidraw";
@@ -39,21 +45,24 @@ import type {
 } from "@excalidraw/excalidraw/types";
 import type { OrderedExcalidrawElement } from "@excalidraw/excalidraw/element/types";
 import type { AppState, BinaryFiles } from "@excalidraw/excalidraw/types";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import { Loader2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { markdownTauri } from "../lib/tauri";
 
 interface ExcalidrawEditorProps {
-  /** Absolute path of the open `*.excalidraw.svg` file. */
+  /** Absolute path of the open `*.excalidraw.svg` *or*
+   *  `*.excalidraw.png` file.  The trailing extension chooses which
+   *  exporter the Cmd+S handler uses (SVG → text, PNG → binary). */
   path: string;
   /** Called on the first user-driven edit so the header can flip the
    *  dirty dot.  Called once per "load → first edit" cycle; the
    *  parent decides what to do with subsequent calls. */
   onDirty: () => void;
   /** Called from the local Cmd+S handler with the freshly serialised
-   *  SVG (with embedded scene).  Parent typically routes through
-   *  `saveCurrent(svg)` to write to disk + flip dirty back to false. */
-  onSave: (svg: string) => void;
+   *  scene.  The host's `saveCurrent(...)` routes a `string` through
+   *  `writeFile` (text, used for the SVG path) and a `Uint8Array`
+   *  through `writeBytes` (binary, used for the PNG path). */
+  onSave: (data: string | Uint8Array) => void;
   /** `"dark"` or `"light"` — passed straight through to Excalidraw. */
   theme: "light" | "dark";
 }
@@ -93,17 +102,24 @@ export default function ExcalidrawEditor({
 
     async function load() {
       try {
-        const svg = await markdownTauri.readFile(path);
+        // Fetch via the asset protocol — works for both `.excalidraw.svg`
+        // and `.excalidraw.png` without a separate text/bytes
+        // round-trip.  An empty file (newly-created via "New file")
+        // comes back with `blob.size === 0` and we start with a
+        // fresh empty scene.
+        const res = await fetch(convertFileSrc(path));
+        if (cancelled) return;
+        if (!res.ok) {
+          throw new Error(`fetch ${path}: HTTP ${res.status}`);
+        }
+        const blob = await res.blob();
         if (cancelled) return;
 
-        if (!svg || svg.trim() === "") {
-          // Brand-new file (created via "New file" → empty bytes).
-          // Pass `null` to let Excalidraw start with an empty scene.
+        if (blob.size === 0) {
           setInitialData(null);
           return;
         }
 
-        const blob = new Blob([svg], { type: "image/svg+xml" });
         const restored = await loadFromBlob(blob, null, null);
         if (cancelled) return;
         setInitialData({
@@ -113,9 +129,10 @@ export default function ExcalidrawEditor({
         });
       } catch (err) {
         if (cancelled) return;
-        // Most common failure: file isn't an Excalidraw-flavoured SVG
-        // (no embedded scene).  Fall back to an empty scene so the
-        // user can still draw — saving overwrites the broken file.
+        // Most common failure: file isn't an Excalidraw-flavoured
+        // file (no embedded scene).  Fall back to an empty scene so
+        // the user can still draw — saving overwrites the broken
+        // file.
         const message = err instanceof Error ? err.message : String(err);
         console.warn("[excalidraw] loadFromBlob failed", path, err);
         setLoadError(message);
@@ -136,6 +153,7 @@ export default function ExcalidrawEditor({
   // wins the race.  Bound only while this editor is mounted.
   // ────────────────────────────────────────────────────────────────
   useEffect(() => {
+    const isPng = path.toLowerCase().endsWith(".excalidraw.png");
     const handler = async (e: KeyboardEvent) => {
       const isSave =
         (e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === "s";
@@ -145,23 +163,40 @@ export default function ExcalidrawEditor({
       e.preventDefault();
       e.stopPropagation();
       try {
-        const svgEl = await exportToSvg({
-          elements: scene.elements,
-          // Tell Excalidraw to embed the scene JSON inside the SVG so
-          // the file round-trips through `loadFromBlob`.  This flag
-          // lives on `appState`, not the top-level export options.
-          appState: { ...scene.appState, exportEmbedScene: true },
-          files: scene.files,
-        });
-        const svg = new XMLSerializer().serializeToString(svgEl);
-        onSave(svg);
+        // `exportEmbedScene: true` writes the scene JSON into a
+        // metadata block (a `<metadata>` element for SVG, a `tEXt`
+        // chunk for PNG) so the file round-trips through
+        // `loadFromBlob`.  The flag lives on `appState`, not the
+        // top-level export options.
+        const exportAppState = {
+          ...scene.appState,
+          exportEmbedScene: true,
+        };
+        if (isPng) {
+          const blob = await exportToBlob({
+            elements: scene.elements,
+            appState: exportAppState,
+            files: scene.files,
+            mimeType: "image/png",
+          });
+          const bytes = new Uint8Array(await blob.arrayBuffer());
+          onSave(bytes);
+        } else {
+          const svgEl = await exportToSvg({
+            elements: scene.elements,
+            appState: exportAppState,
+            files: scene.files,
+          });
+          const svg = new XMLSerializer().serializeToString(svgEl);
+          onSave(svg);
+        }
       } catch (err) {
-        console.error("[excalidraw] exportToSvg failed", err);
+        console.error("[excalidraw] export failed", err);
       }
     };
     window.addEventListener("keydown", handler, true);
     return () => window.removeEventListener("keydown", handler, true);
-  }, [onSave]);
+  }, [onSave, path]);
 
   // ────────────────────────────────────────────────────────────────
   // Render

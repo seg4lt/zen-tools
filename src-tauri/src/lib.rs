@@ -199,6 +199,7 @@ pub fn run() {
             commands::markdown::markdown_search_files,
             commands::markdown::markdown_stop_content_search,
             commands::markdown::markdown_copy_svg_as_png,
+            commands::markdown::markdown_write_bytes,
             // database explorer
             commands::database::db_test_connection,
             commands::database::db_save_connection,
