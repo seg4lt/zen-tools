@@ -481,6 +481,88 @@ pub async fn markdown_rename(
     Ok(new_path.to_string_lossy().to_string())
 }
 
+/// Move a file or directory into a different parent directory, keeping
+/// its existing basename.  Used by drag-and-drop in the file tree.
+///
+/// Validates:
+///   - `source` exists.
+///   - `target_dir` exists and is a directory.
+///   - The destination doesn't already exist (no silent overwrite).
+///   - `target_dir` is not `source` itself, nor any descendant of it
+///     (would corrupt the tree by trying to move a folder into its
+///     own subtree).
+#[tauri::command]
+pub async fn markdown_move(
+    source: String,
+    target_dir: String,
+) -> AppResult<String> {
+    let src = PathBuf::from(&source);
+    let dst_parent = PathBuf::from(&target_dir);
+
+    if !src.exists() {
+        return Err(AppError::BadRequest(format!(
+            "source does not exist: {}",
+            src.display()
+        )));
+    }
+    if !dst_parent.exists() || !dst_parent.is_dir() {
+        return Err(AppError::BadRequest(format!(
+            "target directory is not a directory: {}",
+            dst_parent.display()
+        )));
+    }
+
+    // Canonicalize so we can compare paths without false-negatives from
+    // trailing slashes, `./` segments, or symlink differences.  The
+    // self-and-descendant check below relies on this.
+    let src_canon = src
+        .canonicalize()
+        .map_err(|e| AppError::Other(format!("canonicalize source: {e}")))?;
+    let dst_canon = dst_parent
+        .canonicalize()
+        .map_err(|e| AppError::Other(format!("canonicalize target: {e}")))?;
+
+    if dst_canon == src_canon {
+        return Err(AppError::BadRequest(
+            "cannot move a folder into itself".into(),
+        ));
+    }
+    if dst_canon.starts_with(&src_canon) {
+        return Err(AppError::BadRequest(
+            "cannot move a folder into one of its own descendants".into(),
+        ));
+    }
+
+    let name = src
+        .file_name()
+        .ok_or_else(|| AppError::Other("source has no basename".into()))?
+        .to_owned();
+    let new_path = dst_parent.join(&name);
+
+    // Same-parent check is a no-op move — return the existing path so
+    // the caller doesn't have to special-case it.
+    if let Some(parent) = src.parent() {
+        let parent_canon = parent
+            .canonicalize()
+            .map_err(|e| AppError::Other(format!("canonicalize parent: {e}")))?;
+        if parent_canon == dst_canon {
+            return Ok(src.to_string_lossy().to_string());
+        }
+    }
+
+    if new_path.exists() {
+        return Err(AppError::BadRequest(format!(
+            "`{}` already exists in the destination",
+            name.to_string_lossy()
+        )));
+    }
+
+    tokio::fs::rename(&src, &new_path)
+        .await
+        .map_err(|e| AppError::Other(format!("move: {e}")))?;
+    Ok(new_path.to_string_lossy().to_string())
+}
+
 /// Move a file or directory to the OS trash.  Uses the `trash` crate
 /// rather than `fs::remove_*` so the user can recover from a misclick
 /// — the same semantics as Finder's "Move to Trash".

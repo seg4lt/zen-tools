@@ -147,6 +147,12 @@ export const markdownTauri = {
   rename: (oldPath: string, newName: string) =>
     invoke<string>("markdown_rename", { oldPath, newName }),
 
+  /** Move a file or directory into a different parent directory,
+   *  preserving its basename.  Used by drag-and-drop in the file tree.
+   *  Returns the new absolute path. */
+  move: (source: string, targetDir: string) =>
+    invoke<string>("markdown_move", { source, targetDir }),
+
   /** Move to the OS trash (recoverable). */
   deleteToTrash: (path: string) =>
     invoke<void>("markdown_delete_to_trash", { path }),

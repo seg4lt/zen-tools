@@ -194,6 +194,7 @@ pub fn run() {
             commands::markdown::markdown_create_file,
             commands::markdown::markdown_create_dir,
             commands::markdown::markdown_rename,
+            commands::markdown::markdown_move,
             commands::markdown::markdown_delete_to_trash,
             commands::markdown::markdown_search_contents,
             commands::markdown::markdown_search_files,

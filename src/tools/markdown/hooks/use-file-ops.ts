@@ -65,6 +65,29 @@ export function useFileOps() {
     [dispatch, refresh],
   );
 
+  /**
+   * Move a file or directory into a different parent directory.
+   *
+   * `source` is the absolute path of the entry to move; `targetDir`
+   * is the absolute path of the destination folder.  Reuses the
+   * `renamedFile` reducer hook so any open tab whose path lives
+   * under `source` re-targets to the new location automatically.
+   */
+  const movePath = useCallback(
+    async (source: string, targetDir: string): Promise<string | null> => {
+      try {
+        const newPath = await markdownTauri.move(source, targetDir);
+        await refresh();
+        dispatch({ type: "renamedFile", oldPath: source, newPath });
+        return newPath;
+      } catch (err) {
+        console.error("[markdown] move failed", err);
+        return null;
+      }
+    },
+    [dispatch, refresh],
+  );
+
   const deletePath = useCallback(
     async (path: string): Promise<boolean> => {
       try {
@@ -88,5 +111,5 @@ export function useFileOps() {
     [dispatch, refresh, state.tabs],
   );
 
-  return { createFile, createDir, renamePath, deletePath };
+  return { createFile, createDir, renamePath, movePath, deletePath };
 }
