@@ -287,7 +287,10 @@ BEGIN
     SET NOCOUNT ON;
     IF @pct < 0 OR @pct > 100
     BEGIN
-        RAISERROR('pct must be between 0 and 100, got %.2f', 16, 1, @pct);
+        -- RAISERROR substitution params don't accept DECIMAL — cast to
+        -- NVARCHAR and pass as %s instead.
+        DECLARE @pct_str NVARCHAR(16) = CONVERT(NVARCHAR(16), @pct);
+        RAISERROR('pct must be between 0 and 100, got %s', 16, 1, @pct_str);
         RETURN;
     END
     UPDATE shop.products
@@ -413,7 +416,7 @@ CROSS JOIN (VALUES ('billing'), ('shipping')) AS k(kind);
 ;WITH order_seed AS (
     SELECT c.id AS customer_id,
            ROW_NUMBER() OVER (PARTITION BY c.id ORDER BY (SELECT NULL)) AS n,
-           ABS(CHECKSUM(NEWID())) AS r
+           (CHECKSUM(NEWID()) & 0x7FFFFFFF) AS r
     FROM shop.customers c
     CROSS JOIN (VALUES (1),(2),(3),(4),(5),(6)) AS s(n)
 )
@@ -433,27 +436,33 @@ GO
 INSERT INTO shop.order_items (order_id, product_id, quantity, unit_cents)
 SELECT o.id,
        (SELECT TOP 1 p.id FROM shop.products p ORDER BY NEWID()),
-       1 + ABS(CHECKSUM(NEWID())) % 3,
-       990 + ABS(CHECKSUM(NEWID())) % 50000
+       1 + (CHECKSUM(NEWID()) & 0x7FFFFFFF) % 3,
+       990 + (CHECKSUM(NEWID()) & 0x7FFFFFFF) % 50000
 FROM shop.orders o;
 GO
 
+-- NB: CHOOSE(expr, …) expands to CASE WHEN expr=1 … WHEN expr=2 …, so
+-- when expr contains NEWID() it is re-evaluated per branch and often
+-- matches none → NULL. Materialize the random index once per row via
+-- CROSS APPLY (VALUES …) so NEWID() is invoked exactly once.
 INSERT INTO shop.shipments (order_id, carrier, tracking_number, shipped_at, delivered_at)
 SELECT o.id,
-       CHOOSE(ABS(CHECKSUM(NEWID())) % 4 + 1, 'ups','fedex','dhl','usps'),
+       CHOOSE(r.idx, 'ups','fedex','dhl','usps'),
        'TRK-' + RIGHT('00000000' + CAST(o.id AS NVARCHAR(8)), 8),
        DATEADD(DAY, 2, o.placed_at),
        CASE WHEN o.status = 'delivered' THEN DATEADD(DAY, 5, o.placed_at) ELSE NULL END
 FROM shop.orders o
+CROSS APPLY (VALUES ((CHECKSUM(NEWID()) & 0x7FFFFFFF) % 4 + 1)) AS r(idx)
 WHERE o.status IN ('shipped','delivered');
 
 INSERT INTO shop.payments (order_id, method, amount_cents, captured_at, refunded)
 SELECT o.id,
-       CHOOSE(ABS(CHECKSUM(NEWID())) % 5 + 1, 'card','paypal','bank','gift_card','crypto'),
+       CHOOSE(r.idx, 'card','paypal','bank','gift_card','crypto'),
        o.total_cents,
        DATEADD(MINUTE, 5, o.placed_at),
        CASE WHEN o.status = 'refunded' THEN 1 ELSE 0 END
 FROM shop.orders o
+CROSS APPLY (VALUES ((CHECKSUM(NEWID()) & 0x7FFFFFFF) % 5 + 1)) AS r(idx)
 WHERE o.status <> 'pending';
 GO
 
@@ -488,22 +497,32 @@ GO
     SELECT TOP (200000) ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS n
     FROM sys.all_objects a CROSS JOIN sys.all_objects b
 )
+-- Materialize each random pick once per row via CROSS APPLY so CHOOSE
+-- doesn't re-evaluate NEWID() per CASE branch (which produces NULL).
 INSERT INTO metrics.events (happened, actor, customer_id, action, target, duration_ms, success)
 SELECT
-    DATEADD(MINUTE, -CAST(ABS(CHECKSUM(NEWID())) % (60 * 24 * 14) AS INT), SYSUTCDATETIME()),
-    CHOOSE(ABS(CHECKSUM(NEWID())) % 8 + 1,
+    DATEADD(MINUTE, -r.minutes_back, SYSUTCDATETIME()),
+    CHOOSE(r.actor_idx,
            N'ada', N'grace', N'alan', N'linus', N'barbara', N'don', N'claude', N'john'),
-    CASE WHEN ABS(CHECKSUM(NEWID())) % 100 < 60
-         THEN ABS(CHECKSUM(NEWID())) % 8 + 1
-         ELSE NULL END,
-    CHOOSE(ABS(CHECKSUM(NEWID())) % 8 + 1,
+    CASE WHEN r.cust_present < 60 THEN r.cust_id ELSE NULL END,
+    CHOOSE(r.action_idx,
            N'login', N'search', N'purchase', N'logout', N'refund', N'signup', N'view', N'click'),
-    CASE WHEN ABS(CHECKSUM(NEWID())) % 100 < 40
+    CASE WHEN r.target_present < 40
          THEN N'/api/' + LOWER(CONVERT(NVARCHAR(32), HASHBYTES('MD5', CAST(NEWID() AS NVARCHAR(36))), 2))
          ELSE NULL END,
-    20 + ABS(CHECKSUM(NEWID())) % 800,
-    CASE WHEN ABS(CHECKSUM(NEWID())) % 100 < 95 THEN 1 ELSE 0 END
-FROM nums;
+    20 + r.dur,
+    CASE WHEN r.success_roll < 95 THEN 1 ELSE 0 END
+FROM nums
+CROSS APPLY (VALUES (
+    (CHECKSUM(NEWID()) & 0x7FFFFFFF) % (60 * 24 * 14),
+    (CHECKSUM(NEWID()) & 0x7FFFFFFF) % 8 + 1,
+    (CHECKSUM(NEWID()) & 0x7FFFFFFF) % 100,
+    (CHECKSUM(NEWID()) & 0x7FFFFFFF) % 8 + 1,
+    (CHECKSUM(NEWID()) & 0x7FFFFFFF) % 8 + 1,
+    (CHECKSUM(NEWID()) & 0x7FFFFFFF) % 100,
+    (CHECKSUM(NEWID()) & 0x7FFFFFFF) % 800,
+    (CHECKSUM(NEWID()) & 0x7FFFFFFF) % 100
+)) AS r(minutes_back, actor_idx, cust_present, cust_id, action_idx, target_present, dur, success_roll);
 GO
 
 CREATE INDEX events_happened_idx
@@ -589,60 +608,90 @@ INSERT INTO metrics.wide_records (
     mem_mb, queue_depth, retry_count, success, error_kind, error_message,
     tag_a, tag_b, tag_c, cost_cents, note
 )
+-- Same CHOOSE-re-evaluation hazard as above: materialize every random
+-- pick once per row via CROSS APPLY (VALUES …) before referencing it.
 SELECT
-    DATEADD(MINUTE, -CAST(ABS(CHECKSUM(NEWID())) % (60 * 24 * 7) AS INT), SYSUTCDATETIME()),
-    CHOOSE(ABS(CHECKSUM(NEWID())) % 5 + 1,
-           N'api', N'worker', N'cron', N'sidecar', N'batch'),
-    CHOOSE(ABS(CHECKSUM(NEWID())) % 3 + 1, N'prod', N'staging', N'dev'),
-    CHOOSE(ABS(CHECKSUM(NEWID())) % 6 + 1,
-           N'orders', N'catalog', N'billing', N'search', N'auth', N'notifications'),
-    CHOOSE(ABS(CHECKSUM(NEWID())) % 4 + 1,
-           N'us-east-1', N'us-west-2', N'eu-west-1', N'ap-south-1'),
-    N'host-' + RIGHT('00' + CAST(ABS(CHECKSUM(NEWID())) % 99 + 1 AS NVARCHAR(2)), 2),
-    ABS(CHECKSUM(NEWID())) % 30000 + 1000,
-    ABS(CHECKSUM(NEWID())) % 32 + 1,
-    N'user_' + CAST(ABS(CHECKSUM(NEWID())) % 5000 + 1 AS NVARCHAR(8)),
+    DATEADD(MINUTE, -r.minutes_back, SYSUTCDATETIME()),
+    CHOOSE(r.source_idx,    N'api', N'worker', N'cron', N'sidecar', N'batch'),
+    CHOOSE(r.env_idx,       N'prod', N'staging', N'dev'),
+    CHOOSE(r.service_idx,   N'orders', N'catalog', N'billing', N'search', N'auth', N'notifications'),
+    CHOOSE(r.region_idx,    N'us-east-1', N'us-west-2', N'eu-west-1', N'ap-south-1'),
+    N'host-' + RIGHT('00' + CAST(r.host_n AS NVARCHAR(2)), 2),
+    r.pid,
+    r.thread_id,
+    N'user_' + CAST(r.user_n AS NVARCHAR(8)),
     NEWID(),
     NEWID(),
     LOWER(CONVERT(NVARCHAR(32), HASHBYTES('MD5', CAST(NEWID() AS NVARCHAR(36))), 2)),
     LOWER(CONVERT(NVARCHAR(16), CAST(NEWID() AS BINARY(8)), 2)),
-    CHOOSE(ABS(CHECKSUM(NEWID())) % 5 + 1,
-           N'GET', N'POST', N'PUT', N'DELETE', N'PATCH'),
-    CHOOSE(ABS(CHECKSUM(NEWID())) % 14 + 1,
-           200, 200, 200, 201, 204, 301, 304, 400, 401, 403, 404, 500, 502, 503),
-    CHOOSE(ABS(CHECKSUM(NEWID())) % 9 + 1,
+    CHOOSE(r.method_idx,    N'GET', N'POST', N'PUT', N'DELETE', N'PATCH'),
+    CHOOSE(r.status_idx,    200, 200, 200, 201, 204, 301, 304, 400, 401, 403, 404, 500, 502, 503),
+    CHOOSE(r.path_idx,
            N'/api/orders', N'/api/orders/:id', N'/api/users/me',
            N'/api/products', N'/api/products/:sku', N'/api/checkout',
            N'/api/billing/invoices', N'/healthz', N'/api/search'),
-    ABS(CHECKSUM(NEWID())) % 1500 + 5,
-    CAST(ABS(CHECKSUM(NEWID())) % 65536 AS BIGINT),
-    CAST(ABS(CHECKSUM(NEWID())) % 524288 AS BIGINT),
-    CAST(ABS(CHECKSUM(NEWID())) % 10000 AS FLOAT) / 100.0,
-    CAST(ABS(CHECKSUM(NEWID())) % 40960 AS FLOAT) / 10.0,
-    ABS(CHECKSUM(NEWID())) % 64,
-    ABS(CHECKSUM(NEWID())) % 4,
-    CASE WHEN ABS(CHECKSUM(NEWID())) % 100 < 85 THEN 1 ELSE 0 END,
-    CASE WHEN ABS(CHECKSUM(NEWID())) % 100 < 15
-         THEN CHOOSE(ABS(CHECKSUM(NEWID())) % 5 + 1,
+    r.duration_ms,
+    CAST(r.bytes_in AS BIGINT),
+    CAST(r.bytes_out AS BIGINT),
+    CAST(r.cpu AS FLOAT) / 100.0,
+    CAST(r.mem AS FLOAT) / 10.0,
+    r.queue_depth,
+    r.retry_count,
+    CASE WHEN r.success_roll < 85 THEN 1 ELSE 0 END,
+    CASE WHEN r.err_present < 15
+         THEN CHOOSE(r.err_idx,
                      N'Timeout', N'UpstreamError', N'ValidationError',
                      N'NotFound', N'RateLimited')
          ELSE NULL END,
-    CASE WHEN ABS(CHECKSUM(NEWID())) % 100 < 15
+    CASE WHEN r.errmsg_present < 15
          THEN N'unhandled exception at ' +
               LOWER(CONVERT(NVARCHAR(32), HASHBYTES('MD5', CAST(NEWID() AS NVARCHAR(36))), 2))
          ELSE NULL END,
-    N'tier:' + CHOOSE(ABS(CHECKSUM(NEWID())) % 3 + 1,
-                      N'free', N'pro', N'enterprise'),
-    N'team:' + CHOOSE(ABS(CHECKSUM(NEWID())) % 4 + 1,
-                      N'alpha', N'beta', N'gamma', N'delta'),
-    N'feature:' + CHOOSE(ABS(CHECKSUM(NEWID())) % 4 + 1,
-                         N'v1', N'v2', N'beta', N'dark'),
-    ABS(CHECKSUM(NEWID())) % 5000,
-    CASE WHEN ABS(CHECKSUM(NEWID())) % 100 < 30
+    N'tier:'    + CHOOSE(r.tier_idx,    N'free', N'pro', N'enterprise'),
+    N'team:'    + CHOOSE(r.team_idx,    N'alpha', N'beta', N'gamma', N'delta'),
+    N'feature:' + CHOOSE(r.feature_idx, N'v1', N'v2', N'beta', N'dark'),
+    r.cost_cents,
+    CASE WHEN r.note_present < 30
          THEN N'arbitrary descriptive note ' +
               LOWER(CONVERT(NVARCHAR(32), HASHBYTES('MD5', CAST(NEWID() AS NVARCHAR(36))), 2))
          ELSE NULL END
-FROM nums;
+FROM nums
+CROSS APPLY (VALUES (
+    (CHECKSUM(NEWID()) & 0x7FFFFFFF) % (60 * 24 * 7),
+    (CHECKSUM(NEWID()) & 0x7FFFFFFF) % 5  + 1,
+    (CHECKSUM(NEWID()) & 0x7FFFFFFF) % 3  + 1,
+    (CHECKSUM(NEWID()) & 0x7FFFFFFF) % 6  + 1,
+    (CHECKSUM(NEWID()) & 0x7FFFFFFF) % 4  + 1,
+    (CHECKSUM(NEWID()) & 0x7FFFFFFF) % 99 + 1,
+    (CHECKSUM(NEWID()) & 0x7FFFFFFF) % 30000 + 1000,
+    (CHECKSUM(NEWID()) & 0x7FFFFFFF) % 32 + 1,
+    (CHECKSUM(NEWID()) & 0x7FFFFFFF) % 5000 + 1,
+    (CHECKSUM(NEWID()) & 0x7FFFFFFF) % 5  + 1,
+    (CHECKSUM(NEWID()) & 0x7FFFFFFF) % 14 + 1,
+    (CHECKSUM(NEWID()) & 0x7FFFFFFF) % 9  + 1,
+    (CHECKSUM(NEWID()) & 0x7FFFFFFF) % 1500 + 5,
+    (CHECKSUM(NEWID()) & 0x7FFFFFFF) % 65536,
+    (CHECKSUM(NEWID()) & 0x7FFFFFFF) % 524288,
+    (CHECKSUM(NEWID()) & 0x7FFFFFFF) % 10000,
+    (CHECKSUM(NEWID()) & 0x7FFFFFFF) % 40960,
+    (CHECKSUM(NEWID()) & 0x7FFFFFFF) % 64,
+    (CHECKSUM(NEWID()) & 0x7FFFFFFF) % 4,
+    (CHECKSUM(NEWID()) & 0x7FFFFFFF) % 100,
+    (CHECKSUM(NEWID()) & 0x7FFFFFFF) % 100,
+    (CHECKSUM(NEWID()) & 0x7FFFFFFF) % 5  + 1,
+    (CHECKSUM(NEWID()) & 0x7FFFFFFF) % 100,
+    (CHECKSUM(NEWID()) & 0x7FFFFFFF) % 3  + 1,
+    (CHECKSUM(NEWID()) & 0x7FFFFFFF) % 4  + 1,
+    (CHECKSUM(NEWID()) & 0x7FFFFFFF) % 4  + 1,
+    (CHECKSUM(NEWID()) & 0x7FFFFFFF) % 5000,
+    (CHECKSUM(NEWID()) & 0x7FFFFFFF) % 100
+)) AS r(
+    minutes_back, source_idx, env_idx, service_idx, region_idx, host_n,
+    pid, thread_id, user_n, method_idx, status_idx, path_idx,
+    duration_ms, bytes_in, bytes_out, cpu, mem, queue_depth, retry_count,
+    success_roll, err_present, err_idx, errmsg_present,
+    tier_idx, team_idx, feature_idx, cost_cents, note_present
+);
 GO
 
 -- Refresh stats so the planner has accurate selectivity for query

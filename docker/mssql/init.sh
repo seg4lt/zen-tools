@@ -41,6 +41,11 @@ done
 echo "init: applying /work/01-init.sql against mssql:1433…"
 
 # -C trusts the self-signed cert that the dev image ships with.
-"$SQLCMD" -C -S mssql,1433 -U sa -P "$MSSQL_SA_PASSWORD" -b -i /work/01-init.sql
+# -I enables SET QUOTED_IDENTIFIER ON, which sqlcmd otherwise leaves OFF.
+# Required for filtered indexes (CREATE INDEX … WHERE …), indexed views,
+# computed-column indexes, etc. — the seed uses several. Without it the
+# very first filtered index aborts the run and nothing past shop.customers
+# gets created.
+"$SQLCMD" -C -I -S mssql,1433 -U sa -P "$MSSQL_SA_PASSWORD" -b -i /work/01-init.sql
 
 echo "init: done"
