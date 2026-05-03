@@ -214,17 +214,41 @@ pub fn run() {
                 tracing::info!("PRMaster disabled in preferences; skipping tray/poll/hotkey");
             }
 
-            // Background-agent lifecycle: when the user closes the main
-            // window we keep the process alive (so polling continues) and
-            // drop the Dock icon by switching to `Accessory` activation
-            // policy. Re-opening (via tray menu / hotkey / `prmaster_open_full_window`
-            // command) flips it back to `Regular`.
+            // Background-agent lifecycle: when the user closes the
+            // main window we *can* keep the process alive so PRMaster
+            // polling continues. But that's only a sane default if
+            // PRMaster is actually enabled — if it's disabled there's
+            // no tray, no hotkey, and (depending on macOS version) no
+            // Dock icon either, so the user is locked out and has to
+            // force-quit. So: only hide-to-Accessory when PRMaster is
+            // enabled; otherwise let the close go through and exit
+            // the app normally.
+            //
+            // Re-opening from the hidden state happens via the tray
+            // menu / hotkey / `prmaster_open_full_window` command,
+            // and via the new `RunEvent::Reopen` handler below
+            // (Dock-icon click).
             #[cfg(target_os = "macos")]
             {
                 let app_handle = app.handle().clone();
                 if let Some(main) = app.get_webview_window("main") {
                     main.on_window_event(move |event| {
                         if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                            let prmaster_enabled =
+                                commands::preferences::load_preferences(&app_handle)
+                                    .map(|p| {
+                                        !p.disabled_tools.iter().any(|id| id == "prmaster")
+                                    })
+                                    .unwrap_or(true);
+                            if !prmaster_enabled {
+                                // Nothing keeping the app alive — let
+                                // the close happen, which exits the
+                                // process. (We don't call exit(0) here
+                                // explicitly: with no `prevent_close`,
+                                // Tauri fires `RunEvent::ExitRequested`
+                                // and the app shuts down cleanly.)
+                                return;
+                            }
                             api.prevent_close();
                             if let Some(win) = app_handle.get_webview_window("main") {
                                 let _ = win.hide();
@@ -381,6 +405,28 @@ pub fn run() {
             commands::prmaster::prmaster_list_repos,
             commands::prmaster::prmaster_fetch_repos,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            // macOS Dock-icon click after the user closed the main
+            // window. Without this handler the click is a no-op:
+            // CloseRequested hid the window and dropped the Dock
+            // icon's activation to `Accessory`, so AppKit doesn't
+            // pick the click up as "open the main window again". We
+            // restore `Regular` policy + show + focus the main
+            // window. Mirrors flowstate's `RunEvent::Reopen` recipe.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = event {
+                let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
+                if let Some(win) = app.get_webview_window("main") {
+                    let _ = win.unminimize();
+                    let _ = win.show();
+                    let _ = win.set_focus();
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                let _ = (app, event);
+            }
+        });
 }
