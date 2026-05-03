@@ -171,11 +171,17 @@ fn classify_markdown_file(name: &str) -> Option<&'static str> {
 fn collect_markdown(dir: &Path) -> Vec<MarkdownFileItem> {
     let cfg = zen_fs::WalkConfig {
         include_file: &|name| classify_markdown_file(name).is_some(),
-        // Only emit directories that hold at least one markdown / image
-        // descendant — keeps the tree quiet for unrelated folders, but
-        // still surfaces `pasted/` and any siblings that exist purely
-        // for attachments.
-        include_dir: &|p| zen_fs::dir_contains(p, |n| classify_markdown_file(n).is_some()),
+        // Emit every (non-hidden, non-pruned) directory regardless of
+        // whether its subtree contains markdown / images. The
+        // previous "subtree must contain a matching file" gate hid
+        // freshly-created empty folders from the sidebar, which is
+        // confusing — the user just made the folder, but it
+        // disappears until they drop a `.md` in it. `walk_inner`
+        // still skips dotfiles + `DEFAULT_PRUNED_DIRS` (`.git`,
+        // `node_modules`, …) so the tree doesn't fill up with build
+        // junk; we only stopped hiding genuinely user-meaningful
+        // empties.
+        include_dir: &|_p| true,
         ..Default::default()
     };
     zen_fs::walk_tree(dir, &cfg)
