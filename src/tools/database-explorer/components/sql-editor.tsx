@@ -27,8 +27,14 @@ import {
   useState,
   type Ref,
 } from "react";
-import { Compartment, type Extension } from "@codemirror/state";
-import { EditorView } from "@codemirror/view";
+import { Compartment, RangeSetBuilder, type Extension } from "@codemirror/state";
+import {
+  Decoration,
+  EditorView,
+  ViewPlugin,
+  type DecorationSet,
+  type ViewUpdate,
+} from "@codemirror/view";
 import {
   sql,
   PostgreSQL,
@@ -75,6 +81,7 @@ import {
   type AliasMap,
 } from "../lib/sql-references";
 import { statementAtCursor } from "../lib/sql-statements";
+import { extractPlaceholders } from "../lib/sql-placeholders";
 import { SqlActionsPopup, type SqlAction } from "./sql-actions-popup";
 
 export type SqlEditorHandle = CodeEditorHandle;
@@ -257,6 +264,18 @@ export function SqlEditor({
         // `buildSqlExtension`. Single source of truth for the SQL
         // language layer + completion config; reconfigured atomically.
         sqlCompartment.of(buildSqlExtension(value)),
+        // `:name` placeholder italicisation — purely visual hint
+        // that running the query will open the placeholder prompt
+        // dialog. Re-runs on every doc change; the helper skips
+        // string literals + comments so `'time :12'` stays normal.
+        placeholderDecorationPlugin,
+        EditorView.theme({
+          ".cm-zen-sql-placeholder": {
+            fontStyle: "italic",
+            color: "var(--color-primary, currentColor)",
+            opacity: "0.85",
+          },
+        }),
         EditorView.updateListener.of((update) => {
           if (!update.docChanged) {
             return;
@@ -559,6 +578,49 @@ export function SqlEditor({
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────
+
+/**
+ * CodeMirror ViewPlugin that paints every `:name` placeholder with a
+ * `cm-zen-sql-placeholder` mark decoration. Runs on mount and on
+ * every doc change.
+ *
+ * The decoration is purely cosmetic — substitution still happens
+ * upstream in `DatabaseExplorerView` at run time. We do this here so
+ * the user can see at a glance which tokens will trigger the prompt
+ * dialog when they hit ⌘↵.
+ *
+ * Cost is bounded by the `extractPlaceholders` walker (linear in doc
+ * size, no regex backtracking). For very large buffers (>100k chars)
+ * this could be moved behind a viewport-only scan, but the current
+ * SQL files are tiny relative to the typical Markdown / code buffers
+ * the rest of the app handles, so the simple full-doc scan is fine.
+ */
+const placeholderMark = Decoration.mark({ class: "cm-zen-sql-placeholder" });
+
+function buildPlaceholderDecorations(view: EditorView): DecorationSet {
+  const builder = new RangeSetBuilder<Decoration>();
+  const doc = view.state.doc.toString();
+  for (const occ of extractPlaceholders(doc)) {
+    builder.add(occ.from, occ.to, placeholderMark);
+  }
+  return builder.finish();
+}
+
+const placeholderDecorationPlugin = ViewPlugin.fromClass(
+  class {
+    decorations: DecorationSet;
+    constructor(view: EditorView) {
+      this.decorations = buildPlaceholderDecorations(view);
+    }
+    update(update: ViewUpdate) {
+      if (update.docChanged) {
+        this.decorations = buildPlaceholderDecorations(update.view);
+      }
+    }
+  },
+  { decorations: (v) => v.decorations },
+);
+
 
 /**
  * Build the `@codemirror/lang-sql` config from:

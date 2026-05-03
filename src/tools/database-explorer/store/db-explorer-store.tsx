@@ -90,6 +90,19 @@ export interface DbExplorerState {
    */
   runModesByConnection: Record<string, { plan: boolean; locks: boolean }>;
   /**
+   * Per-connection memory of last `:name` placeholder values entered
+   * by the user in the run-time prompt dialog. Session-only; cleared
+   * when the app closes (no Tauri persistence). Drives the
+   * pre-filled defaults when the same query is re-run.
+   *
+   * Shape: `connectionId → { placeholderName → lastValue }`. The
+   * inner record is shallow-merged on each submit so values for
+   * placeholders that aren't in the current query survive (the user
+   * may switch between queries that share some names but not
+   * others).
+   */
+  placeholderValuesByConnection: Record<string, Record<string, string>>;
+  /**
    * Per-connection toggle for the EXPLAIN-with-actuals checkbox in
    * the toolbar.
    *
@@ -222,6 +235,12 @@ type Action =
       id: string;
       modes: { plan: boolean; locks: boolean };
     }
+  | {
+      type: "set-placeholder-values";
+      id: string;
+      /** Shallow-merged into the per-connection record. */
+      values: Record<string, string>;
+    }
   | { type: "set-active-result-index"; id: string; index: number }
   | { type: "close-result-tab"; id: string; index: number }
   | { type: "set-error"; id: string; error: string | null }
@@ -269,6 +288,7 @@ const initial: DbExplorerState = {
   autoExplainByConnection: {},
   analyzeOnExplainByConnection: {},
   runModesByConnection: {},
+  placeholderValuesByConnection: {},
   status: {},
   errors: {},
   running: {},
@@ -394,6 +414,17 @@ function reducer(state: DbExplorerState, action: Action): DbExplorerState {
           [action.id]: action.modes,
         },
       };
+
+    case "set-placeholder-values": {
+      const prev = state.placeholderValuesByConnection[action.id] ?? {};
+      return {
+        ...state,
+        placeholderValuesByConnection: {
+          ...state.placeholderValuesByConnection,
+          [action.id]: { ...prev, ...action.values },
+        },
+      };
+    }
 
     case "set-active-result-index":
       return {

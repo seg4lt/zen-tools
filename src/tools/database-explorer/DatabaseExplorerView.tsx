@@ -47,12 +47,18 @@ import {
 import { SchemaProgressIndicator } from "./components/schema-progress-indicator";
 import { RunToolbar, type RunModes } from "./components/run-toolbar";
 import { ResultsPane } from "./components/results-pane";
+import { PlaceholderDialog } from "./components/placeholder-dialog";
 import { useDbExplorerStore } from "./store/db-explorer-store";
 import { useDbQuery } from "./hooks/use-db-query";
 import { useSqlProjectsBootstrap } from "./hooks/use-sql-workspace";
 import { dbTauri, sqlWorkspaceTauri, type SqlFileTreeItem } from "./lib/tauri";
 import { formatError } from "./lib/format-error";
 import { splitStatements, statementAtCursor } from "./lib/sql-statements";
+import {
+  extractPlaceholders,
+  substitutePlaceholders,
+  uniqueNames,
+} from "./lib/sql-placeholders";
 import { ensureTablesForSql } from "./lib/schema-cache";
 import { useAutoSave } from "@/hooks/use-auto-save";
 import { useShortcut } from "@zen-tools/keyboard";
@@ -79,6 +85,17 @@ export function DatabaseExplorerView() {
   // toggle. Reset when the user switches files (so a fresh file
   // doesn't open in a hidden editor).
   const [resultsMaximized, setResultsMaximized] = useState(false);
+
+  // Active `:name` placeholder prompt. `null` means the dialog is
+  // closed. The promise resolvers are stashed here so a single
+  // `resolvePlaceholders(sql)` call can `await` the user's answer
+  // and route the substituted SQL back through any of the three run
+  // paths (Run, Run all, Run with…).
+  const [placeholderPrompt, setPlaceholderPrompt] = useState<{
+    names: string[];
+    seed: Record<string, string>;
+    resolve: (values: Record<string, string> | null) => void;
+  } | null>(null);
 
   // Drag-resizable panel sizes (local-state only, not persisted —
   // matches the http-runner pattern). Defaults mirror the previous
@@ -410,6 +427,72 @@ export function DatabaseExplorerView() {
   );
 
   /**
+   * If `sqlText` contains `:name` placeholders, open the prompt
+   * dialog and resolve once the user submits or cancels. The
+   * returned promise yields the substituted SQL (verbatim
+   * substitution, no quoting) or `null` when the user cancels.
+   *
+   * Zero-overhead fast path: queries with no placeholders skip the
+   * dialog entirely and resolve synchronously to the original SQL.
+   *
+   * Submitted values are persisted to the connection's session
+   * memory (`placeholderValuesByConnection`) so the next run of the
+   * same query opens the dialog with everything pre-filled.
+   */
+  const resolvePlaceholders = useCallback(
+    (sqlText: string): Promise<string | null> => {
+      if (!activeId) return Promise.resolve(sqlText);
+      const occurrences = extractPlaceholders(sqlText);
+      if (occurrences.length === 0) return Promise.resolve(sqlText);
+
+      const names = uniqueNames(occurrences);
+      const remembered =
+        state.placeholderValuesByConnection[activeId] ?? {};
+      // Seed with whatever we remember; missing names start empty.
+      // Object spread is safe here (the dialog doesn't mutate).
+      const seed: Record<string, string> = {};
+      for (const name of names) {
+        seed[name] = remembered[name] ?? "";
+      }
+
+      return new Promise<string | null>((resolve) => {
+        setPlaceholderPrompt({
+          names,
+          seed,
+          resolve: (values) => {
+            // Close the dialog regardless of submit/cancel.
+            setPlaceholderPrompt(null);
+            if (!values) {
+              resolve(null);
+              return;
+            }
+            // Persist the user's answers for next time.
+            dispatch({
+              type: "set-placeholder-values",
+              id: activeId,
+              values,
+            });
+            try {
+              resolve(substitutePlaceholders(sqlText, values));
+            } catch (err) {
+              // Should be unreachable — the dialog always returns
+              // an entry for every name in `names`. If it ever
+              // happens, surface as a normal toolbar error.
+              dispatch({
+                type: "set-error",
+                id: activeId,
+                error: formatError(err),
+              });
+              resolve(null);
+            }
+          },
+        });
+      });
+    },
+    [activeId, state.placeholderValuesByConnection, dispatch],
+  );
+
+  /**
    * Cursor / selection target shared by `handleRun` and
    * `handleRunWithPlan`. Returns the SQL the user actually wants to
    * run + a tag of how we resolved it. Falls back to the
@@ -432,20 +515,27 @@ export function DatabaseExplorerView() {
     if (!activeId) return;
     const target = resolveTarget();
     if (!target) return;
-    ensureCacheForSql(target.sql);
+    // Prompt for `:name` placeholders BEFORE the cache prefetch /
+    // run. Cancelling out of the dialog returns `null` and aborts
+    // — the user gets no cache thrash and no run from a half-typed
+    // query. The substituted SQL is what flows through every
+    // subsequent code path (data, auto-EXPLAIN piggyback, log).
+    const finalSql = await resolvePlaceholders(target.sql);
+    if (finalSql === null) return;
+    ensureCacheForSql(finalSql);
     // **Awaited** so the auto-EXPLAIN piggyback runs strictly after
     // the data result is already in place. Without this chain a
     // fast EXPLAIN could resolve before the slow data query and
     // get clobbered by the data's `set-results`.
-    await runQuery(activeId, target.sql, ctxOpts);
-    if (autoExplain && isAnalyzableSql(target.sql)) {
+    await runQuery(activeId, finalSql, ctxOpts);
+    if (autoExplain && isAnalyzableSql(finalSql)) {
       // Plan-only on the piggyback path: we just executed the user's
       // SQL via `runQuery`, doing it again with ANALYZE for a plan
       // is double-work and (worse) double-side-effects on DML.
       // `append-silent` so a flaky EXPLAIN doesn't clobber a good
       // data tab with a scary error — auto-EXPLAIN is a sticky
       // toggle, the user didn't ask for *this* particular run.
-      void captureExplain(target.sql, "append-silent", false);
+      void captureExplain(finalSql, "append-silent", false);
     }
   }, [
     activeId,
@@ -456,6 +546,7 @@ export function DatabaseExplorerView() {
     captureExplain,
     isAnalyzableSql,
     resolveTarget,
+    resolvePlaceholders,
   ]);
 
   /** Explicit "run every statement in the buffer". Auto-EXPLAIN is
@@ -463,15 +554,19 @@ export function DatabaseExplorerView() {
    * multi-statement input, and DDL among the statements would
    * surface a confusing error. The user can still click "Run with
    * plan" on a single statement after Run All. */
-  const handleRunAll = useCallback(() => {
+  const handleRunAll = useCallback(async () => {
     if (!activeId) return;
     const editor = editorRef.current;
     if (!editor) return;
     const buffer = editor.getValue();
     if (buffer.trim().length === 0) return;
-    ensureCacheForSql(buffer);
-    runQuery(activeId, buffer, ctxOpts);
-  }, [activeId, runQuery, ctxOpts, ensureCacheForSql]);
+    // The full buffer may contain placeholders too — prompt once
+    // for the union before running the whole batch.
+    const finalSql = await resolvePlaceholders(buffer);
+    if (finalSql === null) return;
+    ensureCacheForSql(finalSql);
+    runQuery(activeId, finalSql, ctxOpts);
+  }, [activeId, runQuery, ctxOpts, ensureCacheForSql, resolvePlaceholders]);
 
   /**
    * Explicit "Run with plan" — drives the perf visualizer. Uses the
@@ -551,7 +646,13 @@ export function DatabaseExplorerView() {
       if (!activeId) return;
       const target = resolveTarget();
       if (!target) return;
-      ensureCacheForSql(target.sql);
+      // Single dialog covers the whole "Run with…" flow — both the
+      // data path and the EXPLAIN piggyback receive the same
+      // substituted SQL, so the user is prompted once even when
+      // both Plan and Locks are checked.
+      const finalSql = await resolvePlaceholders(target.sql);
+      if (finalSql === null) return;
+      ensureCacheForSql(finalSql);
 
       const wantsData = modes.locks; // need data tab to host the Locks sub-tab
       const wantsPlanOnly = modes.plan && !modes.locks;
@@ -559,7 +660,7 @@ export function DatabaseExplorerView() {
       if (wantsPlanOnly) {
         // Plan with no data side — replace the result set with the
         // plan tab. Mirrors the original "Run with plan" path.
-        void captureExplain(target.sql, "replace", modes.actuals);
+        void captureExplain(finalSql, "replace", modes.actuals);
         return;
       }
 
@@ -567,7 +668,7 @@ export function DatabaseExplorerView() {
         // Run the query for data (with optional lock telemetry),
         // then if the user also wants a plan, fire the piggyback
         // and append it as a sibling tab.
-        await runQuery(activeId, target.sql, {
+        await runQuery(activeId, finalSql, {
           ...ctxOpts,
           captureLocks: modes.locks,
         });
@@ -593,7 +694,7 @@ export function DatabaseExplorerView() {
           //     control statements), skip Plan with a soft
           //     toolbar note — running EXPLAIN would only
           //     surface a syntax error.
-          const planTarget = pickPlanTarget(target.sql);
+          const planTarget = pickPlanTarget(finalSql);
           if (planTarget) {
             void captureExplain(planTarget, "append-explicit", modes.actuals);
           } else {
@@ -613,6 +714,7 @@ export function DatabaseExplorerView() {
       ctxOpts,
       ensureCacheForSql,
       resolveTarget,
+      resolvePlaceholders,
       captureExplain,
       dispatch,
     ],
@@ -847,6 +949,25 @@ export function DatabaseExplorerView() {
       )}
 
       <ConnectionForm />
+
+      {/* `:name` placeholder prompt. Mounted at the layout root so
+          it overlays the entire view (including the right rail) and
+          isn't clipped by any of the column-level `overflow-hidden`
+          containers above. The dialog is fully controlled — its
+          presence is gated on `placeholderPrompt`, and submit /
+          cancel funnel back through the resolver passed in. */}
+      <PlaceholderDialog
+        prompt={
+          placeholderPrompt
+            ? {
+                names: placeholderPrompt.names,
+                seed: placeholderPrompt.seed,
+              }
+            : null
+        }
+        onSubmit={(values) => placeholderPrompt?.resolve(values)}
+        onCancel={() => placeholderPrompt?.resolve(null)}
+      />
     </div>
   );
 }
