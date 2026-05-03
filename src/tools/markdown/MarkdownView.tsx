@@ -7,12 +7,29 @@
  * store's `currentFile.path` changes.
  */
 
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { Keyboard, Loader2, PanelLeftOpen, Save } from "lucide-react";
 import { Button } from "@zen-tools/ui";
 import { DragHandle } from "@/components/drag-handle";
 import { useVimMode } from "@/hooks/use-vim-mode";
 import { cn } from "@zen-tools/ui";
+import {
+  SplitLayout,
+  leafIds,
+  useJumpList,
+  useSplitWorkspace,
+  useWorkspaceVim,
+  type JumpEntry,
+  type WorkspaceContext,
+} from "@zen-tools/editor";
 import { VaultSidebar } from "./components/vault-sidebar";
 import { SearchPalette } from "./components/search-palette";
 import { EmptyState } from "./components/empty-state";
@@ -27,7 +44,7 @@ import {
 const ExcalidrawEditor = lazy(
   () => import("./components/excalidraw-editor"),
 );
-import { activeTab, useMarkdownStore } from "./store/markdown-store";
+import { useMarkdownStore, type TabState } from "./store/markdown-store";
 import { useOpenFile } from "./hooks/use-open-file";
 import { useAutoSave } from "@/hooks/use-auto-save";
 import { markdownTauri } from "./lib/tauri";
@@ -44,56 +61,129 @@ export function MarkdownView() {
   const { state, dispatch } = useMarkdownStore();
   const { openFile, saveCurrent, resolveWikilink } = useOpenFile();
   const { addVault, refresh: refreshVaults } = useVaults();
-  const editorRef = useRef<MarkdownEditorHandle | null>(null);
+  // One editor handle per leaf. Each split has its own CodeMirror
+  // instance — separate cursor, scroll, and undo history.
+  const leafHandlesRef = useRef<Map<string, MarkdownEditorHandle>>(new Map());
 
-  const tab = activeTab(state);
+  // Split workspace state — owns `splitTree`, `focusedLeafId`, and
+  // the `:vsplit` / `:hsplit` / `:q` / `Ctrl+W` actions.
+  const workspace = useSplitWorkspace();
+  const jumpList = useJumpList();
+
+  // Per-leaf tab id — gives each split independent file selection.
+  // The store's `activeTabId` slaves to the *focused* leaf's stored
+  // tab so existing consumers (search palette, autosave keyed on
+  // active tab path, etc.) continue to work.
+  const [leafTabs, setLeafTabs] = useState<Record<string, string>>({});
+  const prevFocusedLeafRef = useRef(workspace.focusedLeafId);
+
+  // Effect A — focus change syncs `state.activeTabId` to the new
+  // focused leaf's stored tab. New (just-split) leaves with no
+  // stored tab inherit from the previously-focused leaf or fall
+  // back to the current `activeTabId`.
+  useEffect(() => {
+    const newFocused = workspace.focusedLeafId;
+    const oldFocused = prevFocusedLeafRef.current;
+    prevFocusedLeafRef.current = newFocused;
+    if (newFocused === oldFocused) return;
+    setLeafTabs((prev) => {
+      const stored = prev[newFocused];
+      if (stored) {
+        if (stored !== state.activeTabId) {
+          dispatch({ type: "selectTab", id: stored });
+        }
+        return prev;
+      }
+      const inherited = prev[oldFocused] ?? state.activeTabId;
+      if (!inherited) return prev;
+      return { ...prev, [newFocused]: inherited };
+    });
+    // Only fires when the focused leaf id changes. We deliberately
+    // don't react to `state.activeTabId` here — that's effect B.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspace.focusedLeafId]);
+
+  // Effect B — `state.activeTabId` changes (sidebar click, search
+  // palette, openFile, tab strip click) all funnel through the
+  // store. Whatever the cause, the *focused* leaf is the one whose
+  // tab should follow.
+  useEffect(() => {
+    if (!state.activeTabId) return;
+    setLeafTabs((prev) => {
+      if (prev[workspace.focusedLeafId] === state.activeTabId) return prev;
+      return { ...prev, [workspace.focusedLeafId]: state.activeTabId! };
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.activeTabId]);
+
+  // Effect C — prune `leafTabs` entries for leaves that no longer
+  // exist in the tree (e.g. after `:q` closes a split) and entries
+  // pointing to closed tabs.
+  useEffect(() => {
+    const validLeaves = new Set(leafIds(workspace.tree));
+    const validTabs = new Set(state.tabs.map((t) => t.id));
+    setLeafTabs((prev) => {
+      let changed = false;
+      const next: Record<string, string> = {};
+      for (const [k, v] of Object.entries(prev)) {
+        if (!validLeaves.has(k)) {
+          changed = true;
+          continue;
+        }
+        if (!validTabs.has(v)) {
+          changed = true;
+          continue;
+        }
+        next[k] = v;
+      }
+      return changed ? next : prev;
+    });
+  }, [workspace.tree, state.tabs]);
+
+  // Lookup helper — the tab object a given leaf is showing. Falls
+  // back to the global `activeTab(state)` when no per-leaf entry is
+  // recorded yet (initial mount, brand-new leaf).
+  const tabForLeaf = useCallback(
+    (leafId: string) => {
+      const id = leafTabs[leafId] ?? state.activeTabId;
+      if (!id) return null;
+      return state.tabs.find((t) => t.id === id) ?? null;
+    },
+    [leafTabs, state.activeTabId, state.tabs],
+  );
+
+  // Tab the focused leaf is showing — drives header chrome, save
+  // button enable/disable, autosave key, etc. Replaces the old
+  // `activeTab(state)` call.
+  const tab = tabForLeaf(workspace.focusedLeafId);
   const isExcalidraw = tab?.kind === "excalidraw";
   const { theme } = useTheme();
 
-  // Re-sync the editor's buffer whenever the *active tab id* changes
-  // (i.e. user switched files), and consume any pending goto-line
-  // request the search palette dropped in.
-  //
-  // Skipped entirely for Excalidraw tabs: the CodeMirror editor isn't
-  // mounted, the imperative ref is null, and `tab.doc` is an empty
-  // sentinel.  The drawing pane manages its own load/save lifecycle.
-  const lastTabIdRef = useRef<string | null>(null);
+  // Push a jump-list entry whenever the focused leaf's active tab
+  // changes — captures both palette / sidebar file switches and
+  // `Ctrl+W h/j/k/l` movements between splits.
   useEffect(() => {
-    if (isExcalidraw) {
-      // Track the active tab id even when CodeMirror is unmounted so
-      // a switch back to a markdown tab still triggers a `setValue`
-      // sync rather than thinking nothing has changed.
-      lastTabIdRef.current = tab?.id ?? null;
-      return;
-    }
-    const handle = editorRef.current;
-    if (!handle) return;
-
-    if (!tab) {
-      handle.setValue("");
-      lastTabIdRef.current = null;
-      return;
-    }
-
-    const tabSwitched = lastTabIdRef.current !== tab.id;
-    if (tabSwitched) {
-      handle.setValue(tab.doc);
-      lastTabIdRef.current = tab.id;
-    }
-
-    // `requestAnimationFrame` lets CodeMirror's own state settle
-    // first; calling focus() / scrollTo() inline can race the
-    // setValue dispatch above.
-    const goto = state.pendingGotoLine;
-    requestAnimationFrame(() => {
-      if (tabSwitched) handle.focus();
-      if (goto != null) {
-        handle.scrollToLine(goto);
-        handle.focus();
-        dispatch({ type: "clearGotoLine" });
-      }
+    if (!tab) return;
+    const handle = leafHandlesRef.current.get(workspace.focusedLeafId);
+    const cursorOffset = handle?.getCursorOffset() ?? 0;
+    jumpList.push({
+      leafId: workspace.focusedLeafId,
+      tabId: tab.id,
+      cursorOffset,
     });
-  }, [tab?.id, tab?.doc, isExcalidraw, state.pendingGotoLine, dispatch]);
+  }, [tab?.id, workspace.focusedLeafId, jumpList]);
+
+  // Goto-line side-effect — only applies to the focused leaf.
+  useEffect(() => {
+    const goto = state.pendingGotoLine;
+    if (goto == null) return;
+    const focused = leafHandlesRef.current.get(workspace.focusedLeafId);
+    requestAnimationFrame(() => {
+      focused?.scrollToLine(goto);
+      focused?.focus();
+      dispatch({ type: "clearGotoLine" });
+    });
+  }, [state.pendingGotoLine, dispatch, workspace.focusedLeafId]);
 
   // Vim toggle plumbing — shared `useVimMode` hook reads + writes the
   // same prefs blob every tool reads, so the toggle propagates
@@ -259,6 +349,63 @@ export function MarkdownView() {
     }
   }, [vimMode, setVimMode]);
 
+  // Workspace context — bridges `:q` / `:vsplit` / `:hsplit` ex-commands
+  // to the split workspace. `:q` closes the focused split when there
+  // are multiple leaves; otherwise falls back to closing the active
+  // tab so the existing one-leaf semantics still work.
+  const workspaceContext = useMemo<WorkspaceContext>(
+    () => ({
+      closeActive: () => {
+        const closed = workspace.closeFocused();
+        if (closed) return;
+        if (state.activeTabId) {
+          dispatch({ type: "closeTab", id: state.activeTabId });
+        }
+      },
+      split: (direction) => workspace.split(direction),
+      moveFocus: (dir) => workspace.moveFocus(dir),
+    }),
+    [workspace, state.activeTabId, dispatch],
+  );
+  useWorkspaceVim(workspaceContext);
+
+  // Jump-list back/forward — looks up the entry's tab id and
+  // refocuses it. Returns `true` when a jump was performed so the
+  // editor's `Ctrl+O`/`Ctrl+I` keymap doesn't fall through to vim.
+  const navigateToJump = useCallback(
+    (entry: JumpEntry | null): boolean => {
+      if (!entry) return false;
+      if (entry.tabId && entry.tabId !== state.activeTabId) {
+        dispatch({ type: "selectTab", id: entry.tabId });
+      }
+      if (entry.leafId !== workspace.focusedLeafId) {
+        workspace.setFocus(entry.leafId);
+      }
+      requestAnimationFrame(() => {
+        const handle = leafHandlesRef.current.get(entry.leafId);
+        if (handle && entry.cursorOffset > 0) {
+          // Cursor offset is 0-based; `scrollToLine` is 1-based.
+          // Best-effort line resolution via the current doc.
+          const value = handle.getValue();
+          const before = value.slice(0, entry.cursorOffset);
+          const line = before.split("\n").length;
+          handle.scrollToLine(line);
+        }
+        handle?.focus();
+      });
+      return true;
+    },
+    [state.activeTabId, dispatch, workspace],
+  );
+  const onJumpBack = useCallback(
+    () => navigateToJump(jumpList.back()),
+    [jumpList, navigateToJump],
+  );
+  const onJumpForward = useCallback(
+    () => navigateToJump(jumpList.forward()),
+    [jumpList, navigateToJump],
+  );
+
   const hasVaults = state.vaults.length > 0;
   const hasFile = !!tab;
 
@@ -359,7 +506,6 @@ export function MarkdownView() {
           </>
         )}
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-          <TabStrip />
           {hasFile ? (
             isExcalidraw ? (
               // Drawings get a remount per tab id so the lazy
@@ -390,23 +536,65 @@ export function MarkdownView() {
                 />
               </Suspense>
             ) : (
-              // The editor stays mounted across tab switches — we
-              // pump fresh content through the imperative handle
-              // when `activeTabId` changes.  Cursor + undo history
-              // reset on switch in v1.
-              <MarkdownEditor
-                imperativeRef={editorRef}
-                value={tab?.doc ?? ""}
-                onChange={onChange}
-                onSave={onSave}
-                vimMode={vimMode}
-                getDocDir={getDocDir}
-                getCurrentPath={getCurrentPath}
-                getVaults={getVaults}
-                getWikilinkCandidates={getCandidates}
-                onWikilinkOpen={onWikilinkOpen}
-                onLinkOpen={onLinkOpen}
-                onImageSaved={onImageSaved}
+              // One CodeMirror instance per split leaf — each gets
+              // its own cursor, scroll position and undo history.
+              // Editors converge on the active tab's `doc` via
+              // `setValue` (CodeEditor's no-op guard prevents
+              // self-feedback when one leaf's onChange propagates
+              // through the store back to itself).
+              <SplitLayout
+                root={workspace.tree}
+                focusedLeafId={workspace.focusedLeafId}
+                onFocusLeaf={workspace.setFocus}
+                onResize={workspace.resize}
+                renderLeaf={(leafId, focused) => {
+                  // Each leaf renders ITS OWN tab. Different leaves
+                  // can show different files independently.
+                  const leafTab = tabForLeaf(leafId);
+                  return (
+                    <MarkdownLeafShell
+                      leafId={leafId}
+                      focused={focused}
+                      leafTab={leafTab}
+                      tabs={state.tabs}
+                      onSelectTab={(tabId) => {
+                        // Click in a leaf's tab strip: focus that
+                        // leaf AND switch its active tab. Update
+                        // both the per-leaf store and the global
+                        // store synchronously so effects converge.
+                        workspace.setFocus(leafId);
+                        setLeafTabs((prev) =>
+                          prev[leafId] === tabId
+                            ? prev
+                            : { ...prev, [leafId]: tabId },
+                        );
+                        if (state.activeTabId !== tabId) {
+                          dispatch({ type: "selectTab", id: tabId });
+                        }
+                      }}
+                      onCloseTab={(tabId) => {
+                        dispatch({ type: "closeTab", id: tabId });
+                      }}
+                      onChange={onChange}
+                      onSave={onSave}
+                      onMoveFocus={workspace.moveFocus}
+                      onJumpBack={onJumpBack}
+                      onJumpForward={onJumpForward}
+                      vimMode={vimMode}
+                      getDocDir={getDocDir}
+                      getCurrentPath={getCurrentPath}
+                      getVaults={getVaults}
+                      getWikilinkCandidates={getCandidates}
+                      onWikilinkOpen={onWikilinkOpen}
+                      onLinkOpen={onLinkOpen}
+                      onImageSaved={onImageSaved}
+                      registerHandle={(h) => {
+                        if (h) leafHandlesRef.current.set(leafId, h);
+                        else leafHandlesRef.current.delete(leafId);
+                      }}
+                    />
+                  );
+                }}
               />
             )
           ) : (
@@ -418,6 +606,140 @@ export function MarkdownView() {
         </div>
       </div>
       <SearchPalette />
+    </div>
+  );
+}
+
+/**
+ * One leaf of the split workspace — a `<MarkdownEditor>` showing
+ * *this leaf's* tab (which may differ from the active tab in
+ * sibling leaves). Owns its own handle ref + focus ring; the
+ * parent only orchestrates state.
+ */
+interface MarkdownLeafShellProps {
+  leafId: string;
+  focused: boolean;
+  /** The tab this leaf is currently showing. `null` for empty leaves. */
+  leafTab: TabState | null;
+  /** Global open tabs — same list rendered in every leaf's strip. */
+  tabs: TabState[];
+  onSelectTab: (tabId: string) => void;
+  onCloseTab: (tabId: string) => void;
+  onChange: (doc: string) => void;
+  onSave: (doc: string) => void;
+  onMoveFocus: (dir: "h" | "j" | "k" | "l") => void;
+  onJumpBack: () => boolean;
+  onJumpForward: () => boolean;
+  vimMode: boolean;
+  getDocDir: () => string;
+  getCurrentPath: () => string | null;
+  getVaults: () => string[];
+  getWikilinkCandidates: () => string[];
+  onWikilinkOpen: (label: string) => void;
+  onLinkOpen: (url: string) => void;
+  onImageSaved: () => void;
+  registerHandle: (handle: MarkdownEditorHandle | null) => void;
+}
+
+function MarkdownLeafShell({
+  focused,
+  leafTab,
+  tabs,
+  onSelectTab,
+  onCloseTab,
+  onChange,
+  onSave,
+  onMoveFocus,
+  onJumpBack,
+  onJumpForward,
+  vimMode,
+  getDocDir,
+  getCurrentPath,
+  getVaults,
+  getWikilinkCandidates,
+  onWikilinkOpen,
+  onLinkOpen,
+  onImageSaved,
+  registerHandle,
+}: MarkdownLeafShellProps) {
+  const handleRef = useRef<MarkdownEditorHandle | null>(null);
+  const lastTabIdRef = useRef<string | null>(null);
+
+  // Register on mount, unregister on unmount, so the parent can
+  // address this leaf's editor (jump-list scroll, focus, etc.).
+  useEffect(() => {
+    registerHandle(handleRef.current);
+    return () => registerHandle(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Pump this leaf's tab content into its editor whenever the tab
+  // id or doc changes. `setValue` is a no-op when content already
+  // matches — so a sibling leaf's edit propagating through the
+  // shared store updates *this* leaf only when this leaf shows the
+  // same tab; when this leaf shows a *different* tab, its content
+  // is unaffected.
+  useEffect(() => {
+    const handle = handleRef.current;
+    if (!handle) return;
+    if (!leafTab) {
+      handle.setValue("");
+      lastTabIdRef.current = null;
+      return;
+    }
+    handle.setValue(leafTab.doc);
+    if (lastTabIdRef.current !== leafTab.id) {
+      lastTabIdRef.current = leafTab.id;
+      // Tab switch: focus this leaf if it owns input focus, so the
+      // user lands in the new file's editor rather than chrome.
+      if (focused) {
+        requestAnimationFrame(() => handle.focus());
+      }
+    }
+    // We deliberately don't include `focused` in deps — focus
+    // tracking is handled by its own effect below.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [leafTab?.id, leafTab?.doc]);
+
+  // When this leaf becomes the focused one (e.g. after `Ctrl+W l`),
+  // pull DOM focus into its editor so subsequent keystrokes land
+  // here.
+  useEffect(() => {
+    if (focused) handleRef.current?.focus();
+  }, [focused]);
+
+  return (
+    <div
+      className={cn(
+        "flex h-full w-full min-h-0 min-w-0 flex-col",
+        focused ? "outline outline-1 outline-primary/40 -outline-offset-1" : "",
+      )}
+    >
+      <TabStrip
+        tabs={tabs}
+        activeTabId={leafTab?.id ?? null}
+        onSelect={onSelectTab}
+        onClose={onCloseTab}
+      />
+      <div className="min-h-0 min-w-0 flex-1">
+        <MarkdownEditor
+          imperativeRef={handleRef}
+          value={leafTab?.doc ?? ""}
+          onChange={onChange}
+          onSave={onSave}
+          onMoveFocus={onMoveFocus}
+          onJumpBack={onJumpBack}
+          onJumpForward={onJumpForward}
+          vimMode={vimMode}
+          getDocDir={getDocDir}
+          getCurrentPath={getCurrentPath}
+          getVaults={getVaults}
+          getWikilinkCandidates={getWikilinkCandidates}
+          onWikilinkOpen={onWikilinkOpen}
+          onLinkOpen={onLinkOpen}
+          onImageSaved={onImageSaved}
+        />
+      </div>
     </div>
   );
 }

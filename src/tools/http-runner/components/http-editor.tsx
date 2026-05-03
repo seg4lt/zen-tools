@@ -42,6 +42,12 @@ export interface HttpEditorProps {
   /** Variable context for the `{{var}}` hover tooltip. */
   varContext?: VarContext;
   vimMode?: boolean;
+  /** `Ctrl+W h/j/k/l` — move focus between split panes. */
+  onMoveFocus?: (dir: "h" | "j" | "k" | "l") => void;
+  /** `Ctrl+O` — workspace-level jump back. Return `true` if handled. */
+  onJumpBack?: () => boolean;
+  /** `Ctrl+I` — workspace-level jump forward. */
+  onJumpForward?: () => boolean;
   imperativeRef?: Ref<HttpEditorHandle>;
 }
 
@@ -55,6 +61,9 @@ export function HttpEditor({
   mode = "http",
   varContext,
   vimMode = true,
+  onMoveFocus,
+  onJumpBack,
+  onJumpForward,
   imperativeRef,
 }: HttpEditorProps) {
   const { theme } = useTheme();
@@ -98,6 +107,9 @@ export function HttpEditor({
       isDark={theme === "dark"}
       imperativeRef={imperativeRef}
       extensions={buildExtensions}
+      onMoveFocus={onMoveFocus}
+      onJumpBack={onJumpBack}
+      onJumpForward={onJumpForward}
     />
   );
 }

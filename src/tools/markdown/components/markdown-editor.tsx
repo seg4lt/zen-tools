@@ -1,63 +1,42 @@
 /**
- * CodeMirror 6 host for `.md` editing.
+ * Markdown editor — thin wrapper around the shared `CodeEditor`.
  *
- * Modeled directly on `http-runner/components/http-editor.tsx` — same
- * mount-once + reconfigure-on-prop-change pattern, same vim ex-command
- * registration (`:w`, `:wq`, `:x`), same `Mod-S` keymap.
+ * The generic CodeMirror 6 plumbing (vim mode, `:w` / `:wq` / `:x`,
+ * `Mod-S`, mount/reconfigure, theme, imperative handle) lives in
+ * `@zen-tools/editor`. This file only contributes the markdown-
+ * specific bits:
  *
- * Differences:
- *   - Language extension is `@codemirror/lang-markdown` instead of the
- *     custom http one.
- *   - Live-preview extension array (image widgets, hide-markup-on-
- *     other-lines, wikilink mark + autocomplete + Mod-click).
- *   - Image-paste handler — clipboard image → save next to the open
+ *   - `@codemirror/lang-markdown` with lazy-loaded code-fence parsers.
+ *   - `livePreview` (image widgets, hide-markup-on-other-lines,
+ *     wikilink mark + autocomplete + Mod-click).
+ *   - `imagePasteHandler` — clipboard image → save next to the open
  *     `.md` → insert `![…](…)`.
- *
- * The editor doesn't read the store directly; instead the parent
- * passes value-getters via callbacks so this component never needs to
- * remount when the open file changes.
+ *   - `markdownHighlightStyle` layered with `Prec.high` so its
+ *     markdown-tag colours win over the base `makeEditorTheme` style.
+ *   - `gf` / `gd` vim normal-mode actions that follow the link under
+ *     the cursor (wikilink first, fall back to a `[label](url)`).
  */
 
-import { useEffect, useImperativeHandle, useRef, type Ref } from "react";
-import { EditorState, type Extension } from "@codemirror/state";
-import {
-  EditorView,
-  drawSelection,
-  highlightActiveLine,
-  keymap,
-  lineNumbers,
-} from "@codemirror/view";
-import {
-  defaultKeymap,
-  history,
-  historyKeymap,
-  indentWithTab,
-} from "@codemirror/commands";
-import { searchKeymap } from "@codemirror/search";
-import {
-  bracketMatching,
-  foldGutter,
-  foldKeymap,
-  indentOnInput,
-} from "@codemirror/language";
+import { useEffect, useMemo, useRef, type Ref } from "react";
+import type { Extension } from "@codemirror/state";
+import { Prec } from "@codemirror/state";
+import { EditorView } from "@codemirror/view";
 import { markdown } from "@codemirror/lang-markdown";
 import { languages } from "@codemirror/language-data";
 import { syntaxHighlighting, syntaxTree } from "@codemirror/language";
-import { vim, Vim } from "@replit/codemirror-vim";
-import { makeEditorTheme } from "@zen-tools/editor";
+import { Vim } from "@replit/codemirror-vim";
+import {
+  CodeEditor,
+  type CodeEditorHandle,
+} from "@zen-tools/editor";
 import { useTheme } from "@/hooks/use-theme";
 import { livePreview } from "../lib/live-preview";
 import { imagePasteHandler } from "../lib/image-paste";
 import { markdownHighlightStyle } from "../lib/markdown-highlight";
 
-export interface MarkdownEditorHandle {
-  setValue: (value: string) => void;
-  getValue: () => string;
-  focus: () => void;
-  /** Scroll the viewport so 1-based `lineNumber` is centred and place
-   *  the cursor at its start.  No-op when the editor isn't ready. */
-  scrollToLine: (lineNumber: number) => void;
-}
+// Re-export the shared handle under the historical name so existing
+// callers (`MarkdownEditorHandle`) keep working unchanged.
+export type MarkdownEditorHandle = CodeEditorHandle;
 
 export interface MarkdownEditorProps {
   /** Initial content. Used at mount only — subsequent updates come
@@ -69,14 +48,14 @@ export interface MarkdownEditorProps {
   onChange?: (value: string) => void;
   /** Called when the user requests a save (`Mod-S` or `:w`). */
   onSave?: (value: string) => void;
-  /** Vim toggle.  Rebuilds state on change without losing content. */
+  /** Vim toggle. Rebuilds state on change without losing content. */
   vimMode?: boolean;
-  /** Returns the directory of the open `.md`.  Live-preview resolves
+  /** Returns the directory of the open `.md`. Live-preview resolves
    *  relative `![…](…)` against this; image-paste writes here. */
   getDocDir: () => string;
   /** Returns the absolute path of the open `.md`, or `null` if none. */
   getCurrentPath: () => string | null;
-  /** Returns every open vault root.  Used by the markdown link
+  /** Returns every open vault root. Used by the markdown link
    *  autocomplete (`[label](query)`) to feed fff-search across the
    *  full set of vaults the user has open. */
   getVaults: () => string[];
@@ -89,6 +68,12 @@ export interface MarkdownEditorProps {
   onLinkOpen: (url: string) => void;
   /** Fired after a clipboard image is successfully saved + linked. */
   onImageSaved?: (relPath: string) => void;
+  /** `Ctrl+W h/j/k/l` — move focus between split panes. */
+  onMoveFocus?: (dir: "h" | "j" | "k" | "l") => void;
+  /** `Ctrl+O` — workspace-level jump back. Return `true` if handled. */
+  onJumpBack?: () => boolean;
+  /** `Ctrl+I` — workspace-level jump forward. */
+  onJumpForward?: () => boolean;
   /** Forwarded ref for imperative control. */
   imperativeRef?: Ref<MarkdownEditorHandle>;
 }
@@ -106,12 +91,23 @@ export function MarkdownEditor({
   onWikilinkOpen,
   onLinkOpen,
   onImageSaved,
+  onMoveFocus,
+  onJumpBack,
+  onJumpForward,
   imperativeRef,
 }: MarkdownEditorProps) {
-  const hostRef = useRef<HTMLDivElement | null>(null);
+  const { theme } = useTheme();
+  const isDark = theme === "dark";
+
+  // Ref to the live `EditorView` so the `gf` / `gd` action can read
+  // the current cursor position. Captured via `CodeEditor`'s `onView`
+  // prop on every (re-)mount.
   const viewRef = useRef<EditorView | null>(null);
-  const onChangeRef = useRef(onChange);
-  const onSaveRef = useRef(onSave);
+
+  // All caller-supplied closures live behind refs so the long-lived
+  // CodeMirror extensions (built once at mount, rebuilt only on
+  // theme/vim/readOnly change) always see the latest props without
+  // having to remount.
   const getDocDirRef = useRef(getDocDir);
   const getCurrentPathRef = useRef(getCurrentPath);
   const getVaultsRef = useRef(getVaults);
@@ -119,15 +115,7 @@ export function MarkdownEditor({
   const onWikilinkOpenRef = useRef(onWikilinkOpen);
   const onLinkOpenRef = useRef(onLinkOpen);
   const onImageSavedRef = useRef(onImageSaved);
-  const { theme } = useTheme();
-
-  // Keep refs current so long-lived listeners always see the latest
-  // closures.  We rebuild the editor when `vimMode` / `theme` /
-  // `readOnly` change but *not* on every render — these refs let
-  // callers swap callbacks on the fly.
   useEffect(() => {
-    onChangeRef.current = onChange;
-    onSaveRef.current = onSave;
     getDocDirRef.current = getDocDir;
     getCurrentPathRef.current = getCurrentPath;
     getVaultsRef.current = getVaults;
@@ -136,8 +124,6 @@ export function MarkdownEditor({
     onLinkOpenRef.current = onLinkOpen;
     onImageSavedRef.current = onImageSaved;
   }, [
-    onChange,
-    onSave,
     getDocDir,
     getCurrentPath,
     getVaults,
@@ -147,27 +133,18 @@ export function MarkdownEditor({
     onImageSaved,
   ]);
 
-  // Vim ex commands — register once.  `:w` / `:wq` / `:x` save through
-  // `onSave` so muscle memory works inside vim mode.  `gf` / `gd`
-  // follow whatever link the cursor is sitting on (wikilink first,
-  // fall back to a standard `[label](url)` link).
+  // Register `gf` / `gd` once. `Vim.defineAction` is module-global so
+  // it doesn't matter which markdown editor instance runs the
+  // useEffect — the action reads the *currently focused* view via
+  // `viewRef`, which the `onView` prop keeps fresh.
   useEffect(() => {
-    const save = () => {
-      const view = viewRef.current;
-      if (!view) return;
-      onSaveRef.current?.(view.state.doc.toString());
-    };
-    Vim.defineEx("write", "w", save);
-    Vim.defineEx("wq", "wq", save);
-    Vim.defineEx("x", "x", save);
-
     const followLink = () => {
       const view = viewRef.current;
       if (!view) return;
       const pos = view.state.selection.main.head;
 
-      // 1. Wikilink at cursor?  Cheaper to test first — a simple
-      //    regex over the cursor's line beats walking the lezer tree.
+      // 1. Wikilink at cursor? Cheaper to test first — a simple regex
+      //    over the cursor's line beats walking the lezer tree.
       const line = view.state.doc.lineAt(pos);
       const lineText = view.state.doc.sliceString(line.from, line.to);
       const cursorOffset = pos - line.from;
@@ -220,146 +197,59 @@ export function MarkdownEditor({
     Vim.mapCommand("gd", "action", "followLink", {}, { context: "normal" });
   }, []);
 
-  const buildExtensions = (isDark: boolean): Extension[] => [
-    ...(vimMode ? [vim()] : []),
-    lineNumbers(),
-    foldGutter(),
-    drawSelection(),
-    EditorState.allowMultipleSelections.of(true),
-    indentOnInput(),
-    bracketMatching(),
-    history(),
-    highlightActiveLine(),
-    // `codeLanguages` from `@codemirror/language-data` is the set of
-    // every language CodeMirror ships a parser for.  Each is a
-    // `LanguageDescription` that *lazy-loads* its actual language
-    // module on first use — so a doc with no fenced code costs
-    // nothing, and a `\`\`\`ts` block triggers a one-time dynamic
-    // import.  Markdown's own parser tags the tokens, then our
-    // `cm-theme` `HighlightStyle` colours them.
-    markdown({ addKeymap: false, codeLanguages: languages }),
-    livePreview({
-      getDocDir: () => getDocDirRef.current(),
-      getCurrentPath: () => getCurrentPathRef.current(),
-      getVaults: () => getVaultsRef.current(),
-      getWikilinkCandidates: () => getCandidatesRef.current(),
-      onWikilinkOpen: (label) => onWikilinkOpenRef.current(label),
-      onLinkOpen: (url) => onLinkOpenRef.current(url),
-      // Theme is baked into the closure here; the editor is rebuilt
-      // (`buildExtensions(theme === "dark")` further up the file)
-      // whenever the user toggles dark mode, so each rebuild produces
-      // a fresh `livePreview()` extension with the right theme value.
-      // The embedded `*.excalidraw.svg` widget reads this on every
-      // decoration build to know which colour scheme to re-export.
-      getTheme: () => (isDark ? "dark" : "light"),
-    }),
-    imagePasteHandler({
-      getCurrentPath: () => getCurrentPathRef.current(),
-      onImageSaved: (rel) => onImageSavedRef.current?.(rel),
-    }),
-    makeEditorTheme(isDark),
-    // Layered after `makeEditorTheme` so its `syntaxHighlighting` is
-    // already in scope; the markdown-specific rules win on tag
-    // conflicts (multiple `syntaxHighlighting` extensions stack and
-    // the *last* one declared takes priority).
-    syntaxHighlighting(markdownHighlightStyle),
-    EditorView.lineWrapping,
-    EditorState.readOnly.of(readOnly),
-    keymap.of([
-      ...defaultKeymap,
-      ...historyKeymap,
-      ...searchKeymap,
-      ...foldKeymap,
-      indentWithTab,
-      {
-        key: "Mod-s",
-        preventDefault: true,
-        run: (view) => {
-          onSaveRef.current?.(view.state.doc.toString());
-          return true;
-        },
-      },
-    ]),
-    EditorView.updateListener.of((update) => {
-      if (update.docChanged) {
-        onChangeRef.current?.(update.state.doc.toString());
-      }
-    }),
-  ];
-
-  // Mount once.
-  useEffect(() => {
-    if (!hostRef.current) return;
-    const view = new EditorView({
-      state: EditorState.create({
-        doc: value,
-        extensions: buildExtensions(theme === "dark"),
-      }),
-      parent: hostRef.current,
-    });
-    viewRef.current = view;
-    return () => {
-      view.destroy();
-      viewRef.current = null;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // Reconfigure on theme / readOnly / vimMode without remounting.
-  useEffect(() => {
-    const view = viewRef.current;
-    if (!view) return;
-    const doc = view.state.doc;
-    const selection = view.state.selection;
-    view.setState(
-      EditorState.create({
-        doc,
-        selection,
-        extensions: buildExtensions(theme === "dark"),
-      }),
-    );
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [theme, readOnly, vimMode]);
-
-  useImperativeHandle(
-    imperativeRef,
-    () => ({
-      setValue: (next) => {
-        const view = viewRef.current;
-        if (!view) return;
-        if (view.state.doc.toString() === next) return;
-        const head = Math.min(view.state.selection.main.head, next.length);
-        view.dispatch({
-          changes: {
-            from: 0,
-            to: view.state.doc.length,
-            insert: next,
-          },
-          selection: { anchor: head, head },
-        });
-      },
-      getValue: () => viewRef.current?.state.doc.toString() ?? "",
-      focus: () => viewRef.current?.focus(),
-      scrollToLine: (lineNumber: number) => {
-        const view = viewRef.current;
-        if (!view) return;
-        const total = view.state.doc.lines;
-        if (total === 0) return;
-        const clamped = Math.max(1, Math.min(lineNumber, total));
-        const line = view.state.doc.line(clamped);
-        view.dispatch({
-          selection: { anchor: line.from, head: line.from },
-          effects: EditorView.scrollIntoView(line.from, { y: "center" }),
-        });
-      },
-    }),
+  // The `extensions` callback is invoked on every CodeEditor rebuild
+  // (theme / vim / readOnly toggles). It captures the refs above by
+  // closure, so each rebuild produces a fresh `livePreview()` /
+  // `imagePasteHandler()` with the right theme + latest callbacks.
+  const buildExtensions = useMemo(
+    () =>
+      ({ isDark }: { isDark: boolean }): Extension[] => [
+        // `codeLanguages` from `@codemirror/language-data` is the set
+        // of every language CodeMirror ships a parser for. Each is a
+        // `LanguageDescription` that *lazy-loads* its actual language
+        // module on first use — so a doc with no fenced code costs
+        // nothing, and a `\`\`\`ts` block triggers a one-time dynamic
+        // import.
+        markdown({ addKeymap: false, codeLanguages: languages }),
+        livePreview({
+          getDocDir: () => getDocDirRef.current(),
+          getCurrentPath: () => getCurrentPathRef.current(),
+          getVaults: () => getVaultsRef.current(),
+          getWikilinkCandidates: () => getCandidatesRef.current(),
+          onWikilinkOpen: (label) => onWikilinkOpenRef.current(label),
+          onLinkOpen: (url) => onLinkOpenRef.current(url),
+          getTheme: () => (isDark ? "dark" : "light"),
+        }),
+        imagePasteHandler({
+          getCurrentPath: () => getCurrentPathRef.current(),
+          onImageSaved: (rel) => onImageSavedRef.current?.(rel),
+        }),
+        // CodeEditor injects `makeEditorTheme()` after the caller's
+        // extensions, so a plain `syntaxHighlighting(...)` here would
+        // be overridden by the theme's own highlight style. Bump the
+        // markdown highlight to `Prec.high` so its tag colours win
+        // regardless of declaration order.
+        Prec.high(syntaxHighlighting(markdownHighlightStyle)),
+      ],
     [],
   );
 
   return (
-    <div
-      ref={hostRef}
-      className="h-full min-h-0 w-full overflow-hidden bg-background"
+    <CodeEditor
+      value={value}
+      readOnly={readOnly}
+      onChange={onChange}
+      onSave={onSave}
+      vimMode={vimMode}
+      isDark={isDark}
+      imperativeRef={imperativeRef}
+      extensions={buildExtensions}
+      onMoveFocus={onMoveFocus}
+      onJumpBack={onJumpBack}
+      onJumpForward={onJumpForward}
+      onView={(view) => {
+        viewRef.current = view;
+      }}
     />
   );
 }

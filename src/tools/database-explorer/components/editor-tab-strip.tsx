@@ -18,13 +18,26 @@
 import { FileText, X } from "lucide-react";
 import { Button } from "@zen-tools/ui";
 import { cn } from "@zen-tools/ui";
-import { useDbExplorerStore } from "../store/db-explorer-store";
 
-export function EditorTabStrip() {
-  const { state, dispatch } = useDbExplorerStore();
-  const open = state.openFilePaths;
+export interface EditorTabStripProps {
+  /** Open file paths (shared across all splits). */
+  paths: string[];
+  /** Path active in *this* strip. May differ across splits. */
+  activePath: string | null;
+  /** Per-path dirty flag. */
+  dirtyByPath: Record<string, boolean>;
+  onSelect: (path: string) => void;
+  onClose: (path: string) => void;
+}
 
-  if (open.length === 0) return null;
+export function EditorTabStrip({
+  paths,
+  activePath,
+  dirtyByPath,
+  onSelect,
+  onClose,
+}: EditorTabStripProps) {
+  if (paths.length === 0) return null;
 
   return (
     // `bg-muted/60` matches the connection-tab strip vocabulary so
@@ -32,19 +45,15 @@ export function EditorTabStrip() {
     // surface (deep-tinted "rail"); the active tab's `bg-background`
     // visibly lifts up out of it.
     <div className="flex items-center gap-0.5 overflow-x-auto border-b border-border/60 bg-muted/60 px-1.5 pt-1 text-[11px]">
-      {open.map((path) => {
-        const isActive = state.selectedFilePath === path;
-        const isDirty = !!state.dirtyByPath[path];
+      {paths.map((path) => {
+        const isActive = activePath === path;
+        const isDirty = !!dirtyByPath[path];
         const name = basename(path);
         return (
           <div
             key={path}
             className={cn(
               "group relative flex shrink-0 items-center gap-1.5 rounded-t-md px-2.5 py-1.5 transition",
-              // Active = lifted background only. The previous
-              // 2-px accent ring on top read as "selected with a
-              // glowing border" and the user disliked it; a clean
-              // surface lift is enough.
               isActive
                 ? "bg-background text-foreground"
                 : "text-muted-foreground/70 hover:bg-muted/30 hover:text-muted-foreground",
@@ -54,7 +63,7 @@ export function EditorTabStrip() {
             <button
               type="button"
               className="flex items-center gap-1.5"
-              onClick={() => dispatch({ type: "select-file", path })}
+              onClick={() => onSelect(path)}
             >
               <FileText className="size-3.5 shrink-0" />
               <span
@@ -77,15 +86,11 @@ export function EditorTabStrip() {
               size="sm"
               className={cn(
                 "h-4 w-4 p-0 transition",
-                // The X is always visible on the active tab so the
-                // user has an unambiguous "close this" affordance;
-                // inactive tabs hide it on idle and reveal on hover
-                // to keep the strip uncluttered.
                 isActive ? "opacity-70 hover:opacity-100" : "opacity-0 group-hover:opacity-100",
               )}
               onClick={(e) => {
                 e.stopPropagation();
-                dispatch({ type: "close-editor-tab", path });
+                onClose(path);
               }}
               title="Close (does not delete the file)"
             >

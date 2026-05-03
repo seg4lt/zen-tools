@@ -29,22 +29,36 @@ import { useLayoutEffect, useMemo, useRef } from "react";
 import { FileText, PenLine, X } from "lucide-react";
 import { Button } from "@zen-tools/ui";
 import { cn } from "@zen-tools/ui";
-import { useMarkdownStore, type TabState } from "../store/markdown-store";
+import type { TabState } from "../store/markdown-store";
 import { basenameNoExt } from "../lib/tauri";
 
-export function TabStrip() {
-  const { state, dispatch } = useMarkdownStore();
+export interface TabStripProps {
+  /** Global open tabs (shared across all splits). */
+  tabs: TabState[];
+  /** Tab id active in *this* tab strip. May differ across splits. */
+  activeTabId: string | null;
+  /** Click — host updates this leaf's active tab. */
+  onSelect: (tabId: string) => void;
+  /** X / middle-click — host removes the tab from `state.tabs`. */
+  onClose: (tabId: string) => void;
+}
 
+export function TabStrip({
+  tabs,
+  activeTabId,
+  onSelect,
+  onClose,
+}: TabStripProps) {
   // Build a `Map<tabId, dirSubtitle>` only for tabs whose basename
   // collides with another open tab.  Computed once per render.
   const subtitles = useMemo(() => {
     const counts = new Map<string, number>();
-    for (const tab of state.tabs) {
+    for (const tab of tabs) {
       const name = basenameNoExt(tab.path).toLowerCase();
       counts.set(name, (counts.get(name) ?? 0) + 1);
     }
     const out = new Map<string, string>();
-    for (const tab of state.tabs) {
+    for (const tab of tabs) {
       const name = basenameNoExt(tab.path).toLowerCase();
       if ((counts.get(name) ?? 0) > 1) {
         const segs = tab.path.split("/").filter(Boolean);
@@ -52,21 +66,21 @@ export function TabStrip() {
       }
     }
     return out;
-  }, [state.tabs]);
+  }, [tabs]);
 
   // Auto-scroll the active tab into view when it changes.  Without
   // this, opening a deep file from the search palette can leave the
   // new tab off-screen on the right when many are open.
   const stripRef = useRef<HTMLDivElement | null>(null);
   useLayoutEffect(() => {
-    if (!state.activeTabId) return;
+    if (!activeTabId) return;
     const el = stripRef.current?.querySelector<HTMLElement>(
-      `[data-tab-id="${state.activeTabId}"]`,
+      `[data-tab-id="${activeTabId}"]`,
     );
     el?.scrollIntoView({ block: "nearest", inline: "nearest" });
-  }, [state.activeTabId]);
+  }, [activeTabId]);
 
-  if (state.tabs.length === 0) return null;
+  if (tabs.length === 0) return null;
 
   return (
     <div
@@ -74,14 +88,14 @@ export function TabStrip() {
       role="tablist"
       className="flex shrink-0 items-center gap-0.5 overflow-x-auto border-b border-border/60 bg-muted/60 px-1.5 pt-1 text-[11px] [scrollbar-width:thin]"
     >
-      {state.tabs.map((tab) => (
+      {tabs.map((tab) => (
         <Tab
           key={tab.id}
           tab={tab}
-          active={tab.id === state.activeTabId}
+          active={tab.id === activeTabId}
           subtitle={subtitles.get(tab.id) ?? null}
-          onSelect={() => dispatch({ type: "selectTab", id: tab.id })}
-          onClose={() => dispatch({ type: "closeTab", id: tab.id })}
+          onSelect={() => onSelect(tab.id)}
+          onClose={() => onClose(tab.id)}
         />
       ))}
     </div>
