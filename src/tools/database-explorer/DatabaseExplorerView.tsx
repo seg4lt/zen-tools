@@ -462,6 +462,14 @@ export function DatabaseExplorerView() {
           resolve: (values) => {
             // Close the dialog regardless of submit/cancel.
             setPlaceholderPrompt(null);
+            // Restore editor focus once Radix has finished its
+            // close transition (it manages focus internally during
+            // unmount). A 0ms timeout drops us onto the next macro-
+            // task, which is after Radix's blur-the-trigger logic
+            // settles. Without this, the user has to click back
+            // into the editor to keep typing — the original bug
+            // report.
+            window.setTimeout(() => editorRef.current?.focus(), 0);
             if (!values) {
               resolve(null);
               return;
