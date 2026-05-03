@@ -1,12 +1,20 @@
 /**
- * API Stats tab — live view of `gh` CLI invocations + an AI-runs panel
- * that records what provider / model each summary actually used.
+ * API Stats tab — split 50/50 between two panels:
  *
- * The AI panel is the diagnostic checkpoint for "did Settings actually
- * propagate?". Every `engine.ai_summary()` invocation pushes a record
- * (provider, resolved model, repo, date range, duration, success,
- * commit count, cost) into a 200-entry rolling log on the engine, and
- * we render it here newest-first.
+ *   • AI runs        diagnostic checkpoint for "did Settings actually
+ *                    propagate?". Every `engine.ai_summary()`
+ *                    invocation pushes a record (provider, resolved
+ *                    model, repo, date range, duration, success,
+ *                    commit count, cost) into a 200-entry rolling log
+ *                    on the engine.
+ *   • gh CLI calls   live view of every `gh` invocation made by the
+ *                    other tabs.
+ *
+ * Each panel takes half the vertical space and scrolls internally,
+ * so the page header stays put and the user can scan both logs
+ * without one drowning the other. No sticky table heads (we already
+ * bound the scroll area), no transparent page header (was bleeding
+ * the tab content through during scroll).
  */
 
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -68,7 +76,10 @@ export function ApiStatsTab() {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <header className="flex h-10 shrink-0 items-center justify-between border-b bg-card/40 px-4">
+      {/* Solid card background — was `bg-card/40` and the
+          half-transparency let the panel rows scroll up *behind* the
+          page header, which read as a visual glitch. */}
+      <header className="flex h-10 shrink-0 items-center justify-between border-b bg-card px-4">
         <div className="flex items-center gap-2">
           <h2 className="text-sm font-medium">API stats</h2>
           <span className="text-xs text-muted-foreground">
@@ -95,80 +106,13 @@ export function ApiStatsTab() {
         </div>
       </header>
 
-      <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto p-2">
+      {/* Two equal-height panels, each scrolling internally. Using
+          `grid grid-rows-2` gives a clean 50/50 split with `min-h-0`
+          on each row so flex/grid children can actually shrink past
+          their content height. */}
+      <div className="grid min-h-0 flex-1 grid-rows-2 gap-2 bg-muted/20 p-2">
         <AiRunsPanel runs={aiRuns} />
-
-        {calls.length === 0 ? (
-          <Panel className="border-dashed">
-            <PanelContent className="my-8 flex flex-col items-center gap-1.5 py-6 text-center text-xs text-muted-foreground">
-              <p>No `gh` calls yet.</p>
-              <p>
-                Switch to another tab and trigger a refresh — calls show up
-                here in real time.
-              </p>
-            </PanelContent>
-          </Panel>
-        ) : (
-          <Panel>
-            <PanelHeader>
-              <PanelTitle>gh CLI calls</PanelTitle>
-              <span className="text-[10px] text-muted-foreground">
-                {calls.length} total
-              </span>
-            </PanelHeader>
-            <table className="w-full text-xs">
-              <thead className="sticky top-0 bg-card">
-                <tr className="border-b text-left text-[10px] tracking-wide text-muted-foreground uppercase">
-                  <th className="px-2 py-1.5 font-medium">Status</th>
-                  <th className="px-2 py-1.5 font-medium">When</th>
-                  <th className="w-full px-2 py-1.5 font-medium">Command</th>
-                  <th className="px-2 py-1.5 text-right font-medium">
-                    Duration
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {[...calls].reverse().map((call, i) => (
-                  <tr
-                    key={`${call.timestamp}-${i}`}
-                    className="border-b last:border-b-0"
-                  >
-                    <td className="px-2 py-1">
-                      {call.success ? (
-                        <CheckCircle2 className="size-3.5 text-emerald-600 dark:text-emerald-400" />
-                      ) : (
-                        <XCircle className="size-3.5 text-destructive" />
-                      )}
-                    </td>
-                    <td className="px-2 py-1 whitespace-nowrap text-muted-foreground">
-                      {new Date(call.timestamp).toLocaleTimeString()}
-                    </td>
-                    <td className="px-2 py-1 font-mono">
-                      <span
-                        className={cn(!call.success && "text-destructive")}
-                      >
-                        {call.command}
-                      </span>
-                    </td>
-                    <td className="px-2 py-1 text-right whitespace-nowrap">
-                      <Badge
-                        variant={
-                          call.duration_ms > 5000
-                            ? "destructive"
-                            : call.duration_ms > 1500
-                              ? "outline"
-                              : "secondary"
-                        }
-                      >
-                        {call.duration_ms.toFixed(0)}ms
-                      </Badge>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </Panel>
-        )}
+        <GhCallsPanel calls={calls} />
       </div>
     </div>
   );
@@ -176,7 +120,7 @@ export function ApiStatsTab() {
 
 function AiRunsPanel({ runs }: { runs: AiRunRecord[] }) {
   return (
-    <Panel>
+    <Panel className="flex min-h-0 flex-col">
       <PanelHeader>
         <div className="flex items-center gap-2">
           <Sparkles className="size-3.5 text-purple-500" />
@@ -195,72 +139,149 @@ function AiRunsPanel({ runs }: { runs: AiRunRecord[] }) {
           actually being applied.
         </PanelContent>
       ) : (
+        <div className="min-h-0 flex-1 overflow-y-auto">
+          <table className="w-full text-xs">
+            <thead className="bg-card">
+              <tr className="border-b text-left text-[10px] tracking-wide text-muted-foreground uppercase">
+                <th className="px-2 py-1.5 font-medium">Status</th>
+                <th className="px-2 py-1.5 font-medium">When</th>
+                <th className="px-2 py-1.5 font-medium">Provider</th>
+                <th className="px-2 py-1.5 font-medium">Model</th>
+                <th className="px-2 py-1.5 font-medium">Repo</th>
+                <th className="px-2 py-1.5 font-medium">Range</th>
+                <th className="px-2 py-1.5 text-right font-medium">Commits</th>
+                <th className="px-2 py-1.5 text-right font-medium">Cost</th>
+                <th className="px-2 py-1.5 text-right font-medium">Duration</th>
+              </tr>
+            </thead>
+            <tbody>
+              {runs.map((r, i) => (
+                <tr
+                  key={`${r.timestamp}-${r.repo}-${i}`}
+                  className="border-b last:border-b-0"
+                >
+                  <td className="px-2 py-1">
+                    {r.success ? (
+                      <CheckCircle2 className="size-3.5 text-emerald-600 dark:text-emerald-400" />
+                    ) : (
+                      <XCircle className="size-3.5 text-destructive" />
+                    )}
+                  </td>
+                  <td className="px-2 py-1 whitespace-nowrap text-muted-foreground">
+                    {new Date(r.timestamp).toLocaleTimeString()}
+                  </td>
+                  <td className="px-2 py-1 font-mono">{r.provider}</td>
+                  <td className="px-2 py-1 font-mono">
+                    {r.model ?? (
+                      <span className="italic text-muted-foreground">
+                        (provider default)
+                      </span>
+                    )}
+                  </td>
+                  <td className="px-2 py-1 font-mono">{r.repo}</td>
+                  <td className="px-2 py-1 whitespace-nowrap text-muted-foreground">
+                    {formatRangeShort(r.since, r.until)}
+                  </td>
+                  <td className="px-2 py-1 text-right whitespace-nowrap">
+                    {r.commit_count}
+                  </td>
+                  <td className="px-2 py-1 text-right whitespace-nowrap">
+                    {r.cost_usd != null ? `$${r.cost_usd.toFixed(3)}` : "—"}
+                  </td>
+                  <td className="px-2 py-1 text-right whitespace-nowrap">
+                    <Badge
+                      variant={
+                        !r.success
+                          ? "destructive"
+                          : r.duration_ms > 30_000
+                            ? "outline"
+                            : "secondary"
+                      }
+                    >
+                      {(r.duration_ms / 1000).toFixed(1)}s
+                    </Badge>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+function GhCallsPanel({ calls }: { calls: GhCall[] }) {
+  if (calls.length === 0) {
+    return (
+      <Panel className="flex min-h-0 flex-col border-dashed">
+        <PanelContent className="my-auto flex flex-col items-center gap-1.5 py-6 text-center text-xs text-muted-foreground">
+          <p>No `gh` calls yet.</p>
+          <p>
+            Switch to another tab and trigger a refresh — calls show up here
+            in real time.
+          </p>
+        </PanelContent>
+      </Panel>
+    );
+  }
+  return (
+    <Panel className="flex min-h-0 flex-col">
+      <PanelHeader>
+        <PanelTitle>gh CLI calls</PanelTitle>
+        <span className="text-[10px] text-muted-foreground">
+          {calls.length} total
+        </span>
+      </PanelHeader>
+      <div className="min-h-0 flex-1 overflow-y-auto">
         <table className="w-full text-xs">
-          <thead className="sticky top-0 bg-card">
+          <thead className="bg-card">
             <tr className="border-b text-left text-[10px] tracking-wide text-muted-foreground uppercase">
               <th className="px-2 py-1.5 font-medium">Status</th>
               <th className="px-2 py-1.5 font-medium">When</th>
-              <th className="px-2 py-1.5 font-medium">Provider</th>
-              <th className="px-2 py-1.5 font-medium">Model</th>
-              <th className="px-2 py-1.5 font-medium">Repo</th>
-              <th className="px-2 py-1.5 font-medium">Range</th>
-              <th className="px-2 py-1.5 text-right font-medium">Commits</th>
-              <th className="px-2 py-1.5 text-right font-medium">Cost</th>
+              <th className="w-full px-2 py-1.5 font-medium">Command</th>
               <th className="px-2 py-1.5 text-right font-medium">Duration</th>
             </tr>
           </thead>
           <tbody>
-            {runs.map((r, i) => (
+            {[...calls].reverse().map((call, i) => (
               <tr
-                key={`${r.timestamp}-${r.repo}-${i}`}
+                key={`${call.timestamp}-${i}`}
                 className="border-b last:border-b-0"
               >
                 <td className="px-2 py-1">
-                  {r.success ? (
+                  {call.success ? (
                     <CheckCircle2 className="size-3.5 text-emerald-600 dark:text-emerald-400" />
                   ) : (
                     <XCircle className="size-3.5 text-destructive" />
                   )}
                 </td>
                 <td className="px-2 py-1 whitespace-nowrap text-muted-foreground">
-                  {new Date(r.timestamp).toLocaleTimeString()}
+                  {new Date(call.timestamp).toLocaleTimeString()}
                 </td>
-                <td className="px-2 py-1 font-mono">{r.provider}</td>
                 <td className="px-2 py-1 font-mono">
-                  {r.model ?? (
-                    <span className="italic text-muted-foreground">
-                      (provider default)
-                    </span>
-                  )}
-                </td>
-                <td className="px-2 py-1 font-mono">{r.repo}</td>
-                <td className="px-2 py-1 whitespace-nowrap text-muted-foreground">
-                  {formatRangeShort(r.since, r.until)}
-                </td>
-                <td className="px-2 py-1 text-right whitespace-nowrap">
-                  {r.commit_count}
-                </td>
-                <td className="px-2 py-1 text-right whitespace-nowrap">
-                  {r.cost_usd != null ? `$${r.cost_usd.toFixed(3)}` : "—"}
+                  <span className={cn(!call.success && "text-destructive")}>
+                    {call.command}
+                  </span>
                 </td>
                 <td className="px-2 py-1 text-right whitespace-nowrap">
                   <Badge
                     variant={
-                      !r.success
+                      call.duration_ms > 5000
                         ? "destructive"
-                        : r.duration_ms > 30_000
+                        : call.duration_ms > 1500
                           ? "outline"
                           : "secondary"
                     }
                   >
-                    {(r.duration_ms / 1000).toFixed(1)}s
+                    {call.duration_ms.toFixed(0)}ms
                   </Badge>
                 </td>
               </tr>
             ))}
           </tbody>
         </table>
-      )}
+      </div>
     </Panel>
   );
 }
