@@ -36,19 +36,23 @@ import {
   type SummaryCard,
 } from "../lib/tauri";
 import {
+  calendarYearOfFiscalWeek,
+  fiscalWeekIds,
+  fiscalYearOf,
+  fiscalYearOfIsoWeek,
+  formatFiscalYear,
   formatRangeLabel,
   formatWeekTag,
   isPastWeek,
   isoWeekOf,
   weekToRange,
-  weeksInYear,
 } from "../lib/iso-week";
 import type { CellState, HeatCellInfo } from "../components/shared/YearHeatmap";
 
-/** How many years (ending at the current year) appear in the year-tab
- *  strip by default. Picked so a freshly-installed user sees enough
- *  history to drill into without having to click "+ Year" right away,
- *  while keeping the strip from getting visually noisy. Anything
+/** How many fiscal years (ending at the current FY) appear in the
+ *  year-tab strip by default. Picked so a freshly-installed user sees
+ *  enough history to drill into without having to click "+ Year" right
+ *  away, while keeping the strip from getting visually noisy. Anything
  *  older is reachable via the "+ Year" picker. */
 const DEFAULT_LOOKBACK_YEARS = 5;
 
@@ -82,23 +86,39 @@ export interface AiSummaryState {
   statusMessage: string | null;
   error: string | null;
   providerStatus: ProviderStatus;
+  /** Selected **fiscal** year (Oct 1 → Sep 30, end-year-named so e.g.
+   *  Oct 1 2025 → Sep 30 2026 == 2026). Drives `yearOptions` selection
+   *  + heatmap filter. */
   selectedYear: number;
+  /** ISO week number (1..53) of the focused cell within `selectedYear`.
+   *  Within a single fiscal year each ISO week appears at most once,
+   *  so this scalar plus `selectedYear` uniquely identifies a slot.
+   *  Translate to (calendar year, week) via `calendarYearOfFiscalWeek`
+   *  before calling `weekToRange` / `weekKey`. */
   selectedWeek: number | null;
-  /** Today's ISO week. Memoised once at provider mount so derived
-   *  filters (past-week gating, future-cell dimming) don't drift
-   *  during a long-lived session. */
+  /** Today's ISO week (calendar year + week number). Memoised once at
+   *  provider mount so derived filters (past-week gating, future-cell
+   *  dimming) don't drift during a long-lived session. */
   todayIso: { year: number; week: number };
+  /** Today's fiscal year. Same memoisation as `todayIso`. */
+  todayFy: number;
 
   // ── Derived ─────────────────────────────────────────────────────────
   mappedRepos: string[];
-  /** `(repo, isoWeek)` lookup so legacy cards with non-Monday-aligned
-   *  ranges still find their slot. Key: `${repo}|${year}-${week}`. */
+  /** `(repo, calYear, isoWeek)` lookup. Key: `${repo}|${calYear}-${week}`. */
   cardIndex: Map<string, SummaryCard>;
+  /** Fiscal years available in the picker — recent N + any year that
+   *  appears in `cards`. */
   yearOptions: number[];
-  /** Heatmap cell info for the **selected** year, keyed by ISO week
+  /** Heatmap cell info for the selected fiscal year, keyed by ISO week
    *  number. Includes future / locked weeks too — the heatmap dims
    *  them based on a separate flag. */
   cellsByWeek: Map<number, HeatCellInfo>;
+  /** Ordered list of `(calYear, isoWeek)` IDs that make up the selected
+   *  fiscal year, from October (Q1) through September (Q4). Used by
+   *  the heatmap to lay out cells in fiscal order and by every loop
+   *  that iterates "every week in the selected year". */
+  fyWeekIds: Array<{ year: number; week: number }>;
   /** Strictly-past (mapped repo × week) pairs in the selected year
    *  that aren't yet cached. Drives the toolbar's "Generate (N new)"
    *  badge. */
@@ -151,7 +171,10 @@ export function AiSummaryStoreProvider({ children }: { children: ReactNode }) {
   });
 
   const todayIso = useMemo(() => isoWeekOf(new Date()), []);
-  const [selectedYear, setSelectedYear] = useState(todayIso.year);
+  const todayFy = useMemo(() => fiscalYearOf(new Date()), []);
+  // `selectedYear` is the FISCAL year the user is currently browsing.
+  // See state interface comment for translation rules.
+  const [selectedYear, setSelectedYear] = useState(todayFy);
   const [selectedWeek, setSelectedWeek] = useState<number | null>(null);
   const [extraYears, setExtraYears] = useState<Set<number>>(new Set());
 
@@ -232,6 +255,8 @@ export function AiSummaryStoreProvider({ children }: { children: ReactNode }) {
     const m = new Map<string, SummaryCard>();
     for (const c of cards) {
       const w = isoWeekOf(new Date(c.since));
+      // Key on calendar year — that's what every lookup uses (a card's
+      // (calYear, week) identity is fiscal-year-agnostic).
       m.set(weekKey(c.repo, w.year, w.week), c);
     }
     return m;
@@ -239,26 +264,30 @@ export function AiSummaryStoreProvider({ children }: { children: ReactNode }) {
 
   const yearOptions = useMemo<number[]>(() => {
     const set = new Set<number>();
-    for (
-      let y = todayIso.year;
-      y > todayIso.year - DEFAULT_LOOKBACK_YEARS;
-      y--
-    ) {
+    for (let y = todayFy; y > todayFy - DEFAULT_LOOKBACK_YEARS; y--) {
       set.add(y);
     }
     for (const c of cards) {
       const w = isoWeekOf(new Date(c.since));
-      set.add(w.year);
+      set.add(fiscalYearOfIsoWeek(w.year, w.week));
     }
     for (const y of extraYears) set.add(y);
     return [...set].sort((a, b) => b - a);
-  }, [cards, todayIso.year, extraYears]);
+  }, [cards, todayFy, extraYears]);
+
+  // Pre-compute the (calYear, isoWeek) ordering for the selected
+  // fiscal year. Used by every loop that iterates "weeks in the
+  // selected year" + by the heatmap's cell layout.
+  const fyWeekIds = useMemo(
+    () => fiscalWeekIds(selectedYear),
+    [selectedYear],
+  );
 
   const cellsByWeek = useMemo<Map<number, HeatCellInfo>>(() => {
     const m = new Map<number, HeatCellInfo>();
     for (const c of cards) {
       const w = isoWeekOf(new Date(c.since));
-      if (w.year !== selectedYear) continue;
+      if (fiscalYearOfIsoWeek(w.year, w.week) !== selectedYear) continue;
       let bucket = m.get(w.week);
       if (!bucket) {
         bucket = {
@@ -272,10 +301,9 @@ export function AiSummaryStoreProvider({ children }: { children: ReactNode }) {
       bucket.commits += c.commit_count;
       bucket.cached += 1;
     }
-    const total = weeksInYear(selectedYear);
-    for (let week = 1; week <= total; week++) {
+    for (const { year: calYear, week } of fyWeekIds) {
       const bucket = m.get(week);
-      const range = weekToRange(selectedYear, week);
+      const range = weekToRange(calYear, week);
       const sinceIso = `${isoDate(range.since)}T00:00:00Z`;
       const untilIso = `${isoDate(range.until)}T23:59:59Z`;
 
@@ -299,7 +327,7 @@ export function AiSummaryStoreProvider({ children }: { children: ReactNode }) {
       else {
         let mappedCovered = 0;
         for (const repo of mappedRepos) {
-          if (cardIndex.has(weekKey(repo, selectedYear, week))) {
+          if (cardIndex.has(weekKey(repo, calYear, week))) {
             mappedCovered += 1;
           }
         }
@@ -309,46 +337,45 @@ export function AiSummaryStoreProvider({ children }: { children: ReactNode }) {
       m.set(week, info);
     }
     return m;
-  }, [cards, cardIndex, mappedRepos, selectedYear, cellStatus]);
+  }, [cards, cardIndex, mappedRepos, selectedYear, fyWeekIds, cellStatus]);
 
   // Auto-pick a week when none is set, or when the user switches year
   // to one that doesn't include the previous selection.
   useEffect(() => {
-    const total = weeksInYear(selectedYear);
-    if (selectedWeek == null || selectedWeek > total) {
-      if (selectedYear === todayIso.year) {
+    const inSelectedFy = fyWeekIds.some((id) => id.week === selectedWeek);
+    if (selectedWeek == null || !inSelectedFy) {
+      if (selectedYear === todayFy) {
         setSelectedWeek(todayIso.week);
         return;
       }
-      let pick = 1;
-      for (let w = total; w >= 1; w--) {
-        const info = cellsByWeek.get(w);
-        if (info && info.cached > 0) {
-          pick = w;
-          break;
-        }
-      }
-      setSelectedWeek(pick);
+      // Pick the most recent week in this fiscal year that has cached
+      // data; fall back to the last week of the FY if nothing is
+      // cached yet.
+      const reversed = [...fyWeekIds].reverse();
+      const picked =
+        reversed.find((id) => (cellsByWeek.get(id.week)?.cached ?? 0) > 0) ??
+        reversed[0];
+      if (picked) setSelectedWeek(picked.week);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedYear]);
 
   const pendingCount = useMemo(() => {
     if (mappedRepos.length === 0) return 0;
-    const total = weeksInYear(selectedYear);
     let n = 0;
-    for (let w = 1; w <= total; w++) {
-      if (!isPastWeek(selectedYear, w, todayIso.year, todayIso.week)) continue;
+    for (const { year: calYear, week: w } of fyWeekIds) {
+      if (!isPastWeek(calYear, w, todayIso.year, todayIso.week)) continue;
       for (const repo of mappedRepos) {
-        if (!cardIndex.has(weekKey(repo, selectedYear, w))) n += 1;
+        if (!cardIndex.has(weekKey(repo, calYear, w))) n += 1;
       }
     }
     return n;
-  }, [cardIndex, mappedRepos, selectedYear, todayIso]);
+  }, [cardIndex, mappedRepos, fyWeekIds, todayIso]);
 
   const focusedRange = useMemo<WeekRange | null>(() => {
     if (selectedWeek == null) return null;
-    const r = weekToRange(selectedYear, selectedWeek);
+    const calYear = calendarYearOfFiscalWeek(selectedYear, selectedWeek);
+    const r = weekToRange(calYear, selectedWeek);
     return {
       since: `${isoDate(r.since)}T00:00:00Z`,
       until: `${isoDate(r.until)}T23:59:59Z`,
@@ -358,9 +385,10 @@ export function AiSummaryStoreProvider({ children }: { children: ReactNode }) {
   const focusedCards = useMemo<Map<string, SummaryCard>>(() => {
     const m = new Map<string, SummaryCard>();
     if (selectedWeek == null) return m;
+    const calYear = calendarYearOfFiscalWeek(selectedYear, selectedWeek);
     for (const c of cards) {
       const w = isoWeekOf(new Date(c.since));
-      if (w.year === selectedYear && w.week === selectedWeek) {
+      if (w.year === calYear && w.week === selectedWeek) {
         m.set(c.repo, c);
       }
     }
@@ -400,20 +428,19 @@ export function AiSummaryStoreProvider({ children }: { children: ReactNode }) {
     setGenerating(true);
     cancelRef.current = false;
 
-    const total = weeksInYear(selectedYear);
     const queue: Array<{ repo: string; year: number; week: number }> = [];
-    for (let w = 1; w <= total; w++) {
-      if (!isPastWeek(selectedYear, w, todayIso.year, todayIso.week)) continue;
+    for (const { year: calYear, week: w } of fyWeekIds) {
+      if (!isPastWeek(calYear, w, todayIso.year, todayIso.week)) continue;
       for (const repo of mappedRepos) {
-        if (!cardIndex.has(weekKey(repo, selectedYear, w))) {
-          queue.push({ repo, year: selectedYear, week: w });
+        if (!cardIndex.has(weekKey(repo, calYear, w))) {
+          queue.push({ repo, year: calYear, week: w });
         }
       }
     }
 
     if (queue.length === 0) {
       setStatusMessage(
-        `Already generated for every mapped repo in ${selectedYear}.`,
+        `Already generated for every mapped repo in ${formatFiscalYear(selectedYear)}.`,
       );
       setGenerating(false);
       window.setTimeout(() => setStatusMessage(null), 2500);
@@ -439,7 +466,7 @@ export function AiSummaryStoreProvider({ children }: { children: ReactNode }) {
       const untilIso = `${isoDate(r.until)}T23:59:59Z`;
       const k = cardKey(repo, sinceIso, untilIso);
       setStatusMessage(
-        `Summarising ${repo} · ${formatWeekTag(week)} ${selectedYear}…`,
+        `Summarising ${repo} · ${formatWeekTag(week)} ${year}…`,
       );
       try {
         const card = await prmasterTauri.aiSummary({
@@ -478,22 +505,25 @@ export function AiSummaryStoreProvider({ children }: { children: ReactNode }) {
       setStatusMessage(null);
     }
     setGenerating(false);
-  }, [mappedRepos, selectedYear, todayIso, cardIndex, persistCards]);
+  }, [mappedRepos, fyWeekIds, todayIso, cardIndex, persistCards]);
 
   const cancel = useCallback(() => {
     cancelRef.current = true;
   }, []);
 
-  /** Force-regenerate one (repo, week) pair. */
+  /** Force-regenerate one (repo, week) pair. The `year` argument is the
+   *  **fiscal** year currently selected in the UI; translated to the
+   *  calendar year of the focused ISO week before any date math. */
   const regenerateCell = useCallback(
-    async (repo: string, year: number, week: number) => {
-      if (!isPastWeek(year, week, todayIso.year, todayIso.week)) {
+    async (repo: string, fy: number, week: number) => {
+      const calYear = calendarYearOfFiscalWeek(fy, week);
+      if (!isPastWeek(calYear, week, todayIso.year, todayIso.week)) {
         setError(
           "AI summaries only run on fully-past weeks. Wait until this week ends before generating.",
         );
         return;
       }
-      const r = weekToRange(year, week);
+      const r = weekToRange(calYear, week);
       const sinceIso = `${isoDate(r.since)}T00:00:00Z`;
       const untilIso = `${isoDate(r.until)}T23:59:59Z`;
       const k = cardKey(repo, sinceIso, untilIso);
@@ -521,12 +551,14 @@ export function AiSummaryStoreProvider({ children }: { children: ReactNode }) {
     [todayIso, persistCards],
   );
 
+  /** Delete the cached card for `(repo, week)` in the given fiscal year. */
   const deleteCell = useCallback(
-    async (repo: string, year: number, week: number) => {
+    async (repo: string, fy: number, week: number) => {
+      const calYear = calendarYearOfFiscalWeek(fy, week);
       const next = cardsRef.current.filter((c) => {
         if (c.repo !== repo) return true;
         const w = isoWeekOf(new Date(c.since));
-        return !(w.year === year && w.week === week);
+        return !(w.year === calYear && w.week === week);
       });
       await persistCards(next);
     },
@@ -535,7 +567,9 @@ export function AiSummaryStoreProvider({ children }: { children: ReactNode }) {
 
   const regenerateFocusedWeek = useCallback(async () => {
     if (selectedWeek == null || generating) return;
-    const year = selectedYear;
+    // selectedYear is the fiscal year — translate to the calendar year
+    // the focused ISO week actually sits in.
+    const year = calendarYearOfFiscalWeek(selectedYear, selectedWeek);
     const week = selectedWeek;
     if (!isPastWeek(year, week, todayIso.year, todayIso.week)) {
       setError(
@@ -614,16 +648,24 @@ export function AiSummaryStoreProvider({ children }: { children: ReactNode }) {
       setStatusMessage(null);
     }
     setGenerating(false);
-  }, [selectedWeek, selectedYear, generating, mappedRepos, todayIso, persistCards]);
+  }, [
+    selectedWeek,
+    selectedYear,
+    generating,
+    mappedRepos,
+    todayIso,
+    persistCards,
+  ]);
 
   const editCell = useCallback(
     async (
       prevRepo: string,
       nextRepo: string,
-      year: number,
+      fy: number,
       week: number,
     ) => {
-      const r = weekToRange(year, week);
+      const calYear = calendarYearOfFiscalWeek(fy, week);
+      const r = weekToRange(calYear, week);
       const sinceIso = `${isoDate(r.since)}T00:00:00Z`;
       const untilIso = `${isoDate(r.until)}T23:59:59Z`;
       const k = cardKey(nextRepo, sinceIso, untilIso);
@@ -631,7 +673,7 @@ export function AiSummaryStoreProvider({ children }: { children: ReactNode }) {
       const stripped = cardsRef.current.filter((c) => {
         if (c.repo !== prevRepo) return true;
         const w = isoWeekOf(new Date(c.since));
-        return !(w.year === year && w.week === week);
+        return !(w.year === calYear && w.week === week);
       });
       try {
         const card = await prmasterTauri.aiSummary({
@@ -659,30 +701,56 @@ export function AiSummaryStoreProvider({ children }: { children: ReactNode }) {
 
   const copyAll = useCallback(async () => {
     const lines: string[] = [];
-    const buckets = new Map<string, SummaryCard[]>();
+
+    // Bucket by (fiscalYear, ISO week). Skip cards where the project
+    // had **no commits** in the window — there's nothing useful to
+    // paste, and an empty/boilerplate AI summary just adds noise.
+    type Bucket = {
+      fy: number;
+      week: number;
+      calYear: number;
+      cards: SummaryCard[];
+    };
+    const buckets = new Map<string, Bucket>();
     for (const c of cardsRef.current) {
+      if (c.commit_count <= 0) continue;
       const w = isoWeekOf(new Date(c.since));
-      const key = `${w.year}-${String(w.week).padStart(2, "0")}`;
-      const arr = buckets.get(key) ?? [];
-      arr.push(c);
-      buckets.set(key, arr);
+      const fy = fiscalYearOfIsoWeek(w.year, w.week);
+      const key = `${fy}|${String(w.week).padStart(2, "0")}`;
+      const b = buckets.get(key) ?? {
+        fy,
+        week: w.week,
+        calYear: w.year,
+        cards: [],
+      };
+      b.cards.push(c);
+      buckets.set(key, b);
     }
-    const sortedKeys = [...buckets.keys()].sort().reverse();
-    for (const key of sortedKeys) {
-      const [year, weekStr] = key.split("-");
-      const week = Number(weekStr);
-      const r = weekToRange(Number(year), week);
-      const label = `${formatWeekTag(week)} · ${formatRangeLabel(
+
+    // Order: most-recent fiscal year first, then most-recent week
+    // (chronologically — within a fiscal year that's by Monday date,
+    // not by ISO week number). Repos alphabetical within a bucket.
+    const ordered = [...buckets.values()].sort((a, b) => {
+      if (a.fy !== b.fy) return b.fy - a.fy;
+      const aMonday = weekToRange(a.calYear, a.week).since.getTime();
+      const bMonday = weekToRange(b.calYear, b.week).since.getTime();
+      return bMonday - aMonday;
+    });
+
+    for (const b of ordered) {
+      const r = weekToRange(b.calYear, b.week);
+      const label = `${formatFiscalYear(b.fy)} · ${formatWeekTag(b.week)} · ${formatRangeLabel(
         r.since.toISOString(),
         r.until.toISOString(),
       )}`;
-      const repos = (buckets.get(key) ?? [])
+      const repos = b.cards
         .slice()
-        .sort((a, b) => a.repo.localeCompare(b.repo));
+        .sort((a, b2) => a.repo.localeCompare(b2.repo));
       for (const c of repos) {
         lines.push(`## ${label} · ${c.repo}`, "", c.summary, "");
       }
     }
+
     if (lines.length === 0) return;
     await writeText(lines.join("\n").trim() + "\n");
   }, []);
@@ -720,10 +788,12 @@ export function AiSummaryStoreProvider({ children }: { children: ReactNode }) {
     selectedYear,
     selectedWeek,
     todayIso,
+    todayFy,
     mappedRepos,
     cardIndex,
     yearOptions,
     cellsByWeek,
+    fyWeekIds,
     pendingCount,
     focusedRange,
     focusedCards,

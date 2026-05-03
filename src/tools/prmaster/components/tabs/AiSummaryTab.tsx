@@ -64,6 +64,8 @@ import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
 import { type SummaryCard } from "../../lib/tauri";
 import {
+  calendarYearOfFiscalWeek,
+  formatFiscalYear,
   formatRangeLabel,
   formatWeekTag,
   isPastWeek,
@@ -101,6 +103,7 @@ export function AiSummaryTab() {
     selectedYear,
     selectedWeek,
     todayIso,
+    todayFy,
     mappedRepos,
     yearOptions,
     cellsByWeek,
@@ -119,7 +122,7 @@ export function AiSummaryTab() {
           actions.setSelectedWeek(null); // re-pick on next effect
         }}
         onAddYear={actions.addExtraYear}
-        currentYear={todayIso.year}
+        currentYear={todayFy}
         mappedCount={mappedRepos.length}
         pendingCount={pendingCount}
         onGenerate={() => void actions.generate()}
@@ -167,9 +170,7 @@ export function AiSummaryTab() {
                     year={selectedYear}
                     cells={cellsByWeek}
                     selectedWeek={selectedWeek}
-                    todayWeek={
-                      selectedYear === todayIso.year ? todayIso.week : null
-                    }
+                    today={selectedYear === todayFy ? todayIso : null}
                     onSelectWeek={(w) => actions.setSelectedWeek(w)}
                   />
                 </PanelContent>
@@ -186,7 +187,7 @@ export function AiSummaryTab() {
                   generating={generating}
                   locked={
                     !isPastWeek(
-                      selectedYear,
+                      calendarYearOfFiscalWeek(selectedYear, selectedWeek),
                       selectedWeek,
                       todayIso.year,
                       todayIso.week,
@@ -251,8 +252,11 @@ function Toolbar({
 
   return (
     <div className="flex shrink-0 flex-wrap items-center gap-x-1.5 gap-y-1 border-b bg-card/40 px-3 py-1.5">
-      <span className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
-        Year
+      <span
+        className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground"
+        title="Fiscal year — Oct 1 → Sep 30, end-year-named (FY2026 = Oct 1 2025 → Sep 30 2026)"
+      >
+        FY
       </span>
       <div className="flex flex-wrap items-center gap-1">
         {yearOptions.map((year) => (
@@ -262,8 +266,9 @@ function Toolbar({
             variant={year === selectedYear ? "secondary" : "ghost"}
             className="font-mono"
             onClick={() => onSelectYear(year)}
+            title={`Fiscal ${formatFiscalYear(year)} (Oct 1 ${year - 1} → Sep 30 ${year})`}
           >
-            {year}
+            {formatFiscalYear(year)}
           </Button>
         ))}
         <AddYearButton
@@ -298,7 +303,7 @@ function Toolbar({
             variant="outline"
             disabled
             className="h-9"
-            title={`${selectedYear}: every mapped repo + week is already cached`}
+            title={`${formatFiscalYear(selectedYear)}: every mapped repo + week is already cached`}
           >
             <Sparkles className="size-4" />
             Up to date
@@ -313,12 +318,12 @@ function Toolbar({
             className="h-9"
             title={
               pendingCount > 0
-                ? `Generate ${pendingCount} new summary card${pendingCount === 1 ? "" : "s"} for ${selectedYear}`
-                : `Generate AI summaries for ${selectedYear}`
+                ? `Generate ${pendingCount} new summary card${pendingCount === 1 ? "" : "s"} for ${formatFiscalYear(selectedYear)}`
+                : `Generate AI summaries for ${formatFiscalYear(selectedYear)}`
             }
           >
             <Sparkles className="size-4" />
-            Generate {selectedYear}
+            Generate {formatFiscalYear(selectedYear)}
             {pendingCount > 0 && (
               <Badge
                 variant="secondary"
@@ -400,16 +405,16 @@ function AddYearButton({
           size="xs"
           variant="ghost"
           className="font-mono text-muted-foreground"
-          aria-label="Add year"
-          title="Add an older year to the tab strip"
+          aria-label="Add fiscal year"
+          title="Add an older fiscal year to the tab strip"
         >
-          + Year
+          + FY
         </Button>
       </PopoverTrigger>
       <PopoverContent align="start" className="w-[220px] p-3">
         <div className="grid gap-2">
           <Label className="text-[10px] uppercase tracking-wide text-muted-foreground">
-            Add year
+            Add fiscal year
           </Label>
           <div className="flex items-center gap-1.5">
             <Input
@@ -565,7 +570,7 @@ function FocusedWeekPanel({
           <PanelTitle>
             {formatWeekTag(week)} · {formatRangeLabel(range.since, range.until)}
             <span className="ml-1 text-[10px] font-normal text-muted-foreground">
-              {year}
+              {formatFiscalYear(year)}
             </span>
           </PanelTitle>
           {inFlight ? (

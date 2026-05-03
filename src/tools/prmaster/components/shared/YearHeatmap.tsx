@@ -1,10 +1,15 @@
 /**
- * GitHub-contributions-style year heatmap for the AI Summary tab.
+ * GitHub-contributions-style fiscal-year heatmap for the AI Summary tab.
  *
  * Layout: four rows × thirteen columns (52 cells), one row per
- * quarter — Q1 = W01-W13, Q2 = W14-W26, Q3 = W27-W39, Q4 = W40-W52.
- * Years with a 53rd ISO week (rare; happens when Jan 1 lands on
- * Thursday or in some leap years on Wednesday) get the 53rd cell
+ * fiscal quarter:
+ *
+ *   Q1 = Oct, Nov, Dec  (first 13 weeks of the fiscal year)
+ *   Q2 = Jan, Feb, Mar
+ *   Q3 = Apr, May, Jun
+ *   Q4 = Jul, Aug, Sep
+ *
+ * Fiscal years that contain a 53rd ISO week (rare) get the 53rd cell
  * appended to the Q4 row.
  *
  * Each cell is a clickable button colored by its `state`:
@@ -14,17 +19,14 @@
  *   complete  every mapped repo has a cached card for this week
  *   inFlight  at least one cell is currently queued or running
  *
- * The selected week gets a primary-coloured ring. Future weeks (past
- * the current ISO week of the current year) get a slight opacity drop
- * so the user can see at a glance "I haven't reached there yet."
+ * The selected week gets a primary-coloured ring. Future weeks (the
+ * current ISO week of the current fiscal year, plus any weeks past
+ * it) get a slight opacity drop so the user can see at a glance
+ * "I haven't reached there yet."
  */
 import { Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import {
-  formatWeekTag,
-  weekToRange,
-  weeksInYear,
-} from "../../lib/iso-week";
+import { fiscalWeekIds, formatWeekTag, weekToRange } from "../../lib/iso-week";
 
 export type CellState = "empty" | "partial" | "complete" | "inFlight";
 
@@ -40,14 +42,18 @@ export interface HeatCellInfo {
 }
 
 interface Props {
+  /** Fiscal year — Oct 1 of (year-1) → Sep 30 of (year). */
   year: number;
-  /** Map keyed by ISO week number (1..53). Weeks with no entry render
-   *  as `empty`. */
+  /** Map keyed by ISO week number (1..53). Within a single fiscal
+   *  year each ISO week appears at most once, so the scalar key is
+   *  unambiguous. Weeks with no entry render as `empty`. */
   cells: Map<number, HeatCellInfo>;
   selectedWeek: number | null;
-  /** Today's `(year, week)` so we can dim future cells in the current
-   *  year. `null` to disable the dim. */
-  todayWeek: number | null;
+  /** Today's calendar (year, ISO week). Cells whose `(calYear, week)`
+   *  Monday is **on or after** today's Monday render dimmed, marking
+   *  the still-running and future weeks. Pass `null` to disable
+   *  dimming (e.g. when the user is browsing a past fiscal year). */
+  today: { year: number; week: number } | null;
   onSelectWeek: (week: number) => void;
 }
 
@@ -57,28 +63,38 @@ export function YearHeatmap({
   year,
   cells,
   selectedWeek,
-  todayWeek,
+  today,
   onSelectWeek,
 }: Props) {
-  const total = weeksInYear(year);
+  // Fiscal-year-ordered list of `(calYear, isoWeek)` IDs:
+  // Oct → Dec → Jan → … → Sep.
+  const ids = fiscalWeekIds(year);
 
-  // Build four quarter rows. Q1 = 1..13, Q2 = 14..26, Q3 = 27..39,
-  // Q4 = 40..(total). The 53rd week (when present) gets tacked onto
-  // Q4 so we never crash out of bounds.
-  const rows: number[][] = [
+  // Build four quarter rows. Position 0..12 = Q1 (Oct-Dec),
+  // 13..25 = Q2 (Jan-Mar), 26..38 = Q3 (Apr-Jun), 39..end = Q4
+  // (Jul-Sep). 53-week fiscal years tack the extra cell onto Q4.
+  const rows: Array<Array<{ calYear: number; week: number }>> = [
     [],
     [],
     [],
     [],
   ];
-  for (let w = 1; w <= total; w++) {
-    const rowIdx = Math.min(3, Math.floor((w - 1) / 13));
-    rows[rowIdx].push(w);
-  }
+  ids.forEach((id, idx) => {
+    const rowIdx = Math.min(3, Math.floor(idx / 13));
+    rows[rowIdx].push({ calYear: id.year, week: id.week });
+  });
+
+  // Today's Monday timestamp — used to decide which cells are
+  // "current or future" (locked from generation). Computed once;
+  // the heatmap only re-renders when `today` changes.
+  const todayMondayMs =
+    today != null
+      ? weekToRange(today.year, today.week).since.getTime()
+      : null;
 
   return (
     <div className="space-y-1">
-      {rows.map((weeks, rowIdx) => (
+      {rows.map((cells_, rowIdx) => (
         <div key={rowIdx} className="flex items-center gap-2">
           <span className="w-6 shrink-0 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
             {QUARTER_LABELS[rowIdx]}
@@ -91,7 +107,7 @@ export function YearHeatmap({
             // is small but still hoverable + readable.
             style={{ gridTemplateColumns: "repeat(13, 16px)" }}
           >
-            {weeks.map((week) => {
+            {cells_.map(({ calYear, week }) => {
               const info = cells.get(week) ?? {
                 state: "empty" as const,
                 commits: 0,
@@ -101,16 +117,20 @@ export function YearHeatmap({
               const isSelected = selectedWeek === week;
               // A week is "locked" when it's still ongoing or in the
               // future — generation only runs on fully-past weeks
-              // (isPastWeek in AiSummaryTab). Both the current week
-              // and future weeks render dimmer to signal that.
+              // (isPastWeek). Compare by Monday date so the lock
+              // honours fiscal-year ordering across the calendar
+              // boundary (Q4 of cal-2025 → Q1 of FY2026 still
+              // unlocked while Q3 of FY2026 sitting in cal-2026 may
+              // be locked).
+              const cellMondayMs = weekToRange(calYear, week).since.getTime();
               const isLocked =
-                todayWeek != null && week >= todayWeek;
+                todayMondayMs != null && cellMondayMs >= todayMondayMs;
               const isCurrent =
-                todayWeek != null && week === todayWeek;
+                todayMondayMs != null && cellMondayMs === todayMondayMs;
               return (
                 <HeatCell
-                  key={week}
-                  year={year}
+                  key={`${calYear}-${week}`}
+                  year={calYear}
                   week={week}
                   info={info}
                   isSelected={isSelected}
