@@ -267,32 +267,48 @@ pub fn run() {
             }
 
             // Background-agent lifecycle: when the user closes the
-            // main window we *can* keep the process alive so PRMaster
-            // polling continues. But that's only a sane default if
-            // PRMaster is actually enabled — if it's disabled there's
-            // no tray, no hotkey, and (depending on macOS version) no
-            // Dock icon either, so the user is locked out and has to
-            // force-quit. So: only hide-to-Accessory when PRMaster is
-            // enabled; otherwise let the close go through and exit
-            // the app normally.
+            // main window we *can* keep the process alive so always-on
+            // tools (PRMaster polling, dictation hotkey watcher, …)
+            // keep working. But that's only a sane default if at
+            // least one of those tools is enabled — if every
+            // background tool is off there's no tray, no hotkey, and
+            // (depending on macOS version) no Dock icon either, so
+            // the user would be locked out and have to force-quit.
+            // Hide-to-Accessory only when at least one always-on
+            // tool is live; otherwise let the close go through and
+            // exit the app normally.
             //
-            // Re-opening from the hidden state happens via the tray
-            // menu / hotkey / `prmaster_open_full_window` command,
-            // and via the new `RunEvent::Reopen` handler below
-            // (Dock-icon click).
+            // Re-opening from the hidden state happens via either
+            // tool's tray menu, the PRMaster hotkey, the
+            // `prmaster_open_full_window` command, or the
+            // `RunEvent::Reopen` handler below (Dock-icon click).
             #[cfg(target_os = "macos")]
             {
                 let app_handle = app.handle().clone();
                 if let Some(main) = app.get_webview_window("main") {
                     main.on_window_event(move |event| {
                         if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                            let prmaster_enabled =
-                                commands::preferences::load_preferences(&app_handle)
-                                    .map(|p| {
-                                        !p.disabled_tools.iter().any(|id| id == "prmaster")
-                                    })
-                                    .unwrap_or(true);
-                            if !prmaster_enabled {
+                            // List every tool that needs the app to
+                            // stay resident in Accessory mode. New
+                            // background tools should append to this
+                            // list — staying in scope here keeps the
+                            // accessory-mode policy in one place.
+                            let prefs = commands::preferences::load_preferences(&app_handle).ok();
+                            let any_keep_alive = prefs
+                                .as_ref()
+                                .map(|p| {
+                                    let prmaster = !p
+                                        .disabled_tools
+                                        .iter()
+                                        .any(|id| id == "prmaster");
+                                    let dictation = !p
+                                        .disabled_tools
+                                        .iter()
+                                        .any(|id| id == dictation::TOOL_ID);
+                                    prmaster || dictation
+                                })
+                                .unwrap_or(true);
+                            if !any_keep_alive {
                                 // Nothing keeping the app alive — let
                                 // the close happen, which exits the
                                 // process. (We don't call exit(0) here

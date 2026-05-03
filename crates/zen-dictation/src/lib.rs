@@ -23,7 +23,9 @@ pub mod manager;
 pub mod mic;
 pub mod models;
 pub mod paste;
+pub mod transcript;
 
 pub use error::DictationError;
 pub use manager::{DictationManager, HotkeyEvent};
 pub use models::{ModelId, ModelStatus};
+pub use transcript::is_likely_speech;

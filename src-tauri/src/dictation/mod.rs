@@ -23,6 +23,19 @@ pub mod dto;
 pub mod lifecycle;
 pub mod state;
 
+// Permanent macOS menu-bar tray (mic icon + small menu). Lives only
+// while the dictation tool is enabled — see `lifecycle::start` /
+// `lifecycle::stop`. macOS-only because that's where the rest of
+// the dictation feature is gated.
+#[cfg(target_os = "macos")]
+pub mod menu_bar;
+#[cfg(not(target_os = "macos"))]
+pub mod menu_bar {
+    use tauri::AppHandle;
+    pub fn init(_app: &AppHandle) -> tauri::Result<()> { Ok(()) }
+    pub fn tear_down(_app: &AppHandle) {}
+}
+
 // Dynamic Island-style HUD overlay (top-centre pill) shown while
 // dictation is recording or transcribing. macOS-only; on other
 // platforms `hud::set_state` is a no-op stub so the call sites in
@@ -154,14 +167,35 @@ fn on_hotkey(app: &AppHandle, state: &DictationTauriState, _event: HotkeyEvent) 
             })
             .await;
             match outcome {
-                Ok(Ok(text)) if !text.is_empty() => {
-                    tracing::info!(chars = text.chars().count(), "dictation: pasting transcript");
-                    if let Err(e) = zen_dictation::paste::paste_text(&text) {
-                        tracing::warn!(?e, "dictation: paste failed");
+                Ok(Ok(text)) => {
+                    // Two-step gate before we paste:
+                    //   1. `is_likely_speech` — Whisper's non-speech
+                    //      markers (`[Music]`, `[BLANK_AUDIO]`,
+                    //      `(silence)`, `[Applause]`, …) come back
+                    //      as the entire transcript when there's no
+                    //      actual speech in the buffer. We must NOT
+                    //      paste those into the user's editor.
+                    //   2. We deliberately don't even touch the
+                    //      pasteboard in the skip path. The previous
+                    //      version called `paste_text(text)` which
+                    //      would set `NSPasteboard.setString` first
+                    //      and only then synthesise ⌘V — so a
+                    //      non-speech transcript would still clobber
+                    //      the user's clipboard with `[Music]`.
+                    if zen_dictation::is_likely_speech(&text) {
+                        tracing::info!(
+                            chars = text.chars().count(),
+                            "dictation: pasting transcript"
+                        );
+                        if let Err(e) = zen_dictation::paste::paste_text(&text) {
+                            tracing::warn!(?e, "dictation: paste failed");
+                        }
+                    } else {
+                        tracing::info!(
+                            transcript = %text.trim(),
+                            "dictation: transcript skipped (blank or non-speech); clipboard untouched"
+                        );
                     }
-                }
-                Ok(Ok(_)) => {
-                    tracing::info!("dictation: empty transcript, nothing pasted");
                 }
                 Ok(Err(e)) => {
                     tracing::warn!(?e, "dictation: transcription failed");

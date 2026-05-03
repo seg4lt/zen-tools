@@ -70,15 +70,15 @@ impl HudState {
     }
 }
 
-/// Pixel size of the pill. Logical points (Tauri's default unit on
-/// macOS); device pixels follow the user's display scale.
-const HUD_WIDTH: f64 = 240.0;
-const HUD_HEIGHT: f64 = 44.0;
-/// Distance from the top of the primary display to the top of the
-/// HUD. ~12 pt clears the menu bar on most macOS setups (menu bar is
-/// ~24 pt tall in the default theme; we want the HUD to sit just
-/// below it).
-const HUD_TOP_INSET: f64 = 12.0;
+/// Pixel size of the notch-style overlay. Logical points (Tauri's
+/// default unit on macOS); device pixels follow the user's display
+/// scale.
+const HUD_WIDTH: f64 = 280.0;
+/// Height of the visible content row (waveform + label). This is the
+/// portion the user actually reads — sits flush at the bottom of the
+/// pill regardless of menu-bar thickness so the layout is identical
+/// on notched (~37 pt menu bar) and non-notched (~24 pt) machines.
+const HUD_CONTENT_HEIGHT: f64 = 40.0;
 
 /// Dispatch a state change to the HUD. Idempotent and safe to call
 /// from any thread (everything is hopped to the Cocoa main thread
@@ -106,12 +106,20 @@ pub fn set_state(app: &AppHandle, state: HudState) {
 }
 
 /// Build the HUD window if it doesn't already exist, position it at
-/// the top-centre of the primary monitor, and apply the macOS
-/// always-on-top-over-fullscreen behaviour.
+/// the top-centre of the primary monitor (covering the menu bar),
+/// and apply the macOS always-on-top-over-fullscreen behaviour.
 fn ensure_hud(app: &AppHandle) -> tauri::Result<()> {
     if app.get_webview_window(HUD_LABEL).is_some() {
         return Ok(());
     }
+
+    // The pill extends from the very top of the screen down past the
+    // menu bar — the upper section overlays the menu bar (which is
+    // mostly empty whitespace centred above the active app menus and
+    // status icons; on notched MacBooks the centre is just the
+    // notch/camera anyway) and the lower section is the visible
+    // content row.
+    let total_height = menu_bar_thickness() + HUD_CONTENT_HEIGHT;
 
     // The webview loads `index.html?window=dictation-hud`; the React
     // entry-point in `src/main.tsx` reads the query-param and short-
@@ -123,7 +131,7 @@ fn ensure_hud(app: &AppHandle) -> tauri::Result<()> {
         WebviewUrl::App("index.html?window=dictation-hud".into()),
     )
     .title("Dictation")
-    .inner_size(HUD_WIDTH, HUD_HEIGHT)
+    .inner_size(HUD_WIDTH, total_height)
     .resizable(false)
     .decorations(false)
     .transparent(true)
@@ -131,31 +139,47 @@ fn ensure_hud(app: &AppHandle) -> tauri::Result<()> {
     .visible_on_all_workspaces(true)
     .skip_taskbar(true)
     .focused(false)
-    .shadow(false) // we draw our own pill shadow in CSS
+    .shadow(false)
     .build()?;
 
-    // Position at top-centre of the primary monitor. Done after build
-    // so we can read the actual monitor geometry (handles multi-display
-    // and notched displays correctly).
+    // Position at the top-centre of the primary monitor with **no**
+    // y offset — the pill's top edge sits flush at y=0 (i.e. flush
+    // with the screen's physical top edge, behind the menu bar in
+    // window stacking terms). We then raise the window's NSLevel
+    // above the menu bar so it actually paints over it (see
+    // `raise_above_menu_bar`); without that step macOS would clip
+    // our top half.
     if let Some(monitor) = window.primary_monitor()? {
         let monitor_size = monitor.size();
         let monitor_pos = monitor.position();
         let scale = monitor.scale_factor();
-        // Convert physical → logical so position() receives the same
-        // unit our inner_size() used.
         let monitor_w_logical = monitor_size.width as f64 / scale;
         let monitor_x_logical = monitor_pos.x as f64 / scale;
         let monitor_y_logical = monitor_pos.y as f64 / scale;
         let target_x = monitor_x_logical + (monitor_w_logical - HUD_WIDTH) / 2.0;
-        let target_y = monitor_y_logical + HUD_TOP_INSET;
+        let target_y = monitor_y_logical;
         window.set_position(LogicalPosition::new(target_x, target_y))?;
     }
     // Defensive: lock the size in case the platform default ignored
-    // `resizable(false)`.
-    window.set_size(LogicalSize::new(HUD_WIDTH, HUD_HEIGHT))?;
+    // `resizable(false)`. Use the same total_height we built with.
+    window.set_size(LogicalSize::new(HUD_WIDTH, total_height))?;
 
+    raise_above_menu_bar(&window);
     raise_above_fullscreen(&window);
     make_click_through(&window);
+
+    // Hand the visible content height to the React side so its CSS
+    // anchors the waveform + label at the bottom of the pill instead
+    // of the centre — that way the menu-bar overlap stays empty
+    // black space, identical on notched and non-notched displays.
+    use tauri::Emitter as _;
+    let _ = window.emit(
+        "dictation:hud-layout",
+        serde_json::json!({
+            "content_height": HUD_CONTENT_HEIGHT,
+            "menu_bar_height": menu_bar_thickness(),
+        }),
+    );
 
     Ok(())
 }
@@ -219,6 +243,71 @@ fn raise_above_fullscreen(window: &tauri::WebviewWindow) {
     unsafe {
         let ns_window = ns_window_ptr as *mut AnyObject;
         let _: () = msg_send![ns_window, setCollectionBehavior: behavior];
+    }
+}
+
+/// Live menu-bar height in logical points. Returns
+/// `NSStatusBar.systemStatusBar.thickness`, which already accounts
+/// for notched MacBooks (~37 pt) versus standard machines (~24 pt).
+/// Falls back to 24 pt if the AppKit call somehow fails.
+fn menu_bar_thickness() -> f64 {
+    use objc2::{class, msg_send, runtime::AnyObject};
+    unsafe {
+        let status_bar: *mut AnyObject = msg_send![class!(NSStatusBar), systemStatusBar];
+        if status_bar.is_null() {
+            return 24.0;
+        }
+        // `thickness` returns CGFloat (= f64 on aarch64 / x86_64
+        // Darwin). Newer SDKs declare it as `CGFloat` directly.
+        let thickness: f64 = msg_send![status_bar, thickness];
+        if thickness > 0.0 {
+            thickness
+        } else {
+            24.0
+        }
+    }
+}
+
+/// Raise the HUD's NSWindow level so it paints **over** the macOS
+/// menu bar.
+///
+/// macOS ships these named levels (from `<AppKit/NSWindow.h>`):
+///
+/// | name                       | numeric |
+/// |----------------------------|---------|
+/// | `NSNormalWindowLevel`      | 0       |
+/// | `NSFloatingWindowLevel`    | 3       |
+/// | `NSMainMenuWindowLevel`    | 24      |
+/// | `NSStatusWindowLevel`      | 25      |
+/// | `NSPopUpMenuWindowLevel`   | 101     |
+/// | `NSScreenSaverWindowLevel` | 1000    |
+///
+/// The menu bar lives at `NSMainMenuWindowLevel` (24). Tauri's
+/// `always_on_top(true)` only puts us at `NSFloatingWindowLevel` (3),
+/// so the menu bar still draws on top of us. Promoting to
+/// `NSStatusWindowLevel` (25) is exactly what status-bar items use
+/// and is the appropriate slot for a small persistent overlay — it
+/// gets us above the menu bar without going so high that we'd
+/// occlude the screen-saver, accessibility hover-cards, or system
+/// modal panels.
+fn raise_above_menu_bar(window: &tauri::WebviewWindow) {
+    use objc2::{msg_send, runtime::AnyObject};
+
+    let Ok(ns_window_ptr) = window.ns_window() else {
+        return;
+    };
+    if ns_window_ptr.is_null() {
+        return;
+    }
+    // SAFETY: `ns_window()` returns a valid `NSWindow*` (or null,
+    // already filtered). `setLevel:` is documented main-thread-safe;
+    // we're called from the Cocoa main thread via
+    // `run_on_main_thread` upstream. The selector takes a single
+    // `NSInteger` (= `isize` on 64-bit Darwin).
+    const NS_STATUS_WINDOW_LEVEL: isize = 25;
+    unsafe {
+        let ns_window = ns_window_ptr as *mut AnyObject;
+        let _: () = msg_send![ns_window, setLevel: NS_STATUS_WINDOW_LEVEL];
     }
 }
 
