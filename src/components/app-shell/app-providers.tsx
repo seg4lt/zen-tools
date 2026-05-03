@@ -35,6 +35,7 @@ import { useProjectsBootstrap } from "@/tools/http-runner/hooks/use-projects";
 import { HttpRunnerStoreProvider } from "@/tools/http-runner/store/http-runner-store";
 import { MarkdownStoreProvider } from "@/tools/markdown/store/markdown-store";
 import { ProcessMonitorStoreProvider } from "@/tools/process-monitor/store/process-monitor-store";
+import { AiSummaryStoreProvider } from "@/tools/prmaster/store/ai-summary-store";
 import { PrMasterStoreProvider } from "@/tools/prmaster/store/prmaster-store";
 
 export function AppProviders({ children }: { children: ReactNode }) {
@@ -45,15 +46,17 @@ export function AppProviders({ children }: { children: ReactNode }) {
           <MarkdownStoreProvider>
             <DbExplorerStoreProvider>
               <PrMasterStoreProvider>
-                {/* Bootstrap hooks need to live inside the providers
-                    whose state they touch. `useProjectsBootstrap`
-                    uses React Query (already wired in App.tsx) plus
-                    the http-runner backend; doesn't actually depend
-                    on the http-runner store, but keeping it here
-                    groups all "fire-once at app start" effects in
-                    one place so they're easy to find. */}
-                <Bootstrappers />
-                {children}
+                <AiSummaryStoreProvider>
+                  {/* Bootstrap hooks need to live inside the providers
+                      whose state they touch. `useProjectsBootstrap`
+                      uses React Query (already wired in App.tsx) plus
+                      the http-runner backend; doesn't actually depend
+                      on the http-runner store, but keeping it here
+                      groups all "fire-once at app start" effects in
+                      one place so they're easy to find. */}
+                  <Bootstrappers />
+                  {children}
+                </AiSummaryStoreProvider>
               </PrMasterStoreProvider>
             </DbExplorerStoreProvider>
           </MarkdownStoreProvider>

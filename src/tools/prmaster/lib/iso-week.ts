@@ -102,3 +102,41 @@ export function isoWeeksInRange(
 export function formatWeekTag(week: number): string {
   return `W${week.toString().padStart(2, "0")}`;
 }
+
+/** A week is "generatable" only when it sits **strictly in the past** —
+ *  the current ISO week itself is excluded because work that's still
+ *  unfolding shouldn't be summarised mid-stream (commits land
+ *  throughout, the report would go stale instantly). Future weeks are
+ *  excluded for the obvious reason. So:
+ *
+ *    year < todayYear       → past, eligible
+ *    year > todayYear       → future, locked
+ *    year === todayYear     → eligible only when week < todayWeek
+ */
+export function isPastWeek(
+  year: number,
+  week: number,
+  todayYear: number,
+  todayWeek: number,
+): boolean {
+  if (year < todayYear) return true;
+  if (year > todayYear) return false;
+  return week < todayWeek;
+}
+
+/** "May 5 – May 11" (or "May 5" if same day). Used in card headers
+ *  and copy-all dumps. */
+export function formatRangeLabel(sinceIso: string, untilIso: string): string {
+  const start = new Date(sinceIso);
+  const end = new Date(untilIso);
+  const fmt = (d: Date) =>
+    d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  if (
+    start.getFullYear() === end.getFullYear() &&
+    start.getMonth() === end.getMonth() &&
+    start.getDate() === end.getDate()
+  ) {
+    return fmt(start);
+  }
+  return `${fmt(start)} – ${fmt(end)}`;
+}

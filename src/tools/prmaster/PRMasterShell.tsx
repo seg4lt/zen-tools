@@ -26,6 +26,7 @@ import {
   CheckCircle2,
   GitPullRequest,
   Inbox,
+  Loader2,
   MessageSquare,
   Settings as SettingsIcon,
   Sparkles,
@@ -43,6 +44,7 @@ import { MineTab } from "./components/tabs/MineTab";
 import { ReviewedTab } from "./components/tabs/ReviewedTab";
 import { SettingsTab } from "./components/tabs/SettingsTab";
 import { ToReviewTab } from "./components/tabs/ToReviewTab";
+import { useAiSummaryStore } from "./store/ai-summary-store";
 import { usePrMasterStore } from "./store/prmaster-store";
 
 const DEFAULT_TAB = "to-review";
@@ -203,6 +205,7 @@ export function PRMasterShell() {
                 icon={t.icon}
                 label={t.label}
                 badge={badgeFor(t.value)}
+                activity={t.value === "ai"}
               />
             ))}
           </TabsList>
@@ -257,18 +260,45 @@ function TabTrigger({
   icon: Icon,
   label,
   badge,
+  activity = false,
 }: {
   value: string;
   icon: React.ComponentType<{ className?: string }>;
   label: string;
   badge: number;
+  /** When true, this tab participates in the cross-tab "AI is
+   *  generating" indicator — the icon flips to a spinner whenever the
+   *  AI tab has work in flight, even if the user is on a different
+   *  tab right now. Lets the user start a long generation, switch
+   *  back to Review for a coffee, and still see at a glance that
+   *  things are happening. */
+  activity?: boolean;
 }) {
+  // The AI tab's `generating` flag lives in the hoisted summary store
+  // alongside the rest of its state, so it survives every navigation
+  // (tab switches *and* tool switches). We read it once for the
+  // activity-flagged tab and let the spinner reflect work in flight
+  // even when the user isn't on the AI tab.
+  const { state: aiState } = useAiSummaryStore();
+  const showSpinner = activity && aiState.generating;
   return (
     <TabsTrigger
       value={value}
-      className="h-7 gap-1 rounded px-2 text-xs data-[state=active]:bg-accent"
+      className={cn(
+        "h-7 gap-1 rounded px-2 text-xs data-[state=active]:bg-accent",
+        showSpinner && "text-primary",
+      )}
+      title={
+        showSpinner
+          ? "AI summary generation in progress"
+          : undefined
+      }
     >
-      <Icon className="size-3" />
+      {showSpinner ? (
+        <Loader2 className="size-3 animate-spin" />
+      ) : (
+        <Icon className="size-3" />
+      )}
       {label}
       {badge > 0 && (
         <span

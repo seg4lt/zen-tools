@@ -1,29 +1,38 @@
 /**
  * AI Summary tab — generates per-(repo, week) Markdown reports.
  *
- * Navigation model: the user picks a **year** at the top, sees a
- * GitHub-contributions-style heatmap of all 52 (or 53) ISO weeks, and
- * clicks any cell to focus that single week's per-repo cards in the
- * panel below. No more vertical-stack-of-accordions; one focused week
- * at a time.
+ * This component is a **thin presentational consumer** of
+ * `useAiSummaryStore()`. All state (settings, cards, in-flight
+ * cells, generation flag, year/week selection, provider status,
+ * derived heatmap buckets, focused-week cards) lives in the
+ * hoisted `AiSummaryStoreProvider` at the app-shell level. That
+ * means switching tabs inside PRMaster (or even switching to a
+ * different tool entirely) doesn't unmount the state — when the
+ * user comes back, the heatmap, focused panel, and any in-flight
+ * generation are exactly where they left them.
  *
- * Repo selection: only repositories with a local mapping in Settings
- * are summarised (mapped repo == fast `git log` path). The user has
- * no per-tab selection step — Generate runs against every mapped
- * repo.
+ * What stays here:
+ *   - Layout / render tree (Toolbar, YearHeatmap, FocusedWeekPanel,
+ *     RepoCardRow, EmptyRepoChip, etc.).
+ *   - Pure render-only sub-components (AddYearButton,
+ *     ProviderStatusPill, NoMappingsHint, RepoEditPopoverButton,
+ *     SummaryView).
+ *   - Local UI state internal to those sub-components (popover
+ *     open/closed, draft input value, "copied" flag).
  *
- * Persistence:
- *   - Cards: `prmaster_load_ai_summaries` / `prmaster_save_ai_summaries`.
- *   - Year / week selection: in-memory only.
- *
- * Card → ISO week mapping: cards are bucketed by `isoWeekOf(card.since)`,
- * **not** by exact range string, so legacy cards generated with
- * non-Monday-aligned ranges still appear in the right slot. New
- * generations always use `weekToRange(year, week)` so the canonical
- * Monday→Sunday span lands in the cache.
+ * What moved out:
+ *   - Every `useState` for `cards`, `cellStatus`, `generating`,
+ *     `selectedYear`, `selectedWeek`, etc. → store state.
+ *   - Bootstrap / focus-listener / provider-probe / week-auto-pick
+ *     `useEffect`s → store provider.
+ *   - All `useMemo` derivations (mappedRepos, cardIndex, yearOptions,
+ *     cellsByWeek, pendingCount, focusedRange, focusedCards) → store.
+ *   - Generation actions (generate, cancel, regenerateCell,
+ *     regenerateFocusedWeek, editCell, deleteCell, copyAll, clearAll,
+ *     addExtraYear) → store actions.
  */
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -53,16 +62,11 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
+import { type SummaryCard } from "../../lib/tauri";
 import {
-  prmasterTauri,
-  type PrMasterSettings,
-  type SummaryCard,
-} from "../../lib/tauri";
-import {
+  formatRangeLabel,
   formatWeekTag,
-  isoWeekOf,
-  weekToRange,
-  weeksInYear,
+  isPastWeek,
 } from "../../lib/iso-week";
 import {
   Panel,
@@ -70,660 +74,58 @@ import {
   PanelHeader,
   PanelTitle,
 } from "../shared/density";
-import {
-  YearHeatmap,
-  type CellState,
-  type HeatCellInfo,
-} from "../shared/YearHeatmap";
+import { YearHeatmap } from "../shared/YearHeatmap";
 import { MarkdownReader } from "../shared/MarkdownReader";
-
-/** How many years (ending at the current year) appear in the year-tab
- *  strip by default. Picked so a freshly-installed user sees enough
- *  history to drill into without having to click "+ Year" right away,
- *  while keeping the strip from getting visually noisy. Anything older
- *  is reachable via the "+ Year" picker. */
-const DEFAULT_LOOKBACK_YEARS = 5;
-
-/** A week is "generatable" only when it sits **strictly in the past** —
- *  the current ISO week itself is excluded because work that's still
- *  unfolding shouldn't be summarised mid-stream (commits land
- *  throughout, the report would go stale instantly). Future weeks are
- *  excluded for the obvious reason. So:
- *
- *    year < todayYear       → past, eligible
- *    year > todayYear       → future, locked
- *    year === todayYear     → eligible only when week < todayWeek
- */
-function isPastWeek(
-  year: number,
-  week: number,
-  todayYear: number,
-  todayWeek: number,
-): boolean {
-  if (year < todayYear) return true;
-  if (year > todayYear) return false;
-  return week < todayWeek;
-}
-
-// ────────────────────────────────────────────────────────────────────────
-// Types
-// ────────────────────────────────────────────────────────────────────────
-
-type CellStatus =
-  | { kind: "idle" }
-  | { kind: "loading" }
-  | { kind: "error"; message: string };
-
-interface WeekRange {
-  since: string;
-  until: string;
-}
-
-type ProviderStatus =
-  | { kind: "checking" }
-  | { kind: "ready" }
-  | { kind: "missing"; message: string };
+import {
+  cardKey,
+  useAiSummaryStore,
+  type CellStatus,
+  type ProviderStatus,
+  type WeekRange,
+} from "../../store/ai-summary-store";
 
 // ────────────────────────────────────────────────────────────────────────
 // Component
 // ────────────────────────────────────────────────────────────────────────
 
 export function AiSummaryTab() {
-  // ── Settings (mapped repos source of truth) ─────────────────────────
-  const [settings, setSettings] = useState<PrMasterSettings | null>(null);
+  const { state, actions } = useAiSummaryStore();
+  const {
+    settings,
+    cards,
+    cellStatus,
+    generating,
+    statusMessage,
+    error,
+    providerStatus,
+    selectedYear,
+    selectedWeek,
+    todayIso,
+    mappedRepos,
+    yearOptions,
+    cellsByWeek,
+    pendingCount,
+    focusedRange,
+    focusedCards,
+  } = state;
 
-  // ── Cards + in-flight cells ─────────────────────────────────────────
-  const [cards, setCards] = useState<SummaryCard[]>([]);
-  const [cellStatus, setCellStatus] = useState<Map<string, CellStatus>>(
-    new Map(),
-  );
-  const [generating, setGenerating] = useState(false);
-  const [statusMessage, setStatusMessage] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const cancelRef = useRef(false);
-
-  // ── Provider status ─────────────────────────────────────────────────
-  const [providerStatus, setProviderStatus] = useState<ProviderStatus>({
-    kind: "checking",
-  });
-  useEffect(() => {
-    let alive = true;
-    setProviderStatus({ kind: "checking" });
-    void (async () => {
-      try {
-        await prmasterTauri.aiListModels();
-        if (alive) setProviderStatus({ kind: "ready" });
-      } catch (err) {
-        if (alive)
-          setProviderStatus({ kind: "missing", message: formatError(err) });
-      }
-    })();
-    return () => {
-      alive = false;
-    };
-  }, [settings?.ai_provider]);
-
-  // ── Year + week selection ───────────────────────────────────────────
-  const todayIso = useMemo(() => isoWeekOf(new Date()), []);
-  const [selectedYear, setSelectedYear] = useState(todayIso.year);
-  const [selectedWeek, setSelectedWeek] = useState<number | null>(null);
-
-  // ── Bootstrap ──────────────────────────────────────────────────────
-  useEffect(() => {
-    let alive = true;
-    void (async () => {
-      try {
-        const [s, list] = await Promise.all([
-          prmasterTauri.getSettings(),
-          prmasterTauri.loadAiSummaries(),
-        ]);
-        if (!alive) return;
-        setSettings(s);
-        setCards(list);
-      } catch (err) {
-        if (alive) setError(formatError(err));
-      }
-    })();
-    return () => {
-      alive = false;
-    };
-  }, []);
-
-  // Refresh settings whenever the tab regains focus so a mapping added
-  // in Settings shows up here without a hard reload.
-  useEffect(() => {
-    function onFocus() {
-      void (async () => {
-        try {
-          setSettings(await prmasterTauri.getSettings());
-        } catch (err) {
-          console.warn("[ai-summary] settings refresh failed:", err);
-        }
-      })();
-    }
-    window.addEventListener("focus", onFocus);
-    return () => window.removeEventListener("focus", onFocus);
-  }, []);
-
-  // Repos we summarise == repos with a local mapping.
-  const mappedRepos = useMemo<string[]>(() => {
-    if (!settings) return [];
-    const set = new Set<string>();
-    for (const m of settings.repo_mappings) {
-      if (m.repo.length > 0) set.add(m.repo);
-    }
-    return [...set].sort((a, b) => a.localeCompare(b));
-  }, [settings]);
-
-  // Cards bucketed by `(repo, isoWeek)` so legacy cards (non-Monday-
-  // aligned ranges) still find their slot. Lookup key:
-  // `${repo}|${year}-${week}`.
-  const cardIndex = useMemo(() => {
-    const m = new Map<string, SummaryCard>();
-    for (const c of cards) {
-      const w = isoWeekOf(new Date(c.since));
-      m.set(weekKey(c.repo, w.year, w.week), c);
-    }
-    return m;
-  }, [cards]);
-
-  // Years the user has manually added via the "+ Year" button. We
-  // keep these in plain in-memory state — once you've added an old
-  // year you can always re-add it; no need to persist a list of "tab
-  // bookmarks". Resets cleanly on app restart.
-  const [extraYears, setExtraYears] = useState<Set<number>>(new Set());
-
-  // Year tabs: union of
-  //   - the last DEFAULT_LOOKBACK_YEARS (current year + N-1 prior),
-  //     so brand-new users see a useful range without having to add
-  //     anything manually
-  //   - every year that already has at least one cached card
-  //   - any year the user explicitly added via the "+ Year" picker
-  // Sorted newest-first.
-  const yearOptions = useMemo<number[]>(() => {
-    const set = new Set<number>();
-    for (let y = todayIso.year; y > todayIso.year - DEFAULT_LOOKBACK_YEARS; y--) {
-      set.add(y);
-    }
-    for (const c of cards) {
-      const w = isoWeekOf(new Date(c.since));
-      set.add(w.year);
-    }
-    for (const y of extraYears) set.add(y);
-    return [...set].sort((a, b) => b - a);
-  }, [cards, todayIso.year, extraYears]);
-
-  // Heatmap cell info for the selected year, keyed by week number.
-  const cellsByWeek = useMemo<Map<number, HeatCellInfo>>(() => {
-    const m = new Map<number, HeatCellInfo>();
-    for (const c of cards) {
-      const w = isoWeekOf(new Date(c.since));
-      if (w.year !== selectedYear) continue;
-      let bucket = m.get(w.week);
-      if (!bucket) {
-        bucket = {
-          state: "complete",
-          commits: 0,
-          cached: 0,
-          mapped: mappedRepos.length,
-        };
-        m.set(w.week, bucket);
-      }
-      bucket.commits += c.commit_count;
-      bucket.cached += 1;
-    }
-    // Layer in-flight + partial state.
-    const total = weeksInYear(selectedYear);
-    for (let week = 1; week <= total; week++) {
-      const bucket = m.get(week);
-      const range = weekToRange(selectedYear, week);
-      const sinceIso = `${isoDate(range.since)}T00:00:00Z`;
-      const untilIso = `${isoDate(range.until)}T23:59:59Z`;
-
-      const inFlight = mappedRepos.some((repo) => {
-        const k = cardKey(repo, sinceIso, untilIso);
-        return cellStatus.get(k)?.kind === "loading";
-      });
-
-      const info: HeatCellInfo = bucket ?? {
-        state: "empty",
-        commits: 0,
-        cached: 0,
-        mapped: mappedRepos.length,
-      };
-      info.mapped = mappedRepos.length;
-
-      let state: CellState;
-      if (inFlight) state = "inFlight";
-      else if (info.cached === 0) state = "empty";
-      else if (mappedRepos.length === 0) state = "complete";
-      else {
-        // Count repos *currently mapped* that have a card in this
-        // week. A week is "complete" only when every mapped repo has
-        // a card for that week; legacy cards from since-removed
-        // mappings count as extras, not gaps.
-        let mappedCovered = 0;
-        for (const repo of mappedRepos) {
-          if (cardIndex.has(weekKey(repo, selectedYear, week))) {
-            mappedCovered += 1;
-          }
-        }
-        state = mappedCovered === mappedRepos.length ? "complete" : "partial";
-      }
-      info.state = state;
-      m.set(week, info);
-    }
-    return m;
-  }, [cards, cardIndex, mappedRepos, selectedYear, cellStatus]);
-
-  // Auto-pick a week when none is set, or when the user switches year
-  // to one that doesn't include the previous selection.
-  useEffect(() => {
-    const total = weeksInYear(selectedYear);
-    if (selectedWeek == null || selectedWeek > total) {
-      // Same year as today → snap to today's week.
-      // Otherwise → most-recent week with cards, fallback to W01.
-      if (selectedYear === todayIso.year) {
-        setSelectedWeek(todayIso.week);
-        return;
-      }
-      let pick = 1;
-      for (let w = total; w >= 1; w--) {
-        const info = cellsByWeek.get(w);
-        if (info && info.cached > 0) {
-          pick = w;
-          break;
-        }
-      }
-      setSelectedWeek(pick);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedYear]);
-
-  // ── Pending count for the toolbar (selected year, strictly-past weeks)
-  const pendingCount = useMemo(() => {
-    if (mappedRepos.length === 0) return 0;
-    const total = weeksInYear(selectedYear);
-    let n = 0;
-    for (let w = 1; w <= total; w++) {
-      // Only count strictly-past weeks. The current week is still
-      // running so its commit set isn't final, and future weeks
-      // obviously don't have commits to summarise yet.
-      if (!isPastWeek(selectedYear, w, todayIso.year, todayIso.week)) continue;
-      for (const repo of mappedRepos) {
-        if (!cardIndex.has(weekKey(repo, selectedYear, w))) n += 1;
-      }
-    }
-    return n;
-  }, [cardIndex, mappedRepos, selectedYear, todayIso]);
-
-  // ── Persistence helper ──────────────────────────────────────────────
-  async function persistCards(next: SummaryCard[]) {
-    setCards(next);
-    try {
-      await prmasterTauri.saveAiSummaries(next);
-    } catch (err) {
-      console.warn("[ai-summary] saveAiSummaries failed:", err);
-    }
-  }
-
-  // ── Generate every missing (mapped repo × week ≤ today) cell ────────
-  async function generate() {
-    if (mappedRepos.length === 0) {
-      setError(
-        "Add at least one local repo mapping in Settings to enable AI summaries.",
-      );
-      return;
-    }
-    setError(null);
-    setGenerating(true);
-    cancelRef.current = false;
-
-    const total = weeksInYear(selectedYear);
-    const queue: Array<{ repo: string; year: number; week: number }> = [];
-    for (let w = 1; w <= total; w++) {
-      // Only queue strictly-past weeks (matches `pendingCount` and
-      // `isPastWeek`). The current and future weeks are locked.
-      if (!isPastWeek(selectedYear, w, todayIso.year, todayIso.week)) continue;
-      for (const repo of mappedRepos) {
-        if (!cardIndex.has(weekKey(repo, selectedYear, w))) {
-          queue.push({ repo, year: selectedYear, week: w });
-        }
-      }
-    }
-
-    if (queue.length === 0) {
-      setStatusMessage(
-        `Already generated for every mapped repo in ${selectedYear}.`,
-      );
-      setGenerating(false);
-      window.setTimeout(() => setStatusMessage(null), 2500);
-      return;
-    }
-
-    // Up-front loading flags so the heatmap lights up immediately.
-    setCellStatus((prev) => {
-      const next = new Map(prev);
-      for (const { repo, year, week } of queue) {
-        const r = weekToRange(year, week);
-        const sinceIso = `${isoDate(r.since)}T00:00:00Z`;
-        const untilIso = `${isoDate(r.until)}T23:59:59Z`;
-        next.set(cardKey(repo, sinceIso, untilIso), { kind: "loading" });
-      }
-      return next;
-    });
-
-    let nextCards = cards.slice();
-    for (const { repo, year, week } of queue) {
-      if (cancelRef.current) break;
-      const r = weekToRange(year, week);
-      const sinceIso = `${isoDate(r.since)}T00:00:00Z`;
-      const untilIso = `${isoDate(r.until)}T23:59:59Z`;
-      const k = cardKey(repo, sinceIso, untilIso);
-      setStatusMessage(
-        `Summarising ${repo} · ${formatWeekTag(week)} ${selectedYear}…`,
-      );
-      try {
-        const card = await prmasterTauri.aiSummary({
-          repo,
-          since: sinceIso,
-          until: untilIso,
-          force: false,
-        });
-        if (cancelRef.current) break;
-        nextCards = upsertCardByWeek(nextCards, card);
-        await persistCards(nextCards);
-        setCellStatus((prev) => {
-          const next = new Map(prev);
-          next.delete(k);
-          return next;
-        });
-      } catch (err) {
-        const message = formatError(err);
-        setCellStatus((prev) =>
-          new Map(prev).set(k, { kind: "error", message }),
-        );
-      }
-    }
-
-    if (cancelRef.current) {
-      setCellStatus((prev) => {
-        const next = new Map(prev);
-        for (const [k, v] of next) {
-          if (v.kind === "loading") next.delete(k);
-        }
-        return next;
-      });
-      setStatusMessage("Generation cancelled.");
-      window.setTimeout(() => setStatusMessage(null), 2000);
-    } else {
-      setStatusMessage(null);
-    }
-    setGenerating(false);
-  }
-
-  function cancelGeneration() {
-    cancelRef.current = true;
-  }
-
-  // ── Per-cell ops (in the focused-week panel) ────────────────────────
-  async function regenerateCell(repo: string, year: number, week: number) {
-    if (!isPastWeek(year, week, todayIso.year, todayIso.week)) {
-      setError(
-        "AI summaries only run on fully-past weeks. Wait until this week ends before generating.",
-      );
-      return;
-    }
-    const r = weekToRange(year, week);
-    const sinceIso = `${isoDate(r.since)}T00:00:00Z`;
-    const untilIso = `${isoDate(r.until)}T23:59:59Z`;
-    const k = cardKey(repo, sinceIso, untilIso);
-    setCellStatus((prev) => new Map(prev).set(k, { kind: "loading" }));
-    try {
-      const card = await prmasterTauri.aiSummary({
-        repo,
-        since: sinceIso,
-        until: untilIso,
-        force: true,
-      });
-      const next = upsertCardByWeek(cards, card);
-      await persistCards(next);
-      setCellStatus((prev) => {
-        const x = new Map(prev);
-        x.delete(k);
-        return x;
-      });
-    } catch (err) {
-      setCellStatus((prev) =>
-        new Map(prev).set(k, { kind: "error", message: formatError(err) }),
-      );
-    }
-  }
-
-  async function deleteCell(repo: string, year: number, week: number) {
-    const next = cards.filter((c) => {
-      if (c.repo !== repo) return true;
-      const w = isoWeekOf(new Date(c.since));
-      return !(w.year === year && w.week === week);
-    });
-    await persistCards(next);
-  }
-
-  /** Bulk action: regenerate every cell in the currently-focused week
-   *  (every mapped repo + any cached repos still hanging around). */
-  async function regenerateFocusedWeek() {
-    if (selectedWeek == null || generating) return;
-    const year = selectedYear;
-    const week = selectedWeek;
-    if (!isPastWeek(year, week, todayIso.year, todayIso.week)) {
-      setError(
-        "AI summaries only run on fully-past weeks. Wait until this week ends before generating.",
-      );
-      return;
-    }
-
-    const r = weekToRange(year, week);
-    const sinceIso = `${isoDate(r.since)}T00:00:00Z`;
-    const untilIso = `${isoDate(r.until)}T23:59:59Z`;
-
-    const cachedReposThisWeek = cards
-      .filter((c) => {
-        const w = isoWeekOf(new Date(c.since));
-        return w.year === year && w.week === week;
-      })
-      .map((c) => c.repo);
-    const targets = Array.from(
-      new Set([...mappedRepos, ...cachedReposThisWeek]),
-    ).sort((a, b) => a.localeCompare(b));
-    if (targets.length === 0) return;
-
-    setError(null);
-    setGenerating(true);
-    cancelRef.current = false;
-
-    setCellStatus((prev) => {
-      const next = new Map(prev);
-      for (const repo of targets) {
-        next.set(cardKey(repo, sinceIso, untilIso), { kind: "loading" });
-      }
-      return next;
-    });
-
-    let nextCards = cards.slice();
-    for (const repo of targets) {
-      if (cancelRef.current) break;
-      const k = cardKey(repo, sinceIso, untilIso);
-      setStatusMessage(`Regenerating ${repo} · ${formatWeekTag(week)}…`);
-      try {
-        const card = await prmasterTauri.aiSummary({
-          repo,
-          since: sinceIso,
-          until: untilIso,
-          force: true,
-        });
-        if (cancelRef.current) break;
-        nextCards = upsertCardByWeek(nextCards, card);
-        await persistCards(nextCards);
-        setCellStatus((prev) => {
-          const next = new Map(prev);
-          next.delete(k);
-          return next;
-        });
-      } catch (err) {
-        setCellStatus((prev) =>
-          new Map(prev).set(k, {
-            kind: "error",
-            message: formatError(err),
-          }),
-        );
-      }
-    }
-    if (cancelRef.current) {
-      setCellStatus((prev) => {
-        const next = new Map(prev);
-        for (const [k, v] of next) {
-          if (v.kind === "loading") next.delete(k);
-        }
-        return next;
-      });
-      setStatusMessage("Generation cancelled.");
-      window.setTimeout(() => setStatusMessage(null), 2000);
-    } else {
-      setStatusMessage(null);
-    }
-    setGenerating(false);
-  }
-
-  /** Replace a card with a fresh generation at a different repo (the
-   *  week stays put — the heatmap is the canonical week picker). */
-  async function editCell(
-    prevRepo: string,
-    nextRepo: string,
-    year: number,
-    week: number,
-  ) {
-    const r = weekToRange(year, week);
-    const sinceIso = `${isoDate(r.since)}T00:00:00Z`;
-    const untilIso = `${isoDate(r.until)}T23:59:59Z`;
-    const k = cardKey(nextRepo, sinceIso, untilIso);
-    setCellStatus((prev) => new Map(prev).set(k, { kind: "loading" }));
-    const stripped = cards.filter((c) => {
-      if (c.repo !== prevRepo) return true;
-      const w = isoWeekOf(new Date(c.since));
-      return !(w.year === year && w.week === week);
-    });
-    try {
-      const card = await prmasterTauri.aiSummary({
-        repo: nextRepo,
-        since: sinceIso,
-        until: untilIso,
-        force: true,
-      });
-      await persistCards(upsertCardByWeek(stripped, card));
-      setCellStatus((prev) => {
-        const x = new Map(prev);
-        x.delete(k);
-        return x;
-      });
-    } catch (err) {
-      await persistCards(cards);
-      setCellStatus((prev) =>
-        new Map(prev).set(k, { kind: "error", message: formatError(err) }),
-      );
-    }
-  }
-
-  async function copyAll() {
-    const lines: string[] = [];
-    // Group cards by ISO (year, week) so the dump comes out in
-    // chronological order, year-by-year.
-    const buckets = new Map<string, SummaryCard[]>();
-    for (const c of cards) {
-      const w = isoWeekOf(new Date(c.since));
-      const key = `${w.year}-${String(w.week).padStart(2, "0")}`;
-      const arr = buckets.get(key) ?? [];
-      arr.push(c);
-      buckets.set(key, arr);
-    }
-    const sortedKeys = [...buckets.keys()].sort().reverse();
-    for (const key of sortedKeys) {
-      const [year, weekStr] = key.split("-");
-      const week = Number(weekStr);
-      const r = weekToRange(Number(year), week);
-      const label = `${formatWeekTag(week)} · ${formatRangeLabel(
-        r.since.toISOString(),
-        r.until.toISOString(),
-      )}`;
-      const repos = (buckets.get(key) ?? []).slice().sort((a, b) =>
-        a.repo.localeCompare(b.repo),
-      );
-      for (const c of repos) {
-        lines.push(`## ${label} · ${c.repo}`, "", c.summary, "");
-      }
-    }
-    if (lines.length === 0) return;
-    await writeText(lines.join("\n").trim() + "\n");
-  }
-
-  async function clearAll() {
-    setCards([]);
-    setCellStatus(new Map());
-    try {
-      await prmasterTauri.clearAiSummaries();
-    } catch (err) {
-      console.warn("[ai-summary] clearAiSummaries failed:", err);
-    }
-  }
-
-  // ── Focused-week derivations ────────────────────────────────────────
-  const focusedRange = useMemo<WeekRange | null>(() => {
-    if (selectedWeek == null) return null;
-    const r = weekToRange(selectedYear, selectedWeek);
-    return {
-      since: `${isoDate(r.since)}T00:00:00Z`,
-      until: `${isoDate(r.until)}T23:59:59Z`,
-    };
-  }, [selectedYear, selectedWeek]);
-
-  // Cards that fall in the focused (year, week) bucket.
-  const focusedCards = useMemo<Map<string, SummaryCard>>(() => {
-    const m = new Map<string, SummaryCard>();
-    if (selectedWeek == null) return m;
-    for (const c of cards) {
-      const w = isoWeekOf(new Date(c.since));
-      if (w.year === selectedYear && w.week === selectedWeek) {
-        m.set(c.repo, c);
-      }
-    }
-    return m;
-  }, [cards, selectedYear, selectedWeek]);
-
-  // ── Render ─────────────────────────────────────────────────────────
   return (
     <div className="flex h-full min-h-0 flex-col">
       <Toolbar
         yearOptions={yearOptions}
         selectedYear={selectedYear}
         onSelectYear={(y) => {
-          setSelectedYear(y);
-          setSelectedWeek(null); // re-pick on next effect
+          actions.setSelectedYear(y);
+          actions.setSelectedWeek(null); // re-pick on next effect
         }}
-        onAddYear={(y) => {
-          setExtraYears((prev) => {
-            const next = new Set(prev);
-            next.add(y);
-            return next;
-          });
-          setSelectedYear(y);
-          setSelectedWeek(null);
-        }}
+        onAddYear={actions.addExtraYear}
         currentYear={todayIso.year}
         mappedCount={mappedRepos.length}
         pendingCount={pendingCount}
-        onGenerate={() => void generate()}
-        onCancel={cancelGeneration}
-        onCopyAll={() => void copyAll()}
-        onClearAll={() => void clearAll()}
+        onGenerate={() => void actions.generate()}
+        onCancel={actions.cancel}
+        onCopyAll={() => void actions.copyAll()}
+        onClearAll={() => void actions.clearAll()}
         generating={generating}
         cardCount={cards.length}
         providerStatus={providerStatus}
@@ -738,7 +140,7 @@ export function AiSummaryTab() {
                 <Button
                   size="xs"
                   variant="ghost"
-                  onClick={() => setError(null)}
+                  onClick={() => actions.setError(null)}
                 >
                   Dismiss
                 </Button>
@@ -768,7 +170,7 @@ export function AiSummaryTab() {
                     todayWeek={
                       selectedYear === todayIso.year ? todayIso.week : null
                     }
-                    onSelectWeek={(w) => setSelectedWeek(w)}
+                    onSelectWeek={(w) => actions.setSelectedWeek(w)}
                   />
                 </PanelContent>
               </Panel>
@@ -790,15 +192,15 @@ export function AiSummaryTab() {
                       todayIso.week,
                     )
                   }
-                  onRegenerateWeek={() => void regenerateFocusedWeek()}
+                  onRegenerateWeek={() => void actions.regenerateFocusedWeek()}
                   onRegenerate={(repo) =>
-                    void regenerateCell(repo, selectedYear, selectedWeek)
+                    void actions.regenerateCell(repo, selectedYear, selectedWeek)
                   }
                   onDelete={(repo) =>
-                    void deleteCell(repo, selectedYear, selectedWeek)
+                    void actions.deleteCell(repo, selectedYear, selectedWeek)
                   }
                   onEdit={(prev, next) =>
-                    void editCell(prev, next, selectedYear, selectedWeek)
+                    void actions.editCell(prev, next, selectedYear, selectedWeek)
                   }
                 />
               )}
@@ -1581,61 +983,4 @@ function RepoEditPopoverButton({
       </PopoverContent>
     </Popover>
   );
-}
-
-// ────────────────────────────────────────────────────────────────────────
-// Helpers
-// ────────────────────────────────────────────────────────────────────────
-
-function isoDate(d: Date): string {
-  const y = d.getUTCFullYear();
-  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
-  const day = String(d.getUTCDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
-}
-
-function cardKey(repo: string, since: string, until: string): string {
-  return `${repo}|${since}|${until}`;
-}
-
-function weekKey(repo: string, year: number, week: number): string {
-  return `${repo}|${year}-${String(week).padStart(2, "0")}`;
-}
-
-/** Insert / replace a card by its `(repo, isoWeek)` bucket so legacy
- *  cards (non-Monday-aligned ranges) get cleanly superseded by ISO-
- *  aligned ones on regeneration — no orphan duplicates. */
-function upsertCardByWeek(
-  cards: SummaryCard[],
-  next: SummaryCard,
-): SummaryCard[] {
-  const nextWeek = isoWeekOf(new Date(next.since));
-  const filtered = cards.filter((c) => {
-    if (c.repo !== next.repo) return true;
-    const w = isoWeekOf(new Date(c.since));
-    return w.year !== nextWeek.year || w.week !== nextWeek.week;
-  });
-  return [next, ...filtered];
-}
-
-function formatRangeLabel(sinceIso: string, untilIso: string): string {
-  const start = new Date(sinceIso);
-  const end = new Date(untilIso);
-  const fmt = (d: Date) =>
-    d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
-  if (
-    start.getFullYear() === end.getFullYear() &&
-    start.getMonth() === end.getMonth() &&
-    start.getDate() === end.getDate()
-  ) {
-    return fmt(start);
-  }
-  return `${fmt(start)} – ${fmt(end)}`;
-}
-
-function formatError(err: unknown): string {
-  if (err && typeof err === "object" && "message" in err) {
-    return String((err as { message: unknown }).message);
-  }
-  return String(err);
 }
