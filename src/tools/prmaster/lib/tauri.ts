@@ -202,6 +202,25 @@ export interface AiRunRecord {
   commit_count: number;
   /** Cost reported by the provider when available. */
   cost_usd: number | null;
+  /** Per-model token-usage breakdown reported by the provider (Claude
+   *  Code lists every model that consumed tokens for this run; Copilot
+   *  doesn't expose this). For the common "I asked for Sonnet but I
+   *  see Haiku in the JSON" case, this column makes both models
+   *  visible — Haiku is the routing model the CLI uses internally,
+   *  Sonnet/Opus is the answer model. Empty when the field wasn't
+   *  reported (or for cache hits). */
+  model_usage?: ModelUsageEntry[];
+}
+
+/** Per-model token usage as reported by the provider's CLI. Mirrors
+ *  `zen_ai_cli::ModelUsageEntry`. */
+export interface ModelUsageEntry {
+  model: string;
+  input_tokens?: number | null;
+  output_tokens?: number | null;
+  cache_read_input_tokens?: number | null;
+  cache_creation_input_tokens?: number | null;
+  cost_usd?: number | null;
 }
 
 export type NotificationActionKind =
@@ -356,6 +375,10 @@ export interface SummaryCard {
   summary: string;
   cost_usd: number | null;
   generated_at_ms: number;
+  /** Per-model breakdown reported by the provider when available.
+   *  Optional (older cached cards persisted before this field
+   *  existed don't have it). */
+  model_usage?: ModelUsageEntry[];
 }
 
 // ────────────────────────────────────────────────────────────────────────

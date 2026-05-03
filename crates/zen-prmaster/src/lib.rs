@@ -141,6 +141,17 @@ pub struct AiRunRecord {
     pub commit_count: usize,
     /// Cost reported by the provider, when available.
     pub cost_usd: Option<f64>,
+    /// Per-model token-usage breakdown reported by the provider, when
+    /// available. For Claude Code this typically shows **both** the
+    /// model the user requested via `--model` (Sonnet/Opus/etc.) and
+    /// the small Haiku model the CLI uses internally for routing /
+    /// classification. Surfacing this here lets the API Stats tab
+    /// answer the common question "did Sonnet actually run?" without
+    /// the user having to pop a terminal and re-run the CLI manually.
+    /// Empty for Copilot (no breakdown available) and for cache hits
+    /// (no run happened).
+    #[serde(default)]
+    pub model_usage: Vec<zen_ai_cli::ModelUsageEntry>,
 }
 
 /// Events broadcast by the engine to the Tauri command layer (which
@@ -488,6 +499,11 @@ impl PrMasterEngine {
                     .map(|c| c.commit_count)
                     .unwrap_or(0),
                 cost_usd: result.as_ref().ok().and_then(|c| c.cost_usd),
+                model_usage: result
+                    .as_ref()
+                    .ok()
+                    .map(|c| c.model_usage.clone())
+                    .unwrap_or_default(),
             };
             self.push_ai_run(record);
         }

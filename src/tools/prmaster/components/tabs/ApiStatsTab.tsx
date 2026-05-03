@@ -33,6 +33,7 @@ import {
   prmasterTauri,
   type AiRunRecord,
   type GhCall,
+  type ModelUsageEntry,
 } from "../../lib/tauri";
 import { Panel, PanelContent, PanelHeader, PanelTitle } from "../shared/density";
 
@@ -172,11 +173,24 @@ function AiRunsPanel({ runs }: { runs: AiRunRecord[] }) {
                   </td>
                   <td className="px-2 py-1 font-mono">{r.provider}</td>
                   <td className="px-2 py-1 font-mono">
-                    {r.model ?? (
-                      <span className="italic text-muted-foreground">
-                        (provider default)
+                    <div className="flex flex-col gap-0.5">
+                      <span>
+                        {r.model ?? (
+                          <span
+                            className="italic text-muted-foreground"
+                            title={
+                              "No --model flag was passed; the CLI used its " +
+                              "own default. Pick a model in Settings → AI Model."
+                            }
+                          >
+                            (provider default)
+                          </span>
+                        )}
                       </span>
-                    )}
+                      {r.model_usage && r.model_usage.length > 0 && (
+                        <ModelUsageBreakdown entries={r.model_usage} />
+                      )}
+                    </div>
                   </td>
                   <td className="px-2 py-1 font-mono">{r.repo}</td>
                   <td className="px-2 py-1 whitespace-nowrap text-muted-foreground">
@@ -293,4 +307,62 @@ function formatRangeShort(sinceIso: string, untilIso: string): string {
     return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
   };
   return `${fmt(sinceIso)} → ${fmt(untilIso)}`;
+}
+
+/**
+ * Per-model token-usage breakdown. Renders one chip per model the
+ * provider's CLI reported, sorted by output tokens (the "real answer"
+ * model first; the small Haiku routing model trails behind).
+ *
+ * The most common confusion this resolves: Claude Code uses Haiku
+ * internally for tool selection / prompt routing **even when you ask
+ * for Sonnet or Opus**. The CLI's JSON output names every model that
+ * consumed tokens, so seeing Haiku alongside Sonnet here is normal —
+ * the tooltip on each chip clarifies what each line means.
+ */
+function ModelUsageBreakdown({ entries }: { entries: ModelUsageEntry[] }) {
+  return (
+    <div className="flex flex-wrap gap-1">
+      {entries.map((e, i) => {
+        const isRouting =
+          /haiku/i.test(e.model) &&
+          (e.output_tokens ?? 0) <
+            Math.max(...entries.map((m) => m.output_tokens ?? 0), 1) / 4;
+        const inTok = e.input_tokens ?? 0;
+        const outTok = e.output_tokens ?? 0;
+        const tip = [
+          e.model,
+          `in ${inTok.toLocaleString()} / out ${outTok.toLocaleString()}`,
+          isRouting
+            ? "small model — used by Claude Code for internal routing / classification"
+            : null,
+        ]
+          .filter(Boolean)
+          .join(" · ");
+        return (
+          <span
+            key={`${e.model}-${i}`}
+            title={tip}
+            className={cn(
+              "inline-flex items-center gap-1 rounded border px-1 py-px text-[9px] font-mono",
+              isRouting
+                ? "border-muted-foreground/20 bg-muted/40 text-muted-foreground"
+                : "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
+            )}
+          >
+            <span className="truncate max-w-[160px]">{e.model}</span>
+            <span className="opacity-70">
+              {formatTokens(inTok + outTok)}
+            </span>
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
+function formatTokens(n: number): string {
+  if (n < 1000) return `${n}t`;
+  if (n < 10_000) return `${(n / 1000).toFixed(1)}kt`;
+  return `${Math.round(n / 1000)}kt`;
 }

@@ -74,6 +74,17 @@ pub struct SummaryCard {
     pub cost_usd: Option<f64>,
     /// Wall-clock generation time, UNIX millis.
     pub generated_at_ms: i64,
+    /// Per-model token usage reported by the AI provider. Empty for
+    /// providers that don't expose it (Copilot) and for the
+    /// zero-commit early-return path (no AI call happened). For
+    /// Claude Code this normally lists **both** the model the user
+    /// asked for (Sonnet/Opus/…) and the internal Haiku used for
+    /// routing — exposed so the API Stats panel can answer "did the
+    /// configured model actually run?" without the user having to
+    /// re-invoke the CLI by hand. `#[serde(default)]` so cards
+    /// cached by older builds (without this field) decode cleanly.
+    #[serde(default)]
+    pub model_usage: Vec<zen_ai_cli::ModelUsageEntry>,
 }
 
 /// Errors raised by [`generate_summary`].
@@ -463,6 +474,8 @@ pub async fn generate_summary(
             summary: String::from("_No commits in this range._"),
             cost_usd: None,
             generated_at_ms: chrono::Utc::now().timestamp_millis(),
+            // No AI call happened — nothing to report.
+            model_usage: Vec::new(),
         });
     }
 
@@ -487,6 +500,7 @@ pub async fn generate_summary(
         summary: response.text,
         cost_usd: response.cost_usd,
         generated_at_ms: chrono::Utc::now().timestamp_millis(),
+        model_usage: response.model_usage,
     })
 }
 
@@ -602,6 +616,7 @@ mod tests {
             summary: "* worked on x\n* refactored y".into(),
             cost_usd: Some(0.05),
             generated_at_ms: 1,
+            model_usage: Vec::new(),
         };
         let key = AiSummaryCache::key(&card.repo, card.since, card.until);
         cache.put(key.clone(), card.clone());
