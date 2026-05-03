@@ -113,23 +113,20 @@ jobs:
           TAG="${{ github.ref_name }}"
 
           if [ "${{ runner.os }}" = "macOS" ]; then
-            # Tauri produces a .dmg per build; the .app.tar.gz +
-            # .sig pair only appears once the updater is enabled
-            # (`createUpdaterArtifacts: true` in tauri.conf.json
-            # plus a signing key).  We copy whichever artifacts
-            # exist and leave a missing-updater-bundle as a
-            # non-fatal warning so the release still happens.
+            # Tauri produces a .dmg + a .app.tar.gz/.sig pair on every
+            # build now that `createUpdaterArtifacts: true` is set in
+            # tauri.conf.json.  Missing artifacts are a hard failure —
+            # if the updater bundle is absent here, either the bundle
+            # config regressed or the TAURI_SIGNING_PRIVATE_KEY secret
+            # is missing/wrong, both of which we want to know about
+            # before publishing a release.
             DMG=$(find . -name "*.dmg" -path "*/release/bundle/dmg/*" | head -1)
             cp "$DMG" "release-assets/Zen-Tools-${TAG}-macos-arm64.dmg"
 
-            APP_TAR=$(find . -name "*.app.tar.gz" -path "*/release/bundle/macos/*" | head -1 || true)
-            APP_SIG=$(find . -name "*.app.tar.gz.sig" -path "*/release/bundle/macos/*" | head -1 || true)
-            if [ -n "$APP_TAR" ] && [ -n "$APP_SIG" ]; then
-              cp "$APP_TAR" "release-assets/Zen-Tools-${TAG}-macos-arm64.app.tar.gz"
-              cp "$APP_SIG" "release-assets/Zen-Tools-${TAG}-macos-arm64.app.tar.gz.sig"
-            else
-              echo "::notice::No updater artifacts produced — turn on createUpdaterArtifacts in tauri.conf.json to enable auto-update."
-            fi
+            APP_TAR=$(find . -name "*.app.tar.gz" -path "*/release/bundle/macos/*" | head -1)
+            APP_SIG=$(find . -name "*.app.tar.gz.sig" -path "*/release/bundle/macos/*" | head -1)
+            cp "$APP_TAR" "release-assets/Zen-Tools-${TAG}-macos-arm64.app.tar.gz"
+            cp "$APP_SIG" "release-assets/Zen-Tools-${TAG}-macos-arm64.app.tar.gz.sig"
           fi
 
           # Windows row reinstated later — kept for symmetry with the
@@ -170,11 +167,10 @@ jobs:
         run: ls -la release-assets/
 
       - name: Generate updater manifest (latest.json)
-        # Only emitted when the matching .sig exists — see the
-        # "Stage release assets" step.  Without a signed bundle the
-        # Tauri updater can't verify the artifact, so shipping a
-        # latest.json with a missing signature would be worse than
-        # not shipping one at all.
+        # `createUpdaterArtifacts: true` in tauri.conf.json guarantees
+        # the .app.tar.gz/.sig pair is present, so missing files here
+        # are a hard failure rather than a quiet skip — same reasoning
+        # as the asset-stage step.
         shell: bash
         run: |
           set -euo pipefail
@@ -182,10 +178,6 @@ jobs:
           REPO="${{ github.repository }}"
           PUB_DATE="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
           MAC_SIG_FILE="release-assets/Zen-Tools-${TAG}-macos-arm64.app.tar.gz.sig"
-          if [ ! -f "$MAC_SIG_FILE" ]; then
-            echo "::notice::Skipping latest.json — no .sig produced (updater not enabled)."
-            exit 0
-          fi
           MAC_SIG="$(cat "$MAC_SIG_FILE")"
           cat > release-assets/latest.json <<EOF
           {

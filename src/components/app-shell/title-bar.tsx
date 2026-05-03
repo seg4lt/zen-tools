@@ -6,6 +6,7 @@ import { isMac, useShortcut } from "@/lib/keyboard";
 import { useAppZoom } from "@/hooks/use-app-zoom";
 import { useLastRoute } from "@/hooks/use-last-route";
 import { useToolOrder } from "@/hooks/use-tool-order";
+import { useUpdater } from "@/lib/updater/use-updater";
 
 /**
  * Top bar with traffic-light gap on the left (macOS only), segmented
@@ -48,6 +49,13 @@ export function TitleBar() {
   // the index route can resume on the same page next launch.
   useLastRoute();
 
+  // Yellow dot on the Settings icon when an update is waiting (and the
+  // user hasn't yet visited Settings to act on it). The dot stays on
+  // even after dismissing the banner — Settings is the canonical place
+  // to see/install updates, so the dot persists until they install.
+  const { state: updaterState } = useUpdater();
+  const hasUpdate = updaterState.status === "available";
+
   return (
     <header
       data-tauri-drag-region
@@ -78,16 +86,22 @@ export function TitleBar() {
         <Button
           variant="ghost"
           size="icon"
-          aria-label="Settings"
+          aria-label={hasUpdate ? "Settings (update available)" : "Settings"}
           aria-pressed={onSettings}
           onClick={() => void navigate({ to: "/settings" })}
           className={
-            "size-7 " +
+            "relative size-7 " +
             (onSettings ? "bg-muted text-foreground" : "")
           }
-          title="Settings"
+          title={hasUpdate ? "Settings — update available" : "Settings"}
         >
           <SettingsIcon className="size-4" />
+          {hasUpdate && (
+            <span
+              aria-hidden
+              className="pointer-events-none absolute right-1 top-1 size-1.5 rounded-full bg-amber-400 ring-1 ring-card"
+            />
+          )}
         </Button>
       </div>
     </header>

@@ -10,6 +10,7 @@ import {
 import { listen } from "@tauri-apps/api/event";
 import { AppProviders } from "@/components/app-shell/app-providers";
 import { TitleBar } from "@/components/app-shell/title-bar";
+import { UpdateBanner } from "@/lib/updater/UpdateBanner";
 import { HTTPRunnerShell } from "@/tools/http-runner/HTTPRunnerShell";
 import { RequestsView } from "@/tools/http-runner/RequestsView";
 import { ProcessMonitorShell } from "@/tools/process-monitor/ProcessMonitorShell";
@@ -30,6 +31,7 @@ const rootRoute = createRootRoute({
     return (
       <div className="flex h-screen w-screen flex-col overflow-hidden bg-background text-foreground">
         {!isPopover && <TitleBar />}
+        {!isPopover && <UpdateBanner />}
         <main className="flex min-h-0 flex-1">
           <AppProviders>
             <FocusRouteListener />

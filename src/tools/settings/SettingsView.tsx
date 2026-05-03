@@ -11,6 +11,7 @@ import type { ReactNode } from "react";
 import { VimToggle } from "@/components/vim-toggle";
 import { AppOrderList } from "./components/app-order-list";
 import { ThemeModePicker } from "./components/theme-mode-picker";
+import { UpdateSection } from "./components/update-section";
 import { ZoomControl } from "./components/zoom-control";
 
 export function SettingsView() {
@@ -24,6 +25,13 @@ export function SettingsView() {
             and shared across every tool.
           </p>
         </header>
+
+        <Section
+          title="Updates"
+          description="Auto-checks every few hours. The yellow dot above appears whenever a new version is waiting; click Download and install to apply it now."
+          fullWidthControl
+          control={<UpdateSection />}
+        />
 
         <Section
           title="Appearance"

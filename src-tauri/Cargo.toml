@@ -49,6 +49,13 @@ tauri-plugin-fs = "2"
 tauri-plugin-clipboard-manager = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-global-shortcut = "2"
+# In-app auto-update: queries the GitHub Releases endpoint configured in
+# tauri.conf.json's `plugins.updater.endpoints` and verifies the .sig
+# against `plugins.updater.pubkey`. The publishing side (artifacts +
+# latest.json) is handled by `createUpdaterArtifacts: true` in the
+# bundle config plus the release workflow's manifest step.
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
 
 tokio = { workspace = true }
 serde = { workspace = true }
