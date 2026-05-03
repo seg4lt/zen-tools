@@ -222,12 +222,26 @@ pub async fn set_tool_disabled(
 
     // Tool-specific live lifecycle dispatch. Other tools have no
     // always-on machinery to gate, so they fall through.
-    if tool_id == "prmaster" {
-        if disabled {
-            crate::prmaster_lifecycle::stop(&app);
-        } else {
-            crate::prmaster_lifecycle::start(&app);
+    match tool_id.as_str() {
+        "prmaster" => {
+            if disabled {
+                crate::prmaster_lifecycle::stop(&app);
+            } else {
+                crate::prmaster_lifecycle::start(&app);
+            }
         }
+        // Local Whisper dictation. When disabled this drops the
+        // CGEventTap (so right-⌘ stops being intercepted), hides
+        // the mic tray, and abandons any in-flight recording.
+        // See `crate::dictation::lifecycle` for the teardown order.
+        id if id == crate::dictation::TOOL_ID => {
+            if disabled {
+                crate::dictation::lifecycle::stop(&app);
+            } else {
+                crate::dictation::lifecycle::start(&app);
+            }
+        }
+        _ => {}
     }
 
     Ok(())

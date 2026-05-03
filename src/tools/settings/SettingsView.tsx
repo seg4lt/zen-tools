@@ -6,15 +6,35 @@
  *  2. Vim mode — global Vim-keybinding flag (reuses VimToggle).
  *  3. Zoom    — ⌘= / ⌘− / ⌘0 + on-screen control.
  *  4. App order — drag-reorder of the tool pills.
+ *  5. Dictation — Whisper enable switch + model picker. The Switch
+ *     routes through `set_tool_disabled("dictation", ...)` so the
+ *     backend lifecycle hook tears down the CGEventTap, mic tray, and
+ *     any in-flight recording when the user disables the feature.
+ *  6. Paths — app-data / logs / models directories with Open in Finder.
  */
 import type { ReactNode } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { dictationIpc } from "@zen-tools/ipc";
 import { VimToggle } from "@/components/vim-toggle";
 import { AppOrderList } from "./components/app-order-list";
+import { DictationSection } from "./components/dictation-section";
+import { PathsSection } from "./components/paths-section";
 import { ThemeModePicker } from "./components/theme-mode-picker";
 import { UpdateSection } from "./components/update-section";
 import { ZoomControl } from "./components/zoom-control";
 
 export function SettingsView() {
+  // Dictation is macOS-only today (whisper.cpp ships Metal + Accelerate
+  // backends in our vendored build; the Linux/Windows backends aren't
+  // wired up). The backend command returns `cfg!(target_os = "macos")`
+  // so the Settings UI hides the section entirely on other OSes
+  // rather than showing a non-functional toggle.
+  const { data: dictationSupported } = useQuery({
+    queryKey: ["dictation", "supported"],
+    queryFn: dictationIpc.isSupported,
+    staleTime: Infinity,
+  });
+
   return (
     <div className="flex h-full min-h-0 flex-1 justify-center overflow-auto bg-background">
       <div className="flex w-full max-w-2xl flex-col gap-6 px-6 py-8">
@@ -57,6 +77,23 @@ export function SettingsView() {
           description="Drag the pills into the order you want to see them in the title bar."
           fullWidthControl
           control={<AppOrderList />}
+        />
+
+        {dictationSupported && (
+          <Section
+            title="Dictation"
+            description="Local speech-to-text powered by Whisper. Tap the right ⌘ then hold it for ~½ second to start recording; repeat the gesture to stop, transcribe, and paste at the cursor."
+            fullWidthControl
+            control={<DictationSection />}
+          />
+        )}
+
+
+        <Section
+          title="Paths"
+          description="Locations on disk used by Zen Tools. Logs rotate daily; dictation models cache here on first download."
+          fullWidthControl
+          control={<PathsSection />}
         />
       </div>
     </div>

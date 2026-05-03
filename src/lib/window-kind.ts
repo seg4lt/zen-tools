@@ -34,7 +34,11 @@
  * in a normal browser tab) so callers can treat that as the default.
  */
 
-export type WindowKind = "main" | "pm-popover" | "prmaster-popover";
+export type WindowKind =
+  | "main"
+  | "pm-popover"
+  | "prmaster-popover"
+  | "dictation-hud";
 
 export function getWindowKind(): WindowKind {
   if (typeof window === "undefined") return "main";
@@ -45,6 +49,7 @@ export function getWindowKind(): WindowKind {
   try {
     const param = new URLSearchParams(window.location.search).get("window");
     if (param === "pm-popover") return "pm-popover";
+    if (param === "dictation-hud") return "dictation-hud";
   } catch {
     // `URLSearchParams` constructor can throw on really exotic URLs;
     // fall through to the Tauri-label probe.
@@ -71,5 +76,7 @@ export function getWindowKind(): WindowKind {
 export const isPmPopover = (): boolean => getWindowKind() === "pm-popover";
 export const isPrmasterPopover = (): boolean =>
   getWindowKind() === "prmaster-popover";
+export const isDictationHud = (): boolean =>
+  getWindowKind() === "dictation-hud";
 /** True for either popover — used by the title bar to skip its chrome. */
 export const isPopover = (): boolean => getWindowKind() !== "main";

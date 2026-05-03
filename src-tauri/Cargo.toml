@@ -32,6 +32,11 @@ zen-cleaner = { workspace = true }
 zen-db = { workspace = true }
 zen-github = { workspace = true }
 zen-prmaster = { workspace = true }
+# Local dictation: vendored whisper.cpp wrapper + mic capture / hotkey.
+# Pulled in unconditionally so the Settings page renders the Paths
+# section on every platform; the actual recording pipeline is gated
+# inside the crate via `cfg(target_os = "macos")`.
+zen-dictation = { workspace = true }
 # Note: zen-ai-cli + zen-shell are reached transitively through
 # zen-prmaster / zen-github (no direct `use` in src-tauri/src/).
 
@@ -94,6 +99,10 @@ thiserror = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+# Daily-rotating file appender. Used in `lib.rs::run` so the in-app
+# Settings → Paths section can point at a real, populated `logs/`
+# folder. Stdout output is preserved via a fanout layer.
+tracing-appender = { workspace = true }
 chrono = { workspace = true }
 # Generates TypeScript bindings for the wire DTOs declared inside
 # src-tauri/src/ (the cross-tool DTOs live in their owning crate; this
@@ -106,3 +115,11 @@ ts-rs = { workspace = true }
 # `bundled` vendors the SQLite source so we don't depend on a system
 # library — keeps Windows builds simple.
 rusqlite = { version = "0.32", features = ["bundled"] }
+
+# ── macOS-only: native AppKit binding for the dictation HUD overlay.
+# We call `setCollectionBehavior:` on the WKWebView's host NSWindow
+# so the HUD floats above fullscreen apps (Tauri's `always_on_top`
+# only raises above normal apps). One unsafe `msg_send!`; not worth
+# bringing in `objc2-app-kit` for a single selector.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.5"

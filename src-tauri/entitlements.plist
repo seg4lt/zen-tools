@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  macOS code-signing entitlements.
+
+  - com.apple.security.device.audio-input — declares that the app
+    intends to capture from the microphone. Required at code-sign time
+    on macOS 10.14+; the user is then prompted via the
+    NSMicrophoneUsageDescription string from Info.plist on first
+    AudioUnit start.
+  - com.apple.security.automation.apple-events — required so we can
+    post synthetic keyboard events (⌘V) into the focused application.
+    Accessibility approval still has to be granted by the user via
+    System Settings → Privacy & Security → Accessibility (TCC); that
+    prompt is triggered by AXIsProcessTrustedWithOptions in
+    `crates/zen-dictation/src/hotkey/macos.rs`.
+
+  Anything else (network, file-system access) is already covered by
+  Tauri's default sandbox config, so we don't need additional keys
+  here for the rest of the app.
+-->
+<plist version="1.0">
+<dict>
+  <key>com.apple.security.device.audio-input</key>
+  <true/>
+  <key>com.apple.security.automation.apple-events</key>
+  <true/>
+</dict>
+</plist>

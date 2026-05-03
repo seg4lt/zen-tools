@@ -137,12 +137,6 @@ pub struct AppState {
     /// retained here — the task lives for the lifetime of the process.
     pub prmaster: PrMasterEngine,
 
-    /// Permanent menu-bar tray icon for the PRMaster tool. Created once
-    /// during `setup`, lives until the app exits (matching PRMaster's
-    /// always-present `MenuBarExtra`). Distinct from [`tray`] (the lazy
-    /// zen-tools tray bound to perf / process-monitor activity).
-    pub prmaster_tray: Option<tauri::tray::TrayIcon>,
-
     /// Lifecycle handles for the PRMaster background workers (broadcast
     /// → Tauri-event bridge and 5-minute refresh loop). Held so the
     /// `set_tool_disabled` command can abort them when the user toggles
@@ -196,7 +190,6 @@ impl AppState {
             db: Arc::new(ConnectionRegistry::new()),
             sql_workspace_dirs: Vec::new(),
             prmaster: PrMasterEngine::new(),
-            prmaster_tray: None,
             prmaster_lifecycle: PrMasterLifecycle::default(),
         }
     }

@@ -1,0 +1,27 @@
+[package]
+name = "zen-whisper"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Vendored whisper.cpp + bindgen-generated Rust bindings (macOS Metal/Accelerate)."
+build = "build.rs"
+
+# The vendored C/C++/Obj-C sources live under `vendor/whisper.cpp/`.
+# `build.rs` compiles them with the `cc` crate and runs `bindgen` on
+# `whisper.h`. macOS-only for v1; the Rust surface still compiles on
+# other platforms so the workspace stays buildable, but the methods
+# return `WhisperError::NotSupported`.
+
+[lib]
+name = "zen_whisper"
+path = "src/lib.rs"
+
+[build-dependencies]
+cc = "1"
+# Pinned to keep the generated bindings deterministic across machines.
+bindgen = "0.70"
+
+[dependencies]
+thiserror = { workspace = true }
+tracing = { workspace = true }

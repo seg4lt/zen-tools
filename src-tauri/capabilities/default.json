@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Default capabilities for the Zen Tools main window.",
-  "windows": ["main", "prmaster-popover", "pm-popover"],
+  "windows": ["main", "prmaster-popover", "pm-popover", "dictation-hud"],
   "permissions": [
     "core:default",
     "core:event:default",

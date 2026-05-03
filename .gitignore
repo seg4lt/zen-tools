@@ -31,6 +31,28 @@ src-tauri/gen/schemas
 **/Cargo.lock.bak
 .tauri
 
+# Dictation: Whisper ggml model weights are downloaded on demand into
+# the user's app-data dir at runtime. If anyone ever stages a `models/`
+# folder under the repo (e.g. while debugging), make sure the
+# multi-hundred-MB binaries don't sneak into a commit.
+**/models/ggml-*.bin
+**/models/ggml-*.bin.tmp
+
+# Whisper.cpp Metal shader build artefacts. We embed the .metal source
+# into the static library at build time via `GGML_METAL_EMBED_LIBRARY`
+# (see `crates/zen-whisper/build.rs`), so these only ever appear if
+# someone runs `xcrun -sdk macosx metal` by hand for debugging.
+*.metallib
+*.air
+
+# macOS debug symbols produced by `cargo build --release` with split
+# debug info. Not part of the source tree.
+*.dSYM/
+
+# zen-test-server has its own [workspace] (see top-level Cargo.toml
+# `exclude`), so cargo creates a sibling target dir here too.
+crates/zen-test-server/target/
+
 # Env & secrets
 .env
 .env.local

@@ -1,0 +1,54 @@
+[package]
+name = "zen-dictation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Local dictation: microphone capture, hotkey, model download, paste-at-cursor, plus the whisper.cpp inference glue."
+
+[lib]
+name = "zen_dictation"
+path = "src/lib.rs"
+
+[dependencies]
+zen-whisper = { workspace = true }
+
+# Async runtime — used for the model download stream and the hotkey →
+# transcription pipeline. Same workspace tokio so feature flags stay
+# unified across the build.
+tokio = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+parking_lot = { workspace = true }
+once_cell = { workspace = true }
+
+# HTTP client for downloading ggml model files from Hugging Face. We
+# explicitly opt into the `stream` feature so the download module can
+# pump bytes through a callback for the progress bar.
+reqwest = { workspace = true, features = ["stream"] }
+futures = { workspace = true }
+
+# Cross-platform audio capture (CoreAudio on macOS, ALSA/PipeWire on
+# Linux, WASAPI on Windows). We always request 16-bit f32 mono and
+# resample with `rubato` to whisper.cpp's required 16 kHz f32 mono.
+cpal = "0.15"
+rubato = "0.16"
+
+# Optional sha256 of model downloads — wired but not enforced for v1
+# (huggingface CDN over HTTPS is the trust anchor).
+sha2 = { workspace = true }
+
+# ── macOS-only: hotkey detection (CGEventTap) + paste injection
+# (NSPasteboard + synthetic ⌘V via CGEvent).
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.10"
+core-graphics = { version = "0.24", features = ["highsierra"] }
+objc2 = "0.5"
+objc2-foundation = { version = "0.2", features = [
+    "NSString",
+    "NSArray",
+] }
+objc2-app-kit = { version = "0.2", features = [
+    "NSPasteboard",
+] }

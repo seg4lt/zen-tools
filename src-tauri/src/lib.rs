@@ -6,10 +6,10 @@
 #![warn(missing_docs)]
 
 pub mod commands;
+pub mod dictation;
 pub mod dto;
 pub mod error;
 pub mod prmaster_lifecycle;
-pub mod prmaster_tray;
 pub mod schema_cache;
 pub mod state;
 pub mod tray;
@@ -21,7 +21,7 @@ use state::AppState;
 use std::sync::Arc;
 use tauri::{Emitter, Manager};
 use tokio::sync::Mutex;
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
 
 /// Build the `tauri-plugin-global-shortcut` plugin with the PRMaster hotkey
 /// handler baked in. The handler matches against the chord we register in
@@ -61,12 +61,18 @@ fn build_global_shortcut_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
 /// points.
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,zen=debug")),
-        )
-        .with_target(false)
-        .try_init();
+    // Logging is initialised inside `setup()` once we can resolve the
+    // app-data dir for the rolling file appender. We deliberately do
+    // NOT call `tracing_subscriber::fmt().try_init()` here at the top
+    // of `run()` — doing so installs a global subscriber, and a
+    // second `try_init` from `setup()` (where we add the file layer)
+    // is then a silent no-op, which is exactly the bug that left the
+    // logs file at zero bytes between commits 7a2b063 and 8d2e858.
+    //
+    // The cost: any `tracing::*` macro fired during plugin
+    // construction (i.e. before `setup()` runs) is dropped on the
+    // floor. Tauri's plugin registration is fast and uses `eprintln!`
+    // for genuine errors anyway, so the trade is worth it.
 
     tauri::Builder::default()
         // Default macOS Tao behaviour for `CloseRequested` on a
@@ -125,6 +131,51 @@ pub fn run() {
         // Wrapped in `Arc` so command handlers can clone cheaply.
         .manage(Arc::new(MarkdownIndexRegistry::default()))
         .setup(|app| {
+            // ── Logging ────────────────────────────────────────────────
+            // One Registry, two layers: a coloured stdout layer and a
+            // daily-rotating file layer at <app_data_dir>/logs/zen-tools.log.
+            // Both share the same EnvFilter (RUST_LOG override → fall
+            // back to "info,zen=debug").
+            //
+            // Installed exactly once via `init()`. The previous shape
+            // — two separate `tracing_subscriber::fmt().try_init()`
+            // calls, one early and one in setup — silently dropped
+            // the second registration because tracing's global default
+            // is first-installed-wins. That's why the on-disk log
+            // file was empty until this commit.
+            //
+            // The non-blocking worker guard from `tracing-appender`
+            // is `Box::leak`'d so it lives the lifetime of the
+            // process; without that the background writer tears down
+            // and log lines emitted just before exit are lost.
+            let env_filter = EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| EnvFilter::new("info,zen=debug"));
+            let stdout_layer = fmt::layer().with_target(false);
+            let file_layer = match dictation::logs_dir(app.handle()) {
+                Ok(dir) => {
+                    let appender = tracing_appender::rolling::daily(&dir, "zen-tools.log");
+                    let (writer, guard) = tracing_appender::non_blocking(appender);
+                    Box::leak(Box::new(guard));
+                    Some(
+                        fmt::layer()
+                            .with_target(false)
+                            .with_ansi(false)
+                            .with_writer(writer)
+                            .boxed(),
+                    )
+                }
+                Err(e) => {
+                    eprintln!("zen-tools: file logging disabled — {e}");
+                    None
+                }
+            };
+            tracing_subscriber::registry()
+                .with(env_filter)
+                .with(stdout_layer)
+                .with(file_layer)
+                .init();
+            tracing::info!("zen-tools: logging initialised");
+
             // Open the user-config store FIRST so subsequent setup
             // steps (and every command path) can read settings via
             // `commands::preferences::load_preferences`. Registering
@@ -198,57 +249,52 @@ pub fn run() {
                 }
             });
 
-            // ── PRMaster: light up tray + broadcast bridge + 5-min poll
-            // + global hotkey, but only if the user hasn't disabled the
-            // app from the settings list. Disabled tools should be
-            // completely silent — no menubar entry, no background gh
-            // calls, no chord registration. Toggling back on at runtime
-            // is wired through the `set_tool_disabled` command, which
-            // calls `prmaster_lifecycle::start` to re-arm everything.
+            // ── Unified menu-bar tray ─────────────────────────────────
+            // One tray for the whole app — see `crate::tray`. Built
+            // once here, lives the lifetime of the process. The menu
+            // adapts to current state (perf running, PM active,
+            // PRMaster enabled, dictation enabled) via fire-and-forget
+            // `tray::update` calls from each tool's command paths.
+            if let Err(e) = tray::init(app.handle()) {
+                tracing::warn!(?e, "tray::init failed; menu-bar will not be available");
+            }
+
+            // ── PRMaster: broadcast bridge + 5-min poll + global hotkey,
+            // but only if the user hasn't disabled the app from the
+            // settings list. Disabled tools should be completely silent
+            // — no background gh calls, no chord registration. Toggling
+            // back on at runtime is wired through the
+            // `set_tool_disabled` command, which calls
+            // `prmaster_lifecycle::start` to re-arm everything.
             let prmaster_disabled = commands::preferences::load_preferences(app.handle())
                 .map(|p| p.disabled_tools.iter().any(|id| id == "prmaster"))
                 .unwrap_or(false);
             if !prmaster_disabled {
                 prmaster_lifecycle::start(app.handle());
             } else {
-                tracing::info!("PRMaster disabled in preferences; skipping tray/poll/hotkey");
+                tracing::info!("PRMaster disabled in preferences; skipping poll/hotkey");
             }
 
-            // Background-agent lifecycle: when the user closes the
-            // main window we *can* keep the process alive so PRMaster
-            // polling continues. But that's only a sane default if
-            // PRMaster is actually enabled — if it's disabled there's
-            // no tray, no hotkey, and (depending on macOS version) no
-            // Dock icon either, so the user is locked out and has to
-            // force-quit. So: only hide-to-Accessory when PRMaster is
-            // enabled; otherwise let the close go through and exit
-            // the app normally.
+            // Background-agent lifecycle: closing the main window
+            // never exits the app. The unified menu-bar tray (see
+            // `crate::tray`) is permanent for the lifetime of the
+            // process and provides "Show Zen Tools" and "Quit" so
+            // the user always has a way back in / a way to exit.
+            // Closing → hide window + flip to Accessory (no Dock
+            // icon). The only exit path is the tray's "Quit Zen
+            // Tools" menu item.
             //
             // Re-opening from the hidden state happens via the tray
-            // menu / hotkey / `prmaster_open_full_window` command,
-            // and via the new `RunEvent::Reopen` handler below
-            // (Dock-icon click).
+            // menu's "Show Zen Tools" item, the PRMaster hotkey, the
+            // `prmaster_open_full_window` command, the
+            // `RunEvent::Reopen` handler below (Dock-icon click), or
+            // the right-⌘ tap-then-hold dictation gesture.
             #[cfg(target_os = "macos")]
             {
                 let app_handle = app.handle().clone();
                 if let Some(main) = app.get_webview_window("main") {
                     main.on_window_event(move |event| {
                         if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                            let prmaster_enabled =
-                                commands::preferences::load_preferences(&app_handle)
-                                    .map(|p| {
-                                        !p.disabled_tools.iter().any(|id| id == "prmaster")
-                                    })
-                                    .unwrap_or(true);
-                            if !prmaster_enabled {
-                                // Nothing keeping the app alive — let
-                                // the close happen, which exits the
-                                // process. (We don't call exit(0) here
-                                // explicitly: with no `prevent_close`,
-                                // Tauri fires `RunEvent::ExitRequested`
-                                // and the app shuts down cleanly.)
-                                return;
-                            }
                             api.prevent_close();
                             if let Some(win) = app_handle.get_webview_window("main") {
                                 let _ = win.hide();
@@ -259,6 +305,34 @@ pub fn run() {
                         }
                     });
                 }
+            }
+
+            // ── Dictation ─────────────────────────────────────────────
+            // Resolve the per-app data dirs and register the managed
+            // state, then hand off to `dictation::bootstrap`. That:
+            //
+            //   * Hydrates the persisted selected-model id.
+            //   * Reads `Preferences::disabled_tools`; if "dictation"
+            //     is in the list, it stops here.
+            //   * Otherwise calls `dictation::lifecycle::start` to
+            //     install the CGEventTap and kick off the base-model
+            //     download.
+            //
+            // The Settings UI's enable switch routes through
+            // `set_tool_disabled("dictation", _)` which calls into
+            // the same lifecycle module to flip start/stop live.
+            let app_data_dir = app.path().app_data_dir().ok();
+            let models_dir_path = dictation::models_dir(app.handle()).ok();
+            let logs_dir_path = dictation::logs_dir(app.handle()).ok();
+            if let (Some(app_data), Some(models), Some(logs)) =
+                (app_data_dir, models_dir_path, logs_dir_path)
+            {
+                let dictation_state =
+                    dictation::state::DictationTauriState::new(app_data, models, logs);
+                app.manage(dictation_state);
+                dictation::bootstrap(app.handle());
+            } else {
+                tracing::warn!("dictation: failed to resolve app_data_dir; feature disabled");
             }
 
             Ok(())
@@ -404,6 +478,16 @@ pub fn run() {
             commands::prmaster::prmaster_get_ai_runs,
             commands::prmaster::prmaster_list_repos,
             commands::prmaster::prmaster_fetch_repos,
+            // dictation (local Whisper)
+            dictation::commands::dictation_is_supported,
+            dictation::commands::dictation_list_models,
+            dictation::commands::dictation_get_state,
+            dictation::commands::dictation_select_model,
+            dictation::commands::dictation_download_model,
+            dictation::commands::dictation_open_app_data_dir,
+            dictation::commands::dictation_open_logs_dir,
+            dictation::commands::dictation_open_models_dir,
+            dictation::commands::dictation_get_paths,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -414,7 +498,13 @@ pub fn run() {
             // icon's activation to `Accessory`, so AppKit doesn't
             // pick the click up as "open the main window again". We
             // restore `Regular` policy + show + focus the main
-            // window. Mirrors flowstate's `RunEvent::Reopen` recipe.
+            // window, then ask the frontend to navigate to the
+            // user's first enabled tool — the route persisted on the
+            // window before close was usually `/settings` (the user
+            // tweaks settings then closes), and greeting them with
+            // Settings on every reopen feels wrong. The
+            // `FirstToolListener` in `src/router.tsx` consumes the
+            // `app:focus-first-tool` event.
             #[cfg(target_os = "macos")]
             if let tauri::RunEvent::Reopen { .. } = event {
                 let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
@@ -423,6 +513,7 @@ pub fn run() {
                     let _ = win.show();
                     let _ = win.set_focus();
                 }
+                let _ = app.emit("app:focus-first-tool", ());
             }
             #[cfg(not(target_os = "macos"))]
             {
