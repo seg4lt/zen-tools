@@ -21,16 +21,19 @@ tempfile = "3"
 
 [dependencies]
 zen-types = { workspace = true }
+zen-fs = { workspace = true }
+zen-storage = { workspace = true }
+zen-runs = { workspace = true }
 zen-parser = { workspace = true }
 zen-http = { workspace = true }
 zen-perf = { workspace = true }
 zen-process-monitor = { workspace = true }
 zen-cleaner = { workspace = true }
 zen-db = { workspace = true }
-zen-shell = { workspace = true }
 zen-github = { workspace = true }
-zen-ai-cli = { workspace = true }
 zen-prmaster = { workspace = true }
+# Note: zen-ai-cli + zen-shell are reached transitively through
+# zen-prmaster / zen-github (no direct `use` in src-tauri/src/).
 
 # `macos-private-api` is required so the `pm-popover` window can be
 # spawned with `transparent: true` (paired with `app.macOSPrivateApi:
@@ -64,8 +67,6 @@ parking_lot = { workspace = true }
 ahash = { workspace = true }
 rayon = "1.10"
 trash = "5"
-regex = { workspace = true }
-globset = "0.4"
 # Server-side SVG rasterisation for "Copy as PNG" on mermaid widgets —
 # WKWebView taints any canvas an SVG <img> is drawn into, so we keep
 # the raster path entirely on the Rust side.
@@ -94,9 +95,7 @@ thiserror = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-dirs = { workspace = true }
 chrono = { workspace = true }
-async-trait = { workspace = true }
 # Local SQLite for the schema-cache (per-table column/index/FK metadata).
 # `bundled` vendors the SQLite source so we don't depend on a system
 # library — keeps Windows builds simple.

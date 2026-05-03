@@ -31,6 +31,14 @@ keyring = { version = "3", features = ["apple-native", "windows-native", "linux-
 # State
 dashmap = "6"
 
+# Local SQLite for the schema cache (per-table column/index/FK metadata).
+# `bundled` vendors the SQLite source so we don't depend on a system
+# library — keeps Windows builds simple. Re-uses zen-storage's pragma
+# helper to stay consistent with the user-config DB.
+rusqlite = { workspace = true }
+parking_lot = { workspace = true }
+zen-storage = { workspace = true }
+
 # Serde / errors / utility
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -38,3 +46,6 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

@@ -121,85 +121,26 @@ fn persist(app: &AppHandle, dirs: &[PathBuf]) {
 }
 
 fn collect(dir: &Path) -> Vec<FileTreeItem> {
-    let mut items = Vec::new();
-    walk(dir, &mut items, 0);
-    items
-}
-
-fn walk(dir: &Path, items: &mut Vec<FileTreeItem>, depth: usize) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
+    let cfg = zen_fs::WalkConfig {
+        include_file: &|name| name.ends_with(".sql"),
+        include_dir: &|p| zen_fs::dir_contains(p, |n| n.ends_with(".sql")),
+        ..Default::default()
     };
-    let mut entries: Vec<_> = entries.filter_map(|e| e.ok()).collect();
-    entries.sort_by(|a, b| {
-        let a_dir = a.file_type().map(|t| t.is_dir()).unwrap_or(false);
-        let b_dir = b.file_type().map(|t| t.is_dir()).unwrap_or(false);
-        match (a_dir, b_dir) {
-            (true, false) => std::cmp::Ordering::Less,
-            (false, true) => std::cmp::Ordering::Greater,
-            _ => a.file_name().cmp(&b.file_name()),
-        }
-    });
-
-    for entry in entries {
-        let path = entry.path();
-        let name = path
-            .file_name()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_default();
-
-        if name.starts_with('.') || name == "target" || name == "node_modules" {
-            continue;
-        }
-
-        if path.is_dir() {
-            if has_sql(&path) {
-                items.push(FileTreeItem {
-                    name: name.clone(),
-                    path: path.to_string_lossy().to_string(),
-                    is_dir: true,
-                    depth,
-                    expanded: true,
-                    file_type: FileType::Directory,
-                });
-                walk(&path, items, depth + 1);
-            }
-        } else if name.ends_with(".sql") {
-            items.push(FileTreeItem {
-                name,
-                path: path.to_string_lossy().to_string(),
-                is_dir: false,
-                depth,
-                expanded: false,
-                file_type: FileType::SqlFile,
-            });
-        }
-    }
-}
-
-fn has_sql(dir: &Path) -> bool {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return false;
-    };
-    for entry in entries.filter_map(|e| e.ok()) {
-        let path = entry.path();
-        if path.is_file() {
-            if let Some(name) = path.file_name() {
-                if name.to_string_lossy().ends_with(".sql") {
-                    return true;
-                }
-            }
-        } else if path.is_dir()
-            && !path
-                .file_name()
-                .map(|n| n.to_string_lossy().starts_with('.'))
-                .unwrap_or(true)
-            && has_sql(&path)
-        {
-            return true;
-        }
-    }
-    false
+    zen_fs::walk_tree(dir, &cfg)
+        .into_iter()
+        .map(|e| FileTreeItem {
+            name: e.name,
+            path: e.path.to_string_lossy().to_string(),
+            is_dir: e.is_dir,
+            depth: e.depth,
+            expanded: e.is_dir,
+            file_type: if e.is_dir {
+                FileType::Directory
+            } else {
+                FileType::SqlFile
+            },
+        })
+        .collect()
 }
 
 // ── Filesystem mutations (used by the right-click context menu) ─────────
@@ -234,7 +175,7 @@ pub async fn sql_workspace_create_file(
     } else {
         trimmed.to_string()
     };
-    let resolved = unique_sibling(&parent, &with_ext);
+    let resolved = zen_fs::unique_sibling(&parent, &with_ext);
     tokio::fs::write(&resolved, b"")
         .await
         .map_err(|e| AppError::Other(format!("create sql file: {e}")))?;
@@ -264,7 +205,7 @@ pub async fn sql_workspace_create_dir(
             "name must not contain path separators".into(),
         ));
     }
-    let resolved = unique_sibling(&parent, trimmed);
+    let resolved = zen_fs::unique_sibling(&parent, trimmed);
     tokio::fs::create_dir(&resolved)
         .await
         .map_err(|e| AppError::Other(format!("create directory: {e}")))?;
@@ -349,31 +290,3 @@ pub async fn sql_workspace_delete_to_trash(path: String) -> AppResult<()> {
     Ok(())
 }
 
-/// Find a sibling name that doesn't yet exist by appending ` 2`, ` 3`,
-/// … to the file stem. Mirrors the helper used by the markdown tool.
-fn unique_sibling(parent: &Path, name: &str) -> PathBuf {
-    let candidate = parent.join(name);
-    if !candidate.exists() {
-        return candidate;
-    }
-    let stem = Path::new(name)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("untitled")
-        .to_string();
-    let ext = Path::new(name)
-        .extension()
-        .and_then(|s| s.to_str())
-        .map(|s| format!(".{s}"))
-        .unwrap_or_default();
-    for n in 2..=9999 {
-        let c = parent.join(format!("{stem} {n}{ext}"));
-        if !c.exists() {
-            return c;
-        }
-    }
-    parent.join(format!(
-        "{stem}-{}{ext}",
-        chrono::Utc::now().timestamp_millis()
-    ))
-}

@@ -26,6 +26,15 @@ pub enum DbError {
 
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+
+    #[error("schema cache: {0}")]
+    SchemaCache(String),
+
+    #[error("storage: {0}")]
+    Storage(#[from] zen_storage::StorageError),
+
+    #[error("json: {0}")]
+    Json(#[from] serde_json::Error),
 }
 
 pub type DbResult<T> = Result<T, DbError>;

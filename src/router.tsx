@@ -18,7 +18,7 @@ import { CleanerShell } from "@/tools/cleaner/CleanerShell";
 import { MarkdownShell } from "@/tools/markdown/MarkdownShell";
 import { DatabaseExplorerShell } from "@/tools/database-explorer/DatabaseExplorerShell";
 import { PRMasterShell } from "@/tools/prmaster/PRMasterShell";
-import { SettingsShell } from "@/tools/settings/SettingsShell";
+import { SettingsView } from "@/tools/settings/SettingsView";
 import { readLastRoute } from "@/hooks/use-last-route";
 
 const rootRoute = createRootRoute({
@@ -172,7 +172,7 @@ const databaseExplorerRoute = createRoute({
 const settingsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/settings",
-  component: SettingsShell,
+  component: SettingsView,
 });
 
 const prmasterRoute = createRoute({

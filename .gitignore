@@ -41,5 +41,6 @@ coverage/
 
 # TypeScript / build outputs
 *.tsbuildinfo
+**/*.tsbuildinfo
 vite.config.d.ts
 vite.config.js

@@ -33,7 +33,6 @@ import {
   User,
 } from "lucide-react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { invoke } from "@tauri-apps/api/core";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
 import { AiSummaryTab } from "./components/tabs/AiSummaryTab";
@@ -44,6 +43,7 @@ import { MineTab } from "./components/tabs/MineTab";
 import { ReviewedTab } from "./components/tabs/ReviewedTab";
 import { SettingsTab } from "./components/tabs/SettingsTab";
 import { ToReviewTab } from "./components/tabs/ToReviewTab";
+import { prmasterTauri } from "./lib/tauri";
 import { useAiSummaryStore } from "./store/ai-summary-store";
 import { usePrMasterStore } from "./store/prmaster-store";
 
@@ -131,7 +131,7 @@ export function PRMasterShell() {
     (async () => {
       unlisten = await win.onFocusChanged(({ payload: focused }) => {
         if (!focused) {
-          void invoke("prmaster_hide_popover");
+          void prmasterTauri.hidePopover();
         } else {
           setTab(DEFAULT_TAB);
           dispatch({ type: "select", id: null });

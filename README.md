@@ -1,12 +1,26 @@
 # Zen Tools
 
-A modular Tauri 2 desktop app hosting developer tooling. The first tool is an
-IntelliJ-style **HTTP file runner** with a built-in **performance testing**
-engine — ported from `rust-tui-http-file-runner`.
+A modular Tauri 2 desktop app hosting developer tooling. Six tools ship
+today, each with its own segmented-pill in the title bar:
 
-The shell is designed so additional tools can drop in next to the HTTP
-runner without changing the routing or layout: each tool registers itself
-in `src/config/tools.ts` and gets its own segmented-pill in the title bar.
+- **HTTP runner** — IntelliJ-style `.http` / `.rest` file editor + runner
+  with cross-file dependency chains, environments, and a built-in
+  performance-test engine (HDR-histogram, CSV export).
+- **Process Monitor** — Activity-Monitor-accurate CPU/RSS sampler for
+  process trees, with a menu-bar popover.
+- **Cleaner** — Disk-space cleaner: parallel git-repo discovery,
+  dev-tool cache enumeration (node_modules, target, pip caches), bulk
+  `git clean` / `rm -rf`.
+- **Markdown** — Obsidian-lite vault editor: live-preview CodeMirror
+  extension, wikilinks, mermaid diagrams, Excalidraw drawings, image
+  paste, content + file search.
+- **Database Explorer** — DataGrip-lite: Postgres + MSSQL, schema cache
+  with autocomplete, explain-plan visualiser, lock telemetry.
+- **PRMaster** — GitHub PR dashboard with menu-bar popover, AI
+  summaries, notification filters.
+
+Each tool registers itself in `src/config/tools.ts`. Settings is reached
+via the gear icon and is not in that list.
 
 ## Stack
 
@@ -27,49 +41,56 @@ in `src/config/tools.ts` and gets its own segmented-pill in the title bar.
 ```
 zen-tools/
 ├── Cargo.toml                # workspace root + shared dep declarations
-├── crates/
+├── pnpm-workspace.yaml       # frontend pnpm workspace (root + packages/*)
+├── crates/                   # Rust workspace members
 │   ├── zen-types/            # pure data model — no I/O, no async
+│   ├── zen-fs/               # shared directory walker + sibling helper
+│   ├── zen-storage/          # SQLite primitives + KV JSON store
+│   ├── zen-runs/             # per-request run history + persistence
 │   ├── zen-parser/           # .http / env JSON / perf YAML parsers
 │   ├── zen-http/             # HTTP execution + variables + dep graph
 │   ├── zen-perf/             # load test engine + metrics + CSV export
-│   └── zen-test-server/      # axum mock backend (port 3000) for examples/
+│   ├── zen-process-monitor/  # libproc-backed process-tree sampler (macOS)
+│   ├── zen-cleaner/          # disk-cleanup engine (rayon-parallel scans)
+│   ├── zen-db/               # Postgres + MSSQL drivers + schema cache + SQL splitter
+│   ├── zen-shell/            # async child-process executor with PATH augmentation
+│   ├── zen-github/           # gh CLI client with retry/backoff + GraphQL enrichment
+│   ├── zen-ai-cli/           # claude / copilot CLI adapters
+│   ├── zen-prmaster/         # PRMaster domain controller
+│   └── zen-test-server/      # standalone axum mock backend (excluded from workspace build)
 ├── src-tauri/                # Tauri binary that composes the crates
 │   ├── tauri.conf.json
-│   ├── capabilities/default.json
+│   ├── capabilities/
 │   └── src/
 │       ├── main.rs / lib.rs
 │       ├── state.rs          # AppState (Mutex<AppState>)
 │       ├── error.rs          # AppError ({ kind, message } over IPC)
 │       ├── dto.rs            # serializable boundary types
-│       └── commands/
-│           ├── files.rs      # tree, working dir, env discovery
-│           ├── parse.rs      # open / read / write / reload .http files
-│           ├── environment.rs# env, extracted vars, cookies
-│           ├── execute.rs    # run_request, run_request_with_deps,
-│           │                 # build_curl_command (request:* events)
-│           ├── perf.rs       # load_perf_config, run/stop/export
-│           │                 # (perf:update events)
-│           └── misc.rs       # open_in_editor
-├── src/                      # React frontend
+│       ├── user_config.rs    # thin wrapper over zen-storage::KvStore
+│       ├── schema_cache.rs   # thin wrapper over zen-db::SchemaCache
+│       ├── tray.rs / prmaster_tray.rs
+│       └── commands/         # one file per tool (102 commands total)
+├── packages/                 # frontend pnpm workspace packages
+│   ├── ipc/                  # @zen-tools/ipc — preferences + file IPC
+│   ├── keyboard/             # @zen-tools/keyboard — shortcut registry + DSL
+│   ├── ui/                   # @zen-tools/ui — shadcn primitives (skeleton)
+│   ├── editor/               # @zen-tools/editor — CodeMirror wrapper (skeleton)
+│   └── types/                # @zen-tools/types — shared TS types (skeleton)
+├── src/                      # React frontend (the Tauri window)
 │   ├── components/
-│   │   ├── ui/               # shadcn primitives
-│   │   ├── app-shell/        # title bar, tool pills, working-dir picker
-│   │   └── theme-toggle.tsx
+│   │   ├── ui/               # shadcn primitives (pending move to @zen-tools/ui)
+│   │   ├── app-shell/        # title bar, tool pills, providers
+│   │   ├── code-editor/      # CodeMirror wrapper (pending move to @zen-tools/editor)
+│   │   └── vim-toggle.tsx
 │   ├── config/tools.ts       # tool registry — drives the title bar
 │   ├── lib/
-│   │   ├── utils.ts
-│   │   └── keyboard/         # DSL-based global keybinding registry
-│   ├── hooks/use-theme.tsx
+│   │   ├── utils.ts          # cn() helper
+│   │   ├── preferences-key.ts # re-exports from @zen-tools/ipc
+│   │   └── updater/          # auto-updater store + banner
+│   ├── hooks/                # use-theme, use-app-zoom, use-tool-order, …
 │   ├── router.tsx            # TanStack Router code tree
-│   └── tools/http-runner/
-│       ├── HTTPRunnerShell.tsx
-│       ├── RequestsView.tsx
-│       ├── PerformanceView.tsx
-│       ├── components/       # editor, file tree, response panel, etc.
-│       ├── store/            # useReducer + Context
-│       └── lib/              # tauri client, lang-http, run-gutter,
-│                             # cm-theme, perf-types
-└── examples/                 # sample .http / env / perf YAML files
+│   └── tools/                # one folder per tool, each with shell/view/components/store/lib
+└── examples/                 # sample .http / env / perf YAML / SQL files
 ```
 
 ## Develop

@@ -2,7 +2,7 @@
  * Settings page. Sectioned vertical layout, scrollable.
  *
  * Sections:
- *  1. Theme — light / dark toggle (reuses ThemeToggle).
+ *  1. Theme — light / dark / system picker (uses ThemeModePicker).
  *  2. Vim mode — global Vim-keybinding flag (reuses VimToggle).
  *  3. Zoom    — ⌘= / ⌘− / ⌘0 + on-screen control.
  *  4. App order — drag-reorder of the tool pills.

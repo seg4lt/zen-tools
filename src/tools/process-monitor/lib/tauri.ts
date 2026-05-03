@@ -66,6 +66,13 @@ export const pmTauri = {
   getHistory: () => invoke<Sample[]>("pm_get_history"),
   setPollInterval: (pollMs: number) =>
     invoke<void>("pm_set_poll_interval", { pollMs }),
+  /**
+   * Bring the main app window to the foreground from the menu-bar
+   * popover (`?window=pm-popover`).
+   */
+  showMainWindow: () => invoke<void>("pm_show_main_window"),
+  /** Close the menu-bar popover window. */
+  popoverClose: () => invoke<void>("pm_popover_close"),
 };
 
 // ────────────────────────────────────────────────────────────────────────

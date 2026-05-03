@@ -21,7 +21,7 @@ serde_json = { workspace = true }
 chrono = { workspace = true }
 tokio = { workspace = true }
 parking_lot = { workspace = true }
-arc-swap = { workspace = true }
+arc-swap = "1.7"
 tracing = { workspace = true }
 thiserror = { workspace = true }
 rusqlite = { workspace = true }

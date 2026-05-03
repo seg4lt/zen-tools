@@ -8,6 +8,7 @@ use zen_github::GhError;
 use zen_http::{CrossFileDependencyError, DependencyError, FileRegistryError, HttpError};
 use zen_parser::ParserError;
 use zen_perf::PerfError;
+use zen_storage::StorageError;
 
 /// All errors raised by Tauri commands.
 #[derive(Debug, Error)]
@@ -48,6 +49,10 @@ pub enum AppError {
     #[error("github: {0}")]
     Github(#[from] GhError),
 
+    /// SQLite-backed storage failure (`zen-storage`).
+    #[error("storage: {0}")]
+    Storage(#[from] StorageError),
+
     /// Tauri framework error.
     #[error("tauri: {0}")]
     Tauri(#[from] tauri::Error),
@@ -79,6 +84,7 @@ impl AppError {
             AppError::Perf(_) => "perf",
             AppError::Db(_) => "db",
             AppError::Github(_) => "github",
+            AppError::Storage(_) => "storage",
             AppError::Tauri(_) => "tauri",
             AppError::Other(_) => "other",
             AppError::BadRequest(_) => "badRequest",

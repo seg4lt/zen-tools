@@ -14,9 +14,12 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { tauri } from "@/tools/http-runner/lib/tauri";
+import {
+  PREFERENCES_KEY,
+  getPreferences,
+  savePreferences,
+} from "@zen-tools/ipc";
 
-const PREFERENCES_KEY = ["preferences"] as const;
 const ZOOM_STEP = 0.1;
 const ZOOM_MIN = 0.5;
 const ZOOM_MAX = 2.0;
@@ -42,7 +45,7 @@ export function useAppZoom(): UseAppZoomResult {
   const queryClient = useQueryClient();
   const { data, isLoading } = useQuery({
     queryKey: PREFERENCES_KEY,
-    queryFn: () => tauri.getPreferences(),
+    queryFn: () => getPreferences(),
     staleTime: Infinity,
   });
 
@@ -79,8 +82,8 @@ export function useAppZoom(): UseAppZoomResult {
     async (next: number) => {
       const clamped = clampZoom(next);
       // Read-modify-write so we don't drop other tools' prefs.
-      const current = await tauri.getPreferences();
-      await tauri.savePreferences({ ...current, appZoom: clamped });
+      const current = await getPreferences();
+      await savePreferences({ ...current, appZoom: clamped });
       await queryClient.invalidateQueries({ queryKey: PREFERENCES_KEY });
     },
     [queryClient],

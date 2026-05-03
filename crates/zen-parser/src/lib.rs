@@ -11,7 +11,7 @@ pub mod http_file;
 pub mod perf_config;
 pub mod variables;
 
-pub use env_file::{find_env_file, parse_env_file};
+pub use env_file::{find_env_file, parse_env_file, pick_default_env, pick_default_env_name};
 pub use error::ParserError;
 pub use http_file::parse_http_file;
 pub use perf_config::{parse_request_ref, PerfConfig, PerfTest, TestType};

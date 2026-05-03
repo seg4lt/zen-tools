@@ -16,9 +16,11 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useMemo } from "react";
 import { TOOLS, type Tool } from "@/config/tools";
-import { tauri } from "@/tools/http-runner/lib/tauri";
-
-const PREFERENCES_KEY = ["preferences"] as const;
+import {
+  PREFERENCES_KEY,
+  getPreferences,
+  savePreferences,
+} from "@zen-tools/ipc";
 
 interface UseToolOrderResult {
   /** `TOOLS` reordered per user preference. Always a full permutation. */
@@ -32,7 +34,7 @@ export function useToolOrder(): UseToolOrderResult {
   const queryClient = useQueryClient();
   const { data, isLoading } = useQuery({
     queryKey: PREFERENCES_KEY,
-    queryFn: () => tauri.getPreferences(),
+    queryFn: () => getPreferences(),
     staleTime: Infinity,
   });
 
@@ -58,8 +60,8 @@ export function useToolOrder(): UseToolOrderResult {
 
   const setOrder = useCallback(
     async (orderedIds: string[]) => {
-      const current = await tauri.getPreferences();
-      await tauri.savePreferences({ ...current, toolOrder: orderedIds });
+      const current = await getPreferences();
+      await savePreferences({ ...current, toolOrder: orderedIds });
       await queryClient.invalidateQueries({ queryKey: PREFERENCES_KEY });
     },
     [queryClient],

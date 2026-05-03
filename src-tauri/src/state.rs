@@ -34,6 +34,16 @@ pub struct CleanerState {
 /// Wrapped in [`tokio::sync::Mutex`] for per-command access. Critical
 /// sections are kept short — long-running work (HTTP execution, perf
 /// loops) drops the lock first.
+///
+/// **Future direction:** this megastruct should be split into per-tool
+/// sub-structs (`HttpRunnerState`, `PerfState`, `PmState`,
+/// `CleanerState`, `MarkdownState`, `DbState`, `PrMasterState`) each
+/// registered as its own `tauri::State` entry, so commands take only
+/// the slice they touch. The current pattern (every command clones a
+/// sub-field then drops the outer lock) is consistent but makes
+/// cross-tool coupling invisible at the function signature. Doing the
+/// split is mechanical but invasive (~17 command files) and is left
+/// for a dedicated PR.
 pub struct AppState {
     /// Open project roots. Each entry is a folder the user has added via
     /// the "+" button on the file tree. Empty until the user adds at
@@ -122,8 +132,9 @@ pub struct AppState {
     /// Domain controller for the PRMaster tool. Wraps a `gh`-CLI-backed
     /// GitHub client; cheap to clone (`Arc`-backed). Constructed once at
     /// startup so the polling loop and command handlers share the same
-    /// rolling call log + cache. Future phases (P5) will hold the
-    /// background-refresh `JoinHandle` here too.
+    /// rolling call log + cache. The 5-minute background refresh
+    /// `JoinHandle` is currently spawned by `lib.rs::setup` and not
+    /// retained here — the task lives for the lifetime of the process.
     pub prmaster: PrMasterEngine,
 
     /// Permanent menu-bar tray icon for the PRMaster tool. Created once

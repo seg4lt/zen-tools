@@ -13,9 +13,9 @@ tokio = { workspace = true }
 reqwest = { workspace = true }
 serde_json = { workspace = true }
 regex = { workspace = true }
-urlencoding = { workspace = true }
-jsonpath-rust = { workspace = true }
-petgraph = { workspace = true }
+urlencoding = "2"
+jsonpath-rust = "0.7"
+petgraph = "0.6"
 uuid = { workspace = true }
 ahash = { workspace = true }
 parking_lot = { workspace = true }

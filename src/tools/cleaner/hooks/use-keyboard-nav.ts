@@ -11,7 +11,7 @@
  */
 
 import { useCallback, useEffect, useRef } from "react";
-import { useShortcut } from "@/lib/keyboard/registry";
+import { useShortcut } from "@zen-tools/keyboard/registry";
 import {
   GLOBALS_KEY,
   REPOS_SECTION_ID,

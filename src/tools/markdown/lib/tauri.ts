@@ -213,6 +213,14 @@ export const markdownTauri = {
       query,
       currentFile,
     }),
+
+  /**
+   * Rasterise an SVG to PNG and copy the bytes to the OS clipboard.
+   * Used by the live-preview mermaid widget's "Copy as PNG" action.
+   * `scale` is the device-pixel multiplier (typically 2 for retina).
+   */
+  copySvgAsPng: (svg: string, scale = 2) =>
+    invoke<void>("markdown_copy_svg_as_png", { svg, scale }),
 };
 
 // ────────────────────────────────────────────────────────────────────────

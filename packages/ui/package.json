@@ -1,0 +1,24 @@
+{
+  "name": "@zen-tools/ui",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "//": "Skeleton package — Phase 3.1 of the cleanup plan. Pending move of src/components/ui/* + src/lib/utils.ts here. See plans/what-i-want-you-typed-pearl.md.",
+  "peerDependencies": {
+    "react": "^18.0.0",
+    "react-dom": "^18.0.0"
+  },
+  "dependencies": {
+    "class-variance-authority": "^0.7.0",
+    "clsx": "^2.1.1",
+    "cmdk": "^1.1.1",
+    "lucide-react": "^0.451.0",
+    "radix-ui": "^1.4.3",
+    "tailwind-merge": "^2.5.4"
+  }
+}

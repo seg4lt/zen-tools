@@ -25,37 +25,6 @@ use crate::user_config::UserConfig;
 use crate::error::AppResult;
 use crate::state::AppState;
 
-/// Shape passed back for `prmaster_get_gh_status`. Mirrors `AuthStatus` but
-/// stable across crate versions so the frontend doesn't see internal renames.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GhStatusDto {
-    /// Whether `gh` was found on `$PATH` (with PRMaster's augmentation).
-    pub installed: bool,
-    /// `gh --version` (first line) when installed.
-    pub version: Option<String>,
-    /// Whether `gh auth status` reports a logged-in session.
-    pub authenticated: bool,
-    /// Active login if known.
-    pub login: Option<String>,
-    /// Hostname (e.g. `github.com`) if known.
-    pub host: Option<String>,
-    /// Raw stdout/stderr from `gh auth status` for diagnostics.
-    pub raw: String,
-}
-
-impl From<AuthStatus> for GhStatusDto {
-    fn from(s: AuthStatus) -> Self {
-        Self {
-            installed: s.installed,
-            version: s.version,
-            authenticated: s.authenticated,
-            login: s.login,
-            host: s.host,
-            raw: s.raw,
-        }
-    }
-}
-
 /// Snapshot of a single CI check used by the Mine tab's detail panel.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckSummaryDto {
@@ -104,12 +73,12 @@ pub async fn prmaster_whoami(state: State<'_, Mutex<AppState>>) -> AppResult<Str
 #[tauri::command]
 pub async fn prmaster_get_gh_status(
     state: State<'_, Mutex<AppState>>,
-) -> AppResult<GhStatusDto> {
+) -> AppResult<AuthStatus> {
     let engine = {
         let s = state.lock().await;
         engine(&s)
     };
-    Ok(engine.auth_status().await?.into())
+    Ok(engine.auth_status().await?)
 }
 
 /// Open PRs the current user authored, enriched with reviewer + check
@@ -357,7 +326,7 @@ pub async fn prmaster_hide_popover(app: AppHandle) -> AppResult<()> {
 }
 
 /// Update the menu-bar tray badge text. Pass an empty string to clear it.
-/// The future P5 refresh loop will call this from inside `lib.rs`'s
+/// The 5-minute background refresh loop in `lib.rs` calls this via the
 /// broadcast bridge; surfacing it as a command also lets the frontend
 /// nudge the badge directly (e.g. after an optimistic action).
 #[tauri::command]
@@ -390,18 +359,17 @@ pub async fn prmaster_ai_summary(
 /// List the active provider's supported model identifiers.
 #[tauri::command]
 pub async fn prmaster_ai_list_models(
+    state: State<'_, tokio::sync::Mutex<crate::state::AppState>>,
     config: State<'_, UserConfig>,
 ) -> AppResult<Vec<String>> {
     let settings = config
         .get::<PrMasterSettings>(PRMASTER_SETTINGS_KEY)?
         .unwrap_or_default();
-    let kind = zen_ai_cli::AiProviderType::from_wire(settings.ai_provider.as_str());
-    let provider = zen_ai_cli::build_provider(kind);
-    let models = provider
-        .list_models()
+    let engine = state.lock().await.prmaster.clone();
+    engine
+        .ai_list_models(&settings)
         .await
-        .map_err(|e| crate::error::AppError::Other(format!("ai list_models: {e}")))?;
-    Ok(models)
+        .map_err(|e| crate::error::AppError::Other(format!("ai list_models: {e}")))
 }
 
 /// Storage key for the AI Summary tab's persistent card list — the

@@ -3,6 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
+  "packageManager": "pnpm@10.33.0",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
@@ -11,6 +12,8 @@
     "lint": "tsc --noEmit"
   },
   "dependencies": {
+    "@zen-tools/ipc": "workspace:*",
+    "@zen-tools/keyboard": "workspace:*",
     "@codemirror/autocomplete": "^6.20.1",
     "@codemirror/commands": "^6.10.3",
     "@codemirror/lang-json": "^6.0.2",
@@ -35,11 +38,9 @@
     "@tauri-apps/api": "^2.1.1",
     "@tauri-apps/plugin-clipboard-manager": "^2.0.0",
     "@tauri-apps/plugin-dialog": "^2.0.1",
-    "@tauri-apps/plugin-fs": "^2.0.2",
     "@tauri-apps/plugin-process": "^2.3.1",
     "@tauri-apps/plugin-shell": "^2.0.1",
     "@tauri-apps/plugin-updater": "^2.10.1",
-    "@types/diff": "^8.0.0",
     "class-variance-authority": "^0.7.0",
     "clsx": "^2.1.1",
     "cmdk": "^1.1.1",
@@ -54,7 +55,6 @@
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.0.0",
-    "@tanstack/router-devtools": "^1.85.0",
     "@tauri-apps/cli": "^2.10.1",
     "@types/node": "^22.7.0",
     "@types/react": "^18.3.12",

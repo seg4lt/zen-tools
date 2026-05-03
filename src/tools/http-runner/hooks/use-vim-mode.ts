@@ -6,8 +6,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback } from "react";
 import { tauri } from "../lib/tauri";
-
-const PREFERENCES_KEY = ["preferences"] as const;
+import { PREFERENCES_KEY } from "@/lib/preferences-key";
 
 interface UseVimModeResult {
   /** Current preference (`true` until the user disables it). */

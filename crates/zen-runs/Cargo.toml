@@ -1,0 +1,18 @@
+[package]
+name = "zen-runs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Per-request run history (FIFO ring buffers + atomic JSON persistence) used by the HTTP runner's Sent / Body / Headers / Diff tabs."
+
+[lints.rust]
+missing_docs = "warn"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+ahash = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }

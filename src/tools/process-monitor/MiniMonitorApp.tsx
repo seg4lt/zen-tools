@@ -22,7 +22,6 @@
  * via the main window shows up on the very next sample tick.
  */
 
-import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { useEffect, useMemo, useState } from "react";
@@ -123,7 +122,7 @@ export function MiniMonitorApp() {
 
   const openMain = async () => {
     try {
-      await invoke("pm_show_main_window");
+      await pmTauri.showMainWindow();
     } catch (err) {
       console.error("[mini-monitor] pm_show_main_window failed", err);
     }

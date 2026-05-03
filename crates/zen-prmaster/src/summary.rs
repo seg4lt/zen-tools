@@ -25,8 +25,8 @@ use chrono::{DateTime, Datelike, Utc};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use zen_ai_cli::{AiError, AiProvider, AiProviderType};
-use zen_github::{GhError, GhResult};
+use zen_ai_cli::{AiError, AiProvider};
+use zen_github::GhError;
 use zen_shell::{ShellError, ShellExecutor};
 
 use crate::settings::LocalRepoMapping;

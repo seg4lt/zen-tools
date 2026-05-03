@@ -16,7 +16,6 @@ pub mod user_config;
 
 use commands::markdown_index::MarkdownIndexRegistry;
 use commands::runs::{load_runs, RunHistory};
-use schema_cache::SchemaCache;
 use state::AppState;
 use user_config::UserConfig;
 use std::sync::Arc;
@@ -92,7 +91,7 @@ pub fn run() {
             // before `load_runs` is overkill today (runs.rs reads its
             // own file) but keeps the invariant simple: settings are
             // available from this point onward.
-            match UserConfig::open(app.handle()) {
+            match user_config::open(app.handle()) {
                 Ok(cfg) => {
                     app.manage(cfg);
                 }
@@ -114,7 +113,7 @@ pub fn run() {
             // Open (or create) the SQL-autocomplete schema cache. Held
             // as managed state so commands can clone the `Arc` cheaply
             // without touching the outer `Mutex<AppState>`.
-            match SchemaCache::open(app.handle()) {
+            match schema_cache::open(app.handle()) {
                 Ok(cache) => {
                     app.manage(cache);
                 }

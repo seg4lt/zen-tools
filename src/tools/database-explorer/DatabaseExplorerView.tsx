@@ -55,7 +55,7 @@ import { formatError } from "./lib/format-error";
 import { splitStatements, statementAtCursor } from "./lib/sql-statements";
 import { ensureTablesForSql } from "./lib/schema-cache";
 import { useAutoSave } from "@/hooks/use-auto-save";
-import { useShortcut } from "@/lib/keyboard";
+import { useShortcut } from "@zen-tools/keyboard";
 import { useVimMode } from "@/tools/http-runner/hooks/use-vim-mode";
 
 export function DatabaseExplorerView() {

@@ -19,7 +19,6 @@ use crate::commands::preferences::{load_preferences, write_preferences};
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 use serde::{Deserialize, Serialize};
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -143,95 +142,58 @@ pub async fn markdown_discover_files(
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| v.clone());
-        let mut items = Vec::new();
-        collect_markdown(&pb, &mut items, 0);
         out.push(MarkdownVaultDto {
             root: v,
             name,
-            items,
+            items: collect_markdown(&pb),
         });
     }
     Ok(out)
 }
 
-fn collect_markdown(dir: &Path, items: &mut Vec<MarkdownFileItem>, depth: usize) {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
-    let mut entries: Vec<_> = entries.filter_map(|e| e.ok()).collect();
-    entries.sort_by(|a, b| {
-        let a_dir = a.file_type().map(|t| t.is_dir()).unwrap_or(false);
-        let b_dir = b.file_type().map(|t| t.is_dir()).unwrap_or(false);
-        match (a_dir, b_dir) {
-            (true, false) => std::cmp::Ordering::Less,
-            (false, true) => std::cmp::Ordering::Greater,
-            _ => a.file_name().cmp(&b.file_name()),
-        }
-    });
-
-    for entry in entries {
-        let path = entry.path();
-        let name = path
-            .file_name()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_default();
-
-        // Skip dotfiles and well-known noise.  Users routinely keep
-        // node-modules / .git directories inside their vaults; walking
-        // them is both slow and useless.
-        if name.starts_with('.')
-            || name == "node_modules"
-            || name == "target"
-            || name == "dist"
-            || name == "build"
-        {
-            continue;
-        }
-
-        if path.is_dir() {
-            // Only emit directories that hold at least one markdown
-            // or image descendant — keeps the tree quiet for unrelated
-            // folders, but still surfaces `pasted/` and any siblings
-            // that exist purely for attachments.
-            if has_included_descendant(&path) {
-                items.push(MarkdownFileItem {
-                    name: name.clone(),
-                    path: path.to_string_lossy().to_string(),
-                    is_dir: true,
-                    depth,
-                    kind: "directory".to_string(),
-                });
-                collect_markdown(&path, items, depth + 1);
-            }
-        } else if is_markdown(&name) {
-            items.push(MarkdownFileItem {
-                name,
-                path: path.to_string_lossy().to_string(),
-                is_dir: false,
-                depth,
-                kind: "markdown".to_string(),
-            });
-        } else if is_excalidraw(&name) {
-            // Must come BEFORE `is_image` — excalidraw drawings end in
-            // `.svg` and would otherwise get the generic image kind,
-            // making them unclickable in the sidebar.
-            items.push(MarkdownFileItem {
-                name,
-                path: path.to_string_lossy().to_string(),
-                is_dir: false,
-                depth,
-                kind: "excalidraw".to_string(),
-            });
-        } else if is_image(&name) {
-            items.push(MarkdownFileItem {
-                name,
-                path: path.to_string_lossy().to_string(),
-                is_dir: false,
-                depth,
-                kind: "image".to_string(),
-            });
-        }
+/// Classify a markdown-vault file basename (lowercased) into the kind
+/// string the frontend expects, or `None` if the file should be skipped.
+///
+/// Order matters: excalidraw drawings end in `.svg` / `.png`, so they
+/// must be checked **before** the generic image classifier.
+fn classify_markdown_file(name: &str) -> Option<&'static str> {
+    if is_markdown(name) {
+        Some("markdown")
+    } else if is_excalidraw(name) {
+        Some("excalidraw")
+    } else if is_image(name) {
+        Some("image")
+    } else {
+        None
     }
+}
+
+fn collect_markdown(dir: &Path) -> Vec<MarkdownFileItem> {
+    let cfg = zen_fs::WalkConfig {
+        include_file: &|name| classify_markdown_file(name).is_some(),
+        // Only emit directories that hold at least one markdown / image
+        // descendant — keeps the tree quiet for unrelated folders, but
+        // still surfaces `pasted/` and any siblings that exist purely
+        // for attachments.
+        include_dir: &|p| zen_fs::dir_contains(p, |n| classify_markdown_file(n).is_some()),
+        ..Default::default()
+    };
+    zen_fs::walk_tree(dir, &cfg)
+        .into_iter()
+        .map(|e| MarkdownFileItem {
+            name: e.name.clone(),
+            path: e.path.to_string_lossy().to_string(),
+            is_dir: e.is_dir,
+            depth: e.depth,
+            kind: if e.is_dir {
+                "directory".to_string()
+            } else {
+                classify_markdown_file(&e.name.to_ascii_lowercase())
+                    .unwrap_or("markdown")
+                    .to_string()
+            },
+        })
+        .collect()
 }
 
 fn is_markdown(name: &str) -> bool {
@@ -264,39 +226,6 @@ fn is_image(name: &str) -> bool {
 fn is_excalidraw(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     lower.ends_with(".excalidraw.svg") || lower.ends_with(".excalidraw.png")
-}
-
-fn has_included_descendant(dir: &Path) -> bool {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return false;
-    };
-    for entry in entries.filter_map(|e| e.ok()) {
-        let path = entry.path();
-        if path.is_file() {
-            if let Some(name) = path.file_name() {
-                let n = name.to_string_lossy();
-                if is_markdown(&n) || is_excalidraw(&n) || is_image(&n) {
-                    return true;
-                }
-            }
-        } else if path.is_dir() {
-            if let Some(n) = path.file_name() {
-                let n = n.to_string_lossy();
-                if n.starts_with('.')
-                    || n == "node_modules"
-                    || n == "target"
-                    || n == "dist"
-                    || n == "build"
-                {
-                    continue;
-                }
-            }
-            if has_included_descendant(&path) {
-                return true;
-            }
-        }
-    }
-    false
 }
 
 // ────────────────────────────────────────────────────────────────────────
@@ -381,7 +310,7 @@ pub async fn markdown_create_file(
     } else {
         trimmed.to_string()
     };
-    let resolved = unique_sibling(&parent, &with_ext);
+    let resolved = zen_fs::unique_sibling(&parent, &with_ext);
     tokio::fs::write(&resolved, b"")
         .await
         .map_err(|e| AppError::Other(format!("create markdown file: {e}")))?;
@@ -411,7 +340,7 @@ pub async fn markdown_create_dir(
             "name must not contain path separators".into(),
         ));
     }
-    let resolved = unique_sibling(&parent, trimmed);
+    let resolved = zen_fs::unique_sibling(&parent, trimmed);
     tokio::fs::create_dir(&resolved)
         .await
         .map_err(|e| AppError::Other(format!("create directory: {e}")))?;
@@ -726,33 +655,6 @@ pub async fn markdown_search_files(
     })
     .await
     .map_err(|e| AppError::Other(format!("join file-search worker: {e}")))?
-}
-
-/// Find a sibling name that doesn't yet exist.  Returns the resolved
-/// path.  Strategy: try `name`, then `stem 2.ext`, `stem 3.ext`, …
-fn unique_sibling(parent: &Path, name: &str) -> PathBuf {
-    let candidate = parent.join(name);
-    if !candidate.exists() {
-        return candidate;
-    }
-    let stem = Path::new(name)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("untitled")
-        .to_string();
-    let ext = Path::new(name)
-        .extension()
-        .and_then(|s| s.to_str())
-        .map(|s| format!(".{s}"))
-        .unwrap_or_default();
-    for n in 2..=9999 {
-        let c = parent.join(format!("{stem} {n}{ext}"));
-        if !c.exists() {
-            return c;
-        }
-    }
-    // Astronomically unlikely fallback; better than panicking.
-    parent.join(format!("{stem}-{}{ext}", chrono::Utc::now().timestamp_millis()))
 }
 
 /// Save a clipboard-pasted image into a `pasted/` subfolder of the

@@ -54,21 +54,6 @@ pub fn ticks_to_ns(ticks: u64) -> u64 {
     ((ticks as u128) * tb.numer as u128 / tb.denom as u128) as u64
 }
 
-/// Number of online (user-visible) CPUs. Cached.
-#[allow(dead_code)]
-pub fn num_cpus() -> usize {
-    static N: OnceCell<usize> = OnceCell::new();
-    *N.get_or_init(|| {
-        // SAFETY: documented sysconf key, always returns a positive value.
-        let n = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) };
-        if n > 0 {
-            n as usize
-        } else {
-            1
-        }
-    })
-}
-
 /// Compute one process' CPU% over a sampling interval.
 ///
 /// `d_proc_ticks` is the delta of `pti_total_user + pti_total_system` between
@@ -92,11 +77,6 @@ mod tests {
     fn timebase_is_sensible() {
         let tb = timebase();
         assert!(tb.numer > 0 && tb.denom > 0);
-    }
-
-    #[test]
-    fn num_cpus_is_positive() {
-        assert!(num_cpus() >= 1);
     }
 
     #[test]

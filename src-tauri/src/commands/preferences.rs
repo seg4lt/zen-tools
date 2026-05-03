@@ -170,7 +170,8 @@ pub fn load_preferences(app: &AppHandle) -> AppResult<Preferences> {
 /// atomicity for us — no temp-file dance required.
 pub fn write_preferences(app: &AppHandle, prefs: &Preferences) -> AppResult<()> {
     let cfg = user_config::require(app)?;
-    cfg.set(PREFERENCES_KEY, prefs)
+    cfg.set(PREFERENCES_KEY, prefs)?;
+    Ok(())
 }
 
 /// Read the preferences JSON. Returns defaults when the file is

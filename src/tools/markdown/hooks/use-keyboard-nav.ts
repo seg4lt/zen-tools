@@ -15,7 +15,7 @@
  * swaps mode without closing — same affordance Flowstate gives.
  */
 
-import { useShortcut } from "@/lib/keyboard/registry";
+import { useShortcut } from "@zen-tools/keyboard/registry";
 import { useMarkdownStore } from "../store/markdown-store";
 import { useVaults } from "./use-vaults";
 

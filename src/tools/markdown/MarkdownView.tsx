@@ -14,6 +14,7 @@ import { Button } from "@/components/ui/button";
 import { DragHandle } from "@/components/drag-handle";
 import { tauri as httpTauri } from "@/tools/http-runner/lib/tauri";
 import { cn } from "@/lib/utils";
+import { PREFERENCES_KEY } from "@/lib/preferences-key";
 import { VaultSidebar } from "./components/vault-sidebar";
 import { SearchPalette } from "./components/search-palette";
 import { EmptyState } from "./components/empty-state";
@@ -100,7 +101,7 @@ export function MarkdownView() {
   // Vim toggle plumbing — same prefs key as http-runner.  Lazy load,
   // default `true` to match the tool's historical behaviour.
   const { data: prefs } = useQuery({
-    queryKey: ["preferences"],
+    queryKey: PREFERENCES_KEY,
     queryFn: () => httpTauri.getPreferences(),
     staleTime: Infinity,
   });
@@ -260,7 +261,7 @@ export function MarkdownView() {
     if (!prefs) return;
     try {
       await httpTauri.savePreferences({ ...prefs, vimMode: !prefs.vimMode });
-      await queryClient.invalidateQueries({ queryKey: ["preferences"] });
+      await queryClient.invalidateQueries({ queryKey: PREFERENCES_KEY });
     } catch (err) {
       console.error("[markdown] toggle vim failed", err);
     }

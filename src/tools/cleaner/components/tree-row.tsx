@@ -3,8 +3,8 @@
  *
  * Section rows show only a chevron + label.
  * Leaf rows show a chevron-spacer, an icon, the label, the action chip,
- * and the size summary.  Sizes that haven't yet settled render a
- * shimmer (`Skeleton`) instead of a value.
+ * and the size summary.  Sizes that haven't yet settled render an
+ * inline `…` placeholder instead of a value.
  */
 
 import {

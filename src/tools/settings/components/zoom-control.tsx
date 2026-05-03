@@ -6,7 +6,7 @@
 import { Minus, Plus, RotateCcw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useAppZoom, APP_ZOOM_LIMITS } from "@/hooks/use-app-zoom";
-import { isMac } from "@/lib/keyboard";
+import { isMac } from "@zen-tools/keyboard";
 
 export function ZoomControl() {
   const { zoom, zoomIn, zoomOut, reset } = useAppZoom();

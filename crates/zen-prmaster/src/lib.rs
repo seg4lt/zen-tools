@@ -1,26 +1,30 @@
 //! Domain controller for the PRMaster tool.
 //!
-//! Direct port of the Swift `PRListViewModel` + the various `*Service`
-//! types from PRMaster, brought up phase-by-phase:
+//! [`PrMasterEngine`] is the single point of orchestration the Tauri
+//! command layer talks to. It owns:
 //!
-//! * **P1**: minimal [`PrMasterEngine`] wrapping a [`zen_github::GhClient`]
-//!   so the Tauri command layer has something to call. Surfaces enough for
-//!   the **Mine** tab.
-//! * **P2** (current): adds the **client-side reclassification** that the
-//!   Swift `refresh()` performs — `gh search prs --review-requested @me`
-//!   and `--reviewed-by @me` overlap, so PRs are split into "To Review"
-//!   vs "Done" by inspecting whether the current user has submitted an
-//!   approving / changes-requested review. A short-lived in-memory cache
-//!   (30 s TTL) avoids re-fetching when the user clicks between tabs.
-//! * **P5** will add the 300 s background refresh loop, the notification
-//!   diff, and broadcast events on top of [`refresh_lists`].
-//! * **P6** will add the AI Summary orchestration on top of `zen-ai-cli`.
+//! * A [`zen_github::GhClient`] for all `gh` CLI traffic.
+//! * A 30 s in-memory cache of the last fetched PR lists so tab switches
+//!   in the UI don't re-fetch.
+//! * Client-side reclassification of `--review-requested @me` /
+//!   `--reviewed-by @me` overlap into **To Review** vs **Done** by
+//!   inspecting whether the current user has submitted an approving or
+//!   changes-requested review.
+//! * On-demand refresh (`refresh_lists_and_notify`) plus a broadcast
+//!   channel of [`PrMasterEvent`]s so subscribers (Tauri command layer,
+//!   tray badge, notifications) react to state changes.
+//! * Per-PR notification diffing with persistent filter rules
+//!   ([`FilterStore`]) and last-seen state ([`NotificationStore`]).
+//! * AI Summary orchestration via `zen-ai-cli`, with a JSON-file-backed
+//!   summary cache ([`AiSummaryCache`]).
 //!
-//! Keeping the public surface stable from P1 onwards means the Tauri
-//! command layer doesn't churn between phases.
+//! The 5-minute background refresh loop is wired by the host (the Tauri
+//! `setup` callback in `src-tauri/src/lib.rs`) so the engine itself
+//! stays runtime-agnostic.
 
 pub mod filters;
 pub mod notifications;
+pub mod paths;
 pub mod settings;
 pub mod summary;
 
@@ -46,7 +50,6 @@ use arc_swap::ArcSwapOption;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
-use tokio::task::JoinHandle;
 use tracing::warn;
 use zen_github::{
     ConversationGroup, EnrichedPullRequest, GhCall, GhClient, GhResult, PrRef, PullRequest,
@@ -216,43 +219,12 @@ impl PrMasterEngine {
         self.inner.tx.subscribe()
     }
 
-    /// Spawn the 5-minute background-refresh task (mirrors the hardcoded
-    /// `Timer.scheduledTimer(withTimeInterval: 300, repeats: true)` in
-    /// the Swift app). Returns the [`JoinHandle`] so the caller can
-    /// abort / await on shutdown.
-    ///
-    /// **Caller must already be inside a tokio runtime**, otherwise
-    /// `tokio::spawn` panics. Tauri's `setup` callback runs on the AppKit
-    /// main thread, *not* a tokio worker — to spawn from there, use
-    /// `tauri::async_runtime::spawn` directly with the same loop body
-    /// (see `src-tauri/src/lib.rs`).
-    pub fn start_background_loop(self) -> JoinHandle<()> {
-        let engine = self;
-        tokio::spawn(async move {
-            let mut tick = tokio::time::interval(Duration::from_secs(300));
-            // Skip the immediate first tick — the foreground UI fires its
-            // own refresh on mount; we don't want to compete with that.
-            tick.tick().await;
-            loop {
-                tick.tick().await;
-                if let Err(e) = engine.refresh_lists_and_notify(&PrMasterSettings::default()).await {
-                    tracing::warn!(error = %e, "background refresh failed");
-                }
-            }
-        })
-    }
-
     fn notification_store(&self) -> std::io::Result<NotificationStore> {
         let mut slot = self.inner.notification_store.lock();
         if let Some(s) = slot.as_ref() {
             return Ok(s.clone());
         }
-        let dir = dirs::data_dir()
-            .or_else(dirs::home_dir)
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join("com.zen-tools.app")
-            .join("prmaster");
-        let store = NotificationStore::open_in(&dir)?;
+        let store = NotificationStore::open_in(&paths::data_dir())?;
         *slot = Some(store.clone());
         Ok(store)
     }
@@ -431,12 +403,7 @@ impl PrMasterEngine {
         if let Some(s) = slot.as_ref() {
             return Ok(s.clone());
         }
-        let dir = dirs::data_dir()
-            .or_else(dirs::home_dir)
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join("com.zen-tools.app")
-            .join("prmaster");
-        let cache = AiSummaryCache::open_in(&dir)?;
+        let cache = AiSummaryCache::open_in(&paths::data_dir())?;
         *slot = Some(cache.clone());
         Ok(cache)
     }
@@ -551,6 +518,21 @@ impl PrMasterEngine {
     pub fn clear_ai_cache(&self) -> std::io::Result<()> {
         self.summary_cache()?.clear();
         Ok(())
+    }
+
+    /// List the supported model identifiers for the AI provider named
+    /// in `settings.ai_provider`. Surfaces the underlying CLI's
+    /// catalogue (e.g. `claude --models`, `copilot --models`).
+    ///
+    /// This is the engine-level seam over `zen-ai-cli` so the host
+    /// (Tauri command layer) doesn't need a direct dep on `zen-ai-cli`.
+    pub async fn ai_list_models(
+        &self,
+        settings: &PrMasterSettings,
+    ) -> Result<Vec<String>, zen_ai_cli::AiError> {
+        let kind = zen_ai_cli::AiProviderType::from_wire(settings.ai_provider.as_str());
+        let provider = zen_ai_cli::build_provider(kind);
+        provider.list_models().await
     }
 
     /// Enumerate every repo the current user can see — personal repos

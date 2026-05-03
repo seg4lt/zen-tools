@@ -12,6 +12,34 @@ pub fn parse_env_file(path: PathBuf, content: &str) -> Result<EnvironmentFile, P
     })
 }
 
+/// Pick a sensible default environment name from the available list.
+/// Preference order: `development` → `dev` → first item.
+///
+/// This is the canonical "what env should we pick when the user hasn't
+/// chosen one" rule, used by both the project loader (working with an
+/// [`EnvironmentFile`]) and the file-open command (working with a flat
+/// list of names).
+pub fn pick_default_env_name<I, S>(names: I) -> Option<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let names: Vec<String> = names.into_iter().map(|s| s.as_ref().to_string()).collect();
+    if names.iter().any(|n| n == "development") {
+        return Some("development".to_string());
+    }
+    if names.iter().any(|n| n == "dev") {
+        return Some("dev".to_string());
+    }
+    names.into_iter().next()
+}
+
+/// Convenience wrapper: pick the default env from an
+/// already-parsed [`EnvironmentFile`].
+pub fn pick_default_env(env: &EnvironmentFile) -> Option<String> {
+    pick_default_env_name(env.env_names())
+}
+
 /// Walk the directory tree (`directory` and all its parents) looking for an
 /// env file in the canonical priority order.
 pub fn find_env_file(directory: &Path) -> Option<PathBuf> {

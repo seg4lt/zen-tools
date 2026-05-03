@@ -1,0 +1,16 @@
+[package]
+name = "zen-fs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Filesystem helpers shared across the zen-tools workspace: directory walking with consistent pruning rules, sibling-name disambiguation, etc."
+
+[lints.rust]
+missing_docs = "warn"
+
+[dependencies]
+chrono = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

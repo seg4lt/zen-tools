@@ -7,7 +7,6 @@
 #![warn(missing_docs)]
 
 pub mod environment;
-pub mod error;
 pub mod ids;
 pub mod prelude;
 pub mod request;

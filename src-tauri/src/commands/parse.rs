@@ -6,20 +6,8 @@ use crate::state::AppState;
 use std::path::{Path, PathBuf};
 use tokio::sync::Mutex;
 use tracing::debug;
-use zen_parser::{find_env_file, parse_env_file};
+use zen_parser::{find_env_file, parse_env_file, pick_default_env_name};
 use zen_types::prelude::*;
-
-/// Choose a sensible default environment from a list of names.
-/// Mirrors the picker used by `add_working_dir`.
-fn pick_default_env_name(names: &[String]) -> Option<String> {
-    if names.iter().any(|n| n == "development") {
-        return Some("development".to_string());
-    }
-    if names.iter().any(|n| n == "dev") {
-        return Some("dev".to_string());
-    }
-    names.first().cloned()
-}
 
 /// Open an `.http` file, register it in the cache, and resolve any
 /// directory-local env file. If no environment is currently selected

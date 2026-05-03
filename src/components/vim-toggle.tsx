@@ -1,9 +1,8 @@
 /**
- * Round icon button that flips the global Vim-mode preference. Lives in
- * the top bar next to `ThemeToggle`. Persists to `preferences.json`
- * (the `vimMode` field) via the existing `useVimMode` hook, so the
- * choice survives across launches and is shared by every editor in the
- * app (HTTP runner + Database Explorer + Markdown).
+ * Round icon button that flips the global Vim-mode preference. Persists
+ * to `preferences.json` (the `vimMode` field) via the `useVimMode` hook,
+ * so the choice survives across launches and is shared by every editor
+ * in the app (HTTP runner + Database Explorer + Markdown).
  */
 
 import { Button } from "@/components/ui/button";

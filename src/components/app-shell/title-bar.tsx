@@ -2,7 +2,7 @@ import { useNavigate, useRouterState } from "@tanstack/react-router";
 import { Settings as SettingsIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ToolPill } from "./tool-pill";
-import { isMac, useShortcut } from "@/lib/keyboard";
+import { isMac, useShortcut } from "@zen-tools/keyboard";
 import { useAppZoom } from "@/hooks/use-app-zoom";
 import { useLastRoute } from "@/hooks/use-last-route";
 import { useToolOrder } from "@/hooks/use-tool-order";

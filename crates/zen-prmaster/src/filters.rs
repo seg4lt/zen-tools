@@ -20,13 +20,11 @@ use uuid::Uuid;
 
 use zen_github::PullRequest;
 
-/// macOS / Linux app data directory under `dirs::data_dir()` (mirrors
-/// Tauri's `app_data_dir`).
+use crate::paths;
+
+/// macOS / Linux app data directory shared by every PRMaster store.
 fn default_data_dir() -> PathBuf {
-    let base = dirs::data_dir()
-        .or_else(dirs::home_dir)
-        .unwrap_or_else(|| PathBuf::from("."));
-    base.join("com.zen-tools.app").join("prmaster")
+    paths::data_dir()
 }
 
 /// PRMaster notification action — mirrors Swift's `NotificationAction`.

@@ -9,7 +9,7 @@ use tauri::AppHandle;
 use tauri_plugin_dialog::DialogExt;
 use tokio::sync::Mutex;
 use tracing::{debug, warn};
-use zen_parser::{find_env_file, parse_env_file};
+use zen_parser::{find_env_file, parse_env_file, pick_default_env};
 use zen_types::prelude::*;
 
 /// One project's slice of the discovered tree. The frontend renders one
@@ -160,19 +160,6 @@ pub async fn list_working_dirs(
         .collect())
 }
 
-/// Choose a sensible default environment from the loaded env file.
-/// Preference order: `development` → `dev` → first alphabetical name.
-fn pick_default_env(env: &EnvironmentFile) -> Option<String> {
-    let names = env.env_names();
-    if names.iter().any(|n| n == "development") {
-        return Some("development".to_string());
-    }
-    if names.iter().any(|n| n == "dev") {
-        return Some("dev".to_string());
-    }
-    names.into_iter().next()
-}
-
 /// Show a native directory picker. Returns the selected path or `None` if
 /// the user cancelled.
 #[tauri::command]
@@ -189,128 +176,57 @@ pub async fn pick_directory(app_handle: AppHandle) -> AppResult<Option<String>> 
     }
 }
 
+/// Returns the [`FileType`] for a relevant http-runner file given its
+/// lowercased basename, or `None` if the file is not interesting.
+///
+/// Order matters: `perf.variable.yaml` is checked **before** the generic
+/// `perf.yaml` pattern so it gets the dedicated [`FileType::PerfVariableFile`]
+/// tag.
+fn classify_http_file(name: &str) -> Option<FileType> {
+    if name.ends_with(".http") || name.ends_with(".rest") {
+        Some(FileType::HttpFile)
+    } else if name.ends_with(".env.json") {
+        Some(FileType::EnvFile)
+    } else if name == "perf.variable.yaml" || name == "perf.variable.yml" {
+        Some(FileType::PerfVariableFile)
+    } else if name == "perf.yaml"
+        || name == "perf.yml"
+        || name.ends_with(".perf.yaml")
+        || name.ends_with(".perf.yml")
+    {
+        Some(FileType::PerfFile)
+    } else {
+        None
+    }
+}
+
 /// Recursively collect HTTP, env, and perf files from `dir`.
+/// Empty directories (no relevant descendant) are pruned.
 fn collect_http_files(dir: &Path) -> Vec<FileTreeItem> {
-    let mut items = Vec::new();
-    collect_recursive(dir, &mut items, 0);
-    items
-}
-
-fn collect_recursive(dir: &Path, items: &mut Vec<FileTreeItem>, depth: usize) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
+    let cfg = zen_fs::WalkConfig {
+        include_file: &|name| classify_http_file(name).is_some(),
+        include_dir: &|p| zen_fs::dir_contains(p, |n| classify_http_file(n).is_some()),
+        ..Default::default()
     };
-    let mut entries: Vec<_> = entries.filter_map(|e| e.ok()).collect();
-    entries.sort_by(|a, b| {
-        let a_dir = a.file_type().map(|t| t.is_dir()).unwrap_or(false);
-        let b_dir = b.file_type().map(|t| t.is_dir()).unwrap_or(false);
-        match (a_dir, b_dir) {
-            (true, false) => std::cmp::Ordering::Less,
-            (false, true) => std::cmp::Ordering::Greater,
-            _ => a.file_name().cmp(&b.file_name()),
-        }
-    });
-
-    for entry in entries {
-        let path = entry.path();
-        let name = path
-            .file_name()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_default();
-
-        if name.starts_with('.') || name == "target" || name == "node_modules" {
-            continue;
-        }
-
-        if path.is_dir() {
-            if has_relevant_files(&path) {
-                items.push(FileTreeItem {
-                    name: name.clone(),
-                    path: path.to_string_lossy().to_string(),
-                    is_dir: true,
-                    depth,
-                    expanded: true,
-                    file_type: FileType::Directory,
-                });
-                collect_recursive(&path, items, depth + 1);
+    zen_fs::walk_tree(dir, &cfg)
+        .into_iter()
+        .map(|e| {
+            let file_type = if e.is_dir {
+                FileType::Directory
+            } else {
+                // Re-classify on the lowercased basename. Falls back to
+                // `HttpFile` defensively, though `include_file` already
+                // ensures classification will succeed.
+                classify_http_file(&e.name.to_ascii_lowercase()).unwrap_or(FileType::HttpFile)
+            };
+            FileTreeItem {
+                name: e.name,
+                path: e.path.to_string_lossy().to_string(),
+                is_dir: e.is_dir,
+                depth: e.depth,
+                expanded: e.is_dir,
+                file_type,
             }
-        } else if name.ends_with(".http") || name.ends_with(".rest") {
-            items.push(FileTreeItem {
-                name,
-                path: path.to_string_lossy().to_string(),
-                is_dir: false,
-                depth,
-                expanded: false,
-                file_type: FileType::HttpFile,
-            });
-        } else if name.ends_with(".env.json") {
-            items.push(FileTreeItem {
-                name,
-                path: path.to_string_lossy().to_string(),
-                is_dir: false,
-                depth,
-                expanded: false,
-                file_type: FileType::EnvFile,
-            });
-        } else if name == "perf.variable.yaml" || name == "perf.variable.yml" {
-            // Perf variable files are matched *before* the generic perf
-            // pattern so they get tagged with their own file type.
-            items.push(FileTreeItem {
-                name,
-                path: path.to_string_lossy().to_string(),
-                is_dir: false,
-                depth,
-                expanded: false,
-                file_type: FileType::PerfVariableFile,
-            });
-        } else if name == "perf.yaml"
-            || name == "perf.yml"
-            || name.ends_with(".perf.yaml")
-            || name.ends_with(".perf.yml")
-        {
-            items.push(FileTreeItem {
-                name,
-                path: path.to_string_lossy().to_string(),
-                is_dir: false,
-                depth,
-                expanded: false,
-                file_type: FileType::PerfFile,
-            });
-        }
-    }
-}
-
-fn has_relevant_files(dir: &Path) -> bool {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return false;
-    };
-    for entry in entries.filter_map(|e| e.ok()) {
-        let path = entry.path();
-        if path.is_file() {
-            if let Some(name) = path.file_name() {
-                let name = name.to_string_lossy();
-                if name.ends_with(".http")
-                    || name.ends_with(".rest")
-                    || name.ends_with(".env.json")
-                    || name == "perf.yaml"
-                    || name == "perf.yml"
-                    || name.ends_with(".perf.yaml")
-                    || name.ends_with(".perf.yml")
-                    || name == "perf.variable.yaml"
-                    || name == "perf.variable.yml"
-                {
-                    return true;
-                }
-            }
-        } else if path.is_dir()
-            && !path
-                .file_name()
-                .map(|n| n.to_string_lossy().starts_with('.'))
-                .unwrap_or(true)
-            && has_relevant_files(&path)
-        {
-            return true;
-        }
-    }
-    false
+        })
+        .collect()
 }

@@ -17,8 +17,8 @@
  */
 
 import { WidgetType } from "@codemirror/view";
-import { invoke } from "@tauri-apps/api/core";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
+import { markdownTauri } from "../tauri";
 
 // ────────────────────────────────────────────────────────────────────────
 // Lazy-loaded mermaid module + per-source render cache
@@ -248,7 +248,7 @@ async function copyAsPng(wrapper: HTMLElement): Promise<boolean> {
     // Serialise *without* the surrounding `<div>` chrome so resvg
     // doesn't need to parse anything but the diagram itself.
     const xml = new XMLSerializer().serializeToString(svg);
-    await invoke("markdown_copy_svg_as_png", { svg: xml, scale: 2 });
+    await markdownTauri.copySvgAsPng(xml, 2);
     return true;
   } catch (err) {
     console.warn("[mermaid] copy PNG failed", err);
