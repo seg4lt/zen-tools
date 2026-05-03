@@ -485,6 +485,7 @@ pub fn run() {
             commands::prmaster::prmaster_list_repos,
             commands::prmaster::prmaster_fetch_repos,
             // dictation (local Whisper)
+            dictation::commands::dictation_is_supported,
             dictation::commands::dictation_list_models,
             dictation::commands::dictation_get_state,
             dictation::commands::dictation_select_model,

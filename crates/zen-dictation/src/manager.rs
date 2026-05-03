@@ -16,13 +16,16 @@ use crate::mic::MicCapture;
 use crate::models::{ModelId, ModelStatus};
 
 /// Hotkey events emitted by the platform watcher.
+///
+/// Single variant: the watcher fires `Toggle` whenever the user
+/// completes the **tap-then-long-press** gesture on right ⌘. The
+/// Tauri-layer consumer reads `DictationManager::is_recording()` to
+/// decide whether this should start or stop the pipeline.
 #[derive(Debug, Clone, Copy)]
 pub enum HotkeyEvent {
-    /// Right-⌘ has been held past the long-press threshold.
-    LongPressStart,
-    /// Right-⌘ released after a successful long press. Caller should
-    /// finalise the recording, run inference, and paste.
-    Released,
+    /// User completed the tap-then-long-press gesture. If we're not
+    /// already recording, start; if we are, stop and transcribe.
+    Toggle,
 }
 
 /// Owner of all dictation state. Cheap to clone (one `Arc` deep).
@@ -31,16 +34,37 @@ pub struct DictationManager {
     inner: Arc<Mutex<Inner>>,
 }
 
+/// Teardown summary (for the listener-leak audit):
+///
+/// * `context` — `whisper_context*`. `Drop` calls `whisper_free`. Released
+///   when the context is replaced (model switch) or the manager itself
+///   drops.
+/// * `mic` — `cpal::Stream`. `Drop` tears down the audio thread. Released
+///   in `finalise_recording` (transcribe path) and `abandon_recording`
+///   (toggle-off-while-disabled path).
+/// * `hotkey` — `HotkeyHandle` (CGEventTap + CFRunLoopSource + run-loop
+///   ref). `Drop` calls `CGEventTapEnable(false)`,
+///   `CFRunLoopRemoveSource`, then releases the wrapper retains so the
+///   tap is fully detached from the run loop. Released in
+///   `set_hotkey_handle(None)` (lifecycle stop / restart) and on
+///   manager drop.
+///
+/// Pending long-press timer threads in `crates/zen-dictation/src/hotkey/macos.rs`
+/// hold weak-by-construction references (Arc clones to `TapState` and the
+/// callback). When the watcher is dropped they continue to sleep until
+/// the 500 ms window elapses, observe a generation mismatch, and exit
+/// without firing. Bounded ≤500 ms; not a leak.
 #[derive(Default)]
 struct Inner {
     selected_model: Option<ModelId>,
     /// Loaded whisper context. Lazily populated on first transcription
-    /// after the selected model file is on disk.
+    /// after the selected model file is on disk. Reset to `None` on
+    /// model switch so the next transcription reloads the new weights.
     context: Option<zen_whisper::WhisperContext>,
-    /// Active microphone capture. `Some` while right-⌘ is held past
-    /// the long-press threshold.
+    /// Active microphone capture. `Some` between toggle-on and
+    /// toggle-off (or until `abandon_recording` runs).
     mic: Option<MicCapture>,
-    /// Hotkey watcher handle. Held to keep the CGEventTap alive.
+    /// Hotkey watcher handle. Held to keep the CGEventTap installed.
     hotkey: Option<HotkeyHandle>,
     is_recording: bool,
 }

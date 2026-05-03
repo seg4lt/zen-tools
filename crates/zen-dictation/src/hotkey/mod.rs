@@ -1,4 +1,4 @@
-//! Long-press hotkey detection.
+//! Tap-then-long-press hotkey detection on the right ⌘ key.
 //!
 //! macOS implementation lives in [`macos`]. A non-mac stub is provided
 //! so callers don't have to cfg-wall every reference.
@@ -7,10 +7,10 @@
 pub mod macos;
 
 #[cfg(target_os = "macos")]
-pub use macos::start_long_press_watcher;
+pub use macos::start_double_tap_watcher;
 
 #[cfg(not(target_os = "macos"))]
-pub fn start_long_press_watcher<F>(_on_event: F) -> Result<HotkeyHandle, crate::DictationError>
+pub fn start_double_tap_watcher<F>(_on_event: F) -> Result<HotkeyHandle, crate::DictationError>
 where
     F: FnMut(crate::manager::HotkeyEvent) + Send + 'static,
 {

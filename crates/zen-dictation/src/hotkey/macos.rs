@@ -59,12 +59,25 @@ use crate::hotkey::HotkeyHandle;
 use crate::manager::HotkeyEvent;
 
 /// Right-Command HID keycode (kVK_RightCommand). Matches the value
-/// Carbon defines in `<HIToolbox/Events.h>`.
+/// Carbon defines in `<HIToolbox/Events.h>`. We deliberately filter
+/// to the right ⌘ side — left ⌘ is keycode `0x37` and is left
+/// completely inert for the dictation gesture.
 const KVK_RIGHT_COMMAND: i64 = 0x36;
 
-/// Threshold before we treat a hold as a "long press". 500 ms
-/// matches the user spec and is forgiving enough that normal ⌘+key
-/// shortcuts (~tens of ms) never trip it.
+/// A right-⌘ press counts as a "tap" only if the down→up cycle
+/// completes within this duration. Anything longer is treated as a
+/// deliberate hold or a chord press, not as the first leg of the
+/// tap-then-hold gesture.
+const TAP_MAX_DURATION: Duration = Duration::from_millis(300);
+
+/// Maximum gap between a clean tap-up and the next press-down for
+/// the next press to count as the "hold leg" of the gesture. Beyond
+/// this the chain is considered broken and the user has to start
+/// over.
+const TAP_TO_HOLD_WINDOW: Duration = Duration::from_millis(500);
+
+/// How long the second leg of the gesture must be held (after a
+/// preceding tap) before we fire `HotkeyEvent::Toggle`.
 const LONG_PRESS_THRESHOLD: Duration = Duration::from_millis(500);
 
 /// Trait alias for the boxed callback closure. Kept as a type alias so
@@ -122,14 +135,42 @@ impl Drop for TapHandle {
 
 #[derive(Default)]
 struct TapState {
-    pressed_at: Option<Instant>,
-    long_press_active: bool,
+    /// `Some(t)` while right-⌘ is currently held (between the
+    /// keydown and keyup `flagsChanged` events). `None` while idle.
+    current_press_down: Option<Instant>,
+    /// Set if any non-modifier key fires `keyDown` while right-⌘ is
+    /// being held. Once polluted, the press cannot count as a tap or
+    /// as the "hold" leg of the gesture — this is what stops ⌘C,
+    /// ⌘V, ⌘⇥ from accidentally toggling dictation. Reset on every
+    /// new press-down.
+    polluted: bool,
+    /// Time of the most recent **clean** tap completion (right-⌘ up
+    /// after a press shorter than `TAP_MAX_DURATION` with no chord).
+    /// Cleared on Toggle, on chord-pollution, and on any press that
+    /// exceeds `TAP_MAX_DURATION` (which breaks the chain).
+    last_tap_up: Option<Instant>,
+    /// `true` once the long-press timer for the current press has
+    /// fired and emitted Toggle. Stops the release handler from
+    /// then misclassifying the same press as a (very long) tap.
+    long_press_fired: bool,
 }
 
 /// Install a CGEventTap on the current thread's run loop and dispatch
-/// long-press events to `on_event`. Must be called from the Cocoa
-/// main thread.
-pub fn start_long_press_watcher<F>(on_event: F) -> Result<HotkeyHandle, DictationError>
+/// `HotkeyEvent::Toggle` whenever the user completes the
+/// **tap-then-long-press** gesture on the right ⌘ key. Must be called
+/// from the Cocoa main thread.
+///
+/// The state machine lives in [`TapState`] (see field-level docs).
+/// Two CGEventTap event types feed it:
+///
+/// * `flagsChanged` (filtered to right-⌘ only) — drives the press
+///   down/up transitions and schedules the long-press timer when the
+///   incoming press is in the "hold" window after a clean tap.
+/// * `keyDown` — sets the pollution flag. Modifier keys never fire
+///   `keyDown`, only `flagsChanged`, so any incoming `keyDown` while
+///   right-⌘ is held implies a chord (⌘C, ⌘V, ⌘⇥, …) and disqualifies
+///   the press from counting as part of the gesture.
+pub fn start_double_tap_watcher<F>(on_event: F) -> Result<HotkeyHandle, DictationError>
 where
     F: FnMut(HotkeyEvent) + Send + 'static,
 {
@@ -148,9 +189,17 @@ where
         CGEventTapLocation::HID,
         CGEventTapPlacement::HeadInsertEventTap,
         CGEventTapOptions::ListenOnly,
-        vec![CGEventType::FlagsChanged],
-        move |_proxy, _event_type, event| {
-            handle_event(event, &state_for_tap, &cb_for_tap);
+        vec![CGEventType::FlagsChanged, CGEventType::KeyDown],
+        move |_proxy, event_type, event| {
+            match event_type {
+                CGEventType::FlagsChanged => {
+                    handle_flags_changed(event, &state_for_tap, &cb_for_tap);
+                }
+                CGEventType::KeyDown => {
+                    handle_key_down(&state_for_tap);
+                }
+                _ => {}
+            }
             // ListenOnly taps must return a borrowed event; we don't
             // mutate or replace it. The `None` return tells the OS to
             // pass the event through unchanged.
@@ -174,7 +223,7 @@ where
     }
     tap.enable();
 
-    tracing::info!("dictation: CGEventTap installed for right-⌘ long press");
+    tracing::info!("dictation: CGEventTap installed for tap-then-hold right-⌘ gesture");
 
     Ok(HotkeyHandle {
         inner: TapHandle {
@@ -185,7 +234,8 @@ where
     })
 }
 
-fn handle_event(
+/// Handle a `flagsChanged` event for the right-⌘ key.
+fn handle_flags_changed(
     event: &CGEvent,
     state: &Arc<Mutex<TapState>>,
     cb: &Arc<Mutex<EventCallback>>,
@@ -197,49 +247,108 @@ fn handle_event(
     let flags = event.get_flags();
     let cmd_held = flags.contains(CGEventFlags::CGEventFlagCommand);
 
+    let now = Instant::now();
     let mut s = state.lock();
-    match (s.pressed_at.is_some(), cmd_held) {
+
+    match (s.current_press_down.is_some(), cmd_held) {
         (false, true) => {
-            // Right-Command went down. Start the long-press timer.
-            s.pressed_at = Some(Instant::now());
-            s.long_press_active = false;
-            // We're on the Cocoa main run-loop thread here, which is
-            // NOT a tokio runtime context — `tokio::spawn` panics
-            // ("no reactor running"). Use a plain OS thread for the
-            // 500 ms wait; it's a single short-lived timer per
-            // keypress so the cost is negligible (and we don't have
-            // to thread a `tokio::runtime::Handle` through the
-            // crate).
+            // ── Right-⌘ DOWN ─────────────────────────────────────
+            s.current_press_down = Some(now);
+            s.polluted = false;
+            s.long_press_fired = false;
+
+            // If we have a clean tap completed within the
+            // tap→hold window, this press is a candidate for the
+            // "hold leg" — schedule the long-press timer.
+            let is_hold_candidate = s
+                .last_tap_up
+                .map(|t| now.duration_since(t) <= TAP_TO_HOLD_WINDOW)
+                .unwrap_or(false);
+            if !is_hold_candidate {
+                return; // Just a press; wait for release to classify.
+            }
+
+            // Spawn an OS thread (NOT tokio::spawn — this callback
+            // runs on the Cocoa main thread which has no tokio
+            // reactor; that mistake silently swallowed events
+            // earlier in development).
+            //
+            // We capture **this press's** down-timestamp (`now`) and
+            // only fire if `current_press_down` is still the same
+            // value when the timer wakes. Without that guard a stale
+            // timer from a previous press could fire on a new press
+            // (Inner.current_press_down had been re-populated by the
+            // new keydown), causing a spurious toggle. The
+            // timestamp acts as a generation token.
+            //
+            // Lifecycle: if the watcher is dropped via
+            // `dictation::lifecycle::stop` while a timer is pending,
+            // the timer still wakes after the 500 ms sleep; it
+            // observes `current_press_down != Some(spawned_at)` (or
+            // `None`) and exits without firing. The Arcs it holds
+            // are released and the OS thread terminates. No leak.
+            let spawned_for = now;
             let state = state.clone();
             let cb = cb.clone();
             std::thread::spawn(move || {
                 std::thread::sleep(LONG_PRESS_THRESHOLD);
                 let mut s = state.lock();
-                let still_held = s
-                    .pressed_at
-                    .map(|t| t.elapsed() >= LONG_PRESS_THRESHOLD)
-                    .unwrap_or(false);
-                if still_held && !s.long_press_active {
-                    s.long_press_active = true;
+                if s.current_press_down == Some(spawned_for)
+                    && !s.polluted
+                    && !s.long_press_fired
+                {
+                    s.long_press_fired = true;
+                    s.last_tap_up = None; // chain consumed
                     drop(s);
-                    (cb.lock())(HotkeyEvent::LongPressStart);
+                    tracing::info!("dictation: tap-then-hold gesture fired");
+                    (cb.lock())(HotkeyEvent::Toggle);
                 }
             });
         }
         (true, false) => {
-            // Right-Command released.
-            let was_long = s.long_press_active;
-            s.pressed_at = None;
-            s.long_press_active = false;
-            drop(s);
-            if was_long {
-                (cb.lock())(HotkeyEvent::Released);
+            // ── Right-⌘ UP ──────────────────────────────────────
+            let down = s.current_press_down.take();
+            let was_polluted = s.polluted;
+            s.polluted = false;
+            let long_pressed = s.long_press_fired;
+            s.long_press_fired = false;
+
+            // The hold leg already fired during this press — the
+            // gesture is complete, the timer cleared `last_tap_up`,
+            // we're done.
+            if long_pressed {
+                return;
             }
-            // Sub-threshold release: caller never saw a Start, so no
-            // Released event to send. This is intentional — short
-            // taps stay reserved for normal ⌘ shortcut use.
+
+            let press_duration = down
+                .map(|t| now.duration_since(t))
+                .unwrap_or_default();
+
+            // Polluted (chord) or held too long → not a clean tap.
+            // Break the chain so a stale tap can't pair with a
+            // future hold.
+            if was_polluted || press_duration > TAP_MAX_DURATION {
+                s.last_tap_up = None;
+                return;
+            }
+
+            // Clean tap. Record the timestamp so the next press
+            // (if it lands within `TAP_TO_HOLD_WINDOW`) becomes a
+            // hold candidate.
+            s.last_tap_up = Some(now);
         }
         _ => {}
+    }
+}
+
+/// Handle a `keyDown` event of any kind. Modifier keys never fire
+/// `keyDown` (they fire `flagsChanged`), so any event reaching us
+/// here is a non-modifier key press — i.e. the right-⌘ press is part
+/// of a chord and must not be counted as a tap or as the hold leg.
+fn handle_key_down(state: &Arc<Mutex<TapState>>) {
+    let mut s = state.lock();
+    if s.current_press_down.is_some() {
+        s.polluted = true;
     }
 }
 

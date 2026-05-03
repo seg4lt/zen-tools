@@ -41,7 +41,7 @@
 use tauri::{AppHandle, Emitter, Manager};
 
 use super::state::DictationTauriState;
-use super::{ensure_model_present, install_hotkey, tray};
+use super::{ensure_model_present, hud, install_hotkey};
 use zen_dictation::ModelId;
 
 /// Light up the dictation pipeline. Idempotent: if a hotkey handle is
@@ -111,7 +111,7 @@ pub fn stop(app: &AppHandle) {
     // 2. Hide the mic tray in case it was visible (e.g. the user
     //    toggled off while a recording was in flight). `set_state`
     //    is itself dispatched on main and idempotent.
-    tray::set_state(app, tray::MicTrayState::Hidden);
+    hud::set_state(app, hud::HudState::Hidden);
 
     // 3. If a recording was actively in progress, abandon it. We
     //    can't gracefully cancel an in-flight whisper inference

@@ -151,6 +151,18 @@ pub async fn dictation_open_models_dir(
     open_path_in_finder(&state.models_dir).await
 }
 
+/// `true` only on platforms where local dictation can actually run.
+///
+/// The vendored `whisper.cpp` build only ships the Metal + Accelerate
+/// backends today, so non-macOS targets compile but always return
+/// `WhisperError::NotSupported` at runtime. Front-end code uses this
+/// command to hide the Dictation Settings section entirely on
+/// Linux/Windows — there's nothing for the user to do with it there.
+#[tauri::command]
+pub async fn dictation_is_supported() -> AppResult<bool> {
+    Ok(cfg!(target_os = "macos"))
+}
+
 /// Read-only DTO for the Paths section in Settings.
 #[tauri::command]
 pub async fn dictation_get_paths(state: State<'_, DictationTauriState>) -> AppResult<PathsDto> {

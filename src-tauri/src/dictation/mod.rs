@@ -1,15 +1,15 @@
 //! Tauri layer for the local-dictation feature.
 //!
 //! Owns the [`zen_dictation::DictationManager`], surfaces it via the
-//! commands in [`commands`], and renders an ephemeral mic-icon menu-bar
-//! tray ([`tray`]) while a recording is in progress.
+//! commands in [`commands`], and renders a top-centre Dynamic Island-style
+//! HUD ([`hud`]) while a recording is in progress.
 //!
 //! Gated on the merged main branch's per-tool kill-switch
 //! (`Preferences::disabled_tools`, key `"dictation"`). When the tool
 //! is disabled:
 //!
 //! * No CGEventTap is installed → right-⌘ does nothing dictation-related.
-//! * No mic tray icon ever appears.
+//! * No HUD overlay ever appears.
 //! * No Whisper model auto-downloads.
 //! * The hotkey handle stored on the manager is dropped, which now
 //!   properly tears down the run-loop source (see
@@ -22,7 +22,24 @@ pub mod commands;
 pub mod dto;
 pub mod lifecycle;
 pub mod state;
-pub mod tray;
+
+// Dynamic Island-style HUD overlay (top-centre pill) shown while
+// dictation is recording or transcribing. macOS-only; on other
+// platforms `hud::set_state` is a no-op stub so the call sites in
+// `on_hotkey` don't need cfg-walls.
+#[cfg(target_os = "macos")]
+pub mod hud;
+#[cfg(not(target_os = "macos"))]
+pub mod hud {
+    use tauri::AppHandle;
+    #[derive(Debug, Clone, Copy)]
+    pub enum HudState {
+        Hidden,
+        Recording,
+        Transcribing,
+    }
+    pub fn set_state(_app: &AppHandle, _state: HudState) {}
+}
 
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -97,13 +114,13 @@ pub fn bootstrap(app: &AppHandle) {
     lifecycle::start(app);
 }
 
-/// Install the long-press watcher on the main thread (CGEventTap
+/// Install the tap-then-hold watcher on the main thread (CGEventTap
 /// requires this). Returns immediately on the calling thread; the
 /// closure runs on the next run-loop tick.
 pub(crate) fn install_hotkey(app: &AppHandle, state: &DictationTauriState) {
     let app_for_cb = app.clone();
     let state_for_cb = state.clone();
-    let result = zen_dictation::hotkey::start_long_press_watcher(move |event| {
+    let result = zen_dictation::hotkey::start_double_tap_watcher(move |event| {
         on_hotkey(&app_for_cb, &state_for_cb, event);
     });
     match result {
@@ -112,63 +129,66 @@ pub(crate) fn install_hotkey(app: &AppHandle, state: &DictationTauriState) {
     }
 }
 
-fn on_hotkey(app: &AppHandle, state: &DictationTauriState, event: HotkeyEvent) {
-    match event {
-        HotkeyEvent::LongPressStart => {
-            if let Err(e) = state.manager.start_recording() {
-                tracing::warn!(?e, "dictation: start_recording failed");
-                // Make sure we don't leave the tray showing a stale
-                // state if mic open failed.
-                tray::set_state(app, tray::MicTrayState::Hidden);
-                let _ = app.emit("dictation:status", "idle");
-                return;
-            }
-            tray::set_state(app, tray::MicTrayState::Recording);
-            let _ = app.emit("dictation:status", "recording");
-        }
-        HotkeyEvent::Released => {
-            // Don't tear the tray down yet — flip the tooltip to
-            // "Transcribing…" so the user has feedback that work is
-            // still happening after they let go of ⌘. The tray is
-            // hidden once `finalise_recording` resolves (success,
-            // empty, or error) below.
-            tray::set_state(app, tray::MicTrayState::Transcribing);
-            let _ = app.emit("dictation:status", "transcribing");
+/// Dispatch a `HotkeyEvent::Toggle`. The single-event API means the
+/// gesture itself doesn't carry direction — we read
+/// `is_recording()` to decide between starting a fresh capture and
+/// finalising the active one.
+fn on_hotkey(app: &AppHandle, state: &DictationTauriState, _event: HotkeyEvent) {
+    if state.manager.is_recording() {
+        // ── Toggle OFF: stop capture, transcribe, paste ──────────
+        // Don't tear the tray down yet — flip the tooltip to
+        // "Transcribing…" so the user has feedback that work is
+        // still happening after they let go of ⌘. The tray is
+        // hidden once `finalise_recording` resolves (success,
+        // empty, or error) below.
+        hud::set_state(app, hud::HudState::Transcribing);
+        let _ = app.emit("dictation:status", "transcribing");
 
-            // Run inference on a worker so the run loop is freed.
-            let app = app.clone();
-            let state = state.clone();
-            tauri::async_runtime::spawn(async move {
-                let models_dir = state.models_dir.clone();
-                let outcome = tokio::task::spawn_blocking(move || {
-                    state.manager.finalise_recording(&models_dir)
-                })
-                .await;
-                match outcome {
-                    Ok(Ok(text)) if !text.is_empty() => {
-                        tracing::info!(chars = text.chars().count(), "dictation: pasting transcript");
-                        if let Err(e) = zen_dictation::paste::paste_text(&text) {
-                            tracing::warn!(?e, "dictation: paste failed");
-                        }
-                    }
-                    Ok(Ok(_)) => {
-                        tracing::info!("dictation: empty transcript, nothing pasted");
-                    }
-                    Ok(Err(e)) => {
-                        tracing::warn!(?e, "dictation: transcription failed");
-                    }
-                    Err(e) => {
-                        tracing::warn!(?e, "dictation: spawn_blocking join failed");
+        // Run inference on a worker so the run loop is freed.
+        let app = app.clone();
+        let state = state.clone();
+        tauri::async_runtime::spawn(async move {
+            let models_dir = state.models_dir.clone();
+            let outcome = tokio::task::spawn_blocking(move || {
+                state.manager.finalise_recording(&models_dir)
+            })
+            .await;
+            match outcome {
+                Ok(Ok(text)) if !text.is_empty() => {
+                    tracing::info!(chars = text.chars().count(), "dictation: pasting transcript");
+                    if let Err(e) = zen_dictation::paste::paste_text(&text) {
+                        tracing::warn!(?e, "dictation: paste failed");
                     }
                 }
-                // Always clear the tray and signal idle, even on the
-                // empty / error paths — otherwise a botched
-                // transcription would leave a "Transcribing…" mic
-                // sitting in the menu bar forever.
-                tray::set_state(&app, tray::MicTrayState::Hidden);
-                let _ = app.emit("dictation:status", "idle");
-            });
+                Ok(Ok(_)) => {
+                    tracing::info!("dictation: empty transcript, nothing pasted");
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!(?e, "dictation: transcription failed");
+                }
+                Err(e) => {
+                    tracing::warn!(?e, "dictation: spawn_blocking join failed");
+                }
+            }
+            // Always clear the tray and signal idle, even on the
+            // empty / error paths — otherwise a botched
+            // transcription would leave a "Transcribing…" mic
+            // sitting in the menu bar forever.
+            hud::set_state(&app, hud::HudState::Hidden);
+            let _ = app.emit("dictation:status", "idle");
+        });
+    } else {
+        // ── Toggle ON: start capture ─────────────────────────────
+        if let Err(e) = state.manager.start_recording() {
+            tracing::warn!(?e, "dictation: start_recording failed");
+            // Make sure we don't leave the tray showing a stale
+            // state if mic open failed.
+            hud::set_state(app, hud::HudState::Hidden);
+            let _ = app.emit("dictation:status", "idle");
+            return;
         }
+        hud::set_state(app, hud::HudState::Recording);
+        let _ = app.emit("dictation:status", "recording");
     }
 }
 

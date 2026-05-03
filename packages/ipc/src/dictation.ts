@@ -22,6 +22,7 @@ export const DICTATION_STATE_KEY = ["dictation", "state"] as const;
 export const DICTATION_PATHS_KEY = ["dictation", "paths"] as const;
 
 export const dictationIpc = {
+  isSupported: (): Promise<boolean> => invoke<boolean>("dictation_is_supported"),
   listModels: (): Promise<ModelDto[]> => invoke<ModelDto[]>("dictation_list_models"),
   getState: (): Promise<DictationStateDto> => invoke<DictationStateDto>("dictation_get_state"),
   selectModel: (id: string): Promise<void> =>

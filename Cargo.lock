@@ -9244,6 +9244,7 @@ dependencies = [
  "chrono",
  "dunce",
  "fff-search",
+ "objc2 0.5.2",
  "parking_lot",
  "rayon",
  "resvg",

@@ -210,9 +210,10 @@ export function DictationSection() {
           )}
 
           <p className="text-[10px] text-muted-foreground">
-            Long-press the right ⌘ key to record. Release to transcribe and
-            paste. First use of any model loads the weights from disk into
-            memory.
+            Tap the right ⌘ key quickly, then hold it for ~½ second to start
+            recording. Recording stays on after you release. Repeat the
+            same gesture (tap, then hold) to stop, transcribe, and paste.
+            First use of any model loads the weights from disk into memory.
           </p>
 
           <p className="text-[10px] text-muted-foreground">

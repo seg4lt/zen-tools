@@ -13,6 +13,8 @@
  *  6. Paths — app-data / logs / models directories with Open in Finder.
  */
 import type { ReactNode } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { dictationIpc } from "@zen-tools/ipc";
 import { VimToggle } from "@/components/vim-toggle";
 import { AppOrderList } from "./components/app-order-list";
 import { DictationSection } from "./components/dictation-section";
@@ -22,6 +24,17 @@ import { UpdateSection } from "./components/update-section";
 import { ZoomControl } from "./components/zoom-control";
 
 export function SettingsView() {
+  // Dictation is macOS-only today (whisper.cpp ships Metal + Accelerate
+  // backends in our vendored build; the Linux/Windows backends aren't
+  // wired up). The backend command returns `cfg!(target_os = "macos")`
+  // so the Settings UI hides the section entirely on other OSes
+  // rather than showing a non-functional toggle.
+  const { data: dictationSupported } = useQuery({
+    queryKey: ["dictation", "supported"],
+    queryFn: dictationIpc.isSupported,
+    staleTime: Infinity,
+  });
+
   return (
     <div className="flex h-full min-h-0 flex-1 justify-center overflow-auto bg-background">
       <div className="flex w-full max-w-2xl flex-col gap-6 px-6 py-8">
@@ -66,12 +79,14 @@ export function SettingsView() {
           control={<AppOrderList />}
         />
 
-        <Section
-          title="Dictation"
-          description="Local speech-to-text powered by Whisper. Long-press the right ⌘ key to record, then release to transcribe and paste at the cursor."
-          fullWidthControl
-          control={<DictationSection />}
-        />
+        {dictationSupported && (
+          <Section
+            title="Dictation"
+            description="Local speech-to-text powered by Whisper. Tap the right ⌘ then hold it for ~½ second to start recording; repeat the gesture to stop, transcribe, and paste at the cursor."
+            fullWidthControl
+            control={<DictationSection />}
+          />
+        )}
 
 
         <Section

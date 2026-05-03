@@ -115,3 +115,11 @@ ts-rs = { workspace = true }
 # `bundled` vendors the SQLite source so we don't depend on a system
 # library — keeps Windows builds simple.
 rusqlite = { version = "0.32", features = ["bundled"] }
+
+# ── macOS-only: native AppKit binding for the dictation HUD overlay.
+# We call `setCollectionBehavior:` on the WKWebView's host NSWindow
+# so the HUD floats above fullscreen apps (Tauri's `always_on_top`
+# only raises above normal apps). One unsafe `msg_send!`; not worth
+# bringing in `objc2-app-kit` for a single selector.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.5"
