@@ -1,41 +1,38 @@
 //! The unified Zen Tools menu-bar tray.
 //!
-//! One tray icon for the whole app. It's created once at startup and
-//! lives the lifetime of the process — closing the main window flips
-//! the activation policy to Accessory but the tray stays so the user
-//! always has a visible signal the app is running, plus a way back in.
+//! One always-on tray icon for the app — perf, process-monitor,
+//! dictation. It's created once at startup and lives the lifetime
+//! of the process — closing the main window flips the activation
+//! policy to Accessory but the tray stays so the user always has a
+//! visible signal the app is running, plus a way back in.
 //!
-//! Replaces three separate trays from earlier iterations:
+//! **PRMaster has its own tray** ([`crate::prmaster_tray`]) — the
+//! two trays coexist because PRMaster is a distinct always-on
+//! surface (separate icon, separate popover, separate badge). The
+//! brief unification that folded PRMaster in here was a regression
+//! from the wisper merge.
 //!
-//! * the lazy "zen-tools" tray that came and went with perf /
-//!   process-monitor activity,
-//! * the permanent PRMaster tray (icon + popover + badge),
-//! * the permanent dictation tray.
-//!
-//! All of those collapsed into the single tray here. Each tool now
-//! contributes:
+//! Each tool routed through this tray contributes:
 //!
 //! 1. **Menu items** — a section with its own actions (Stop perf,
-//!    Open PRMaster, Disable dictation, …). Sections appear / vanish
-//!    as state changes; [`update`] is fire-and-forget and rebuilds
-//!    the menu from current state.
-//! 2. **Badge title** — currently only PRMaster uses this; see
-//!    [`set_badge`].
-//! 3. **Left-click routing** — if a tool has a popover and is the
+//!    Stop monitoring, Disable dictation, …). Sections enable /
+//!    disable as state changes; [`update`] is fire-and-forget and
+//!    rebuilds the menu from current state.
+//! 2. **Left-click routing** — if a tool has a popover and is the
 //!    most-relevant active surface, left-click toggles its popover.
-//!    Priority: process-monitor (when it has targets) → PRMaster
-//!    (when enabled) → focus the main window.
-//! 4. **Right-click** falls through to the menu (`show_menu_on_left_click(false)`).
+//!    Priority: process-monitor (when it has targets) → focus the
+//!    main window.
+//! 3. **Right-click** falls through to the menu (`show_menu_on_left_click(false)`).
 //!
 //! ## Threading
 //!
 //! AppKit `NSStatusItem` is main-thread-only. [`init`] expects to be
 //! called from a main-thread context (Tauri's `setup()` is on main
 //! during init, and the `run_on_main_thread` dispatch from
-//! lifecycle modules covers the rest). [`update`] and [`set_badge`]
-//! can be called from anywhere — they hop to the Tauri async runtime
-//! internally and grab the `AppState` async mutex, then dispatch any
-//! AppKit work back to the main thread.
+//! lifecycle modules covers the rest). [`update`] can be called
+//! from anywhere — it hops to the Tauri async runtime internally
+//! and grabs the `AppState` async mutex, then dispatches any AppKit
+//! work back to the main thread.
 
 use crate::commands;
 use crate::state::AppState;
@@ -45,7 +42,7 @@ use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     webview::WebviewWindowBuilder,
-    AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, Rect, Size, WebviewUrl,
+    AppHandle, Emitter, Manager, PhysicalPosition, Size, WebviewUrl,
 };
 use tokio::sync::Mutex;
 
@@ -55,10 +52,6 @@ pub const TRAY_ID: &str = "zen-tools";
 /// Window label of the Process-Monitor mini popover. Built lazily by
 /// [`toggle_pm_popover`] and destroyed on dismiss/blur.
 pub const PM_POPOVER_LABEL: &str = "pm-popover";
-
-/// Window label of the PRMaster popover. Built lazily by
-/// [`toggle_prmaster_popover`] and destroyed on dismiss/blur.
-pub const PRMASTER_POPOVER_LABEL: &str = "prmaster-popover";
 
 /// Embedded template PNG (auto-inverts for light/dark menu bars).
 /// This is the canonical Zen Tools tray icon — the tray represents
@@ -100,9 +93,9 @@ pub fn init(app: &AppHandle) -> tauri::Result<()> {
     s.tray = Some(tray);
 
     // Run an initial reconcile so the menu reflects whatever state
-    // happened to be loaded by the time we're called (e.g. PRMaster
-    // already enabled from preferences). `update` is fire-and-forget;
-    // it will land on the next runtime tick.
+    // happened to be loaded by the time we're called (dictation
+    // default-on, etc.). `update` is fire-and-forget; it will land
+    // on the next runtime tick.
     drop(s);
     update(app);
     Ok(())
@@ -116,7 +109,6 @@ pub fn init(app: &AppHandle) -> tauri::Result<()> {
 ///   * a perf test starts or stops (`commands::perf`)
 ///   * the Process-Monitor target list changes
 ///     (`commands::process_monitor`)
-///   * PRMaster is enabled / disabled (`prmaster_lifecycle`)
 ///   * Dictation is enabled / disabled (`dictation::lifecycle`)
 pub fn update(app: &AppHandle) {
     let app = app.clone();
@@ -125,19 +117,6 @@ pub fn update(app: &AppHandle) {
             tracing::warn!(?e, "tray::update failed");
         }
     });
-}
-
-/// Set the badge title shown next to the tray icon. Pass an empty
-/// string to clear. Currently driven by PRMaster's PR-count broadcast
-/// (`prmaster_lifecycle`); other tools are welcome to layer in if a
-/// future feature needs a numeric badge.
-pub fn set_badge(app: &AppHandle, badge: &str) {
-    if let Some(tray) = app.tray_by_id(TRAY_ID) {
-        let title = if badge.is_empty() { None } else { Some(badge) };
-        if let Err(e) = tray.set_title(title) {
-            tracing::warn!(?e, "tray::set_badge failed");
-        }
-    }
 }
 
 /// Destroy the Process-Monitor popover. Called from the popover's
@@ -151,17 +130,6 @@ pub fn destroy_pm_popover(app: &AppHandle) {
     }
 }
 
-/// Destroy the PRMaster popover. Called from the popover's "Open
-/// Full Window" button via the `prmaster_hide_popover` command, and
-/// from the JS focus-loss listener.
-pub fn destroy_prmaster_popover(app: &AppHandle) {
-    if let Some(win) = app.get_webview_window(PRMASTER_POPOVER_LABEL) {
-        if let Err(e) = win.destroy() {
-            tracing::warn!(error = %e, "prmaster popover destroy failed");
-        }
-    }
-}
-
 // ── Reconcile ───────────────────────────────────────────────────────
 
 /// Snapshot of every signal that affects the menu shape. Computed
@@ -170,7 +138,6 @@ pub fn destroy_prmaster_popover(app: &AppHandle) {
 struct MenuState {
     perf_running: bool,
     pm_active: bool,
-    prmaster_enabled: bool,
     dictation_enabled: bool,
 }
 
@@ -203,17 +170,15 @@ async fn read_state(app: &AppHandle) -> MenuState {
     // on the hot close-handler path.
     let prefs = commands::preferences::load_preferences(app).ok();
     if let Some(p) = prefs {
-        out.prmaster_enabled = !p.disabled_tools.iter().any(|id| id == "prmaster");
         out.dictation_enabled = !p
             .disabled_tools
             .iter()
             .any(|id| id == crate::dictation::TOOL_ID);
     } else {
         // No preferences file yet (very first launch) → defaults.
-        // PRMaster and Dictation default to ENABLED so first-run
-        // users see the full menu.
+        // Dictation defaults to ENABLED on macOS so first-run users
+        // see the full menu.
         let _ = app.try_state::<UserConfig>(); // touch to silence unused if cfg drops it
-        out.prmaster_enabled = true;
         out.dictation_enabled = cfg!(target_os = "macos");
     }
 
@@ -229,7 +194,6 @@ async fn read_state(app: &AppHandle) -> MenuState {
 ///   ───────────────
 ///   [perf]      Stop Perf Test
 ///   [pm]        Stop Monitoring
-///   [prmaster]  Open PRMaster
 ///   [dictation] Disable dictation
 ///   ───────────────
 ///   Quit Zen Tools
@@ -237,6 +201,8 @@ async fn read_state(app: &AppHandle) -> MenuState {
 ///
 /// Each `[…]` line is conditional on the tool being relevant. We
 /// always render the show + quit pair so the menu is never empty.
+/// PRMaster lives in its own tray (`crate::prmaster_tray`) and is
+/// not represented here.
 fn build_menu(app: &AppHandle, st: &MenuState) -> tauri::Result<Menu<tauri::Wry>> {
     let show = MenuItem::with_id(app, "show", "Show Zen Tools", true, None::<&str>)?;
     let sep1 = PredefinedMenuItem::separator(app)?;
@@ -252,13 +218,6 @@ fn build_menu(app: &AppHandle, st: &MenuState) -> tauri::Result<Menu<tauri::Wry>
         "stop_pm",
         "Stop Monitoring",
         st.pm_active,
-        None::<&str>,
-    )?;
-    let open_prmaster = MenuItem::with_id(
-        app,
-        "open_prmaster",
-        "Open PRMaster",
-        st.prmaster_enabled,
         None::<&str>,
     )?;
     let disable_dictation = MenuItem::with_id(
@@ -282,7 +241,6 @@ fn build_menu(app: &AppHandle, st: &MenuState) -> tauri::Result<Menu<tauri::Wry>
             &sep1,
             &stop_perf,
             &stop_pm,
-            &open_prmaster,
             &disable_dictation,
             &sep2,
             &quit,
@@ -297,7 +255,6 @@ fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
         "show" => focus_main_window(app),
         "stop_perf" => stop_perf_test(app),
         "stop_pm" => clear_pm_targets(app),
-        "open_prmaster" => focus_main_window_at_prmaster(app),
         "disable_dictation" => disable_dictation(app),
         "quit" => app.exit(0),
         _ => {}
@@ -317,16 +274,12 @@ fn handle_tray_icon_event(tray: &tauri::tray::TrayIcon, event: TrayIconEvent) {
             return;
         }
         let app = tray.app_handle().clone();
-        // We have to read PM-active synchronously to decide which
-        // popover to show — `tokio::sync::Mutex::try_lock` lets us
-        // peek without blocking the run loop.
-        let pm_active = peek_pm_active(&app);
-        let prmaster_enabled = peek_prmaster_enabled(&app);
-
-        if pm_active {
+        // PM popover takes precedence when there's something to
+        // show; otherwise left-click brings the main window
+        // forward. PRMaster has its own tray + popover and isn't
+        // routed here.
+        if peek_pm_active(&app) {
             toggle_pm_popover(&app, position, rect.size);
-        } else if prmaster_enabled {
-            toggle_prmaster_popover(&app, position, rect);
         } else {
             focus_main_window(&app);
         }
@@ -346,12 +299,6 @@ fn peek_pm_active(app: &AppHandle) -> bool {
         Ok(s) => s.pm_is_active(),
         Err(_) => false,
     }
-}
-
-fn peek_prmaster_enabled(app: &AppHandle) -> bool {
-    commands::preferences::load_preferences(app)
-        .map(|p| !p.disabled_tools.iter().any(|id| id == "prmaster"))
-        .unwrap_or(true)
 }
 
 // ── Popover lifecycle (PM) ──────────────────────────────────────────
@@ -405,54 +352,6 @@ fn build_pm_popover(app: &AppHandle) -> tauri::Result<tauri::WebviewWindow> {
     .build()
 }
 
-// ── Popover lifecycle (PRMaster) ────────────────────────────────────
-
-fn toggle_prmaster_popover(app: &AppHandle, tray_pos: PhysicalPosition<f64>, tray_rect: Rect) {
-    if app.get_webview_window(PRMASTER_POPOVER_LABEL).is_some() {
-        destroy_prmaster_popover(app);
-        return;
-    }
-    let win = match build_prmaster_popover(app) {
-        Ok(w) => w,
-        Err(e) => {
-            tracing::warn!(error = %e, "prmaster popover build failed");
-            return;
-        }
-    };
-    let size = win.outer_size().unwrap_or(PhysicalSize {
-        width: 500,
-        height: 700,
-    });
-    let (icon_w, icon_h) = match tray_rect.size {
-        Size::Physical(s) => (s.width as i32, s.height as i32),
-        Size::Logical(s) => (s.width as i32, s.height as i32),
-    };
-    let target_x = (tray_pos.x as i32 + icon_w / 2) - (size.width as i32 / 2);
-    let target_y = (tray_pos.y as i32) + icon_h + 4;
-    let _ = win.set_position(PhysicalPosition {
-        x: target_x.max(0),
-        y: target_y.max(0),
-    });
-    let _ = win.show();
-    let _ = win.set_focus();
-}
-
-fn build_prmaster_popover(app: &AppHandle) -> tauri::Result<tauri::WebviewWindow> {
-    // Loads the main shell at `/`; the React router checks the
-    // window label via `isPrmasterPopover()` and redirects to
-    // `/prmaster`.
-    WebviewWindowBuilder::new(app, PRMASTER_POPOVER_LABEL, WebviewUrl::App("/".into()))
-        .title("PRMaster")
-        .inner_size(500.0, 700.0)
-        .resizable(false)
-        .decorations(false)
-        .skip_taskbar(true)
-        .always_on_top(true)
-        .focused(false)
-        .visible(false)
-        .build()
-}
-
 // ── Action handlers ─────────────────────────────────────────────────
 
 fn focus_main_window(app: &AppHandle) {
@@ -468,23 +367,6 @@ fn focus_main_window(app: &AppHandle) {
     // Reset the route to the user's first enabled tool. The
     // `FirstToolListener` in `src/router.tsx` consumes the event.
     let _ = app.emit("app:focus-first-tool", ());
-}
-
-fn focus_main_window_at_prmaster(app: &AppHandle) {
-    if let Some(win) = app.get_webview_window("main") {
-        let _ = win.unminimize();
-        let _ = win.show();
-        let _ = win.set_focus();
-    }
-    let _ = app.emit_to(
-        tauri::EventTarget::any(),
-        "prmaster:focus-route",
-        "/prmaster",
-    );
-    #[cfg(target_os = "macos")]
-    {
-        let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
-    }
 }
 
 fn stop_perf_test(app: &AppHandle) {

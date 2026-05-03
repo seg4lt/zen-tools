@@ -94,10 +94,17 @@ pub struct AppState {
     /// bridge holds one subscriber; future consumers can subscribe too).
     pub pm_handle: SamplerHandle,
 
-    // ──── macOS menu-bar tray ────
-    /// Active tray icon, lazily created when a perf test starts or process
-    /// monitoring becomes active. `None` while no work is in flight.
+    // ──── macOS menu-bar trays ────
+    /// Active unified tray icon (perf, process-monitor, dictation).
+    /// Built once at startup by `crate::tray::init`; held here so the
+    /// `NSStatusItem` is pinned alongside the rest of the per-app
+    /// state.
     pub tray: Option<tauri::tray::TrayIcon>,
+    /// PRMaster's dedicated tray. Built / torn down by
+    /// `crate::prmaster_tray::init` / `tear_down`, which run in step
+    /// with PRMaster's lifecycle (enable / disable in settings).
+    /// `None` while PRMaster is disabled.
+    pub prmaster_tray: Option<tauri::tray::TrayIcon>,
 
     // ──── Cleaner ────
     /// Disk-cleaner per-tool state (folders, trees, globals).
@@ -185,6 +192,7 @@ impl AppState {
             pm_state: Arc::new(parking_lot::Mutex::new(SamplerState::new())),
             pm_handle: SamplerHandle { tx },
             tray: None,
+            prmaster_tray: None,
             cleaner: Arc::new(parking_lot::Mutex::new(CleanerState::default())),
             markdown_search_tokens: Arc::new(parking_lot::Mutex::new(HashMap::default())),
             db: Arc::new(ConnectionRegistry::new()),

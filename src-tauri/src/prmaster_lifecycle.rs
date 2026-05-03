@@ -44,8 +44,8 @@ use tokio::sync::Mutex;
 use zen_prmaster::PrMasterEvent;
 
 use crate::commands;
+use crate::prmaster_tray;
 use crate::state::AppState;
-use crate::tray;
 use crate::user_config::UserConfig;
 
 /// The chord registered as PRMaster's global hotkey. Mirrors the
@@ -85,9 +85,20 @@ async fn start_inner(app: &AppHandle) {
         }
     }
 
-    // 1) Repaint the unified tray so PRMaster's "Open PRMaster"
-    //    item flips from disabled to enabled.
-    tray::update(app);
+    // 1) Build PRMaster's permanent menu-bar tray. AppKit's
+    //    `NSStatusItem` is main-thread-only, so we hop to the
+    //    Cocoa main thread before constructing it. Idempotent —
+    //    `init` no-ops if the tray is already present.
+    if app.tray_by_id(prmaster_tray::PRMASTER_TRAY_ID).is_none() {
+        let tray_app = app.clone();
+        if let Err(e) = app.run_on_main_thread(move || {
+            if let Err(e) = prmaster_tray::init(&tray_app) {
+                tracing::warn!(?e, "prmaster_tray::init failed");
+            }
+        }) {
+            tracing::warn!(?e, "run_on_main_thread for tray init failed");
+        }
+    }
 
     // 2) Broadcast → Tauri-event bridge.
     let prmaster_engine = {
@@ -107,7 +118,7 @@ async fn start_inner(app: &AppHandle) {
                     commands::prmaster::persist_pr_snapshot(cfg.inner(), &snapshot);
                 }
                 Ok(PrMasterEvent::BadgeChanged(text)) => {
-                    tray::set_badge(&bridge_app, &text);
+                    prmaster_tray::set_badge(&bridge_app, &text);
                     let _ = bridge_app.emit("prmaster:badge-changed", &text);
                 }
                 Ok(PrMasterEvent::Notification(note)) => {
@@ -230,20 +241,15 @@ async fn stop_inner(app: &AppHandle) {
         }
     }
 
-    // 3) Destroy the popover (touches AppKit `NSWindow`; release on
-    //    the Cocoa main thread or it crashes hard) and clear any
-    //    PR badge title left on the unified tray. Last so any final
-    //    badge updates from in-flight broadcast events have already
-    //    been suppressed by the bridge abort above.
+    // 3) Tear down PRMaster's tray entirely (icon + popover).
+    //    `tear_down` releases the `NSStatusItem` and destroys the
+    //    popover's `NSWindow`; both touch AppKit so we hop to the
+    //    Cocoa main thread or it crashes hard. Bridge-abort above
+    //    already suppressed any in-flight badge updates.
     let teardown_app = app.clone();
     if let Err(e) = app.run_on_main_thread(move || {
-        tray::destroy_prmaster_popover(&teardown_app);
-        tray::set_badge(&teardown_app, "");
+        prmaster_tray::tear_down(&teardown_app);
     }) {
-        tracing::warn!(?e, "run_on_main_thread for tray teardown failed");
+        tracing::warn!(?e, "run_on_main_thread for tray tear_down failed");
     }
-
-    // 4) Repaint the tray so PRMaster's "Open PRMaster" item greys
-    //    out. Fire-and-forget — `tray::update` hops to the runtime.
-    tray::update(app);
 }

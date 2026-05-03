@@ -10,6 +10,7 @@ pub mod dictation;
 pub mod dto;
 pub mod error;
 pub mod prmaster_lifecycle;
+pub mod prmaster_tray;
 pub mod schema_cache;
 pub mod state;
 pub mod tray;
