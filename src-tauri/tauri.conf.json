@@ -69,7 +69,7 @@
       "endpoints": [
         "https://github.com/seg4lt/zen-tools/releases/latest/download/latest.json"
       ],
-      "pubkey": "REPLACE_ME_WITH_BASE64_PUBKEY_FROM_TAURI_SIGNER_GENERATE",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDRFNUE0RkNDNjI1RkJDQzkKUldUSnZGOWl6RTlhVG5NMi91VGtTSDJydldoNFhydGl6Lzk1R3VsUlA0T09vTXA2Wmt4QzBTbVEK",
       "windows": { "installMode": "passive" }
     }
   },
