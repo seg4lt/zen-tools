@@ -325,7 +325,7 @@ pub async fn prmaster_delete_filter(
 /// during a transitional period; both routes through the same destroy.
 #[tauri::command]
 pub async fn prmaster_hide_popover(app: AppHandle) -> AppResult<()> {
-    crate::prmaster_tray::destroy_popover(&app);
+    crate::tray::destroy_prmaster_popover(&app);
     Ok(())
 }
 
@@ -335,7 +335,7 @@ pub async fn prmaster_hide_popover(app: AppHandle) -> AppResult<()> {
 /// nudge the badge directly (e.g. after an optimistic action).
 #[tauri::command]
 pub async fn prmaster_set_badge(app: AppHandle, badge: String) -> AppResult<()> {
-    crate::prmaster_tray::set_badge(&app, &badge);
+    crate::tray::set_badge(&app, &badge);
     Ok(())
 }
 

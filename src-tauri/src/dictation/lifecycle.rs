@@ -41,7 +41,8 @@
 use tauri::{AppHandle, Emitter, Manager};
 
 use super::state::DictationTauriState;
-use super::{ensure_model_present, hud, install_hotkey, menu_bar};
+use super::{ensure_model_present, hud, install_hotkey};
+use crate::tray;
 use zen_dictation::ModelId;
 
 /// Light up the dictation pipeline. Idempotent: if a hotkey handle is
@@ -70,12 +71,10 @@ pub fn start(app: &AppHandle) {
         });
     }
 
-    // CGEventTap install + menu-bar tray init must happen on the
-    // Cocoa main thread. Idempotent — `install_hotkey` overwrites
-    // any previous handle on the manager, so a stop→start cycle
-    // correctly tears down the old tap (via its Drop impl) and
-    // registers a fresh one. The tray init is a no-op if the tray
-    // already exists.
+    // CGEventTap install must happen on the Cocoa main thread.
+    // Idempotent — `install_hotkey` overwrites any previous handle on
+    // the manager, so a stop→start cycle correctly tears down the
+    // old tap (via its Drop impl) and registers a fresh one.
     let app_for_main = app.clone();
     let state_for_main = dictation_state;
     let _ = app.run_on_main_thread(move || {
@@ -85,11 +84,12 @@ pub fn start(app: &AppHandle) {
         // detaches the previous CGEventTap from the run loop.
         state_for_main.manager.set_hotkey_handle(None);
         install_hotkey(&app_for_main, &state_for_main);
-        if let Err(e) = menu_bar::init(&app_for_main) {
-            tracing::warn!(?e, "dictation: menu-bar tray init failed");
-        }
         tracing::info!("dictation: lifecycle started");
     });
+
+    // Repaint the unified Zen Tools tray so the "Disable dictation"
+    // menu item flips from disabled to enabled.
+    tray::update(app);
 
     let _ = app.emit("dictation:lifecycle", "started");
 }
@@ -126,10 +126,8 @@ pub fn stop(app: &AppHandle) {
     //    tool.
     dictation_state.manager.abandon_recording();
 
-    // 4. Drop the menu-bar tray. AppKit `NSStatusItem` release MUST
-    //    happen on the Cocoa main thread or we crash hard;
-    //    `tear_down` already dispatches via `run_on_main_thread`.
-    menu_bar::tear_down(app);
+    // 4. Repaint the unified tray so "Disable dictation" greys out.
+    tray::update(app);
 
     let _ = app.emit("dictation:lifecycle", "stopped");
     let _ = app.emit("dictation:status", "idle");

@@ -23,18 +23,9 @@ pub mod dto;
 pub mod lifecycle;
 pub mod state;
 
-// Permanent macOS menu-bar tray (mic icon + small menu). Lives only
-// while the dictation tool is enabled — see `lifecycle::start` /
-// `lifecycle::stop`. macOS-only because that's where the rest of
-// the dictation feature is gated.
-#[cfg(target_os = "macos")]
-pub mod menu_bar;
-#[cfg(not(target_os = "macos"))]
-pub mod menu_bar {
-    use tauri::AppHandle;
-    pub fn init(_app: &AppHandle) -> tauri::Result<()> { Ok(()) }
-    pub fn tear_down(_app: &AppHandle) {}
-}
+// Note: dictation no longer owns its own menu-bar tray. The unified
+// Zen Tools tray (`crate::tray`) renders a single "Disable dictation"
+// menu item that hides automatically when the tool is disabled.
 
 // Dynamic Island-style HUD overlay (top-centre pill) shown while
 // dictation is recording or transcribing. macOS-only; on other

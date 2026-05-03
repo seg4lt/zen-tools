@@ -10,7 +10,6 @@ pub mod dictation;
 pub mod dto;
 pub mod error;
 pub mod prmaster_lifecycle;
-pub mod prmaster_tray;
 pub mod schema_cache;
 pub mod state;
 pub mod tray;
@@ -250,73 +249,52 @@ pub fn run() {
                 }
             });
 
-            // ── PRMaster: light up tray + broadcast bridge + 5-min poll
-            // + global hotkey, but only if the user hasn't disabled the
-            // app from the settings list. Disabled tools should be
-            // completely silent — no menubar entry, no background gh
-            // calls, no chord registration. Toggling back on at runtime
-            // is wired through the `set_tool_disabled` command, which
-            // calls `prmaster_lifecycle::start` to re-arm everything.
+            // ── Unified menu-bar tray ─────────────────────────────────
+            // One tray for the whole app — see `crate::tray`. Built
+            // once here, lives the lifetime of the process. The menu
+            // adapts to current state (perf running, PM active,
+            // PRMaster enabled, dictation enabled) via fire-and-forget
+            // `tray::update` calls from each tool's command paths.
+            if let Err(e) = tray::init(app.handle()) {
+                tracing::warn!(?e, "tray::init failed; menu-bar will not be available");
+            }
+
+            // ── PRMaster: broadcast bridge + 5-min poll + global hotkey,
+            // but only if the user hasn't disabled the app from the
+            // settings list. Disabled tools should be completely silent
+            // — no background gh calls, no chord registration. Toggling
+            // back on at runtime is wired through the
+            // `set_tool_disabled` command, which calls
+            // `prmaster_lifecycle::start` to re-arm everything.
             let prmaster_disabled = commands::preferences::load_preferences(app.handle())
                 .map(|p| p.disabled_tools.iter().any(|id| id == "prmaster"))
                 .unwrap_or(false);
             if !prmaster_disabled {
                 prmaster_lifecycle::start(app.handle());
             } else {
-                tracing::info!("PRMaster disabled in preferences; skipping tray/poll/hotkey");
+                tracing::info!("PRMaster disabled in preferences; skipping poll/hotkey");
             }
 
-            // Background-agent lifecycle: when the user closes the
-            // main window we *can* keep the process alive so always-on
-            // tools (PRMaster polling, dictation hotkey watcher, …)
-            // keep working. But that's only a sane default if at
-            // least one of those tools is enabled — if every
-            // background tool is off there's no tray, no hotkey, and
-            // (depending on macOS version) no Dock icon either, so
-            // the user would be locked out and have to force-quit.
-            // Hide-to-Accessory only when at least one always-on
-            // tool is live; otherwise let the close go through and
-            // exit the app normally.
+            // Background-agent lifecycle: closing the main window
+            // never exits the app. The unified menu-bar tray (see
+            // `crate::tray`) is permanent for the lifetime of the
+            // process and provides "Show Zen Tools" and "Quit" so
+            // the user always has a way back in / a way to exit.
+            // Closing → hide window + flip to Accessory (no Dock
+            // icon). The only exit path is the tray's "Quit Zen
+            // Tools" menu item.
             //
-            // Re-opening from the hidden state happens via either
-            // tool's tray menu, the PRMaster hotkey, the
-            // `prmaster_open_full_window` command, or the
-            // `RunEvent::Reopen` handler below (Dock-icon click).
+            // Re-opening from the hidden state happens via the tray
+            // menu's "Show Zen Tools" item, the PRMaster hotkey, the
+            // `prmaster_open_full_window` command, the
+            // `RunEvent::Reopen` handler below (Dock-icon click), or
+            // the right-⌘ tap-then-hold dictation gesture.
             #[cfg(target_os = "macos")]
             {
                 let app_handle = app.handle().clone();
                 if let Some(main) = app.get_webview_window("main") {
                     main.on_window_event(move |event| {
                         if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                            // List every tool that needs the app to
-                            // stay resident in Accessory mode. New
-                            // background tools should append to this
-                            // list — staying in scope here keeps the
-                            // accessory-mode policy in one place.
-                            let prefs = commands::preferences::load_preferences(&app_handle).ok();
-                            let any_keep_alive = prefs
-                                .as_ref()
-                                .map(|p| {
-                                    let prmaster = !p
-                                        .disabled_tools
-                                        .iter()
-                                        .any(|id| id == "prmaster");
-                                    let dictation = !p
-                                        .disabled_tools
-                                        .iter()
-                                        .any(|id| id == dictation::TOOL_ID);
-                                    prmaster || dictation
-                                })
-                                .unwrap_or(true);
-                            if !any_keep_alive {
-                                // Nothing keeping the app alive — let
-                                // the close happen, which exits the
-                                // process. (We don't call exit(0) here
-                                // explicitly: with no `prevent_close`,
-                                // Tauri fires `RunEvent::ExitRequested`
-                                // and the app shuts down cleanly.)
-                                return;
-                            }
                             api.prevent_close();
                             if let Some(win) = app_handle.get_webview_window("main") {
                                 let _ = win.hide();
@@ -520,7 +498,13 @@ pub fn run() {
             // icon's activation to `Accessory`, so AppKit doesn't
             // pick the click up as "open the main window again". We
             // restore `Regular` policy + show + focus the main
-            // window. Mirrors flowstate's `RunEvent::Reopen` recipe.
+            // window, then ask the frontend to navigate to the
+            // user's first enabled tool — the route persisted on the
+            // window before close was usually `/settings` (the user
+            // tweaks settings then closes), and greeting them with
+            // Settings on every reopen feels wrong. The
+            // `FirstToolListener` in `src/router.tsx` consumes the
+            // `app:focus-first-tool` event.
             #[cfg(target_os = "macos")]
             if let tauri::RunEvent::Reopen { .. } = event {
                 let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
@@ -529,6 +513,7 @@ pub fn run() {
                     let _ = win.show();
                     let _ = win.set_focus();
                 }
+                let _ = app.emit("app:focus-first-tool", ());
             }
             #[cfg(not(target_os = "macos"))]
             {

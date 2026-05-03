@@ -1,4 +1,4 @@
-import { useEffect, type ReactNode } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import {
   createRootRoute,
   createRoute,
@@ -37,6 +37,7 @@ const rootRoute = createRootRoute({
         <main className="flex min-h-0 flex-1">
           <AppProviders>
             <FocusRouteListener />
+            <FirstToolListener />
             <Outlet />
           </AppProviders>
         </main>
@@ -99,6 +100,54 @@ function FocusRouteListener() {
           // Router may not be ready on the very first event (extremely
           // unlikely outside dev hot-reload) — falling back to a hash
           // change keeps the UX correct.
+          window.location.hash = `#${target}`;
+        }
+      });
+    })();
+    return () => {
+      unlisten?.();
+    };
+  }, [navigate]);
+  return null;
+}
+
+/**
+ * Listens for the generic `app:focus-first-tool` Tauri event and
+ * navigates to the user's first enabled tool. Fired by:
+ *
+ *   * `RunEvent::Reopen` (Dock-icon click after the user closed the
+ *     main window — the app was running in Accessory mode), and
+ *   * the dictation menu-bar tray's "Show Zen Tools" item.
+ *
+ * Without this, reopening from accessory mode lands on whatever
+ * route was active when the user hit ✕ — and since users often
+ * tweak Settings right before closing, that ends up being /settings
+ * which is a confusing surface to greet them with.
+ *
+ * The latest enabled-tool list is captured via a ref so the
+ * listener doesn't need to be unbound and re-bound every time
+ * `useToolOrder` recomputes (e.g. when the user toggles a tool's
+ * disabled state).
+ */
+function FirstToolListener() {
+  const navigate = useNavigate();
+  const { tools } = useToolOrder();
+  const toolsRef = useRef(tools);
+  useEffect(() => {
+    toolsRef.current = tools;
+  }, [tools]);
+
+  useEffect(() => {
+    if (isPrmasterPopover()) return;
+    let unlisten: (() => void) | null = null;
+    (async () => {
+      unlisten = await listen<null>("app:focus-first-tool", () => {
+        // First tool in the user-defined order. Disabled tools are
+        // already filtered out by `useToolOrder().tools`.
+        const target = toolsRef.current[0]?.route ?? "/";
+        try {
+          void navigate({ to: target });
+        } catch {
           window.location.hash = `#${target}`;
         }
       });

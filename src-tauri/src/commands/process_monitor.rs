@@ -6,7 +6,7 @@
 //! these commands only manipulate the shared state and re-emit the tray
 //! visibility update.
 //!
-//! Every mutating command calls `crate::tray::update_tray(&app)` after
+//! Every mutating command calls `crate::tray::update(&app)` after
 //! the lock is released, so the macOS menu-bar icon appears the instant
 //! the user picks a PID and disappears when they clear the selection
 //! (provided no perf test is also running).
@@ -49,7 +49,7 @@ pub async fn pm_add_target(
         let s = state.lock().await;
         s.pm_state.lock().add_target(pid);
     }
-    let _ = tray::update_tray(&app);
+    let _ = tray::update(&app);
     Ok(())
 }
 
@@ -64,7 +64,7 @@ pub async fn pm_remove_target(
         let s = state.lock().await;
         s.pm_state.lock().remove_target(pid);
     }
-    let _ = tray::update_tray(&app);
+    let _ = tray::update(&app);
     Ok(())
 }
 
@@ -79,7 +79,7 @@ pub async fn pm_set_targets(
         let s = state.lock().await;
         s.pm_state.lock().set_targets(pids);
     }
-    let _ = tray::update_tray(&app);
+    let _ = tray::update(&app);
     Ok(())
 }
 
@@ -93,7 +93,7 @@ pub async fn pm_clear_targets(
         let s = state.lock().await;
         s.pm_state.lock().clear_targets();
     }
-    let _ = tray::update_tray(&app);
+    let _ = tray::update(&app);
     Ok(())
 }
 
@@ -133,7 +133,7 @@ pub async fn pm_set_poll_interval(
 /// forward.
 #[tauri::command]
 pub async fn pm_popover_close(app: AppHandle) -> AppResult<()> {
-    tray::destroy_popover(&app);
+    tray::destroy_pm_popover(&app);
     Ok(())
 }
 
@@ -147,6 +147,6 @@ pub async fn pm_show_main_window(app: AppHandle) -> AppResult<()> {
         let _ = win.show();
         let _ = win.set_focus();
     }
-    tray::destroy_popover(&app);
+    tray::destroy_pm_popover(&app);
     Ok(())
 }

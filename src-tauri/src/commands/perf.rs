@@ -175,7 +175,7 @@ pub async fn run_perf_test(
         s.perf_started_at = Some(std::time::Instant::now());
     }
     // Show the tray now that work is in flight.
-    let _ = tray::update_tray(&app_handle);
+    let _ = tray::update(&app_handle);
 
     // Translator: drain PerfUpdate from runner → app_handle.emit + persist.
     let (update_tx, mut update_rx) = mpsc::channel::<PerfUpdate>(1024);
@@ -280,7 +280,7 @@ pub async fn run_perf_test(
                 s.perf_stop = None;
             }
             // Tray hides if neither perf nor monitoring is active.
-            let _ = tray::update_tray(&app_handle);
+            let _ = tray::update(&app_handle);
             return;
         }
 
@@ -302,7 +302,7 @@ pub async fn run_perf_test(
             s.perf_stop = None;
         }
         // Tray hides if neither perf nor monitoring is active.
-        let _ = tray::update_tray(&app_handle);
+        let _ = tray::update(&app_handle);
         debug!("perf test finished");
     });
 
