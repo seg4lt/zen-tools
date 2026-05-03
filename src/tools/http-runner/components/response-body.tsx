@@ -3,10 +3,10 @@ import { EditorState, type Extension } from "@codemirror/state";
 import { EditorView, lineNumbers } from "@codemirror/view";
 import { bracketMatching, foldGutter } from "@codemirror/language";
 import { Braces } from "lucide-react";
-import { makeEditorTheme } from "../lib/cm-theme";
+import { makeEditorTheme } from "@zen-tools/editor";
 import { isJsonContentType, languageForContentType } from "../lib/parse-mime";
-import { Button } from "@/components/ui/button";
-import { cn } from "@/lib/utils";
+import { Button } from "@zen-tools/ui";
+import { cn } from "@zen-tools/ui";
 import { useTheme } from "@/hooks/use-theme";
 
 interface ResponseBodyProps {

@@ -4,7 +4,7 @@
  * are reachable globally via ⌘= / ⌘− / ⌘0.
  */
 import { Minus, Plus, RotateCcw } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import { Button } from "@zen-tools/ui";
 import { useAppZoom, APP_ZOOM_LIMITS } from "@/hooks/use-app-zoom";
 import { isMac } from "@zen-tools/keyboard";
 

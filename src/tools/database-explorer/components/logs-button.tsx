@@ -16,7 +16,7 @@
 
 import { useState } from "react";
 import { ScrollText, Trash2 } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import { Button } from "@zen-tools/ui";
 import {
   Sheet,
   SheetContent,
@@ -24,8 +24,8 @@ import {
   SheetHeader,
   SheetTitle,
   SheetTrigger,
-} from "@/components/ui/sheet";
-import { cn } from "@/lib/utils";
+} from "@zen-tools/ui";
+import { cn } from "@zen-tools/ui";
 import { useDbExplorerStore } from "../store/db-explorer-store";
 import type { QueryLogEntry } from "../store/db-explorer-store";
 

@@ -12,8 +12,11 @@
     "lint": "tsc --noEmit"
   },
   "dependencies": {
+    "@zen-tools/editor": "workspace:*",
     "@zen-tools/ipc": "workspace:*",
     "@zen-tools/keyboard": "workspace:*",
+    "@zen-tools/types": "workspace:*",
+    "@zen-tools/ui": "workspace:*",
     "@codemirror/autocomplete": "^6.20.1",
     "@codemirror/commands": "^6.10.3",
     "@codemirror/lang-json": "^6.0.2",

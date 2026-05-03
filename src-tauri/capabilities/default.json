@@ -20,7 +20,6 @@
     "dialog:default",
     "shell:default",
     "shell:allow-open",
-    "fs:default",
     "clipboard-manager:default",
     "clipboard-manager:allow-write-text",
     "clipboard-manager:allow-read-text",

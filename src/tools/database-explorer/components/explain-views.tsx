@@ -26,21 +26,21 @@ import {
   ListTree,
   Network,
 } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import { Button } from "@zen-tools/ui";
 import {
   Dialog,
   DialogContent,
   DialogDescription,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/dialog";
+} from "@zen-tools/ui";
 import {
   Tooltip,
   TooltipContent,
   TooltipProvider,
   TooltipTrigger,
-} from "@/components/ui/tooltip";
-import { cn } from "@/lib/utils";
+} from "@zen-tools/ui";
+import { cn } from "@zen-tools/ui";
 import {
   actualOrEstimatedRows,
   aggregateBuffers,

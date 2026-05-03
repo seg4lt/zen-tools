@@ -19,7 +19,7 @@
  */
 
 import { Database, LogOut, Pencil, Plus, ChevronDown, Check, AlertCircle, Loader2 } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import { Button } from "@zen-tools/ui";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -27,8 +27,8 @@ import {
   DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { cn } from "@/lib/utils";
+} from "@zen-tools/ui";
+import { cn } from "@zen-tools/ui";
 import { ContextPicker } from "./context-picker";
 import { useDbExplorerStore } from "../store/db-explorer-store";
 import { useDbConnection } from "../hooks/use-db-connection";

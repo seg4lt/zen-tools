@@ -6,8 +6,8 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
 } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { cn } from "@/lib/utils";
+import { Button } from "@zen-tools/ui";
+import { cn } from "@zen-tools/ui";
 import type { ReactNode } from "react";
 
 export type PaneState = "normal" | "collapsed" | "maximized";

@@ -15,7 +15,8 @@ import type { Extension } from "@codemirror/state";
 import {
   CodeEditor,
   type CodeEditorHandle,
-} from "@/components/code-editor";
+} from "@zen-tools/editor";
+import { useTheme } from "@/hooks/use-theme";
 import { httpLanguage } from "../lib/lang-http";
 import { runGutter } from "../lib/run-gutter";
 import { varHoverTooltip, type VarContext } from "../lib/var-hover";
@@ -56,6 +57,7 @@ export function HttpEditor({
   vimMode = true,
   imperativeRef,
 }: HttpEditorProps) {
+  const { theme } = useTheme();
   // The hover tooltip reads the var context from a ref so callers can
   // pass fresh values via a normal prop without rebuilding the editor.
   const varCtxRef = useRef<VarContext>(varContext ?? {});
@@ -93,6 +95,7 @@ export function HttpEditor({
       onRunLine={onRunLine}
       onRunLineWithDeps={onRunLineWithDeps}
       vimMode={vimMode}
+      isDark={theme === "dark"}
       imperativeRef={imperativeRef}
       extensions={buildExtensions}
     />

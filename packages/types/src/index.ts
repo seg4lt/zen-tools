@@ -1,17 +1,18 @@
 /**
- * Placeholder for the `@zen-tools/types` package.
+ * `@zen-tools/types` — pure TypeScript helpers and types shared
+ * across the workspace.
  *
- * Pending move (Phase 3.5):
- * - Shared TS enum-style types (HttpMethod, FileType, …) currently
- *   hand-mirrored across each tool's lib/tauri.ts.
- * - Pure path utilities from `src/tools/markdown/lib/tauri.ts`:
- *   posixRelative, normalizePath, basenameNoExt, basename, dirname,
- *   slugify, isExcalidrawPath.
- *
- * `@zen-tools/ipc` already owns the shared `Preferences` type. This
- * package will own the rest.
- *
- * Until the migration lands this package exists only to reserve the
- * workspace slot.
+ * Today this is just the POSIX path utilities (basename, dirname,
+ * normalizePath, posixRelative, slugify, isExcalidrawPath); the
+ * package will grow to host other zero-IPC utilities as they're
+ * lifted out of tool `lib/` directories.
  */
-export {};
+export {
+  basename,
+  basenameNoExt,
+  dirname,
+  isExcalidrawPath,
+  normalizePath,
+  posixRelative,
+  slugify,
+} from "./paths";

@@ -6,7 +6,7 @@
 
 import { Check, CircleHelp, Clock, X } from "lucide-react";
 import { open as openUrl } from "@tauri-apps/plugin-shell";
-import { Badge } from "@/components/ui/badge";
+import { Badge } from "@zen-tools/ui";
 import {
   checkDisplayName,
   checkKind,

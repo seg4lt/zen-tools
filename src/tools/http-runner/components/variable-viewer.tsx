@@ -7,10 +7,10 @@ import {
   SheetHeader,
   SheetTitle,
   SheetTrigger,
-} from "@/components/ui/sheet";
-import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
-import { Separator } from "@/components/ui/separator";
+} from "@zen-tools/ui";
+import { Button } from "@zen-tools/ui";
+import { Badge } from "@zen-tools/ui";
+import { Separator } from "@zen-tools/ui";
 import { tauri } from "../lib/tauri";
 import { useHttpRunner } from "../store/http-runner-store";
 

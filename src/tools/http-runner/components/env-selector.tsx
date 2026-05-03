@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { Check, ChevronDown, Globe, RefreshCw } from "lucide-react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
-import { cn } from "@/lib/utils";
+import { Button } from "@zen-tools/ui";
+import { Badge } from "@zen-tools/ui";
+import { cn } from "@zen-tools/ui";
 import { tauri } from "../lib/tauri";
 import { useHttpRunner } from "../store/http-runner-store";
 

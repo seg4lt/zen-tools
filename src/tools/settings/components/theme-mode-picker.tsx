@@ -8,8 +8,8 @@
  */
 import { Monitor, Moon, Sun } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { cn } from "@/lib/utils";
+import { Button } from "@zen-tools/ui";
+import { cn } from "@zen-tools/ui";
 import { useTheme, type ThemeMode } from "@/hooks/use-theme";
 
 interface Option {

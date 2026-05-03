@@ -1,7 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider } from "@tanstack/react-router";
 import { ThemeProvider } from "@/hooks/use-theme";
-import { TooltipProvider } from "@/components/ui/tooltip";
+import { TooltipProvider } from "@zen-tools/ui";
 import { UpdaterProvider } from "@/lib/updater/use-updater";
 import { router } from "@/router";
 

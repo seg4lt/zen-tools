@@ -16,8 +16,8 @@ import { useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { CheckCircle2, GitCompare, Trash2, XCircle } from "lucide-react";
 import { diffLines } from "diff";
-import { Button } from "@/components/ui/button";
-import { cn } from "@/lib/utils";
+import { Button } from "@zen-tools/ui";
+import { cn } from "@zen-tools/ui";
 import { tauri, type RunHistoryEntry } from "../lib/tauri";
 import { ResponseBody } from "./response-body";
 

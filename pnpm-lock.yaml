@@ -89,12 +89,21 @@ importers:
       '@tauri-apps/plugin-updater':
         specifier: ^2.10.1
         version: 2.10.1
+      '@zen-tools/editor':
+        specifier: workspace:*
+        version: link:packages/editor
       '@zen-tools/ipc':
         specifier: workspace:*
         version: link:packages/ipc
       '@zen-tools/keyboard':
         specifier: workspace:*
         version: link:packages/keyboard
+      '@zen-tools/types':
+        specifier: workspace:*
+        version: link:packages/types
+      '@zen-tools/ui':
+        specifier: workspace:*
+        version: link:packages/ui
       class-variance-authority:
         specifier: ^0.7.0
         version: 0.7.1
@@ -234,6 +243,9 @@ importers:
       react-dom:
         specifier: ^18.0.0
         version: 18.3.1(react@18.3.1)
+      recharts:
+        specifier: ^3.8.0
+        version: 3.8.0(@types/react@18.3.28)(react-dom@18.3.1(react@18.3.1))(react-is@19.2.5)(react@18.3.1)(redux@5.0.1)
       tailwind-merge:
         specifier: ^2.5.4
         version: 2.6.1

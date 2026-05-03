@@ -28,19 +28,19 @@ import {
   Trash2,
 } from "lucide-react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
+import { Badge } from "@zen-tools/ui";
+import { Button } from "@zen-tools/ui";
+import { Input } from "@zen-tools/ui";
+import { Label } from "@zen-tools/ui";
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from "@/components/ui/select";
-import { Switch } from "@/components/ui/switch";
-import { cn } from "@/lib/utils";
+} from "@zen-tools/ui";
+import { Switch } from "@zen-tools/ui";
+import { cn } from "@zen-tools/ui";
 import {
   prmasterTauri,
   type BadgeSourceConfig,

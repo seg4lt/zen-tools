@@ -2,6 +2,7 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import "./index.css";
 import App from "./App";
+import { isPmPopover } from "./lib/window-kind";
 import { MiniMonitorApp } from "./tools/process-monitor/MiniMonitorApp";
 
 // Wipe any leaked inline body styles before React mounts. Earlier
@@ -18,10 +19,9 @@ if (document.body.style.cursor) document.body.style.cursor = "";
 // `index.html?window=pm-popover`. Detecting the query param here lets
 // the popover share this bundle without booting the entire router /
 // provider tree (which is expensive and pointless for a 340x280 panel).
-const isPopover =
-  new URLSearchParams(window.location.search).get("window") === "pm-popover";
+const pmPopover = isPmPopover();
 
-if (isPopover) {
+if (pmPopover) {
   // Transparent tauri windows inherit the document background;
   // override the global body bg so the rounded popover frame shows.
   document.documentElement.style.background = "transparent";
@@ -29,5 +29,5 @@ if (isPopover) {
 }
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
-  <React.StrictMode>{isPopover ? <MiniMonitorApp /> : <App />}</React.StrictMode>,
+  <React.StrictMode>{pmPopover ? <MiniMonitorApp /> : <App />}</React.StrictMode>,
 );

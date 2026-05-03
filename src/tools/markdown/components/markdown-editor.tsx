@@ -44,7 +44,7 @@ import { markdown } from "@codemirror/lang-markdown";
 import { languages } from "@codemirror/language-data";
 import { syntaxHighlighting, syntaxTree } from "@codemirror/language";
 import { vim, Vim } from "@replit/codemirror-vim";
-import { makeEditorTheme } from "@/tools/http-runner/lib/cm-theme";
+import { makeEditorTheme } from "@zen-tools/editor";
 import { useTheme } from "@/hooks/use-theme";
 import { livePreview } from "../lib/live-preview";
 import { imagePasteHandler } from "../lib/image-paste";

@@ -1,5 +1,5 @@
 import { ArrowDown, CheckCircle2, Loader2, XCircle } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { cn } from "@zen-tools/ui";
 import type { ExecutionStatus, RequestResult } from "../lib/tauri";
 
 interface DependencyChainProps {

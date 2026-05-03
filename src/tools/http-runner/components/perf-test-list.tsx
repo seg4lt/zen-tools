@@ -1,5 +1,5 @@
 import { Play, Users, Clock, Gauge } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { cn } from "@zen-tools/ui";
 import type { PerfTestDto } from "../lib/perf-types";
 
 interface PerfTestListProps {

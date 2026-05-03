@@ -1,17 +1,20 @@
-//! General-purpose async child-process executor used by every zen-tools crate
-//! that needs to shell out (`zen-github` for `gh`, `zen-ai-cli` for `claude` /
-//! `copilot`, `zen-prmaster` for local `git`).
+//! General-purpose async child-process executor used by every zen-tools
+//! crate that needs to shell out (`zen-github` for `gh`, `zen-ai-cli`
+//! for `claude` / `copilot`, `zen-prmaster` for local `git`).
 //!
-//! The Swift PRMaster app shipped a single `ShellExecutor` actor that wrapped
-//! `Foundation.Process` with PATH augmentation so GUI-launched apps could find
-//! Homebrew / npm / nix binaries. This crate ports that idea to Rust on top of
-//! `tokio::process::Command`, plus:
+//! Wraps `tokio::process::Command` with the four things every consumer
+//! turned out to need:
 //!
-//! * a configurable extra-PATH list (defaults match PRMaster),
-//! * an enforced timeout that terminates the child,
-//! * stdin piping (used to feed prompts to `claude -p`),
-//! * a per-call working-directory override (used for local `git log` / `git
-//!   show` against a user-mapped repo).
+//! * **PATH augmentation** so a GUI-launched app finds Homebrew / nix /
+//!   npm-global / `~/.claude/local` binaries (a fresh `tokio::process`
+//!   inherits `launchd`'s minimal `$PATH`, which is just `/usr/bin:/bin`
+//!   on macOS).
+//! * An **enforced timeout** that terminates the child if it overruns
+//!   (default 60 s; per-instance override via [`ShellExecutor::with_timeout`]).
+//! * **stdin piping** (used to feed prompts to `claude -p`).
+//! * A per-call **working-directory override** (used for local `git log`
+//!   / `git show` against a user-mapped repo without mutating the
+//!   process-wide cwd).
 //!
 //! All public methods are `async`; they never block the runtime.
 

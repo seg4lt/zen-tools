@@ -1,17 +1,126 @@
 /**
- * Placeholder for the `@zen-tools/ui` package.
+ * `@zen-tools/ui` — shadcn/New York primitives + the `cn()` helper.
  *
- * Pending move (Phase 3.1):
- * - `src/components/ui/*.tsx` — 19 shadcn primitives (button, card,
- *   command, dialog, dropdown-menu, input, label, popover, select,
- *   separator, sheet, slider, switch, tabs, toggle, toggle-group,
- *   tooltip, …)
- * - `src/lib/utils.ts` — the `cn()` Tailwind merge helper.
- * - The `@theme` block from `src/index.css` (OKLCH design tokens).
+ * Every consumer should import from the package root (`@zen-tools/ui`).
+ * Sub-paths exist as a convenience for tools that want to bundle-split
+ * a single primitive, but the barrel is the supported surface.
  *
- * Migration: rename every `from "@/components/ui/<x>"` import to
- * `from "@zen-tools/ui"` and re-export from this index.
- *
- * Until then this package exists only to reserve the workspace slot.
+ * Re-exports follow the file layout one-to-one — `Button`,
+ * `Dialog*`, etc. — so a tool that previously imported from
+ * `@/components/ui/button` now writes `from "@zen-tools/ui"`.
  */
-export {};
+
+export { cn } from "./utils";
+
+export { Badge, badgeVariants } from "./components/badge";
+export { Button, buttonVariants } from "./components/button";
+export {
+  Card,
+  CardAction,
+  CardContent,
+  CardDescription,
+  CardFooter,
+  CardHeader,
+  CardTitle,
+} from "./components/card";
+export {
+  ChartContainer,
+  ChartTooltip,
+  ChartTooltipContent,
+  ChartLegend,
+  ChartLegendContent,
+  ChartStyle,
+  type ChartConfig,
+} from "./components/chart";
+export { Checkbox } from "./components/checkbox";
+export {
+  Command,
+  CommandDialog,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+  CommandSeparator,
+  CommandShortcut,
+} from "./components/command";
+export {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuLabel,
+  ContextMenuSeparator,
+  ContextMenuShortcut,
+  ContextMenuSubContent,
+  ContextMenuSubTrigger,
+  ContextMenuTrigger,
+} from "./components/context-menu";
+export {
+  Dialog,
+  DialogClose,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogOverlay,
+  DialogPortal,
+  DialogTitle,
+  DialogTrigger,
+} from "./components/dialog";
+export {
+  DropdownMenu,
+  DropdownMenuCheckboxItem,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuPortal,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
+  DropdownMenuShortcut,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
+  DropdownMenuTrigger,
+} from "./components/dropdown-menu";
+export { Input } from "./components/input";
+export { Label } from "./components/label";
+export {
+  Popover,
+  PopoverAnchor,
+  PopoverContent,
+  PopoverTrigger,
+} from "./components/popover";
+export {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectLabel,
+  SelectScrollDownButton,
+  SelectScrollUpButton,
+  SelectSeparator,
+  SelectTrigger,
+  SelectValue,
+} from "./components/select";
+export { Separator } from "./components/separator";
+export {
+  Sheet,
+  SheetClose,
+  SheetContent,
+  SheetDescription,
+  SheetFooter,
+  SheetHeader,
+  SheetTitle,
+  SheetTrigger,
+} from "./components/sheet";
+export { Switch } from "./components/switch";
+export { Tabs, TabsContent, TabsList, TabsTrigger } from "./components/tabs";
+export { Textarea } from "./components/textarea";
+export {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "./components/tooltip";

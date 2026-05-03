@@ -37,8 +37,7 @@ import {
   indentOnInput,
 } from "@codemirror/language";
 import { vim, Vim } from "@replit/codemirror-vim";
-import { makeEditorTheme } from "@/tools/http-runner/lib/cm-theme";
-import { useTheme } from "@/hooks/use-theme";
+import { makeEditorTheme } from "./cm-theme";
 
 export interface CodeEditorHandle {
   /** Replace the buffer content (preserves cursor where possible). */
@@ -88,6 +87,14 @@ export interface CodeEditorProps {
   extensions?: (env: { isDark: boolean }) => Extension[];
   /** Vim keybindings. Default `true`. */
   vimMode?: boolean;
+  /**
+   * Whether the host app is rendering in dark mode. Drives the
+   * `makeEditorTheme` colour scheme + the `isDark` flag passed to
+   * `extensions(...)`. The package stays Tauri- / router-free by
+   * accepting this as a prop instead of reaching for the host's
+   * `useTheme` hook.
+   */
+  isDark?: boolean;
   /** Forwarded ref for imperative control. */
   imperativeRef?: Ref<CodeEditorHandle>;
   /**
@@ -111,6 +118,7 @@ export function CodeEditor({
   onAltEnter,
   extensions,
   vimMode = true,
+  isDark = false,
   imperativeRef,
   onView,
 }: CodeEditorProps) {
@@ -123,7 +131,6 @@ export function CodeEditor({
   const onAltEnterRef = useRef(onAltEnter);
   const extensionsRef = useRef(extensions);
   const onViewRef = useRef(onView);
-  const { theme } = useTheme();
 
   useEffect(() => {
     onChangeRef.current = onChange;
@@ -312,7 +319,7 @@ export function CodeEditor({
     const view = new EditorView({
       state: EditorState.create({
         doc: value,
-        extensions: buildExtensions(theme === "dark"),
+        extensions: buildExtensions(isDark),
       }),
       parent: hostRef.current,
     });
@@ -338,11 +345,11 @@ export function CodeEditor({
       EditorState.create({
         doc,
         selection,
-        extensions: buildExtensions(theme === "dark"),
+        extensions: buildExtensions(isDark),
       }),
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [theme, readOnly, vimMode]);
+  }, [isDark, readOnly, vimMode]);
 
   useImperativeHandle(
     imperativeRef,

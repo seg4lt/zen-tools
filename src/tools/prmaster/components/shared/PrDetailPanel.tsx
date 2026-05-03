@@ -27,12 +27,12 @@ import {
 } from "lucide-react";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { open as openUrl } from "@tauri-apps/plugin-shell";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { Label } from "@/components/ui/label";
-import { Separator } from "@/components/ui/separator";
-import { Textarea } from "@/components/ui/textarea";
-import { cn } from "@/lib/utils";
+import { Badge } from "@zen-tools/ui";
+import { Button } from "@zen-tools/ui";
+import { Label } from "@zen-tools/ui";
+import { Separator } from "@zen-tools/ui";
+import { Textarea } from "@zen-tools/ui";
+import { cn } from "@zen-tools/ui";
 import {
   prmasterTauri,
   prRefFor,

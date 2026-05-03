@@ -1,9 +1,9 @@
 import { ScrollText, Variable } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { cn } from "@/lib/utils";
-import { Badge } from "@/components/ui/badge";
+import { Button } from "@zen-tools/ui";
+import { cn } from "@zen-tools/ui";
+import { Badge } from "@zen-tools/ui";
 import { useHttpRunner } from "../store/http-runner-store";
-import { useVimMode } from "../hooks/use-vim-mode";
+import { useVimMode } from "@/hooks/use-vim-mode";
 import { EnvSelector } from "./env-selector";
 import { VariableViewer } from "./variable-viewer";
 import { LogsPanel } from "./logs-panel";

@@ -14,8 +14,8 @@ import {
   Sparkles,
   Trash2,
 } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { cn } from "@/lib/utils";
+import { Button } from "@zen-tools/ui";
+import { cn } from "@zen-tools/ui";
 import { CleanerTree } from "./components/cleaner-tree";
 import { FolderSidebar } from "./components/folder-sidebar";
 import { BulkPalette } from "./components/bulk-palette";

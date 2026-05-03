@@ -9,14 +9,14 @@
  */
 import { forwardRef, useMemo, useState } from "react";
 import { ChevronsUpDown, Download, Loader2 } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import { Button } from "@zen-tools/ui";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { Input } from "@/components/ui/input";
-import { cn } from "@/lib/utils";
+} from "@zen-tools/ui";
+import { Input } from "@zen-tools/ui";
+import { cn } from "@zen-tools/ui";
 
 interface Props {
   /** Repos to choose from (already filtered to "unmapped" by the caller). */

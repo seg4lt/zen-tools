@@ -1,15 +1,23 @@
 //! Pluggable adapters for the `claude` and `copilot` CLI programs.
 //!
-//! Direct port of the Swift `ClaudeProvider` / `CopilotProvider` /
-//! `AIProviderConfig` types. Both adapters shell out via [`zen_shell`]
-//! with the same PATH augmentation as the rest of PRMaster, so binaries
-//! installed via Homebrew / npm / nix are reliably found.
+//! Two adapters implement the [`AiProvider`] trait — [`ClaudeCliProvider`]
+//! and [`CopilotCliProvider`]. Both shell out via [`zen_shell`] with the
+//! standard PATH augmentation so binaries installed via Homebrew / npm /
+//! nix are reliably found from a GUI-launched app.
 //!
-//! Wire format:
-//!   * **Claude**: `claude -p "<prompt>" --output-format json --max-turns 1 [--model <m>]`
-//!     → JSON `{result, cost_usd, session_id}`.
-//!   * **Copilot**: `copilot -p "<prompt>" [--model <m>]` → plain text
-//!     with a trailing usage block we strip.
+//! ## Wire format
+//!
+//! * **Claude** — `claude -p "<prompt>" --output-format json --max-turns 1 [--model <m>]`
+//!   returns `{ result, cost_usd, modelUsage, … }`. The adapter parses
+//!   `modelUsage` into a [`Vec<ModelUsageEntry>`] and surfaces it on
+//!   [`AiResponse`] so callers can answer "did Sonnet actually run?" — a
+//!   single Claude Code call typically bills both Sonnet (the answer
+//!   model) and Haiku (internal routing).
+//! * **Copilot** — `copilot -p "<prompt>" [--model <m>]` returns plain
+//!   text with a trailing usage block; the adapter strips it.
+//!
+//! Use `RUST_LOG=zen_ai_cli=debug` to see the resolved CLI args (with the
+//! prompt body redacted) and the per-model breakdown for every call.
 
 use std::time::Duration;
 

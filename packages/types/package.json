@@ -1,12 +1,11 @@
 {
   "name": "@zen-tools/types",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
   "main": "./src/index.ts",
   "types": "./src/index.ts",
   "exports": {
     ".": "./src/index.ts"
-  },
-  "//": "Skeleton package — Phase 3.5 of the cleanup plan. Pending: shared TS types and pure path utilities currently scattered across each tool's lib/tauri.ts. See plans/what-i-want-you-typed-pearl.md."
+  }
 }

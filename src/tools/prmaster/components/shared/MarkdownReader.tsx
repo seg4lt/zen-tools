@@ -17,7 +17,7 @@
  * to plain escaped text.
  */
 import { useMemo } from "react";
-import { cn } from "@/lib/utils";
+import { cn } from "@zen-tools/ui";
 
 type InlineNode =
   | { kind: "text"; text: string }

@@ -14,7 +14,7 @@
  */
 
 import { ArrowLeft, Loader2, RefreshCw } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import { Button } from "@zen-tools/ui";
 import {
   enrichedId,
   usePrMasterStore,

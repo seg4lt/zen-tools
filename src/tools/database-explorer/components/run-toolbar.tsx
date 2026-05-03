@@ -14,7 +14,7 @@
  */
 
 import { Activity, ChevronDown, Loader2, Play, PlaySquare } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import { Button } from "@zen-tools/ui";
 import {
   DropdownMenu,
   DropdownMenuCheckboxItem,
@@ -22,8 +22,8 @@ import {
   DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { cn } from "@/lib/utils";
+} from "@zen-tools/ui";
+import { cn } from "@zen-tools/ui";
 import { LogsButton } from "./logs-button";
 import type { DbConnectionPrefs } from "../lib/tauri";
 import type { ResultTab } from "../store/db-explorer-store";

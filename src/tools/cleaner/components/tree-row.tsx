@@ -21,8 +21,8 @@ import {
   ContextMenuContent,
   ContextMenuItem,
   ContextMenuTrigger,
-} from "@/components/ui/context-menu";
-import { cn } from "@/lib/utils";
+} from "@zen-tools/ui";
+import { cn } from "@zen-tools/ui";
 import { ActionChip } from "./action-chip";
 import { fmtSize, type CleanerNodeAction, type CleanerTreeNode } from "../lib/tauri";
 

@@ -27,8 +27,8 @@
 
 import { useLayoutEffect, useMemo, useRef } from "react";
 import { FileText, PenLine, X } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { cn } from "@/lib/utils";
+import { Button } from "@zen-tools/ui";
+import { cn } from "@zen-tools/ui";
 import { useMarkdownStore, type TabState } from "../store/markdown-store";
 import { basenameNoExt } from "../lib/tauri";
 

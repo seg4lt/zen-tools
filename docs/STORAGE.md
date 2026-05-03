@@ -9,28 +9,55 @@ Tauri-resolved app-data directory:
 | Linux   | `~/.local/share/com.zen.tools/`                       |
 | Windows | `%APPDATA%\com.zen.tools\`                            |
 
-Two SQLite databases live there. Everything else is either ephemeral or
-keychain-managed. **Passwords never touch this directory** — they go
-through `zen_db::secrets` (OS keychain).
+Two SQLite databases live there, plus the PRMaster subtree.
+Everything else is either ephemeral or keychain-managed. **Passwords
+never touch this directory** — they go through `zen_db::secrets` (OS
+keychain).
 
 ```
 app_data_dir/
 ├── user_config.db          ← settings (this doc, §1)
 ├── schema_cache.db         ← SQL-autocomplete table descriptions (§2)
 ├── preferences.json.bak    ← legacy file kept after migration (§1)
-└── runs.json               ← perf-run history (still JSON for now, §3)
+├── runs.json               ← per-request HTTP run history (§3)
+└── com.zen-tools.app/prmaster/
+    ├── filters.db          ← PRMaster notification-filter rules
+    ├── notifications.json  ← last-seen state per PR (notification dedup)
+    └── ai_summary_cache/   ← per-(repo, week) AI summary cards (JSON)
 ```
 
-Both `.db` files use `PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;`
-which is the right durability/throughput trade-off for local single-process
-state.
+Both `.db` files in the root and the PRMaster `filters.db` go through
+`zen_storage::open_at`, which centrally sets
+`PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;` — the right
+durability/throughput trade-off for local single-process state. (Before
+the cleanup pass each store applied these pragmas independently and
+inconsistently — `filters.db` shipped without them.)
+
+### Crate landscape
+
+The on-disk shape above is owned by **two layers**:
+
+- **`zen-storage`** — the cross-tool primitive. Provides `open_at(path)`
+  (consistent pragmas + `Arc<Mutex<Connection>>`) and `KvStore`
+  (the `(key, value: TEXT JSON)` table backing `user_config.db`). Any
+  future store should build on these.
+- **Tauri-side wrappers** in `src-tauri/src/`:
+  - `user_config.rs` — resolves the canonical `app_data_dir/user_config.db`
+    path, runs the legacy `preferences.json` migration, and re-exports
+    `KvStore` as `UserConfig` so existing callers don't churn.
+  - `schema_cache.rs` — resolves the path; the actual cache impl lives
+    in `zen-db::schema_cache::SchemaCache`.
+  - `commands/runs.rs` — thin Tauri shim over `zen-runs::{RunHistory, load_from_disk, save_to_disk}`.
 
 ---
 
 ## 1. `user_config.db` — user settings
 
-**Module**: `src-tauri/src/user_config.rs`
-**Public API**: `commands::preferences::{load_preferences, write_preferences, get_preferences, save_preferences}`
+**Implementation**: `zen-storage::KvStore` (in `crates/zen-storage/src/lib.rs`).
+**Tauri wrapper**: `src-tauri/src/user_config.rs` — resolves the
+canonical path under `app_data_dir/`, runs the one-shot
+`preferences.json` migration, re-exports `KvStore` as `UserConfig`.
+**Public API for callers**: `commands::preferences::{load_preferences, write_preferences, get_preferences, save_preferences}`.
 
 ### Schema
 
@@ -129,8 +156,13 @@ Deserialize`, pick a dotted key, done.
 
 ## 2. `schema_cache.db` — SQL-autocomplete cache
 
-**Module**: `src-tauri/src/schema_cache.rs`
-**Public API**: `commands::database::{db_describe_table, db_describe_tables_bulk, db_list_cached_tables, db_invalidate_schema_cache}`
+**Implementation**: `zen-db::SchemaCache` (in `crates/zen-db/src/schema_cache.rs`).
+Built on `zen-storage::open_at` so the WAL pragmas come from the same
+helper as `user_config.db`.
+**Tauri wrapper**: `src-tauri/src/schema_cache.rs` — resolves
+`app_data_dir/schema_cache.db` and re-exports the `SchemaCache` type
+for callers in `commands/database.rs`.
+**Public API**: `commands::database::{db_describe_table, db_describe_tables_bulk, db_list_cached_tables, db_invalidate_schema_cache}`.
 
 ### Schema
 
@@ -182,12 +214,21 @@ same payload shape).
 
 ---
 
-## 3. `runs.json` — perf-run history
+## 3. `runs.json` — per-request HTTP run history
 
-Still JSON, in `app_data_dir/runs.json`. Hasn't moved to SQLite because:
+**Implementation**: `zen-runs::{RunHistory, load_from_disk, save_to_disk}`
+(in `crates/zen-runs/src/lib.rs`). Pure data structure with FIFO ring
+buffers per `request_id`, cap of 10 runs each, body truncation at
+256 KiB.
+**Tauri wrapper**: `src-tauri/src/commands/runs.rs` — resolves
+`app_data_dir/runs.json` and exposes `record_run` / `get_run_history` /
+`clear_run_history` commands.
 
-* It's effectively a ring (capped at N entries), not a key/value store.
-* Writes are infrequent (once per perf-test completion).
+Still JSON, not SQLite, because:
+
+* It's effectively a ring (capped at N entries per request), not a
+  key/value store.
+* Writes are infrequent (once per request completion).
 * Migrating it now would mean a second migrator + a second on-launch
   warning if the file is malformed — not worth it until we either need
   per-entry queries, hit a corruption case, or grow it past JSON's
@@ -199,11 +240,34 @@ per-entry indexing.
 
 ---
 
+## 4. `prmaster/` subtree — PR dashboard state
+
+Owned by `crates/zen-prmaster`. The shared path resolver
+`zen_prmaster::paths::data_dir()` returns `app_data_dir/com.zen-tools.app/prmaster/`
+on every platform; three stores live underneath:
+
+| File / dir              | Owner                                                  | Purpose |
+|-------------------------|--------------------------------------------------------|---------|
+| `filters.db`            | `zen_prmaster::filters::FilterStore`                   | Notification-filter rules + their match counts. SQLite via `zen-storage::open_at` (so it picks up the same WAL pragmas as the rest of the workspace). |
+| `notifications.json`    | `zen_prmaster::notifications::NotificationStore`       | Last-seen state per PR — drives notification dedup so the user isn't pinged twice for the same review. |
+| `ai_summary_cache/*.json` | `zen_prmaster::summary::AiSummaryCache`              | One JSON file per `(repo, since, until)` AI Summary card. Persists with `model_usage` so the API Stats panel shows what models were billed even after a relaunch. |
+
+These files are independent of the two top-level DBs and are managed
+entirely from inside `zen-prmaster` — no Tauri-side wrapper, no shared
+storage path code (the dir name is a single constant in
+`zen-prmaster/src/paths.rs`).
+
+---
+
 ## Don'ts
 
 * **Don't write directly to `app_data_dir`** from new code. Go through
-  `user_config::UserConfig` (settings) or `schema_cache::SchemaCache`
-  (autocomplete).
+  one of: `zen_storage::KvStore` (key/value JSON), `zen_db::SchemaCache`
+  (per-table SQL metadata), `zen_runs` (run history), or
+  `zen_prmaster::paths::data_dir()` (PRMaster subtree).
+* **Don't open `rusqlite::Connection` yourself.** Use
+  `zen_storage::open_at(path)` so the WAL + NORMAL pragmas stay
+  consistent with every other store.
 * **Don't store secrets** in either DB. The OS keychain (via
   `zen_db::secrets`) is the only place credentials may live.
 * **Don't use `:memory:` outside tests** — both stores assume disk

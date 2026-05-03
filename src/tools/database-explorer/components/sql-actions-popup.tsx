@@ -20,7 +20,7 @@ import {
   CommandInput,
   CommandItem,
   CommandList,
-} from "@/components/ui/command";
+} from "@zen-tools/ui";
 
 export interface SqlAction {
   /** Stable id for keyed React rendering. */

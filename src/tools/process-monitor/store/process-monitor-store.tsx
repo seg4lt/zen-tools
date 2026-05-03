@@ -9,6 +9,7 @@
 
 import {
   createContext,
+  useCallback,
   useContext,
   useEffect,
   useMemo,
@@ -211,4 +212,32 @@ export function useProcessMonitorStore() {
     );
   }
   return ctx;
+}
+
+/**
+ * Action helpers that combine an IPC call with the matching dispatch.
+ * Components should reach for these instead of calling `pmTauri.*`
+ * directly — keeps the IPC boundary inside the store and stops leaf
+ * components from drifting on success / failure handling.
+ *
+ * Today this is a single `stopMonitoring` callback (the only place
+ * the Shell needed a one-shot IPC + dispatch); add more here as more
+ * IPC-touching buttons land in views.
+ */
+export function usePmActions(): {
+  /** Stop monitoring every PID — backend tray clears as a side effect. */
+  stopMonitoring: () => Promise<void>;
+} {
+  const { dispatch } = useProcessMonitorStore();
+  const stopMonitoring = useCallback(async () => {
+    try {
+      await pmTauri.clearTargets();
+      dispatch({ type: "clearTargets" });
+    } catch (err) {
+      // Non-fatal: surface to console; the dashboard will simply keep
+      // its existing target list until the user retries.
+      console.error("[process-monitor] clearTargets failed", err);
+    }
+  }, [dispatch]);
+  return { stopMonitoring };
 }

@@ -14,9 +14,9 @@ import {
   RefreshCw,
 } from "lucide-react";
 import { open as openUrl } from "@tauri-apps/plugin-shell";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { cn } from "@/lib/utils";
+import { Badge } from "@zen-tools/ui";
+import { Button } from "@zen-tools/ui";
+import { cn } from "@zen-tools/ui";
 import { Panel, PanelContent } from "../shared/density";
 import {
   loadConversations,

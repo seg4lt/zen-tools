@@ -11,8 +11,8 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { Check, RefreshCw, X } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { cn } from "@/lib/utils";
+import { Button } from "@zen-tools/ui";
+import { cn } from "@zen-tools/ui";
 import { pmTauri, type ProcSummary } from "../lib/tauri";
 import { useProcessMonitorStore } from "../store/process-monitor-store";
 

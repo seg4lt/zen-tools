@@ -1,0 +1,94 @@
+name: PR
+
+# Catches every regression class the cleanup pass shipped fixes for:
+#  - Rust workspace doesn't build
+#  - Crate unit tests regress
+#  - clippy lints land
+#  - frontend TypeScript types drift
+#  - frontend build fails (Vite + tsc -b)
+#
+# Runs on every PR + every push to main so a direct push (rare; we
+# normally branch + PR) still gets validated.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  # Manual re-run from the Actions tab when a flake needs a retry.
+  workflow_dispatch:
+
+# A second push to the same PR cancels the in-flight run — saves
+# minutes when someone pushes a fixup commit while CI is still chewing
+# on the previous one.
+concurrency:
+  group: pr-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Colour-friendly cargo + rustc output in the GitHub Actions log
+  # viewer. `--locked` everywhere ensures CI uses the committed
+  # Cargo.lock rather than silently bumping versions.
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  rust:
+    name: Rust workspace
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      # Restore cargo registry + git index + target dir between runs.
+      # Key on Cargo.lock so a dependency bump invalidates correctly.
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+
+      - name: cargo build --workspace
+        run: cargo build --workspace --locked
+
+      - name: cargo test --workspace
+        run: cargo test --workspace --locked --lib
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --locked -- -D warnings
+
+  frontend:
+    name: Frontend (TS + Vite)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # `packageManager: pnpm@<version>` in package.json is what
+      # corepack uses to pick the right pnpm version; pnpm/action-setup
+      # picks it up automatically with `version: 'package.json'`.
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: pnpm install
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint (tsc --noEmit)
+        run: pnpm lint
+
+      - name: Build (vite + tsc -b)
+        run: pnpm build

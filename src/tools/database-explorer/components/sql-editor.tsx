@@ -49,7 +49,8 @@ import {
 import {
   CodeEditor,
   type CodeEditorHandle,
-} from "@/components/code-editor";
+} from "@zen-tools/editor";
+import { useTheme } from "@/hooks/use-theme";
 import type {
   DbDriverId,
   DbTableDescription,
@@ -119,6 +120,7 @@ export function SqlEditor({
   vimMode = true,
   imperativeRef,
 }: SqlEditorProps) {
+  const { theme } = useTheme();
   const dialect = driver === "postgres" ? PostgreSQL : MSSQL;
 
   // Stable Compartment + reconfigure ref. The compartment lives across
@@ -539,6 +541,7 @@ export function SqlEditor({
         onRunLine={onRun ? () => onRun() : undefined}
         onAltEnter={openActionsPopup}
         vimMode={vimMode}
+        isDark={theme === "dark"}
         imperativeRef={imperativeRef}
         extensions={buildExtensions}
         onView={captureViewRef}

@@ -15,12 +15,14 @@
  */
 
 import { Pencil, Settings as SettingsIcon, StopCircle } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { pmTauri } from "./lib/tauri";
+import { Button } from "@zen-tools/ui";
 import { Dashboard } from "./components/Dashboard";
 import { Picker } from "./components/Picker";
 import { Settings } from "./components/Settings";
-import { useProcessMonitorStore } from "./store/process-monitor-store";
+import {
+  usePmActions,
+  useProcessMonitorStore,
+} from "./store/process-monitor-store";
 
 export function ProcessMonitorShell() {
   return (
@@ -35,6 +37,7 @@ export function ProcessMonitorShell() {
 
 function SubNav() {
   const { state, dispatch } = useProcessMonitorStore();
+  const { stopMonitoring } = usePmActions();
 
   const title = (() => {
     switch (state.view) {
@@ -48,15 +51,6 @@ function SubNav() {
         return "Settings";
     }
   })();
-
-  const onStop = async () => {
-    try {
-      await pmTauri.clearTargets();
-      dispatch({ type: "clearTargets" });
-    } catch (err) {
-      console.error("[shell] clear_targets failed", err);
-    }
-  };
 
   return (
     <div className="flex h-9 shrink-0 items-center gap-2 border-b bg-card/60 px-3">
@@ -77,7 +71,7 @@ function SubNav() {
               size="xs"
               variant="ghost"
               title="Stop monitoring all"
-              onClick={onStop}
+              onClick={() => void stopMonitoring()}
             >
               <StopCircle className="size-3" />
               Stop

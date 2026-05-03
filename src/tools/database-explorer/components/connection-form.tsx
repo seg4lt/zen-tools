@@ -13,8 +13,8 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/dialog";
-import { Button } from "@/components/ui/button";
+} from "@zen-tools/ui";
+import { Button } from "@zen-tools/ui";
 import {
   dbTauri,
   type DbConnectionInput,

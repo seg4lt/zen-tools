@@ -1,5 +1,5 @@
 import { GitBranch, Play } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { cn } from "@zen-tools/ui";
 import type { HttpRequest } from "../lib/tauri";
 import { stableId } from "../store/http-runner-store";
 import { resolveUrl } from "../lib/resolve-url";

@@ -23,7 +23,7 @@ import {
 } from "../store/cleaner-store";
 import { TreeRow } from "./tree-row";
 import type { CleanerTreeNode } from "../lib/tauri";
-import { cn } from "@/lib/utils";
+import { cn } from "@zen-tools/ui";
 
 export function CleanerTree() {
   const { state, dispatch } = useCleanerStore();

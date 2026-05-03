@@ -38,7 +38,7 @@ import { DbTree } from "./components/db-tree";
 import { EditorTabStrip } from "./components/editor-tab-strip";
 import { SqlFileTree } from "./components/sql-file-tree";
 import { DragHandle } from "@/components/drag-handle";
-import { Button } from "@/components/ui/button";
+import { Button } from "@zen-tools/ui";
 import { PanelLeftOpen, PanelRightOpen } from "lucide-react";
 import {
   SqlEditor,
@@ -56,7 +56,7 @@ import { splitStatements, statementAtCursor } from "./lib/sql-statements";
 import { ensureTablesForSql } from "./lib/schema-cache";
 import { useAutoSave } from "@/hooks/use-auto-save";
 import { useShortcut } from "@zen-tools/keyboard";
-import { useVimMode } from "@/tools/http-runner/hooks/use-vim-mode";
+import { useVimMode } from "@/hooks/use-vim-mode";
 
 export function DatabaseExplorerView() {
   useSqlProjectsBootstrap();

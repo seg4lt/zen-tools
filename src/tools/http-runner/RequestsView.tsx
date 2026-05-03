@@ -1,5 +1,12 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import {
   BookOpen,
   Download,
@@ -11,7 +18,7 @@ import {
   Square,
 } from "lucide-react";
 import { DragHandle } from "@/components/drag-handle";
-import { Button } from "@/components/ui/button";
+import { Button } from "@zen-tools/ui";
 import { HttpFileTree } from "./components/http-file-tree";
 import { RequestList } from "./components/request-list";
 import {
@@ -21,10 +28,19 @@ import {
 import { ResponsePanel } from "./components/response-panel";
 import { PaneFrame, type PaneState } from "./components/pane-frame";
 import { PerfTestList } from "./components/perf-test-list";
-import { PerfDashboard } from "./components/perf-dashboard";
+// PerfDashboard pulls in `recharts` (~300 KB) for the latency
+// histogram + sparklines. Lazy-load it so the HTTP-runner's request
+// view stays slim — users who never run a perf test pay zero
+// recharts cost. Mirrors the lazy import pattern Markdown uses for
+// Excalidraw.
+const PerfDashboard = lazy(() =>
+  import("./components/perf-dashboard").then((m) => ({
+    default: m.PerfDashboard,
+  })),
+);
 import { PerfSchemaSheet } from "./components/perf-schema-sheet";
 import { useAutoSave } from "@/hooks/use-auto-save";
-import { useVimMode } from "./hooks/use-vim-mode";
+import { useVimMode } from "@/hooks/use-vim-mode";
 import { usePerfRunner } from "./hooks/use-perf-runner";
 import { onRequestChain, onRequestResult, tauri } from "./lib/tauri";
 import { stableId, useHttpRunner } from "./store/http-runner-store";
@@ -711,11 +727,20 @@ export function RequestsView() {
       onToggleMaximize={() => toggleMaximize("response")}
     >
       {isPerf ? (
-        <PerfDashboard
-          metrics={perf.metrics}
-          currentUsers={perf.currentUsers}
-          exportToast={perf.exportToast}
-        />
+        <Suspense
+          fallback={
+            <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
+              <Loader2 className="mr-1.5 size-3.5 animate-spin" />
+              Loading charts…
+            </div>
+          }
+        >
+          <PerfDashboard
+            metrics={perf.metrics}
+            currentUsers={perf.currentUsers}
+            exportToast={perf.exportToast}
+          />
+        </Suspense>
       ) : (
         <ResponsePanel envVars={envVars} extractedVars={extractedVars} />
       )}

@@ -48,20 +48,20 @@ import {
   Popover,
   PopoverContent,
   PopoverTrigger,
-} from "@/components/ui/popover";
+} from "@zen-tools/ui";
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from "@/components/ui/select";
+} from "@zen-tools/ui";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { cn } from "@/lib/utils";
+import { Badge } from "@zen-tools/ui";
+import { Button } from "@zen-tools/ui";
+import { Input } from "@zen-tools/ui";
+import { Label } from "@zen-tools/ui";
+import { cn } from "@zen-tools/ui";
 import { type SummaryCard } from "../../lib/tauri";
 import {
   calendarYearOfFiscalWeek,

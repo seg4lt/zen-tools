@@ -8,13 +8,11 @@
  */
 
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Keyboard, Loader2, PanelLeftOpen, Save } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import { Button } from "@zen-tools/ui";
 import { DragHandle } from "@/components/drag-handle";
-import { tauri as httpTauri } from "@/tools/http-runner/lib/tauri";
-import { cn } from "@/lib/utils";
-import { PREFERENCES_KEY } from "@/lib/preferences-key";
+import { useVimMode } from "@/hooks/use-vim-mode";
+import { cn } from "@zen-tools/ui";
 import { VaultSidebar } from "./components/vault-sidebar";
 import { SearchPalette } from "./components/search-palette";
 import { EmptyState } from "./components/empty-state";
@@ -47,7 +45,6 @@ export function MarkdownView() {
   const { openFile, saveCurrent, resolveWikilink } = useOpenFile();
   const { addVault, refresh: refreshVaults } = useVaults();
   const editorRef = useRef<MarkdownEditorHandle | null>(null);
-  const queryClient = useQueryClient();
 
   const tab = activeTab(state);
   const isExcalidraw = tab?.kind === "excalidraw";
@@ -98,14 +95,10 @@ export function MarkdownView() {
     });
   }, [tab?.id, tab?.doc, isExcalidraw, state.pendingGotoLine, dispatch]);
 
-  // Vim toggle plumbing — same prefs key as http-runner.  Lazy load,
-  // default `true` to match the tool's historical behaviour.
-  const { data: prefs } = useQuery({
-    queryKey: PREFERENCES_KEY,
-    queryFn: () => httpTauri.getPreferences(),
-    staleTime: Infinity,
-  });
-  const vimMode = prefs?.vimMode ?? true;
+  // Vim toggle plumbing — shared `useVimMode` hook reads + writes the
+  // same prefs blob every tool reads, so the toggle propagates
+  // instantly to the HTTP runner / Database Explorer editors too.
+  const { vimMode, setVimMode } = useVimMode();
 
   const onChange = useCallback(
     (doc: string) => dispatch({ type: "editDoc", doc }),
@@ -254,18 +247,17 @@ export function MarkdownView() {
     void refreshVaults();
   }, [refreshVaults]);
 
-  // Toggle the global `vim_mode` pref.  Writes through Tauri so
-  // every tool (http-runner included) picks up the new value next
-  // render via its `["preferences"]` query.
+  // Toggle the global `vim_mode` pref. The hook's `setVimMode`
+  // round-trips through `getPreferences` + `savePreferences` and
+  // invalidates the React Query cache, so other tools' `useVimMode`
+  // observers re-render with the new value on the next tick.
   const onToggleVim = useCallback(async () => {
-    if (!prefs) return;
     try {
-      await httpTauri.savePreferences({ ...prefs, vimMode: !prefs.vimMode });
-      await queryClient.invalidateQueries({ queryKey: PREFERENCES_KEY });
+      await setVimMode(!vimMode);
     } catch (err) {
       console.error("[markdown] toggle vim failed", err);
     }
-  }, [prefs, queryClient]);
+  }, [vimMode, setVimMode]);
 
   const hasVaults = state.vaults.length > 0;
   const hasFile = !!tab;
@@ -319,19 +311,19 @@ export function MarkdownView() {
               variant="ghost"
               onClick={() => void onToggleVim()}
               title={
-                prefs?.vimMode
+                vimMode
                   ? "Vim mode is ON — click to disable globally"
                   : "Vim mode is OFF — click to enable globally"
               }
               className={cn(
                 "gap-1 font-mono uppercase tracking-wider",
-                prefs?.vimMode
+                vimMode
                   ? "text-emerald-600 dark:text-emerald-400"
                   : "text-muted-foreground",
               )}
             >
               <Keyboard className="size-3" /> vim{" "}
-              {prefs?.vimMode ? "on" : "off"}
+              {vimMode ? "on" : "off"}
             </Button>
           )}
         </div>

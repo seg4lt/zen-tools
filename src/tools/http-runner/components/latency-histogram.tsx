@@ -12,7 +12,7 @@ import {
   ChartTooltip,
   ChartTooltipContent,
   type ChartConfig,
-} from "@/components/ui/chart";
+} from "@zen-tools/ui";
 
 interface LatencyHistogramProps {
   buckets: [string, number][];

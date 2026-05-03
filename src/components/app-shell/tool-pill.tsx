@@ -1,5 +1,5 @@
 import { Link } from "@tanstack/react-router";
-import { cn } from "@/lib/utils";
+import { cn } from "@zen-tools/ui";
 import type { Tool } from "@/config/tools";
 
 interface ToolPillProps {

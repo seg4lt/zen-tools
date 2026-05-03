@@ -17,8 +17,8 @@ import {
   MessageCircle,
   X,
 } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
-import { cn } from "@/lib/utils";
+import { Badge } from "@zen-tools/ui";
+import { cn } from "@zen-tools/ui";
 import type {
   EnrichedPullRequest,
   ReviewDecision,

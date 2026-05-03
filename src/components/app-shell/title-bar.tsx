@@ -1,6 +1,6 @@
 import { useNavigate, useRouterState } from "@tanstack/react-router";
 import { Settings as SettingsIcon } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import { Button } from "@zen-tools/ui";
 import { ToolPill } from "./tool-pill";
 import { isMac, useShortcut } from "@zen-tools/keyboard";
 import { useAppZoom } from "@/hooks/use-app-zoom";

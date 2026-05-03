@@ -1,5 +1,5 @@
-import { Card, CardContent } from "@/components/ui/card";
-import { cn } from "@/lib/utils";
+import { Card, CardContent } from "@zen-tools/ui";
+import { cn } from "@zen-tools/ui";
 import type { MetricsSnapshot } from "../lib/perf-types";
 
 interface PerfCountersProps {

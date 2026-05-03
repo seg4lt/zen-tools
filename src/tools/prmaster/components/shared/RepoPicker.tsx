@@ -11,16 +11,16 @@
 
 import { useMemo, useState } from "react";
 import { ChevronsUpDown, Download, Loader2, X } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
-import { Input } from "@/components/ui/input";
+import { Badge } from "@zen-tools/ui";
+import { Button } from "@zen-tools/ui";
+import { Checkbox } from "@zen-tools/ui";
+import { Input } from "@zen-tools/ui";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { cn } from "@/lib/utils";
+} from "@zen-tools/ui";
+import { cn } from "@zen-tools/ui";
 
 interface Props {
   repos: string[];

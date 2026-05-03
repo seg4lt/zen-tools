@@ -8,7 +8,7 @@
 
 import { Loader2, Sparkles, Trash2 } from "lucide-react";
 import { useMemo } from "react";
-import { Button } from "@/components/ui/button";
+import { Button } from "@zen-tools/ui";
 import {
   Dialog,
   DialogContent,
@@ -16,8 +16,8 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/dialog";
-import { cn } from "@/lib/utils";
+} from "@zen-tools/ui";
+import { cn } from "@zen-tools/ui";
 import { fmtSize } from "../lib/tauri";
 import {
   findNode,

@@ -16,7 +16,7 @@
 import { Sparkles, Trash2 } from "lucide-react";
 import type { MouseEvent } from "react";
 import type { CleanerNodeAction } from "../lib/tauri";
-import { cn } from "@/lib/utils";
+import { cn } from "@zen-tools/ui";
 
 export interface ActionChipProps {
   action: CleanerNodeAction;

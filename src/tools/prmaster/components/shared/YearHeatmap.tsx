@@ -25,7 +25,7 @@
  * "I haven't reached there yet."
  */
 import { Loader2 } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { cn } from "@zen-tools/ui";
 import { fiscalWeekIds, formatWeekTag, weekToRange } from "../../lib/iso-week";
 
 export type CellState = "empty" | "partial" | "complete" | "inFlight";

@@ -71,7 +71,17 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
-        .plugin(tauri_plugin_fs::init())
+        // tauri-plugin-fs intentionally NOT registered — every local
+        // file the frontend reads/writes goes through `read_file_content`
+        // / `write_file_content` Tauri commands (which call into the
+        // crate layer with explicit path validation), and the
+        // markdown live-preview's `<img src=…>` paths use
+        // `convertFileSrc()` over the **asset protocol** (separate
+        // Tauri feature `protocol-asset`, configured in
+        // `tauri.conf.json::security.assetProtocol`). The fs plugin
+        // would let arbitrary frontend code touch arbitrary paths
+        // without going through our wrappers — strictly tighter to
+        // omit it.
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())

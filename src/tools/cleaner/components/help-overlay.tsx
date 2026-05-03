@@ -8,7 +8,7 @@ import {
   DialogDescription,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/dialog";
+} from "@zen-tools/ui";
 import { useCleanerStore } from "../store/cleaner-store";
 
 interface Binding {

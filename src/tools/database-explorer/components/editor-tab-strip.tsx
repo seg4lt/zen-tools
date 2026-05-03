@@ -16,8 +16,8 @@
  * UI change.
  */
 import { FileText, X } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { cn } from "@/lib/utils";
+import { Button } from "@zen-tools/ui";
+import { cn } from "@zen-tools/ui";
 import { useDbExplorerStore } from "../store/db-explorer-store";
 
 export function EditorTabStrip() {

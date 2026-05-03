@@ -35,8 +35,8 @@ import {
   Sparkles,
   TextSearch,
 } from "lucide-react";
-import { Dialog, DialogContent } from "@/components/ui/dialog";
-import { cn } from "@/lib/utils";
+import { Dialog, DialogContent } from "@zen-tools/ui";
+import { cn } from "@zen-tools/ui";
 import {
   basenameNoExt,
   markdownTauri,

@@ -5,8 +5,8 @@
  * in the app (HTTP runner + Database Explorer + Markdown).
  */
 
-import { Button } from "@/components/ui/button";
-import { useVimMode } from "@/tools/http-runner/hooks/use-vim-mode";
+import { Button } from "@zen-tools/ui";
+import { useVimMode } from "@/hooks/use-vim-mode";
 
 export function VimToggle() {
   const { vimMode, setVimMode, isLoaded } = useVimMode();

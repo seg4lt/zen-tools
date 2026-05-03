@@ -21,14 +21,14 @@ import {
   Trash2,
 } from "lucide-react";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
-import { Button } from "@/components/ui/button";
+import { Button } from "@zen-tools/ui";
 import {
   ContextMenu,
   ContextMenuContent,
   ContextMenuItem,
   ContextMenuTrigger,
-} from "@/components/ui/context-menu";
-import { cn } from "@/lib/utils";
+} from "@zen-tools/ui";
+import { cn } from "@zen-tools/ui";
 import { useCleanerStore } from "../store/cleaner-store";
 import { useCleanerScans } from "../hooks/use-cleaner-scans";
 

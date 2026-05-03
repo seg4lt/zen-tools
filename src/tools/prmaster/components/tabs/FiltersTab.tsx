@@ -15,10 +15,10 @@ import {
   RefreshCw,
   Trash2,
 } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { Switch } from "@/components/ui/switch";
-import { cn } from "@/lib/utils";
+import { Badge } from "@zen-tools/ui";
+import { Button } from "@zen-tools/ui";
+import { Switch } from "@zen-tools/ui";
+import { cn } from "@zen-tools/ui";
 import { Panel, PanelContent, PanelTitle } from "../shared/density";
 import {
   prmasterTauri,

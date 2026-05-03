@@ -7,7 +7,7 @@
 
 import { useMemo } from "react";
 import { X } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { cn } from "@zen-tools/ui";
 import { fmtBytes, fmtCpu } from "../lib/format";
 import type { Sample } from "../lib/tauri";
 import { Sparkline } from "./Sparkline";

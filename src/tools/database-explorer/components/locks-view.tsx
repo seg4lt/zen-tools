@@ -31,7 +31,7 @@ import {
   Lock,
   ShieldAlert,
 } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { cn } from "@zen-tools/ui";
 import type {
   DbLockGranularity,
   DbLockSummary,

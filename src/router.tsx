@@ -20,6 +20,7 @@ import { DatabaseExplorerShell } from "@/tools/database-explorer/DatabaseExplore
 import { PRMasterShell } from "@/tools/prmaster/PRMasterShell";
 import { SettingsView } from "@/tools/settings/SettingsView";
 import { readLastRoute } from "@/hooks/use-last-route";
+import { isPrmasterPopover } from "@/lib/window-kind";
 
 const rootRoute = createRootRoute({
   component: () => {
@@ -27,7 +28,7 @@ const rootRoute = createRootRoute({
     // in `tauri.conf.json`) renders the same React tree as the main
     // window — it just skips the TitleBar so the popover is pure tool
     // chrome. We detect it by Tauri window label (set in the config).
-    const isPopover = isPopoverWindow();
+    const isPopover = isPrmasterPopover();
     return (
       <div className="flex h-screen w-screen flex-col overflow-hidden bg-background text-foreground">
         {!isPopover && <TitleBar />}
@@ -54,7 +55,7 @@ const rootRoute = createRootRoute({
 function FocusRouteListener() {
   const navigate = useNavigate();
   useEffect(() => {
-    if (isPopoverWindow()) return;
+    if (isPrmasterPopover()) return;
     let unlisten: (() => void) | null = null;
     (async () => {
       unlisten = await listen<string>("prmaster:focus-route", (event) => {
@@ -76,22 +77,6 @@ function FocusRouteListener() {
   return null;
 }
 
-/**
- * Returns `true` when this React tree is mounted inside the menu-bar
- * popover window. Tauri 2 exposes the current window label via
- * `__TAURI_INTERNALS__.metadata.currentWindow.label`.
- */
-function isPopoverWindow(): boolean {
-  if (typeof window === "undefined") return false;
-  const label = (
-    window as unknown as {
-      __TAURI_INTERNALS__?: {
-        metadata?: { currentWindow?: { label?: string } };
-      };
-    }
-  ).__TAURI_INTERNALS__?.metadata?.currentWindow?.label;
-  return label === "prmaster-popover";
-}
 
 const indexRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -102,7 +87,7 @@ const indexRoute = createRoute({
     // `/index.html` request) — redirect that window straight to
     // `/prmaster` regardless of the last-route fallback used by the
     // main window.
-    if (isPopoverWindow()) {
+    if (isPrmasterPopover()) {
       throw redirect({ to: "/prmaster" });
     }
     // Resume on the last route the user was viewing (sync read from

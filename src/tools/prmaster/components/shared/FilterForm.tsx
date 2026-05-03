@@ -7,11 +7,11 @@
 
 import { useEffect, useState } from "react";
 import { Loader2, Save, X } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Separator } from "@/components/ui/separator";
+import { Button } from "@zen-tools/ui";
+import { Checkbox } from "@zen-tools/ui";
+import { Input } from "@zen-tools/ui";
+import { Label } from "@zen-tools/ui";
+import { Separator } from "@zen-tools/ui";
 import { Panel, PanelContent, PanelFooter } from "./density";
 import {
   Select,
@@ -19,8 +19,8 @@ import {
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from "@/components/ui/select";
-import { Textarea } from "@/components/ui/textarea";
+} from "@zen-tools/ui";
+import { Textarea } from "@zen-tools/ui";
 import {
   prmasterTauri,
   type NotificationActionKind,

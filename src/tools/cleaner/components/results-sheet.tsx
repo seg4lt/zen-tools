@@ -7,7 +7,7 @@
  */
 
 import { CheckCircle2, XCircle } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import { Button } from "@zen-tools/ui";
 import {
   Sheet,
   SheetContent,
@@ -15,7 +15,7 @@ import {
   SheetFooter,
   SheetHeader,
   SheetTitle,
-} from "@/components/ui/sheet";
+} from "@zen-tools/ui";
 import { useCleanerStore } from "../store/cleaner-store";
 
 export function ResultsSheet() {

@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { ArrowLeft, Loader2 } from "lucide-react";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Badge } from "@/components/ui/badge";
-import { cn } from "@/lib/utils";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@zen-tools/ui";
+import { Badge } from "@zen-tools/ui";
+import { cn } from "@zen-tools/ui";
 import { useHttpRunner } from "../store/http-runner-store";
 import { HeadersTable } from "./headers-table";
 import { DependencyChain } from "./dependency-chain";

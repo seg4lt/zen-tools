@@ -21,7 +21,7 @@ import {
   verticalListSortingStrategy,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { cn } from "@/lib/utils";
+import { cn } from "@zen-tools/ui";
 import { useToolOrder } from "@/hooks/use-tool-order";
 import type { Tool } from "@/config/tools";
 

@@ -11,7 +11,7 @@
 
 import { useMemo, useState } from "react";
 import { ChevronDown, ChevronRight } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { cn } from "@zen-tools/ui";
 import { cpuSeverity, fmtBytes, fmtCpu } from "../lib/format";
 import type { PidStats, Sample } from "../lib/tauri";
 

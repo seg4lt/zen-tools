@@ -5,7 +5,7 @@ import {
   ChartTooltip,
   ChartTooltipContent,
   type ChartConfig,
-} from "@/components/ui/chart";
+} from "@zen-tools/ui";
 
 type ChartColorVar =
   | "chart-1"

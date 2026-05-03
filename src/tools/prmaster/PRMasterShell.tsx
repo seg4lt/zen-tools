@@ -33,8 +33,8 @@ import {
   User,
 } from "lucide-react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { cn } from "@/lib/utils";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@zen-tools/ui";
+import { cn } from "@zen-tools/ui";
 import { AiSummaryTab } from "./components/tabs/AiSummaryTab";
 import { ApiStatsTab } from "./components/tabs/ApiStatsTab";
 import { ConversationsTab } from "./components/tabs/ConversationsTab";

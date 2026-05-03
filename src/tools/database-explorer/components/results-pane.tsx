@@ -12,8 +12,8 @@
 
 import { useState } from "react";
 import { AlertCircle, Copy, Lock, Maximize2, Minimize2, Table as TableIcon, X } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { cn } from "@/lib/utils";
+import { Button } from "@zen-tools/ui";
+import { cn } from "@zen-tools/ui";
 import { ResultsGrid } from "./results-grid";
 import { ExplainViews } from "./explain-views";
 import { LocksView } from "./locks-view";

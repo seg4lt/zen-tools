@@ -26,7 +26,7 @@ import {
   CommandList,
   CommandSeparator,
   CommandShortcut,
-} from "@/components/ui/command";
+} from "@zen-tools/ui";
 import {
   REPOS_SECTION_ID,
   useCleanerStore,

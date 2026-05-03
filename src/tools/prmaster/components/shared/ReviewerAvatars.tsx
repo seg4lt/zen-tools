@@ -2,7 +2,7 @@
  * Per-reviewer chips for the PR detail panel. Uses shadcn Badge variants.
  */
 
-import { Badge } from "@/components/ui/badge";
+import { Badge } from "@zen-tools/ui";
 import type { EnrichedPullRequest, ReviewState } from "../../lib/tauri";
 
 interface Props {

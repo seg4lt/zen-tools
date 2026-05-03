@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { cn } from "@/lib/utils";
+import { cn } from "@zen-tools/ui";
 
 interface DragHandleProps {
   /** Initial pixel size of the pane this handle controls. */

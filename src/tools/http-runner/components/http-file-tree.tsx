@@ -19,8 +19,8 @@ import {
   type FileTreeItem,
   type FileType,
 } from "../lib/tauri";
-import { Button } from "@/components/ui/button";
-import { cn } from "@/lib/utils";
+import { Button } from "@zen-tools/ui";
+import { cn } from "@zen-tools/ui";
 import { useProjectActions } from "../hooks/use-projects";
 
 interface HttpFileTreeProps {

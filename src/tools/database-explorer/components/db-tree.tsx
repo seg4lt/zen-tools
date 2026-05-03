@@ -52,7 +52,7 @@ import {
   Popover,
   PopoverContent,
   PopoverTrigger,
-} from "@/components/ui/popover";
+} from "@zen-tools/ui";
 import { useDbExplorerStore } from "../store/db-explorer-store";
 import { useDbTree } from "../hooks/use-db-tree";
 import {

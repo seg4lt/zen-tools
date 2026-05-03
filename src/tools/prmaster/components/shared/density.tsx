@@ -14,7 +14,7 @@
  * PRMaster spacing baked in. Drop-in replacements for `<Card>` /
  * `<CardHeader>` / `<CardContent>` / `<CardTitle>` / `<CardFooter>`.
  */
-import { cn } from "@/lib/utils";
+import { cn } from "@zen-tools/ui";
 
 export function Panel({
   className,
