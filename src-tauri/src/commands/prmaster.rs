@@ -318,10 +318,14 @@ pub async fn prmaster_delete_filter(
         .map_err(|e| crate::error::AppError::Other(format!("filter store: {e}")))
 }
 
-/// Hide the menu-bar popover window. Called by the popover shell on `blur`.
+/// Destroy the menu-bar popover window. Called by the popover shell on
+/// `blur` so the WKWebView's `WebContent` subprocess is freed when the
+/// user clicks away (the next tray click rebuilds it). Renamed from
+/// `prmaster_hide_popover` — the JS side still invokes the old name
+/// during a transitional period; both routes through the same destroy.
 #[tauri::command]
 pub async fn prmaster_hide_popover(app: AppHandle) -> AppResult<()> {
-    crate::prmaster_tray::hide_popover(&app);
+    crate::prmaster_tray::destroy_popover(&app);
     Ok(())
 }
 

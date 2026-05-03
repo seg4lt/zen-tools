@@ -1,17 +1,27 @@
 /**
  * Single source of truth for "which Tauri window am I rendering in?".
  *
- * The app has three webview windows defined in `tauri.conf.json`:
+ * Three webview windows can be alive at once:
  *
- *   - **main**             — the full app window with router + tools
- *   - **pm-popover**       — the menu-bar Process-Monitor popover
- *                            (loads `index.html?window=pm-popover` so
- *                             `main.tsx` mounts `<MiniMonitorApp />`
- *                             instead of the full `<App />`)
- *   - **prmaster-popover** — the menu-bar PRMaster popover (loads `/`
- *                            with the Tauri window label set to
+ *   - **main**             — the full app window with router + tools.
+ *                            Declared in `tauri.conf.json`.
+ *   - **pm-popover**       — the menu-bar Process-Monitor popover, lazy-
+ *                            built by `tray.rs::build_popover` on tray
+ *                            click and destroyed on dismiss/blur. Loads
+ *                            `index.html?window=pm-popover` so
+ *                            `main.tsx` mounts `<MiniMonitorApp />`
+ *                            instead of the full `<App />`.
+ *   - **prmaster-popover** — the menu-bar PRMaster popover, lazy-built
+ *                            by `prmaster_tray.rs::build_popover`. Loads
+ *                            `/` with the Tauri window label set to
  *                            `prmaster-popover`; the router redirects
- *                            it to `/prmaster` and trims the title bar)
+ *                            it to `/prmaster` and trims the title bar.
+ *
+ * The popovers are NOT pre-declared in `tauri.conf.json` — pre-declared
+ * windows leak their WKWebView's `WebContent` subprocess for the app's
+ * lifetime once summoned. Lazy build + destroy on dismiss frees the
+ * subprocess every time the user clicks away (recipe ported from
+ * flowstate's popout pattern).
  *
  * Two different mechanisms historically detected these — `?window=`
  * query string for the PM popover (because `MiniMonitorApp` is a
@@ -41,9 +51,10 @@ export function getWindowKind(): WindowKind {
   }
 
   // 2. PRMaster popover: signalled via the Tauri window label
-  //    (`prmaster-popover`, declared in `tauri.conf.json`). The
-  //    label sits on `__TAURI_INTERNALS__.metadata.currentWindow`
-  //    once the Tauri runtime initialises the window.
+  //    (`prmaster-popover`, set when `WebviewWindowBuilder::new`
+  //    builds the window in `prmaster_tray.rs`). The label sits on
+  //    `__TAURI_INTERNALS__.metadata.currentWindow` once the Tauri
+  //    runtime initialises the window.
   const label = (
     window as unknown as {
       __TAURI_INTERNALS__?: {

@@ -79,6 +79,14 @@ pub struct Preferences {
     /// read time; tools missing from the saved list get appended.
     #[serde(default)]
     pub tool_order: Vec<String>,
+    /// Tool ids the user has explicitly disabled. Disabled tools
+    /// vanish from the title-bar pills, their routes redirect away,
+    /// their frontend providers don't mount, and their backend
+    /// lifecycle hooks (currently only PRMaster's tray, polling,
+    /// hotkey, and broadcast bridge) are torn down. Toggling back on
+    /// re-arms everything live without an app restart.
+    #[serde(default)]
+    pub disabled_tools: Vec<String>,
 }
 
 /// One persisted Database Explorer connection. Mirrors
@@ -141,6 +149,7 @@ impl Default for Preferences {
             sql_workspace_dirs: Vec::new(),
             app_zoom: default_app_zoom(),
             tool_order: Vec::new(),
+            disabled_tools: Vec::new(),
         }
     }
 }
@@ -185,4 +194,41 @@ pub async fn get_preferences(app: AppHandle) -> AppResult<Preferences> {
 #[tauri::command]
 pub async fn save_preferences(prefs: Preferences, app: AppHandle) -> AppResult<()> {
     write_preferences(&app, &prefs)
+}
+
+/// Toggle a single tool on or off. Routes through the backend (rather
+/// than the front-end calling `save_preferences` directly) so any
+/// tool-specific lifecycle hook fires atomically with the preference
+/// write — today only PRMaster has one (tray, polling, hotkey,
+/// broadcast bridge), but the dispatch shape lets new tools opt in
+/// without changing the front-end contract.
+#[tauri::command]
+pub async fn set_tool_disabled(
+    tool_id: String,
+    disabled: bool,
+    app: AppHandle,
+) -> AppResult<()> {
+    let mut prefs = load_preferences(&app)?;
+    let already_disabled = prefs.disabled_tools.iter().any(|id| id == &tool_id);
+    if disabled == already_disabled {
+        return Ok(()); // no-op; preserves the lifecycle invariants
+    }
+    if disabled {
+        prefs.disabled_tools.push(tool_id.clone());
+    } else {
+        prefs.disabled_tools.retain(|id| id != &tool_id);
+    }
+    write_preferences(&app, &prefs)?;
+
+    // Tool-specific live lifecycle dispatch. Other tools have no
+    // always-on machinery to gate, so they fall through.
+    if tool_id == "prmaster" {
+        if disabled {
+            crate::prmaster_lifecycle::stop(&app);
+        } else {
+            crate::prmaster_lifecycle::start(&app);
+        }
+    }
+
+    Ok(())
 }

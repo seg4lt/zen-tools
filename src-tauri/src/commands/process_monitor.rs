@@ -133,7 +133,7 @@ pub async fn pm_set_poll_interval(
 /// forward.
 #[tauri::command]
 pub async fn pm_popover_close(app: AppHandle) -> AppResult<()> {
-    tray::hide_popover(&app);
+    tray::destroy_popover(&app);
     Ok(())
 }
 
@@ -147,6 +147,6 @@ pub async fn pm_show_main_window(app: AppHandle) -> AppResult<()> {
         let _ = win.show();
         let _ = win.set_focus();
     }
-    tray::hide_popover(&app);
+    tray::destroy_popover(&app);
     Ok(())
 }

@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, type ReactNode } from "react";
 import {
   createRootRoute,
   createRoute,
@@ -20,6 +20,7 @@ import { DatabaseExplorerShell } from "@/tools/database-explorer/DatabaseExplore
 import { PRMasterShell } from "@/tools/prmaster/PRMasterShell";
 import { SettingsView } from "@/tools/settings/SettingsView";
 import { readLastRoute } from "@/hooks/use-last-route";
+import { useToolOrder } from "@/hooks/use-tool-order";
 import { isPrmasterPopover } from "@/lib/window-kind";
 
 const rootRoute = createRootRoute({
@@ -52,6 +53,38 @@ const rootRoute = createRootRoute({
  * router URL is set at window creation and the window itself stays
  * scoped to PRMaster.
  */
+/**
+ * Renders its children when the named tool is enabled; redirects to
+ * the first enabled tool (or `/`) when the tool is disabled. Lets the
+ * user re-enable a tool from /settings and then navigate back to it
+ * without a page reload.
+ *
+ * The PRMaster popover window is exempt: the popover is a dedicated
+ * single-tool surface and only appears when PRMaster is enabled (the
+ * tray icon that summons it is itself gated on the same flag).
+ */
+function DisabledGuard({
+  toolId,
+  children,
+}: {
+  toolId: string;
+  children: ReactNode;
+}) {
+  const { tools, disabledIds, isLoaded } = useToolOrder();
+  const navigate = useNavigate();
+  const isDisabled = disabledIds.has(toolId);
+
+  useEffect(() => {
+    if (!isLoaded || !isDisabled) return;
+    if (isPrmasterPopover()) return;
+    const fallback = tools[0]?.route ?? "/";
+    void navigate({ to: fallback });
+  }, [isDisabled, isLoaded, navigate, tools]);
+
+  if (isDisabled && !isPrmasterPopover()) return null;
+  return <>{children}</>;
+}
+
 function FocusRouteListener() {
   const navigate = useNavigate();
   useEffect(() => {
@@ -102,7 +135,11 @@ const indexRoute = createRoute({
 const httpRunnerRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/http-runner",
-  component: HTTPRunnerShell,
+  component: () => (
+    <DisabledGuard toolId="http-runner">
+      <HTTPRunnerShell />
+    </DisabledGuard>
+  ),
 });
 
 const httpRunnerIndexRoute = createRoute({
@@ -133,25 +170,41 @@ const performanceRoute = createRoute({
 const processMonitorRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/process-monitor",
-  component: ProcessMonitorShell,
+  component: () => (
+    <DisabledGuard toolId="process-monitor">
+      <ProcessMonitorShell />
+    </DisabledGuard>
+  ),
 });
 
 const cleanerRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/cleaner",
-  component: CleanerShell,
+  component: () => (
+    <DisabledGuard toolId="cleaner">
+      <CleanerShell />
+    </DisabledGuard>
+  ),
 });
 
 const markdownRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/markdown",
-  component: MarkdownShell,
+  component: () => (
+    <DisabledGuard toolId="markdown">
+      <MarkdownShell />
+    </DisabledGuard>
+  ),
 });
 
 const databaseExplorerRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/database-explorer",
-  component: DatabaseExplorerShell,
+  component: () => (
+    <DisabledGuard toolId="database-explorer">
+      <DatabaseExplorerShell />
+    </DisabledGuard>
+  ),
 });
 
 const settingsRoute = createRoute({
@@ -163,7 +216,11 @@ const settingsRoute = createRoute({
 const prmasterRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/prmaster",
-  component: PRMasterShell,
+  component: () => (
+    <DisabledGuard toolId="prmaster">
+      <PRMasterShell />
+    </DisabledGuard>
+  ),
 });
 
 const routeTree = rootRoute.addChildren([

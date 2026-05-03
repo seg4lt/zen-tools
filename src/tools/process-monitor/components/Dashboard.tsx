@@ -70,7 +70,7 @@ export function Dashboard() {
 
       <div className="text-xs text-muted-foreground">
         {latest
-          ? `Updated ${fmtTime(latest.ts)} · RSS ${fmtBytes(latest.total.rss)} · VM ${fmtBytes(latest.total.vsize)}`
+          ? `Updated ${fmtTime(latest.ts)} · Mem ${fmtBytes(latest.total.phys_footprint)} · RSS ${fmtBytes(latest.total.rss)} · VM ${fmtBytes(latest.total.vsize)}`
           : "Awaiting first sample…"}
       </div>
     </div>

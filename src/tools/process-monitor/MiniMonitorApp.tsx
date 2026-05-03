@@ -55,12 +55,15 @@ export function MiniMonitorApp() {
       setSample(null);
     });
 
-    // Auto-hide on focus loss so the popover behaves like a real
-    // status-bar panel. Without this the user has to click the tray
-    // icon a second time to dismiss.
+    // Auto-destroy on focus loss so the popover behaves like a real
+    // status-bar panel — and so the WKWebView's `WebContent`
+    // subprocess is freed every time the user clicks away. Hiding
+    // (the previous implementation) left the subprocess resident
+    // forever once the popover had been summoned. The next tray
+    // click rebuilds the popover from scratch.
     const win = getCurrentWebviewWindow();
     const unlistenBlur = win.listen("tauri://blur", () => {
-      win.hide().catch(() => {});
+      win.destroy().catch(() => {});
     });
 
     return () => {
@@ -75,6 +78,21 @@ export function MiniMonitorApp() {
   // explicitly-monitored process, summed across its full subtree.
   // Derived from the sample directly — no extra config fetch needed,
   // so any newly-added target shows up on the next sample tick.
+  //
+  // Two memory metrics are surfaced side-by-side because they answer
+  // different questions and a single number is misleading:
+  //   • `mem` (= `phys_footprint`) — macOS's canonical memory-accounting
+  //     figure (anonymous + IOKit-mapped + purgeable + compressed),
+  //     i.e. what Activity Monitor labels "Memory" and what the kernel
+  //     uses for jetsam pressure decisions.
+  //   • `rss` (= `pti_resident_size`) — pages currently in DRAM right
+  //     now, as reported by `top`/`ps`.
+  // RSS is always ≤ Mem; the gap is compressed/swapped pages still
+  // charged to the process.
+  //
+  // Ancestors are excluded from both sums (matching ProcessGraph and
+  // the sampler's `TotalStats`) so the per-row numbers and the
+  // header totals always agree.
   const perRoot = useMemo(() => {
     if (!sample || sample.per_pid.length === 0) {
       return [] as Array<{
@@ -82,25 +100,39 @@ export function MiniMonitorApp() {
         name: string;
         cpu: number;
         rss: number;
+        mem: number;
         procCount: number;
       }>;
     }
 
     const byRoot = new Map<
       number,
-      { name: string; cpu: number; rss: number; n: number; firstSeen: number }
+      {
+        name: string;
+        cpu: number;
+        rss: number;
+        mem: number;
+        n: number;
+        firstSeen: number;
+      }
     >();
     let order = 0;
     for (const p of sample.per_pid) {
+      // Ancestor rows are context only — they shouldn't roll up into
+      // the per-target totals (otherwise launchd, the user shell, etc.
+      // double-count and the popover diverges from the main window).
+      if (p.is_ancestor) continue;
       const entry = byRoot.get(p.root_pid) ?? {
         name: "",
         cpu: 0,
         rss: 0,
+        mem: 0,
         n: 0,
         firstSeen: order++,
       };
       entry.cpu += p.cpu_pct;
       entry.rss += p.rss;
+      entry.mem += p.phys_footprint;
       entry.n += 1;
       // The root row has pid === root_pid; capture its name as the label.
       if (p.pid === p.root_pid) entry.name = p.name;
@@ -116,6 +148,7 @@ export function MiniMonitorApp() {
         name: e.name || `pid ${rootPid}`,
         cpu: e.cpu,
         rss: e.rss,
+        mem: e.mem,
         procCount: e.n,
       }));
   }, [sample]);
@@ -154,7 +187,9 @@ export function MiniMonitorApp() {
         </button>
       </div>
 
-      {/* Totals strip */}
+      {/* Totals strip — both memory metrics shown so the popover
+          matches the main-window dashboard (which also exposes both)
+          and so the user can see compressed-vs-resident at a glance. */}
       {sample && (
         <div className="flex shrink-0 items-baseline gap-3 border-b border-border/50 bg-card/40 px-3 py-2">
           <div>
@@ -170,9 +205,23 @@ export function MiniMonitorApp() {
           </div>
           <div>
             <div className="text-[10px] uppercase tracking-wide text-muted-foreground">
+              Total Mem
+            </div>
+            <div
+              className="text-sm font-semibold tabular-nums"
+              title="phys_footprint — Activity Monitor's 'Memory' column"
+            >
+              {fmtBytes(sample.total.phys_footprint)}
+            </div>
+          </div>
+          <div>
+            <div className="text-[10px] uppercase tracking-wide text-muted-foreground">
               Total RSS
             </div>
-            <div className="text-sm font-semibold tabular-nums">
+            <div
+              className="text-sm font-semibold tabular-nums text-muted-foreground"
+              title="pti_resident_size — pages currently in DRAM"
+            >
               {fmtBytes(sample.total.rss)}
             </div>
           </div>
@@ -211,15 +260,27 @@ export function MiniMonitorApp() {
                     {row.procCount > 1 ? ` · ${row.procCount} procs` : ""}
                   </div>
                 </div>
-                <div className="text-right">
+                <div className="text-right tabular-nums">
                   <div
-                    className="text-xs font-semibold tabular-nums"
+                    className="text-xs font-semibold"
                     style={{ color: cpuSeverity(row.cpu) }}
                   >
                     {fmtCpu(row.cpu)}
                   </div>
-                  <div className="text-[10px] text-muted-foreground tabular-nums">
-                    {fmtBytes(row.rss)}
+                  {/* Mem (phys_footprint) on top — that's the number
+                      Activity Monitor shows. RSS underneath in muted
+                      so the user can spot compression at a glance. */}
+                  <div
+                    className="text-[10px]"
+                    title="phys_footprint — Activity Monitor's 'Memory'"
+                  >
+                    Mem {fmtBytes(row.mem)}
+                  </div>
+                  <div
+                    className="text-[10px] text-muted-foreground"
+                    title="RSS — pages resident in DRAM right now"
+                  >
+                    RSS {fmtBytes(row.rss)}
                   </div>
                 </div>
               </li>

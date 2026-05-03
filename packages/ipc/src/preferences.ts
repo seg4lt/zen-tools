@@ -26,6 +26,14 @@ export interface Preferences {
   appZoom?: number;
   /** User-defined tool ordering for the title-bar pills. */
   toolOrder?: string[];
+  /**
+   * Tool ids the user has explicitly disabled. Disabled tools vanish
+   * from the title-bar pills, their routes redirect away, their
+   * frontend providers don't mount, and their backend lifecycle
+   * hooks (PRMaster tray, polling, hotkey, broadcast bridge) are
+   * torn down — toggling back on re-arms everything live.
+   */
+  disabledTools?: string[];
   /** Markdown vault folders. */
   markdownVaultDirs?: string[];
   /** Most recently opened markdown files (front of list = most recent). */

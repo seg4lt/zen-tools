@@ -56,6 +56,11 @@ export function ProcessGraph({
       ),
     [history, rootPid],
   );
+  // Mem (phys_footprint) drives the sparkline because it's the
+  // canonical macOS memory-accounting metric (matches Activity
+  // Monitor's "Memory" column). RSS is shown alongside it numerically
+  // so the user can spot compressed memory at a glance, but charting
+  // both would double the card height for marginal gain.
   const memSeries = useMemo(
     () =>
       history.map((s) =>
@@ -65,6 +70,13 @@ export function ProcessGraph({
       ),
     [history, rootPid],
   );
+  const rssNow = useMemo(() => {
+    const last = history[history.length - 1];
+    if (!last) return 0;
+    return last.per_pid
+      .filter((p) => p.root_pid === rootPid && !p.is_ancestor)
+      .reduce((acc, p) => acc + p.rss, 0);
+  }, [history, rootPid]);
 
   const cpuNow = cpuSeries.length > 0 ? cpuSeries[cpuSeries.length - 1] : 0;
   const memNow = memSeries.length > 0 ? memSeries[memSeries.length - 1] : 0;
@@ -130,7 +142,20 @@ export function ProcessGraph({
               height={28}
             />
           </div>
-          <span className="w-16 text-right tabular-nums">{fmtBytes(memNow)}</span>
+          {/* Two stacked numbers: Mem (phys_footprint, what Activity
+              Monitor shows) on top, RSS (resident in DRAM) below in
+              muted. Single sparkline keeps the card compact. */}
+          <span className="flex w-20 flex-col items-end leading-tight tabular-nums">
+            <span title="phys_footprint — Activity Monitor's 'Memory'">
+              {fmtBytes(memNow)}
+            </span>
+            <span
+              className="text-[10px] text-muted-foreground"
+              title="RSS — pages resident in DRAM right now"
+            >
+              RSS {fmtBytes(rssNow)}
+            </span>
+          </span>
         </div>
       </div>
     </div>

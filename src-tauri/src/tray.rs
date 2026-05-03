@@ -35,7 +35,8 @@ use tauri::{
     image::Image,
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{TrayIconBuilder, TrayIconEvent},
-    AppHandle, Emitter, Manager, PhysicalPosition, Position, Size,
+    webview::WebviewWindowBuilder,
+    AppHandle, Emitter, Manager, PhysicalPosition, Position, Size, WebviewUrl,
 };
 use tokio::sync::Mutex;
 
@@ -43,8 +44,14 @@ use tokio::sync::Mutex;
 const TRAY_ID: &str = "zen-tools";
 
 /// Window label of the small popover spawned by left-clicking the tray.
-/// Declared in `tauri.conf.json` (hidden by default) so we can just
-/// reposition + show it on demand without going through `WebviewWindowBuilder`.
+///
+/// The popover is **not** pre-declared in `tauri.conf.json`; we build it
+/// lazily on the first tray click and destroy it on dismiss/blur. That
+/// matches macOS NSPopover semantics and — more importantly — frees the
+/// WKWebView's `WebContent` subprocess when the user isn't looking at it
+/// (a hidden WKWebView still keeps that process resident, which is the
+/// memory leak we used to ship). Recipe ported from flowstate's popout
+/// pattern (`apps/flowstate/src-tauri/src/lib.rs::popout_thread`).
 const POPOVER_LABEL: &str = "pm-popover";
 
 /// Embedded template PNG (auto-inverts for light/dark menu bars).
@@ -103,6 +110,13 @@ async fn update_tray_inner(app: &AppHandle) -> tauri::Result<()> {
                 let _ = app.run_on_main_thread(move || {
                     drop(tray);
                     let _ = app_clone.remove_tray_by_id(TRAY_ID);
+                    // The popover was summoned via this tray icon; if
+                    // it's still open when monitoring stops, the user
+                    // has no way to dismiss it (no tray to click) and
+                    // it would leak its WKWebView. Destroy it
+                    // proactively so the popover lifecycle tracks the
+                    // tray's.
+                    destroy_popover(&app_clone);
                 });
             }
         }
@@ -166,21 +180,27 @@ fn build_tray(
         .build(app)
 }
 
-/// Show or hide the mini popover window. Positioned just below the tray
-/// icon so it reads as an attached panel rather than a free-floating
-/// window. If the popover is already visible, a second click hides it.
+/// Toggle the mini popover window. If a popover already exists this is a
+/// dismiss gesture — destroy it. Otherwise build a fresh one positioned
+/// just below the tray icon so it reads as an attached panel.
+///
+/// Building (rather than show/hide-ing a pre-declared window) is what
+/// keeps the WKWebView's `WebContent` subprocess from leaking when the
+/// popover isn't open — see the comment on [`POPOVER_LABEL`].
 fn toggle_popover(app: &AppHandle, tray_pos: Position, tray_size: Size) {
-    let Some(win) = app.get_webview_window(POPOVER_LABEL) else {
-        tracing::warn!("popover window '{}' not found", POPOVER_LABEL);
-        return;
-    };
-
-    // If already visible, treat the click as a "dismiss" gesture so the
-    // tray feels like a togglable status item.
-    if win.is_visible().unwrap_or(false) {
-        let _ = win.hide();
+    // Already open → treat the click as "dismiss" and tear it down.
+    if app.get_webview_window(POPOVER_LABEL).is_some() {
+        destroy_popover(app);
         return;
     }
+
+    let win = match build_popover(app) {
+        Ok(w) => w,
+        Err(e) => {
+            tracing::warn!(error = %e, "pm popover build failed");
+            return;
+        }
+    };
 
     // Normalise the tray rect into physical pixels regardless of
     // which Position/Size variant the platform returns; window
@@ -205,11 +225,38 @@ fn toggle_popover(app: &AppHandle, tray_pos: Position, tray_size: Size) {
     let _ = win.set_focus();
 }
 
-/// Hide the popover (called from the popover's "Open Full Window" button
-/// via the `pm_popover_close` command).
-pub fn hide_popover(app: &AppHandle) {
+/// Build a fresh PM popover window. Mirrors the declaration that used
+/// to live in `tauri.conf.json` — same label, same dimensions, same
+/// always-on-top transparent chrome — but constructed on demand so it
+/// doesn't pin a WKWebView subprocess in memory while idle.
+fn build_popover(app: &AppHandle) -> tauri::Result<tauri::WebviewWindow> {
+    WebviewWindowBuilder::new(
+        app,
+        POPOVER_LABEL,
+        WebviewUrl::App("index.html?window=pm-popover".into()),
+    )
+    .title("Process Monitor")
+    .inner_size(340.0, 280.0)
+    .resizable(false)
+    .decorations(false)
+    .transparent(true)
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .focused(false)
+    .visible(false)
+    .shadow(true)
+    .build()
+}
+
+/// Destroy the popover (tearing down its WKWebView). Called from the
+/// popover's "Open Full Window" button via the `pm_popover_close`
+/// command, on focus loss from the JS side, and whenever the tray
+/// itself goes away (no PIDs being monitored). Idempotent.
+pub fn destroy_popover(app: &AppHandle) {
     if let Some(win) = app.get_webview_window(POPOVER_LABEL) {
-        let _ = win.hide();
+        if let Err(e) = win.destroy() {
+            tracing::warn!(error = %e, "pm popover destroy failed");
+        }
     }
 }
 

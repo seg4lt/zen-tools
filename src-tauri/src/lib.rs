@@ -8,6 +8,7 @@
 pub mod commands;
 pub mod dto;
 pub mod error;
+pub mod prmaster_lifecycle;
 pub mod prmaster_tray;
 pub mod schema_cache;
 pub mod state;
@@ -17,7 +18,6 @@ pub mod user_config;
 use commands::markdown_index::MarkdownIndexRegistry;
 use commands::runs::{load_runs, RunHistory};
 use state::AppState;
-use user_config::UserConfig;
 use std::sync::Arc;
 use tauri::{Emitter, Manager};
 use tokio::sync::Mutex;
@@ -69,6 +69,36 @@ pub fn run() {
         .try_init();
 
     tauri::Builder::default()
+        // Default macOS Tao behaviour for `CloseRequested` on a
+        // non-main window is `[NSWindow orderOut:]` — the WKWebView is
+        // hidden but its `WebContent` subprocess stays resident,
+        // permanently leaking memory once the user has summoned a
+        // popover for the first time. Mirror flowstate's recipe:
+        // `prevent_close()` (mandatory — must come BEFORE destroy or
+        // the default hide races us) followed by `destroy()` so the
+        // WKWebView and its subprocess are actually freed.
+        // The main window stays on the existing
+        // hide-window + Accessory-activation path (registered below in
+        // `setup`) so closing it keeps the background agent alive.
+        .on_window_event(|window, event| {
+            #[cfg(target_os = "macos")]
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() != "main" {
+                    api.prevent_close();
+                    if let Err(e) = window.destroy() {
+                        tracing::warn!(
+                            label = %window.label(),
+                            error = %e,
+                            "non-main window destroy failed",
+                        );
+                    }
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                let _ = (window, event);
+            }
+        })
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         // tauri-plugin-fs intentionally NOT registered — every local
@@ -168,124 +198,21 @@ pub fn run() {
                 }
             });
 
-            // ── PRMaster: build the always-present tray. The tray exists for
-            // the lifetime of the app (matching PRMaster's `MenuBarExtra`).
-            // Failing to build it isn't fatal — the app still works as a
-            // window-only multi-tool.
-            if let Err(e) = prmaster_tray::init(app.handle()) {
-                tracing::warn!(?e, "prmaster_tray::init failed");
+            // ── PRMaster: light up tray + broadcast bridge + 5-min poll
+            // + global hotkey, but only if the user hasn't disabled the
+            // app from the settings list. Disabled tools should be
+            // completely silent — no menubar entry, no background gh
+            // calls, no chord registration. Toggling back on at runtime
+            // is wired through the `set_tool_disabled` command, which
+            // calls `prmaster_lifecycle::start` to re-arm everything.
+            let prmaster_disabled = commands::preferences::load_preferences(app.handle())
+                .map(|p| p.disabled_tools.iter().any(|id| id == "prmaster"))
+                .unwrap_or(false);
+            if !prmaster_disabled {
+                prmaster_lifecycle::start(app.handle());
+            } else {
+                tracing::info!("PRMaster disabled in preferences; skipping tray/poll/hotkey");
             }
-
-            // PRMaster broadcast → Tauri-event bridge. Subscribes to the
-            // engine's broadcast channel, re-emits each event for the
-            // frontend, updates the tray badge on `BadgeChanged`, and
-            // dispatches `Notification` events through the macOS
-            // notification centre via `tauri-plugin-notification`.
-            let prmaster_engine = {
-                let app_state = app.state::<Mutex<AppState>>();
-                let s = app_state.blocking_lock();
-                s.prmaster.clone()
-            };
-            let mut prmaster_rx = prmaster_engine.subscribe();
-            let app_handle = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                use tauri_plugin_notification::NotificationExt;
-                use zen_prmaster::PrMasterEvent;
-                loop {
-                    match prmaster_rx.recv().await {
-                        Ok(PrMasterEvent::Refreshed(snapshot)) => {
-                            let _ = app_handle.emit("prmaster:refreshed", &snapshot);
-                            // Persist the latest snapshot so the next
-                            // cold start hydrates from disk instead of
-                            // showing an empty list until the first
-                            // poll completes (Swift `CacheService`).
-                            let cfg = app_handle.state::<UserConfig>();
-                            commands::prmaster::persist_pr_snapshot(
-                                cfg.inner(),
-                                &snapshot,
-                            );
-                        }
-                        Ok(PrMasterEvent::BadgeChanged(text)) => {
-                            prmaster_tray::set_badge(&app_handle, &text);
-                            let _ = app_handle.emit("prmaster:badge-changed", &text);
-                        }
-                        Ok(PrMasterEvent::Notification(note)) => {
-                            let _ = app_handle.emit("prmaster:notification", &note);
-                            // Suppress badge-only / muted entries here too —
-                            // they should never reach the system notification
-                            // centre. (The engine already filters muted; this
-                            // is belt-and-braces.)
-                            if note.badge_only || note.muted {
-                                continue;
-                            }
-                            let mut builder = app_handle
-                                .notification()
-                                .builder()
-                                .title(&note.title)
-                                .body(&note.body);
-                            if note.silent {
-                                builder = builder.sound("");
-                            }
-                            if let Err(e) = builder.show() {
-                                tracing::warn!(?e, "notification show failed");
-                            }
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                    }
-                }
-            });
-
-            // Spawn the 5-minute background refresh (mirrors PRMaster's
-            // hardcoded `Timer.scheduledTimer(withTimeInterval: 300)`).
-            // Uses `tauri::async_runtime::spawn` so it works regardless of
-            // whether `setup` runs inside a tokio worker — `tokio::spawn`
-            // panics when called from the AppKit main thread that Tauri
-            // hands `setup` to during launch.
-            //
-            // Also kicks an immediate refresh so the menu-bar badge isn't
-            // empty until the user opens the popover.
-            let bg_engine = prmaster_engine.clone();
-            let bg_app = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                use std::time::Duration;
-
-                // Immediate first refresh — load whatever settings the
-                // user has already saved (badge configs included), so the
-                // tray populates as soon as gh data lands.
-                let initial_settings = {
-                    let cfg = bg_app.state::<crate::user_config::UserConfig>();
-                    cfg.get::<zen_prmaster::PrMasterSettings>("prmaster")
-                        .ok()
-                        .flatten()
-                        .unwrap_or_default()
-                };
-                if let Err(e) = bg_engine
-                    .refresh_lists_and_notify(&initial_settings)
-                    .await
-                {
-                    tracing::warn!(error = %e, "initial refresh failed");
-                }
-
-                let mut tick = tokio::time::interval(Duration::from_secs(300));
-                tick.tick().await; // skip immediate first tick
-                loop {
-                    tick.tick().await;
-                    let settings = {
-                        let cfg = bg_app.state::<crate::user_config::UserConfig>();
-                        cfg.get::<zen_prmaster::PrMasterSettings>("prmaster")
-                            .ok()
-                            .flatten()
-                            .unwrap_or_default()
-                    };
-                    if let Err(e) = bg_engine
-                        .refresh_lists_and_notify(&settings)
-                        .await
-                    {
-                        tracing::warn!(error = %e, "background refresh failed");
-                    }
-                }
-            });
 
             // Background-agent lifecycle: when the user closes the main
             // window we keep the process alive (so polling continues) and
@@ -307,23 +234,6 @@ pub fn run() {
                             );
                         }
                     });
-                }
-            }
-
-            // Global hotkey ⌥⌘⇧P → opens the main window at /prmaster.
-            // The hotkey *handler* lives inside the plugin builder
-            // (`build_global_shortcut_plugin`); here we just register the
-            // chord. Failure is non-fatal — the user can still navigate
-            // manually.
-            #[cfg(desktop)]
-            {
-                use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut};
-                let chord = Shortcut::new(
-                    Some(Modifiers::ALT | Modifiers::SHIFT | Modifiers::SUPER),
-                    Code::KeyP,
-                );
-                if let Err(e) = app.global_shortcut().register(chord) {
-                    tracing::warn!(?e, "global-shortcut register failed; hotkey disabled");
                 }
             }
 
@@ -369,6 +279,7 @@ pub fn run() {
             // preferences
             commands::preferences::get_preferences,
             commands::preferences::save_preferences,
+            commands::preferences::set_tool_disabled,
             // run history
             commands::runs::record_run,
             commands::runs::get_run_history,

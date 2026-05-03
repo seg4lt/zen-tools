@@ -142,6 +142,26 @@ pub struct AppState {
     /// always-present `MenuBarExtra`). Distinct from [`tray`] (the lazy
     /// zen-tools tray bound to perf / process-monitor activity).
     pub prmaster_tray: Option<tauri::tray::TrayIcon>,
+
+    /// Lifecycle handles for the PRMaster background workers (broadcast
+    /// → Tauri-event bridge and 5-minute refresh loop). Held so the
+    /// `set_tool_disabled` command can abort them when the user toggles
+    /// PRMaster off; populated by `prmaster_lifecycle::start`.
+    pub prmaster_lifecycle: PrMasterLifecycle,
+}
+
+/// Per-app lifecycle handles for PRMaster. Toggling PRMaster off
+/// aborts the two background tasks, removes the tray, and unregisters
+/// the global hotkey. Toggling on re-spawns everything.
+#[derive(Default)]
+pub struct PrMasterLifecycle {
+    /// Join handle for the broadcast → Tauri-event bridge task.
+    /// `abort()` on the handle is what `prmaster_lifecycle::stop` calls.
+    pub bridge_task: Option<tauri::async_runtime::JoinHandle<()>>,
+    /// Join handle for the 5-minute background refresh loop.
+    pub bg_task: Option<tauri::async_runtime::JoinHandle<()>>,
+    /// `true` once the global hotkey chord has been registered.
+    pub hotkey_registered: bool,
 }
 
 impl AppState {
@@ -177,6 +197,7 @@ impl AppState {
             sql_workspace_dirs: Vec::new(),
             prmaster: PrMasterEngine::new(),
             prmaster_tray: None,
+            prmaster_lifecycle: PrMasterLifecycle::default(),
         }
     }
 

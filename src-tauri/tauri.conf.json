@@ -25,35 +25,6 @@
         "titleBarStyle": "Overlay",
         "hiddenTitle": true,
         "dragDropEnabled": false
-      },
-      {
-        "label": "prmaster-popover",
-        "title": "PRMaster",
-        "url": "/",
-        "width": 500,
-        "height": 700,
-        "resizable": false,
-        "decorations": false,
-        "skipTaskbar": true,
-        "alwaysOnTop": true,
-        "visible": false,
-        "focus": false,
-        "transparent": false
-      },
-      {
-        "label": "pm-popover",
-        "url": "index.html?window=pm-popover",
-        "title": "Process Monitor",
-        "width": 340,
-        "height": 280,
-        "resizable": false,
-        "decorations": false,
-        "transparent": true,
-        "alwaysOnTop": true,
-        "skipTaskbar": true,
-        "focus": false,
-        "visible": false,
-        "shadow": true
       }
     ],
     "security": {
