@@ -142,7 +142,8 @@ export function AiSummaryTab() {
         currentYear={todayFy}
         mappedCount={mappedRepos.length}
         pendingCount={pendingCount}
-        onGenerate={() => void actions.generate()}
+        onCatchUp={() => void actions.generate({ force: false })}
+        onRegenerateAll={() => void actions.generate({ force: true })}
         onCancel={actions.cancel}
         onCopyAll={() => void actions.copyAll()}
         onClearAll={() => void actions.clearAll()}
@@ -152,81 +153,96 @@ export function AiSummaryTab() {
         providerStatus={providerStatus}
       />
 
-      <div className="flex min-h-0 flex-1 flex-col overflow-y-auto bg-muted/20">
-        <div className="grid gap-2 p-2">
-          {error && (
-            <Panel className="border-destructive/40 bg-destructive/5">
-              <PanelContent className="flex items-center justify-between gap-2 p-2 text-xs text-destructive">
-                <span>{error}</span>
-                <Button
-                  size="xs"
-                  variant="ghost"
-                  onClick={() => actions.setError(null)}
-                >
-                  Dismiss
-                </Button>
-              </PanelContent>
-            </Panel>
-          )}
-
-          {statusMessage && (
-            <Panel className="border-primary/30 bg-primary/5">
-              <PanelContent className="flex items-center gap-2 p-2 text-xs text-muted-foreground">
-                <Loader2 className="size-3.5 animate-spin" />
-                {statusMessage}
-              </PanelContent>
-            </Panel>
-          )}
-
-          {settings && mappedRepos.length === 0 && cards.length === 0 ? (
-            <NoMappingsHint />
-          ) : (
-            <>
-              <Panel>
-                <PanelContent className="p-2">
-                  <YearHeatmap
-                    year={selectedYear}
-                    cells={cellsByWeek}
-                    selectedWeek={selectedWeek}
-                    today={selectedYear === todayFy ? todayIso : null}
-                    onSelectWeek={(w) => actions.setSelectedWeek(w)}
-                  />
+      {settings && mappedRepos.length === 0 && cards.length === 0 ? (
+        // Empty-state owns the whole body so the hint sits centred
+        // under the toolbar instead of being squeezed by a hidden
+        // sticky chrome row.
+        <div className="flex-1 overflow-y-auto bg-muted/20 p-2">
+          <NoMappingsHint />
+        </div>
+      ) : (
+        <>
+          {/* ── Sticky chrome — toolbar's neighbour. ──
+              Status / error banners and the year heatmap stay
+              pinned at the top while the user scrolls through
+              week summaries below. `shrink-0` keeps this band at
+              its natural height; the next div absorbs the rest
+              of the column with `flex-1 overflow-y-auto`. */}
+          <div className="flex shrink-0 flex-col gap-2 bg-muted/20 px-2 pt-2">
+            {error && (
+              <Panel className="border-destructive/40 bg-destructive/5">
+                <PanelContent className="flex items-center justify-between gap-2 p-2 text-xs text-destructive">
+                  <span>{error}</span>
+                  <Button
+                    size="xs"
+                    variant="ghost"
+                    onClick={() => actions.setError(null)}
+                  >
+                    Dismiss
+                  </Button>
                 </PanelContent>
               </Panel>
+            )}
 
-              {selectedWeek != null && focusedRange && (
-                <FocusedWeekPanel
+            {statusMessage && (
+              <Panel className="border-primary/30 bg-primary/5">
+                <PanelContent className="flex items-center gap-2 p-2 text-xs text-muted-foreground">
+                  <Loader2 className="size-3.5 animate-spin" />
+                  {statusMessage}
+                </PanelContent>
+              </Panel>
+            )}
+
+            <Panel>
+              <PanelContent className="p-2">
+                <YearHeatmap
                   year={selectedYear}
-                  week={selectedWeek}
-                  range={focusedRange}
-                  focusedCards={focusedCards}
-                  mappedRepos={mappedRepos}
-                  cellStatus={cellStatus}
-                  generating={generating}
-                  locked={
-                    !isPastWeek(
-                      calendarYearOfFiscalWeek(selectedYear, selectedWeek),
-                      selectedWeek,
-                      todayIso.year,
-                      todayIso.week,
-                    )
-                  }
-                  onRegenerateWeek={() => void actions.regenerateFocusedWeek()}
-                  onRegenerate={(repo) =>
-                    void actions.regenerateCell(repo, selectedYear, selectedWeek)
-                  }
-                  onDelete={(repo) =>
-                    void actions.deleteCell(repo, selectedYear, selectedWeek)
-                  }
-                  onEdit={(prev, next) =>
-                    void actions.editCell(prev, next, selectedYear, selectedWeek)
-                  }
+                  cells={cellsByWeek}
+                  selectedWeek={selectedWeek}
+                  today={selectedYear === todayFy ? todayIso : null}
+                  onSelectWeek={(w) => actions.setSelectedWeek(w)}
                 />
-              )}
-            </>
-          )}
-        </div>
-      </div>
+              </PanelContent>
+            </Panel>
+          </div>
+
+          {/* ── Scrollable summary — the only pane that grows
+              past the viewport. Content is the focused-week
+              panel for the cell the user picked in the heatmap
+              above (or empty until they pick one). */}
+          <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto bg-muted/20 px-2 pb-2 pt-2">
+            {selectedWeek != null && focusedRange && (
+              <FocusedWeekPanel
+                year={selectedYear}
+                week={selectedWeek}
+                range={focusedRange}
+                focusedCards={focusedCards}
+                mappedRepos={mappedRepos}
+                cellStatus={cellStatus}
+                generating={generating}
+                locked={
+                  !isPastWeek(
+                    calendarYearOfFiscalWeek(selectedYear, selectedWeek),
+                    selectedWeek,
+                    todayIso.year,
+                    todayIso.week,
+                  )
+                }
+                onRegenerateWeek={() => void actions.regenerateFocusedWeek()}
+                onRegenerate={(repo) =>
+                  void actions.regenerateCell(repo, selectedYear, selectedWeek)
+                }
+                onDelete={(repo) =>
+                  void actions.deleteCell(repo, selectedYear, selectedWeek)
+                }
+                onEdit={(prev, next) =>
+                  void actions.editCell(prev, next, selectedYear, selectedWeek)
+                }
+              />
+            )}
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -243,7 +259,8 @@ function Toolbar({
   currentYear,
   mappedCount,
   pendingCount,
-  onGenerate,
+  onCatchUp,
+  onRegenerateAll,
   onCancel,
   onCopyAll,
   onClearAll,
@@ -259,7 +276,10 @@ function Toolbar({
   currentYear: number;
   mappedCount: number;
   pendingCount: number;
-  onGenerate: () => void;
+  /** "Catch up" — fill missing + retry errored cells only. */
+  onCatchUp: () => void;
+  /** "Regenerate FY" — force-regenerate every cell in the year. */
+  onRegenerateAll: () => void;
   onCancel: () => void;
   onCopyAll: () => void;
   onClearAll: () => void;
@@ -321,42 +341,74 @@ function Toolbar({
             <XCircle className="size-4" />
             Cancel
           </Button>
-        ) : upToDate ? (
-          <Button
-            size="default"
-            variant="outline"
-            disabled
-            className="h-9"
-            title={`${formatFiscalYear(selectedYear)}: every mapped repo + week is already cached`}
-          >
-            <Sparkles className="size-4" />
-            Up to date
-          </Button>
         ) : (
-          <Button
-            size="default"
-            disabled={
-              mappedCount === 0 || providerStatus.kind === "missing"
-            }
-            onClick={onGenerate}
-            className="h-9"
-            title={
-              pendingCount > 0
-                ? `Generate ${pendingCount} new summary card${pendingCount === 1 ? "" : "s"} for ${formatFiscalYear(selectedYear)}`
-                : `Generate AI summaries for ${formatFiscalYear(selectedYear)}`
-            }
-          >
-            <Sparkles className="size-4" />
-            Generate {formatFiscalYear(selectedYear)}
-            {pendingCount > 0 && (
-              <Badge
-                variant="secondary"
-                className="ml-0.5 bg-primary-foreground/20 text-primary-foreground"
+          <>
+            {/* Primary action — "Catch up" only fills missing /
+                errored cells. The badge advertises how many will
+                be queued; when nothing's pending the button
+                collapses into a disabled "Up to date" state so
+                the user has positive confirmation that no work is
+                left. This is the user's everyday button. */}
+            {upToDate ? (
+              <Button
+                size="default"
+                variant="outline"
+                disabled
+                className="h-9"
+                title={`${formatFiscalYear(selectedYear)}: every mapped repo + week is already cached`}
               >
-                {pendingCount} new
-              </Badge>
+                <Sparkles className="size-4" />
+                Up to date
+              </Button>
+            ) : (
+              <Button
+                size="default"
+                disabled={
+                  mappedCount === 0 || providerStatus.kind === "missing"
+                }
+                onClick={onCatchUp}
+                className="h-9"
+                title={
+                  pendingCount > 0
+                    ? `Catch up: generate ${pendingCount} missing or errored summary card${pendingCount === 1 ? "" : "s"} in ${formatFiscalYear(selectedYear)}. Already-cached cells are skipped.`
+                    : `Catch up missing summaries in ${formatFiscalYear(selectedYear)}`
+                }
+              >
+                <Sparkles className="size-4" />
+                Catch up {formatFiscalYear(selectedYear)}
+                {pendingCount > 0 && (
+                  <Badge
+                    variant="secondary"
+                    className="ml-0.5 bg-primary-foreground/20 text-primary-foreground"
+                  >
+                    {pendingCount} missing
+                  </Badge>
+                )}
+              </Button>
             )}
-          </Button>
+
+            {/* Secondary action — "Regenerate" forces a re-ask
+                of every cell in the year, including ones that
+                already have a cached card. Useful when the
+                provider model changed or a prompt template was
+                tweaked. Smaller / outlined so the everyday user
+                doesn't fire it accidentally. */}
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={
+                mappedCount === 0 ||
+                providerStatus.kind === "missing" ||
+                cardCount === 0
+              }
+              onClick={onRegenerateAll}
+              className="h-9"
+              title={`Force-regenerate every summary in ${formatFiscalYear(selectedYear)} (overwrites cached cards). Use after a model / prompt change.`}
+            >
+              <RotateCcw className="size-3.5" />
+              Regenerate
+            </Button>
+          </>
         )}
         <Button
           size="sm"

@@ -128,7 +128,20 @@ export interface AiSummaryState {
 }
 
 export interface AiSummaryActions {
-  generate: () => Promise<void>;
+  /**
+   * Generate per-(repo, past-week) summaries for the selected
+   * fiscal year.
+   *
+   * - **`force: true`** — regenerate every cell, including ones
+   *   that already have a cached card. Backed by the backend's
+   *   `force` flag so existing summaries are re-asked of the
+   *   provider and overwritten on success.
+   * - **`force: false`** (default) — "catch up" mode: only queue
+   *   cells that are missing or previously errored. Already-cached
+   *   cells are skipped. Errored cells aren't in the card index,
+   *   so they get retried automatically.
+   */
+  generate: (opts?: { force?: boolean }) => Promise<void>;
   cancel: () => void;
   regenerateCell: (repo: string, year: number, week: number) => Promise<void>;
   regenerateFocusedWeek: () => Promise<void>;
@@ -415,9 +428,24 @@ export function AiSummaryStoreProvider({ children }: { children: ReactNode }) {
 
   // ── Actions ─────────────────────────────────────────────────────────
 
-  /** Generate every missing (mapped repo × strictly-past week) cell
-   *  in the selected year. Skips cached. */
-  const generate = useCallback(async () => {
+  /**
+   * Generate per-(repo, past-week) summaries for the selected
+   * year. The `force` opt drives two distinct user intents:
+   *
+   *   - `force: false` ("Catch up") — only queue cells without a
+   *     cached card. Three-tier skip: already-summarised year-
+   *     weeks are walked but contribute zero pairs; partial weeks
+   *     contribute only their missing repos; errored cells are
+   *     queued because errors never made it into `cardIndex`.
+   *
+   *   - `force: true` ("Regenerate") — queue every (repo,
+   *     past-week) pair regardless of cache, and pass `force=true`
+   *     to the backend so the provider is re-invoked and any
+   *     existing card is replaced on success.
+   */
+  const generate = useCallback(async (opts?: { force?: boolean }) => {
+    const force = opts?.force ?? false;
+
     if (mappedRepos.length === 0) {
       setError(
         "Add at least one local repo mapping in Settings to enable AI summaries.",
@@ -432,13 +460,15 @@ export function AiSummaryStoreProvider({ children }: { children: ReactNode }) {
     for (const { year: calYear, week: w } of fyWeekIds) {
       if (!isPastWeek(calYear, w, todayIso.year, todayIso.week)) continue;
       for (const repo of mappedRepos) {
-        if (!cardIndex.has(weekKey(repo, calYear, w))) {
+        if (force || !cardIndex.has(weekKey(repo, calYear, w))) {
           queue.push({ repo, year: calYear, week: w });
         }
       }
     }
 
     if (queue.length === 0) {
+      // Catch-up only — force always has work, so this branch
+      // is unreachable when `force=true`.
       setStatusMessage(
         `Already generated for every mapped repo in ${formatFiscalYear(selectedYear)}.`,
       );
@@ -473,7 +503,10 @@ export function AiSummaryStoreProvider({ children }: { children: ReactNode }) {
           repo,
           since: sinceIso,
           until: untilIso,
-          force: false,
+          // `force` flows in from the action arg: false for the
+          // Catch-up button (skip cached, retry errored), true
+          // for the Regenerate button (overwrite cached too).
+          force,
         });
         if (cancelRef.current) break;
         nextCards = upsertCardByWeek(nextCards, card);
