@@ -18,6 +18,22 @@
 //! flow in `lib.rs` and the live `set_tool_disabled` command can flip
 //! the whole bundle atomically.
 //!
+//! ## Threading
+//!
+//! Both [`start`] and [`stop`] are **fire-and-forget** — they spawn
+//! the actual work onto the Tauri async runtime so the caller never
+//! blocks and we never call `tokio::sync::Mutex::blocking_lock()`
+//! from a tokio worker (which panics → SIGABRT). This mirrors
+//! `crate::tray::update_tray`'s pattern. Eventual consistency is fine
+//! here: the lifecycle just needs to settle into the requested state
+//! shortly after the call.
+//!
+//! AppKit-touching steps (tray construction, tray drop, popover
+//! destruction) are dispatched onto the main thread via
+//! `AppHandle::run_on_main_thread` because `NSStatusItem` /
+//! `NSWindow` will hard-crash if released or mutated from a
+//! non-Cocoa thread.
+//!
 //! Idempotent — calling [`start`] when PRMaster is already running, or
 //! [`stop`] when it's already off, is a no-op.
 
@@ -47,24 +63,40 @@ fn prmaster_chord() -> tauri_plugin_global_shortcut::Shortcut {
 
 /// Spin up every PRMaster background worker. Idempotent.
 ///
-/// Records the spawned tasks' [`AbortHandle`]s on
-/// [`crate::state::PrMasterLifecycle`] so [`stop`] can cancel them.
+/// Fire-and-forget — see the module docs for the threading rationale.
+/// Safe to call from `setup` (sync, AppKit main thread) and from any
+/// async Tauri command running on a tokio worker.
 pub fn start(app: &AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        start_inner(&app).await;
+    });
+}
+
+async fn start_inner(app: &AppHandle) {
     // Skip if already running. The tray's presence is the canonical
     // signal — bridge/bg_task are restarted alongside it.
     if app.tray_by_id(prmaster_tray::PRMASTER_TRAY_ID).is_some() {
         return;
     }
 
-    // 1) Tray.
-    if let Err(e) = prmaster_tray::init(app) {
-        tracing::warn!(?e, "prmaster_tray::init failed");
+    // 1) Tray. NSStatusItem must be built on the Cocoa main thread,
+    //    and the cached handle inside `prmaster_tray::init` does its
+    //    own `blocking_lock` of `AppState` — running it on the main
+    //    thread keeps both invariants intact.
+    let tray_app = app.clone();
+    if let Err(e) = app.run_on_main_thread(move || {
+        if let Err(e) = prmaster_tray::init(&tray_app) {
+            tracing::warn!(?e, "prmaster_tray::init failed");
+        }
+    }) {
+        tracing::warn!(?e, "run_on_main_thread for tray init failed");
     }
 
     // 2) Broadcast → Tauri-event bridge.
     let prmaster_engine = {
         let app_state = app.state::<Mutex<AppState>>();
-        let s = app_state.blocking_lock();
+        let s = app_state.lock().await;
         s.prmaster.clone()
     };
     let mut prmaster_rx = prmaster_engine.subscribe();
@@ -75,9 +107,6 @@ pub fn start(app: &AppHandle) {
             match prmaster_rx.recv().await {
                 Ok(PrMasterEvent::Refreshed(snapshot)) => {
                     let _ = bridge_app.emit("prmaster:refreshed", &snapshot);
-                    // Persist the latest snapshot so the next cold
-                    // start hydrates from disk instead of showing an
-                    // empty list until the first poll completes.
                     let cfg = bridge_app.state::<UserConfig>();
                     commands::prmaster::persist_pr_snapshot(cfg.inner(), &snapshot);
                 }
@@ -158,7 +187,7 @@ pub fn start(app: &AppHandle) {
 
     // 5) Persist join handles so `stop` can abort them.
     let app_state = app.state::<Mutex<AppState>>();
-    let mut s = app_state.blocking_lock();
+    let mut s = app_state.lock().await;
     s.prmaster_lifecycle.bridge_task = Some(bridge_task);
     s.prmaster_lifecycle.bg_task = Some(bg_task);
     s.prmaster_lifecycle.hotkey_registered = hotkey_registered;
@@ -166,14 +195,19 @@ pub fn start(app: &AppHandle) {
 
 /// Tear down every PRMaster background worker. Idempotent.
 ///
-/// After this returns the tray is gone, both background tasks are
-/// aborting (they may still be flushing a final iteration), and the
-/// global hotkey no longer fires.
+/// Fire-and-forget — see the module docs for the threading rationale.
 pub fn stop(app: &AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        stop_inner(&app).await;
+    });
+}
+
+async fn stop_inner(app: &AppHandle) {
     // 1) Abort both background tasks.
     {
         let app_state = app.state::<Mutex<AppState>>();
-        let mut s = app_state.blocking_lock();
+        let mut s = app_state.lock().await;
         if let Some(handle) = s.prmaster_lifecycle.bridge_task.take() {
             handle.abort();
         }
@@ -188,7 +222,7 @@ pub fn stop(app: &AppHandle) {
         use tauri_plugin_global_shortcut::GlobalShortcutExt;
         let registered = {
             let app_state = app.state::<Mutex<AppState>>();
-            let mut s = app_state.blocking_lock();
+            let mut s = app_state.lock().await;
             let was = s.prmaster_lifecycle.hotkey_registered;
             s.prmaster_lifecycle.hotkey_registered = false;
             was
@@ -200,8 +234,16 @@ pub fn stop(app: &AppHandle) {
         }
     }
 
-    // 3) Drop the tray icon and hide the popover. Last so any final
-    //    badge updates from in-flight broadcast events have already
-    //    been suppressed by the bridge abort above.
-    prmaster_tray::tear_down(app);
+    // 3) Drop the tray icon and destroy the popover. Both touch
+    //    AppKit (`NSStatusItem`, `NSWindow`) and crash hard if
+    //    released from a non-main thread, so dispatch to the Cocoa
+    //    main thread. Last so any final badge updates from in-flight
+    //    broadcast events have already been suppressed by the bridge
+    //    abort above.
+    let teardown_app = app.clone();
+    if let Err(e) = app.run_on_main_thread(move || {
+        prmaster_tray::tear_down(&teardown_app);
+    }) {
+        tracing::warn!(?e, "run_on_main_thread for tray tear_down failed");
+    }
 }
