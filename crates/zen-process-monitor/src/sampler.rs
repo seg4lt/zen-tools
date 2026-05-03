@@ -19,6 +19,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast;
+use ts_rs::TS;
 
 use crate::proc::{PidSample, PidStats};
 
@@ -30,9 +31,11 @@ const MAX_POLL_MS: u32 = 60_000;
 pub const DEFAULT_POLL_MS: u32 = 1000;
 
 /// One full snapshot emitted to the frontend.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
+#[ts(export)]
 pub struct Sample {
     /// Unix epoch milliseconds.
+    #[ts(type = "number")]
     pub ts: u64,
     /// Aggregate values summed across every monitored tree.
     pub total: TotalStats,
@@ -44,19 +47,25 @@ pub struct Sample {
 
 /// Aggregate values summed across every monitored tree (target rows only —
 /// ancestor rows are excluded).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
+#[ts(export)]
 pub struct TotalStats {
     /// Total CPU% across all monitored target subtrees.
     pub cpu_pct: f64,
     /// Total resident set size.
+    #[ts(type = "number")]
     pub rss: u64,
     /// Total virtual size.
+    #[ts(type = "number")]
     pub vsize: u64,
     /// Total Activity-Monitor "Memory" (phys footprint).
+    #[ts(type = "number")]
     pub phys_footprint: u64,
     /// Number of processes contributing to the totals.
+    #[ts(type = "number")]
     pub proc_count: usize,
     /// Number of root targets whose process is still alive.
+    #[ts(type = "number")]
     pub root_count: usize,
 }
 

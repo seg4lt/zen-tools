@@ -1,0 +1,9 @@
+# ts-rs writes generated `.ts` files to `<TS_RS_EXPORT_DIR>/<TypeName>.ts`
+# whenever `cargo test export_bindings_*` runs. Pinning the dir here
+# means every crate (and CI) lands bindings in the same spot without
+# threading the env var through Makefiles or shell wrappers.
+#
+# Path is relative to this file (the workspace root), per Cargo's
+# config.toml resolution rules.
+[env]
+TS_RS_EXPORT_DIR = { value = "packages/types/src/generated", relative = true }

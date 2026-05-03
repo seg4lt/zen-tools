@@ -95,6 +95,13 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 chrono = { workspace = true }
+# Generates TypeScript bindings for the wire DTOs declared inside
+# src-tauri/src/ (the cross-tool DTOs live in their owning crate; this
+# is just for the Tauri-only ones like `PmConfig`, `Preferences`,
+# command IO shapes). Same `cargo test export_bindings` flow as every
+# other annotated crate.
+ts-rs = { workspace = true }
+
 # Local SQLite for the schema-cache (per-table column/index/FK metadata).
 # `bundled` vendors the SQLite source so we don't depend on a system
 # library — keeps Windows builds simple.

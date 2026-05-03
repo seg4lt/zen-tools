@@ -1,56 +1,35 @@
 /**
  * Typed wrappers around the `pm_*` Tauri commands plus the live sample
- * event stream. Shapes mirror the Rust types in
- * `src-tauri/src/commands/process_monitor.rs` and `crates/zen-process-monitor`.
+ * event stream.
+ *
+ * **DTOs are generated from Rust** by ts-rs and re-exported here so
+ * the rest of the tool's code (components, hooks, store) keeps its
+ * existing imports while the wire shapes stay in lock-step with the
+ * Rust source. The generator runs as `cargo test export_bindings`;
+ * see docs/IPC.md → "Generating TS bindings" for the recipe.
  */
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 // ────────────────────────────────────────────────────────────────────────
-// Domain types — keep in sync with the Rust DTOs.
+// Domain types — generated from Rust via ts-rs.
 // ────────────────────────────────────────────────────────────────────────
 
-export interface ProcSummary {
-  pid: number;
-  ppid: number;
-  name: string;
-}
+export type {
+  PidSample,
+  PidStats,
+  PmConfig,
+  ProcSummary,
+  Sample,
+  TotalStats,
+} from "@zen-tools/types/generated";
 
-export interface PidStats {
-  pid: number;
-  ppid: number;
-  pgid: number;
-  name: string;
-  root_pid: number;
-  depth: number;
-  is_ancestor: boolean;
-  cpu_pct: number;
-  rss: number;
-  vsize: number;
-  phys_footprint: number;
-}
-
-export interface TotalStats {
-  cpu_pct: number;
-  rss: number;
-  vsize: number;
-  phys_footprint: number;
-  proc_count: number;
-  root_count: number;
-}
-
-export interface Sample {
-  ts: number;
-  total: TotalStats;
-  per_pid: PidStats[];
-  ended_roots: number[];
-}
-
-export interface PmConfig {
-  poll_ms: number;
-  target_pids: number[];
-}
+import type {
+  PmConfig,
+  ProcSummary,
+  Sample,
+} from "@zen-tools/types/generated";
 
 // ────────────────────────────────────────────────────────────────────────
 // Commands

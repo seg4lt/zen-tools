@@ -64,6 +64,19 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --workspace --locked -- -D warnings
 
+      # Drift check: re-run the ts-rs export tests, then fail the build
+      # if any generated `.ts` file changed vs what's checked in. Forces
+      # contributors who touch a `#[derive(TS)]` struct to run the
+      # generator + commit the output, instead of merging a backend
+      # change that silently breaks the frontend.
+      - name: ts-rs binding drift check
+        run: |
+          cargo test --workspace --locked export_bindings
+          if ! git diff --exit-code -- packages/types/src/generated; then
+            echo "::error::ts-rs bindings are out of date. Run 'cargo test --workspace export_bindings' locally and commit the result."
+            exit 1
+          fi
+
   frontend:
     name: Frontend (TS + Vite)
     runs-on: ubuntu-latest

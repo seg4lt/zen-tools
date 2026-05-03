@@ -12,6 +12,10 @@ parking_lot = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+# Generates the TypeScript bindings consumed by the frontend. See the
+# workspace-level Cargo.toml comment on `ts-rs` for why this lives in
+# `[dependencies]` rather than `[dev-dependencies]`.
+ts-rs = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libproc = "0.14"

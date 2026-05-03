@@ -17,11 +17,13 @@ use crate::tray;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
 use tokio::sync::Mutex;
+use ts_rs::TS;
 use zen_process_monitor::{ProcSummary, Sample};
 
 /// Snapshot of the current process-monitor configuration (for re-hydration
 /// on tool mount).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
 pub struct PmConfig {
     /// Polling interval in milliseconds.
     pub poll_ms: u32,

@@ -60,6 +60,18 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 dirs = "5"
 
+# TypeScript binding generation. We derive `TS` on every wire DTO that
+# crosses the IPC boundary; `cargo test export_bindings` then emits a
+# `.ts` file per type into `packages/types/src/generated/`. Frontend
+# consumes them via `@zen-tools/types/generated`.
+#
+# Has to live in `[dependencies]` (not dev-only) on every crate that
+# uses `#[derive(TS)]` because the derive macro expands at *every*
+# compile to `impl ts_rs::TS for …`. The runtime impact is one trait
+# impl per type and ts-rs itself has no transitive deps that aren't
+# already in the lock — so the cost is essentially zero.
+ts-rs = { version = "12", features = ["chrono-impl", "no-serde-warnings"] }
+
 # Internal crates
 zen-types = { path = "crates/zen-types" }
 zen-fs = { path = "crates/zen-fs" }

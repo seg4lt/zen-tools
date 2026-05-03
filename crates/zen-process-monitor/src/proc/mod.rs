@@ -12,9 +12,11 @@ pub mod stats;
 pub mod tree;
 
 use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 
 /// Lightweight process descriptor used by the picker UI.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
 pub struct ProcSummary {
     /// Process id.
     pub pid: i32,
@@ -25,7 +27,13 @@ pub struct ProcSummary {
 }
 
 /// One row of per-PID stats, raw counters (not deltas, not percentages).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+///
+/// `u64` fields override the ts-rs default of `bigint` to plain
+/// `number` because the JSON wire (Tauri's IPC) serialises `u64` as a
+/// JSON number, not a string. JS `number` is f64 so the only practical
+/// risk is byte counts ≥ 2^53 (≈ 9 PB) — not a real concern for RSS.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
+#[ts(export)]
 pub struct PidSample {
     /// Process id.
     pub pid: i32,
@@ -36,18 +44,23 @@ pub struct PidSample {
     /// Executable name.
     pub name: String,
     /// Sum of user+system CPU ticks (proc_taskinfo.pti_total_user + pti_total_system).
+    #[ts(type = "number")]
     pub cpu_ticks: u64,
     /// Resident Set Size in bytes (proc_taskinfo.pti_resident_size).
+    #[ts(type = "number")]
     pub rss: u64,
     /// Virtual size in bytes (proc_taskinfo.pti_virtual_size).
+    #[ts(type = "number")]
     pub vsize: u64,
     /// Phys footprint in bytes (rusage_info_v6.ri_phys_footprint) — what
     /// Activity Monitor calls "Memory".
+    #[ts(type = "number")]
     pub phys_footprint: u64,
 }
 
 /// Computed delta values for one PID over a sampling interval.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
+#[ts(export)]
 pub struct PidStats {
     /// Process id.
     pub pid: i32,
@@ -71,9 +84,12 @@ pub struct PidStats {
     /// CPU% where 100% = one core fully utilised.
     pub cpu_pct: f64,
     /// Resident set size in bytes.
+    #[ts(type = "number")]
     pub rss: u64,
     /// Virtual size in bytes.
+    #[ts(type = "number")]
     pub vsize: u64,
     /// Phys footprint (Activity Monitor "Memory") in bytes.
+    #[ts(type = "number")]
     pub phys_footprint: u64,
 }

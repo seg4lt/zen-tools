@@ -273,3 +273,68 @@ is documented in the typed wrapper for each subscriber.
 | `src-tauri/src/commands/sql_workspace.rs` | SQL workspace projects |
 | `src-tauri/src/commands/prmaster.rs` | PRMaster commands |
 | `src-tauri/src/commands/misc.rs` | `open_in_editor` |
+
+## Generating TS bindings (ts-rs)
+
+DTOs that cross the IPC boundary are annotated with `#[derive(TS)]`
+so the TypeScript types come straight from Rust — no hand-mirroring,
+no drift. The generator runs as a `cargo test`, writes one `.ts` file
+per type into `packages/types/src/generated/`, and the frontend
+consumes them via `@zen-tools/types/generated`.
+
+### Migration status
+
+| Tool | Status | Notes |
+|---|---|---|
+| Process Monitor | ✅ migrated | All 6 wire DTOs (`ProcSummary`, `Sample`, `TotalStats`, `PidStats`, `PidSample`, `PmConfig`) generate from Rust. `lib/tauri.ts` re-exports them. Reference for the rest. |
+| HTTP runner / Perf | pending | |
+| Markdown | pending | |
+| Database Explorer | pending | |
+| PRMaster | pending | |
+| Cleaner | pending | |
+
+### Adding bindings to a new type
+
+1. In the crate that owns the type (`crates/zen-*/Cargo.toml` or
+   `src-tauri/Cargo.toml`), add `ts-rs = { workspace = true }` to
+   `[dependencies]` if not already present.
+2. On the Rust struct, add `TS` to the derive list and tag with
+   `#[ts(export)]`. Example:
+
+   ```rust
+   use ts_rs::TS;
+   use serde::{Serialize, Deserialize};
+
+   #[derive(Debug, Clone, Serialize, Deserialize, TS)]
+   #[ts(export)]
+   pub struct MyDto {
+       pub name: String,
+       #[ts(type = "number")]   // ← override `bigint` for u64/i64/usize
+       pub bytes: u64,
+   }
+   ```
+
+3. Run `cargo test --workspace export_bindings` from the repo root.
+   The `.cargo/config.toml` env var (`TS_RS_EXPORT_DIR`) puts the
+   output at `packages/types/src/generated/MyDto.ts`.
+4. Add an `export type { MyDto } from "./MyDto";` line to
+   `packages/types/src/generated/index.ts` (the barrel is hand-maintained
+   so accidental new wire types show up in PR diffs).
+5. Consume from the frontend:
+   `import type { MyDto } from "@zen-tools/types/generated"`.
+
+### `u64` / `i64` / `usize` gotcha
+
+ts-rs defaults these to `bigint` because JS `number` is f64 and
+overflows above 2^53. But Tauri serialises over JSON (number on the
+wire), so the frontend receives a JS `number`. Add
+`#[ts(type = "number")]` per field to override. Existing PM types use
+this pattern.
+
+### CI drift detection
+
+`pr.yml` re-runs the export tests and `git diff --exit-code` against
+`packages/types/src/generated/`. A backend type change without a
+matching binding regenerate fails CI with an actionable error
+("Run `cargo test --workspace export_bindings` locally and commit
+the result").
