@@ -494,21 +494,36 @@ impl PrMasterEngine {
         .await;
         let duration_ms = started_instant.elapsed().as_millis() as u64;
 
-        // Build a record regardless of outcome so failed runs are
-        // visible in the API tab too.
-        let record = AiRunRecord {
-            timestamp: started_at,
-            provider: settings.ai_provider.clone(),
-            model: effective.model.clone(),
-            repo: params.repo.clone(),
-            since: params.since.to_rfc3339(),
-            until: params.until.to_rfc3339(),
-            duration_ms,
-            success: result.is_ok(),
-            commit_count: result.as_ref().map(|c| c.commit_count).unwrap_or(0),
-            cost_usd: result.as_ref().ok().and_then(|c| c.cost_usd),
+        // Record the run for the API-tab diagnostics panel — but only
+        // when the AI provider was actually invoked. `generate_summary`
+        // short-circuits with a zero-commit `SummaryCard` whenever
+        // `git log` returns nothing for the (repo, week, authors)
+        // tuple, so logging those would falsely advertise an AI call
+        // ("Provider: claude · Model: sonnet · Commits: 0") when none
+        // happened. Failures still land in the log so users can debug
+        // genuine errors.
+        let actually_called_provider = match result.as_ref() {
+            Ok(card) => card.commit_count > 0,
+            Err(_) => true,
         };
-        self.push_ai_run(record);
+        if actually_called_provider {
+            let record = AiRunRecord {
+                timestamp: started_at,
+                provider: settings.ai_provider.clone(),
+                model: effective.model.clone(),
+                repo: params.repo.clone(),
+                since: params.since.to_rfc3339(),
+                until: params.until.to_rfc3339(),
+                duration_ms,
+                success: result.is_ok(),
+                commit_count: result
+                    .as_ref()
+                    .map(|c| c.commit_count)
+                    .unwrap_or(0),
+                cost_usd: result.as_ref().ok().and_then(|c| c.cost_usd),
+            };
+            self.push_ai_run(record);
+        }
 
         let card = result?;
         cache.put(key, card.clone());
