@@ -6,6 +6,7 @@
 #![warn(missing_docs)]
 
 pub mod commands;
+pub mod dictation;
 pub mod dto;
 pub mod error;
 pub mod prmaster_lifecycle;
@@ -61,6 +62,14 @@ fn build_global_shortcut_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
 /// points.
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Stdout subscriber comes up first so any messages emitted before
+    // `setup()` resolves the app-data dir still land somewhere.
+    // We re-initialise inside `setup()` to add the rolling file
+    // appender at `<app_data_dir>/logs/zen-tools.log`. The non-blocking
+    // worker guard returned by `tracing_appender` lives for the
+    // process lifetime via `Box::leak` (see below); without that the
+    // worker thread tears down and we silently lose log lines on
+    // shutdown.
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,zen=debug")),
@@ -125,6 +134,36 @@ pub fn run() {
         // Wrapped in `Arc` so command handlers can clone cheaply.
         .manage(Arc::new(MarkdownIndexRegistry::default()))
         .setup(|app| {
+            // ── File logging ───────────────────────────────────────────
+            // Mirror tracing output to <app_data_dir>/logs/zen-tools.log
+            // (daily-rotated). The Settings → Paths section surfaces
+            // this directory; without the file appender the folder
+            // would always be empty.
+            //
+            // We deliberately use `add_directive`-friendly EnvFilter,
+            // and intentionally *don't* tear down the bootstrap stdout
+            // subscriber installed at the top of `run()` — instead we
+            // keep both, side by side. tracing's global default is
+            // first-installed-wins, so this layer adds a sink rather
+            // than replacing one. We `Box::leak` the worker guard so
+            // the appender's background thread isn't dropped at the end
+            // of `setup()`.
+            if let Ok(dir) = dictation::logs_dir(app.handle()) {
+                let appender = tracing_appender::rolling::daily(&dir, "zen-tools.log");
+                let (writer, guard) = tracing_appender::non_blocking(appender);
+                Box::leak(Box::new(guard));
+                let _ = tracing_subscriber::fmt()
+                    .with_env_filter(
+                        EnvFilter::try_from_default_env()
+                            .unwrap_or_else(|_| EnvFilter::new("info,zen=debug")),
+                    )
+                    .with_target(false)
+                    .with_ansi(false)
+                    .with_writer(writer)
+                    .try_init();
+                tracing::info!(logs_dir = %dir.display(), "file logging initialised");
+            }
+
             // Open the user-config store FIRST so subsequent setup
             // steps (and every command path) can read settings via
             // `commands::preferences::load_preferences`. Registering
@@ -259,6 +298,31 @@ pub fn run() {
                         }
                     });
                 }
+            }
+
+            // ── Dictation ─────────────────────────────────────────────
+            // Resolve the per-app data dirs and register the managed
+            // state. Bootstrap is a no-op while the global app-enabled
+            // flag is off — it just hydrates the persisted model
+            // selection so the dropdown shows the right item once the
+            // user toggles the feature on. The merged main branch ships
+            // a generic `disabled_tools: Vec<String>` mechanism (see
+            // `commands::preferences::set_tool_disabled`); a follow-up
+            // can swap `dictation::is_app_enabled()` to read that list
+            // for `"dictation"` so dictation honours the same
+            // per-tool kill-switch the rest of the app uses.
+            let app_data_dir = app.path().app_data_dir().ok();
+            let models_dir_path = dictation::models_dir(app.handle()).ok();
+            let logs_dir_path = dictation::logs_dir(app.handle()).ok();
+            if let (Some(app_data), Some(models), Some(logs)) =
+                (app_data_dir, models_dir_path, logs_dir_path)
+            {
+                let dictation_state =
+                    dictation::state::DictationTauriState::new(app_data, models, logs);
+                app.manage(dictation_state);
+                dictation::bootstrap(app.handle());
+            } else {
+                tracing::warn!("dictation: failed to resolve app_data_dir; feature disabled");
             }
 
             Ok(())
@@ -404,6 +468,14 @@ pub fn run() {
             commands::prmaster::prmaster_get_ai_runs,
             commands::prmaster::prmaster_list_repos,
             commands::prmaster::prmaster_fetch_repos,
+            // dictation (local Whisper)
+            dictation::commands::dictation_list_models,
+            dictation::commands::dictation_get_state,
+            dictation::commands::dictation_select_model,
+            dictation::commands::dictation_download_model,
+            dictation::commands::dictation_open_app_data_dir,
+            dictation::commands::dictation_open_logs_dir,
+            dictation::commands::dictation_get_paths,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

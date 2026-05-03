@@ -15,6 +15,8 @@ members = [
     "crates/zen-github",
     "crates/zen-ai-cli",
     "crates/zen-prmaster",
+    "crates/zen-whisper",
+    "crates/zen-dictation",
     "src-tauri",
 ]
 # zen-test-server is a standalone dev tool. It has its own [workspace] and is
@@ -58,7 +60,19 @@ thiserror = "1"
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+# Daily-rotating file appender used by `src-tauri/src/lib.rs` to mirror
+# tracing output to `<app_data_dir>/logs/zen-tools.log`. Stdout writer is
+# kept too via a fmt-layer fanout.
+tracing-appender = "0.2"
 dirs = "5"
+
+# Local dictation (whisper.cpp + microphone capture). cpal is a
+# cross-platform audio I/O library; rubato is a high-quality sinc
+# resampler used to drop microphone input down to the 16 kHz f32 mono
+# whisper.cpp expects.
+cpal = "0.15"
+rubato = "0.16"
+sha2 = "0.10"
 
 # TypeScript binding generation. We derive `TS` on every wire DTO that
 # crosses the IPC boundary; `cargo test export_bindings` then emits a
@@ -87,6 +101,8 @@ zen-shell = { path = "crates/zen-shell" }
 zen-github = { path = "crates/zen-github" }
 zen-ai-cli = { path = "crates/zen-ai-cli" }
 zen-prmaster = { path = "crates/zen-prmaster" }
+zen-whisper = { path = "crates/zen-whisper" }
+zen-dictation = { path = "crates/zen-dictation" }
 
 # zen-prmaster / zen-github
 globset = "0.4"

@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Custom Info.plist keys merged into the generated bundle Info.plist by
+  the Tauri bundler. We only need to declare the privacy-sensitive
+  usage strings here — Tauri fills in everything else (CFBundleName,
+  CFBundleVersion, etc.) from `tauri.conf.json`.
+
+  - NSMicrophoneUsageDescription is required by macOS for ANY process
+    that opens an audio input stream (cpal in our case). Without it
+    CoreAudio raises `kAudioUnitErr_PropertyNotInUse` at stream start.
+  - NSAppleEventsUsageDescription is the prompt shown when our
+    CGEventTap and synthetic ⌘V calls request Accessibility access.
+    Apple shows it under "TCC" in the dialog title.
+-->
+<plist version="1.0">
+<dict>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Zen Tools needs microphone access to transcribe your voice with the local Whisper model. Audio never leaves your device.</string>
+  <key>NSAppleEventsUsageDescription</key>
+  <string>Zen Tools uses Accessibility APIs to detect the right ⌘ long-press hotkey and to type the transcribed text into the active app.</string>
+</dict>
+</plist>

@@ -6,13 +6,27 @@
  *  2. Vim mode — global Vim-keybinding flag (reuses VimToggle).
  *  3. Zoom    — ⌘= / ⌘− / ⌘0 + on-screen control.
  *  4. App order — drag-reorder of the tool pills.
+ *  5. Dictation — local Whisper model picker + downloader (only
+ *     visible when the global "app enabled" flag is on; that flag is
+ *     being added by another agent's branch — for now we stub
+ *     `isAppEnabled` to false so the section stays hidden).
+ *  6. Paths — app-data / logs / models directories with Open in Finder.
  */
 import type { ReactNode } from "react";
 import { VimToggle } from "@/components/vim-toggle";
 import { AppOrderList } from "./components/app-order-list";
+import { DictationSection } from "./components/dictation-section";
+import { PathsSection } from "./components/paths-section";
 import { ThemeModePicker } from "./components/theme-mode-picker";
 import { UpdateSection } from "./components/update-section";
 import { ZoomControl } from "./components/zoom-control";
+
+// TODO(zen-app-enabled-flag): replace with the hook the parallel agent
+// is shipping (likely something like `const { enabled } = useAppEnabled()`).
+// Temporarily defaulted to `true` so the Dictation section is visible
+// while we test the feature locally; flip back to `false` (or remove
+// entirely) once the real flag is wired through.
+const isAppEnabled = true;
 
 export function SettingsView() {
   return (
@@ -57,6 +71,22 @@ export function SettingsView() {
           description="Drag the pills into the order you want to see them in the title bar."
           fullWidthControl
           control={<AppOrderList />}
+        />
+
+        {isAppEnabled && (
+          <Section
+            title="Dictation"
+            description="Local speech-to-text powered by Whisper. Long-press the right ⌘ key to record, then release to transcribe and paste at the cursor."
+            fullWidthControl
+            control={<DictationSection />}
+          />
+        )}
+
+        <Section
+          title="Paths"
+          description="Locations on disk used by Zen Tools. Logs rotate daily; dictation models cache here on first download."
+          fullWidthControl
+          control={<PathsSection />}
         />
       </div>
     </div>
