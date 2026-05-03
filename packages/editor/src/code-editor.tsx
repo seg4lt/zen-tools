@@ -15,7 +15,13 @@
  */
 
 import { useEffect, useImperativeHandle, useRef, type Ref } from "react";
-import { EditorState, Prec, type Extension } from "@codemirror/state";
+import {
+  EditorState,
+  Prec,
+  StateEffect,
+  StateField,
+  type Extension,
+} from "@codemirror/state";
 import {
   EditorView,
   drawSelection,
@@ -105,7 +111,58 @@ export interface CodeEditorProps {
    * imperative handle.
    */
   onView?: (view: EditorView | null) => void;
+  /**
+   * `Ctrl+W h/j/k/l` — vim-style split focus movement. Fired with
+   * the direction key after the user presses `Ctrl+W` followed by
+   * one of `h`, `j`, `k`, `l` while this editor has focus. The
+   * caller (a tool's view) updates its split-tree focused leaf.
+   *
+   * The chord is intercepted at `Prec.highest` so vim mode and the
+   * default keymap can't shadow it. When no callback is provided,
+   * the chord falls through to vim normally.
+   */
+  onMoveFocus?: (dir: "h" | "j" | "k" | "l") => void;
+  /**
+   * `Ctrl+O` — jump-back at the workspace level. Return `true` if a
+   * cross-tab/split jump was handled; `false` to fall through to
+   * vim's per-view jump list (which handles within-buffer jumps).
+   */
+  onJumpBack?: () => boolean;
+  /**
+   * `Ctrl+I` — jump-forward at the workspace level. Same fall-through
+   * contract as `onJumpBack`.
+   *
+   * Note: in vim, `Tab` and `Ctrl+I` produce the same key code; we
+   * only intercept the explicit `Ctrl-i` binding so plain `Tab` in
+   * insert mode still inserts a tab character.
+   */
+  onJumpForward?: () => boolean;
 }
+
+/** Effect type that drives the `Ctrl+W`-pending state field. */
+const setCtrlWPending = StateEffect.define<boolean>();
+
+/**
+ * Tracks whether the previous keystroke was `Ctrl+W` and we're now
+ * waiting for the second leg of the chord (`h`/`j`/`k`/`l`). Stored
+ * as a CodeMirror `StateField` (rather than a React ref) so the
+ * keymap can read + write it transactionally.
+ */
+const ctrlWPendingField = StateField.define<boolean>({
+  create: () => false,
+  update(value, tr) {
+    for (const e of tr.effects) {
+      if (e.is(setCtrlWPending)) return e.value;
+    }
+    // Any non-`Ctrl+W` keystroke that isn't an h/j/k/l (handled
+    // elsewhere) clears the flag — but since the keymap entries
+    // themselves clear the flag on a successful match, the only
+    // way to reach here is via doc edits / selection changes,
+    // which should also reset the chord to avoid weird state.
+    if (value && (tr.docChanged || tr.selection)) return false;
+    return value;
+  },
+});
 
 /** Generic CodeMirror 6 editor. */
 export function CodeEditor({
@@ -121,6 +178,9 @@ export function CodeEditor({
   isDark = false,
   imperativeRef,
   onView,
+  onMoveFocus,
+  onJumpBack,
+  onJumpForward,
 }: CodeEditorProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const viewRef = useRef<EditorView | null>(null);
@@ -131,6 +191,9 @@ export function CodeEditor({
   const onAltEnterRef = useRef(onAltEnter);
   const extensionsRef = useRef(extensions);
   const onViewRef = useRef(onView);
+  const onMoveFocusRef = useRef(onMoveFocus);
+  const onJumpBackRef = useRef(onJumpBack);
+  const onJumpForwardRef = useRef(onJumpForward);
 
   useEffect(() => {
     onChangeRef.current = onChange;
@@ -140,6 +203,9 @@ export function CodeEditor({
     onAltEnterRef.current = onAltEnter;
     extensionsRef.current = extensions;
     onViewRef.current = onView;
+    onMoveFocusRef.current = onMoveFocus;
+    onJumpBackRef.current = onJumpBack;
+    onJumpForwardRef.current = onJumpForward;
   }, [
     onChange,
     onSave,
@@ -148,6 +214,9 @@ export function CodeEditor({
     onAltEnter,
     extensions,
     onView,
+    onMoveFocus,
+    onJumpBack,
+    onJumpForward,
   ]);
 
   // Vim ex commands — register once. The Vim wrapper passes its adapter;
@@ -165,6 +234,7 @@ export function CodeEditor({
 
   const buildExtensions = (isDark: boolean): Extension[] => [
     ...(vimMode ? [vim()] : []),
+    ctrlWPendingField,
     lineNumbers(),
     foldGutter(),
     drawSelection(),
@@ -192,13 +262,52 @@ export function CodeEditor({
             return true;
           },
         },
+        // `Ctrl+W` followed by `h`/`j`/`k`/`l` — vim-style window
+        // navigation. CodeMirror keymaps don't natively support
+        // chord sequences, so we track the pending state in a
+        // `StateField` (`ctrlWPendingField`) and intercept the
+        // h/j/k/l second leg only when the flag is set.
+        //
+        // Skipping when `onMoveFocus` isn't wired lets a host that
+        // doesn't use splits see plain `Ctrl+W` (which on the web
+        // closes the tab — though Tauri intercepts that anyway).
+        {
+          key: "Ctrl-w",
+          preventDefault: true,
+          run: (view) => {
+            if (!onMoveFocusRef.current) return false;
+            view.dispatch({ effects: setCtrlWPending.of(true) });
+            return true;
+          },
+        },
+        ...(["h", "j", "k", "l"] as const).map((dir) => ({
+          key: dir,
+          run: (view: EditorView) => {
+            if (!view.state.field(ctrlWPendingField, false)) return false;
+            view.dispatch({ effects: setCtrlWPending.of(false) });
+            onMoveFocusRef.current?.(dir);
+            return true;
+          },
+        })),
+        // `Ctrl+O` / `Ctrl+I` — workspace-level jump list. Returns
+        // false (falls through to vim's per-view jump stack) when
+        // there's no cross-tab/split entry to jump to.
+        {
+          key: "Ctrl-o",
+          run: () => onJumpBackRef.current?.() ?? false,
+        },
+        {
+          key: "Ctrl-i",
+          run: () => onJumpForwardRef.current?.() ?? false,
+        },
         {
           key: "Mod-Enter",
           preventDefault: true,
           run: (view) => {
+            if (!onRunLineRef.current) return false;
             const pos = view.state.selection.main.head;
             const line = view.state.doc.lineAt(pos).number;
-            onRunLineRef.current?.(line);
+            onRunLineRef.current(line);
             return true;
           },
         },
@@ -206,9 +315,10 @@ export function CodeEditor({
           key: "Mod-Shift-Enter",
           preventDefault: true,
           run: (view) => {
+            if (!onRunLineWithDepsRef.current) return false;
             const pos = view.state.selection.main.head;
             const line = view.state.doc.lineAt(pos).number;
-            onRunLineWithDepsRef.current?.(line);
+            onRunLineWithDepsRef.current(line);
             return true;
           },
         },

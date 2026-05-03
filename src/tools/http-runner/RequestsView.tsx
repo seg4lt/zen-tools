@@ -4,9 +4,18 @@ import {
   Suspense,
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
+import {
+  SplitLayout,
+  useJumpList,
+  useSplitWorkspace,
+  useWorkspaceVim,
+  type JumpEntry,
+  type WorkspaceContext,
+} from "@zen-tools/editor";
 import {
   BookOpen,
   Download,
@@ -99,7 +108,25 @@ export function RequestsView() {
   });
   const [maximizedPane, setMaximizedPane] = useState<PaneKey | null>(null);
   const queryClient = useQueryClient();
-  const editorRef = useRef<HttpEditorHandle>(null);
+  // One editor handle per split leaf. Run / save flows read from
+  // the focused leaf so the user's selection / cursor in *that*
+  // split drives the action.
+  const leafHandlesRef = useRef<Map<string, HttpEditorHandle>>(new Map());
+  const workspace = useSplitWorkspace();
+  const jumpList = useJumpList();
+  const focusedHandle = useCallback(
+    () => leafHandlesRef.current.get(workspace.focusedLeafId) ?? null,
+    [workspace.focusedLeafId],
+  );
+  const broadcastSetValue = useCallback((content: string) => {
+    for (const h of leafHandlesRef.current.values()) h.setValue(content);
+  }, []);
+  const broadcastScrollToLine = useCallback((line: number) => {
+    // Only the focused leaf jumps to the line — siblings stay where
+    // the user left them. Mirrors vim semantics for picking a
+    // request from the list.
+    focusedHandle()?.scrollToLine(line);
+  }, [focusedHandle]);
   /** Disk-baseline — last known on-disk content for the active file. */
   const [editorValue, setEditorValue] = useState("");
   /** Live editor buffer. Updated on every keystroke; drives the
@@ -331,7 +358,7 @@ export function RequestsView() {
       try {
         setEditorValue(rawContent);
         setLiveValue(rawContent);
-        editorRef.current?.setValue(rawContent);
+        broadcastSetValue(rawContent);
       } finally {
         applyingExternalRef.current = false;
       }
@@ -344,9 +371,9 @@ export function RequestsView() {
       (r) => stableId(state.selectedFile!.path, r) === state.selectedRequestId,
     );
     if (req) {
-      editorRef.current?.scrollToLine(req.lineNumber);
+      broadcastScrollToLine(req.lineNumber);
     }
-  }, [state.selectedRequestId, state.selectedFile]);
+  }, [state.selectedRequestId, state.selectedFile, broadcastScrollToLine]);
 
   /**
    * Disk-write + reparse. Used both by the shared autosave debounce
@@ -481,6 +508,68 @@ export function RequestsView() {
 
   const selectedRequest = state.selectedFile?.requests.find(
     (r) => stableId(state.selectedFile!.path, r) === state.selectedRequestId,
+  );
+
+  // ── Workspace bridge for `:q` / `:vsplit` / `:hsplit` ──────────────
+  //
+  // HTTP Runner has no tab strip — `:q` is a no-op when only one
+  // leaf exists (per the user's spec). With multiple splits, `:q`
+  // closes the focused split. `useSplitWorkspace.closeFocused()`
+  // already enforces the "leave at least one leaf" invariant, so
+  // we don't need a fallback path here.
+  const workspaceContext = useMemo<WorkspaceContext>(
+    () => ({
+      closeActive: () => {
+        workspace.closeFocused();
+      },
+      split: (direction) => workspace.split(direction),
+      moveFocus: (dir) => workspace.moveFocus(dir),
+    }),
+    [workspace],
+  );
+  useWorkspaceVim(workspaceContext);
+
+  // Push a jump entry whenever the user picks a different request
+  // or moves focus to a different split. Within-buffer cursor jumps
+  // (search, gg, G, %) stay handled by vim's per-view stack.
+  useEffect(() => {
+    if (!state.selectedRequestId) return;
+    const handle = focusedHandle();
+    jumpList.push({
+      leafId: workspace.focusedLeafId,
+      tabId: state.selectedRequestId,
+      cursorOffset: handle?.getCursorOffset() ?? 0,
+    });
+  }, [
+    state.selectedRequestId,
+    workspace.focusedLeafId,
+    jumpList,
+    focusedHandle,
+  ]);
+
+  const navigateToJump = useCallback(
+    (entry: JumpEntry | null): boolean => {
+      if (!entry) return false;
+      if (entry.tabId && entry.tabId !== state.selectedRequestId) {
+        dispatch({ type: "selectRequest", id: entry.tabId });
+      }
+      if (entry.leafId !== workspace.focusedLeafId) {
+        workspace.setFocus(entry.leafId);
+      }
+      requestAnimationFrame(() => {
+        leafHandlesRef.current.get(entry.leafId)?.focus();
+      });
+      return true;
+    },
+    [state.selectedRequestId, dispatch, workspace],
+  );
+  const onJumpBack = useCallback(
+    () => navigateToJump(jumpList.back()),
+    [jumpList, navigateToJump],
+  );
+  const onJumpForward = useCallback(
+    () => navigateToJump(jumpList.forward()),
+    [jumpList, navigateToJump],
   );
 
   // ── pane bodies ────────────────────────────────────────────────────
@@ -629,7 +718,10 @@ export function RequestsView() {
                 size="icon"
                 className="size-5"
                 onClick={() =>
-                  editorRef.current && handleSave(editorRef.current.getValue())
+                  (() => {
+                    const h = focusedHandle();
+                    if (h) handleSave(h.getValue());
+                  })()
                 }
                 title={isDirty ? "Save (Cmd+S) — unsaved changes" : "Save (Cmd+S)"}
               >
@@ -680,7 +772,10 @@ export function RequestsView() {
                 size="icon"
                 className="size-5"
                 onClick={() =>
-                  editorRef.current && handleSave(editorRef.current.getValue())
+                  (() => {
+                    const h = focusedHandle();
+                    if (h) handleSave(h.getValue());
+                  })()
                 }
                 title={isDirty ? "Save (Cmd+S) — unsaved changes" : "Save (Cmd+S)"}
               >
@@ -694,20 +789,40 @@ export function RequestsView() {
       }
     >
       {state.selectedFilePath ? (
-        <HttpEditor
-          imperativeRef={editorRef}
-          value={editorValue}
-          mode={isPerf ? "plain" : "http"}
-          vimMode={vimModeEnabled}
-          varContext={{
-            extracted: extractedVars,
-            local: state.selectedFile?.localVariables,
-            env: envVars,
-          }}
-          onSave={handleSave}
-          onChange={handleEditorChange}
-          onRunLine={(line) => handleRunLine(line)}
-          onRunLineWithDeps={(line) => handleRunLine(line, true)}
+        // Splits live *inside* the editor pane only — the four
+        // outer panes (tree | list | editor | response) are
+        // unchanged. Each leaf has its own HttpEditor showing the
+        // active request file.
+        <SplitLayout
+          root={workspace.tree}
+          focusedLeafId={workspace.focusedLeafId}
+          onFocusLeaf={workspace.setFocus}
+          onResize={workspace.resize}
+          renderLeaf={(leafId, focused) => (
+            <HttpLeafShell
+              leafId={leafId}
+              focused={focused}
+              value={editorValue}
+              mode={isPerf ? "plain" : "http"}
+              vimMode={vimModeEnabled}
+              varContext={{
+                extracted: extractedVars,
+                local: state.selectedFile?.localVariables,
+                env: envVars,
+              }}
+              onSave={handleSave}
+              onChange={handleEditorChange}
+              onRunLine={(line) => handleRunLine(line)}
+              onRunLineWithDeps={(line) => handleRunLine(line, true)}
+              onMoveFocus={workspace.moveFocus}
+              onJumpBack={onJumpBack}
+              onJumpForward={onJumpForward}
+              registerHandle={(h) => {
+                if (h) leafHandlesRef.current.set(leafId, h);
+                else leafHandlesRef.current.delete(leafId);
+              }}
+            />
+          )}
         />
       ) : (
         <div className="flex h-full items-center justify-center p-4 text-xs text-muted-foreground">
@@ -852,6 +967,82 @@ export function RequestsView() {
           {responsePane}
         </div>
       </div>
+    </div>
+  );
+}
+
+/**
+ * One leaf of the HTTP editor split workspace. Owns its own
+ * `<HttpEditor>` (independent cursor / scroll / undo) and
+ * registers its imperative handle with the parent so save / scroll
+ * flows can target the focused leaf.
+ */
+interface HttpLeafShellProps {
+  leafId: string;
+  focused: boolean;
+  value: string;
+  mode: "http" | "plain";
+  vimMode: boolean;
+  varContext: React.ComponentProps<typeof HttpEditor>["varContext"];
+  onSave: (next: string) => void;
+  onChange: (next: string) => void;
+  onRunLine: (line: number) => void;
+  onRunLineWithDeps: (line: number) => void;
+  onMoveFocus: (dir: "h" | "j" | "k" | "l") => void;
+  onJumpBack: () => boolean;
+  onJumpForward: () => boolean;
+  registerHandle: (h: HttpEditorHandle | null) => void;
+}
+
+function HttpLeafShell({
+  focused,
+  value,
+  mode,
+  vimMode,
+  varContext,
+  onSave,
+  onChange,
+  onRunLine,
+  onRunLineWithDeps,
+  onMoveFocus,
+  onJumpBack,
+  onJumpForward,
+  registerHandle,
+}: HttpLeafShellProps) {
+  const handleRef = useRef<HttpEditorHandle | null>(null);
+
+  useEffect(() => {
+    registerHandle(handleRef.current);
+    return () => registerHandle(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (focused) handleRef.current?.focus();
+  }, [focused]);
+
+  return (
+    <div
+      className={
+        focused
+          ? "h-full w-full min-h-0 min-w-0 outline outline-1 outline-primary/40 -outline-offset-1"
+          : "h-full w-full min-h-0 min-w-0"
+      }
+    >
+      <HttpEditor
+        imperativeRef={handleRef}
+        value={value}
+        mode={mode}
+        vimMode={vimMode}
+        varContext={varContext}
+        onSave={onSave}
+        onChange={onChange}
+        onRunLine={onRunLine}
+        onRunLineWithDeps={onRunLineWithDeps}
+        onMoveFocus={onMoveFocus}
+        onJumpBack={onJumpBack}
+        onJumpForward={onJumpForward}
+      />
     </div>
   );
 }

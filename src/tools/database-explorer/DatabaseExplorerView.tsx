@@ -30,7 +30,23 @@
  *   in the +Manage popover up top, not in this rail.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import {
+  SplitLayout,
+  leafIds,
+  useJumpList,
+  useSplitWorkspace,
+  useWorkspaceVim,
+  type JumpEntry,
+  type WorkspaceContext,
+} from "@zen-tools/editor";
 import { CacheStatusBadge } from "./components/cache-status-badge";
 import { ConnectionForm } from "./components/connection-form";
 import { ConnectionTabs } from "./components/connection-tabs";
@@ -51,7 +67,12 @@ import { PlaceholderDialog } from "./components/placeholder-dialog";
 import { useDbExplorerStore } from "./store/db-explorer-store";
 import { useDbQuery } from "./hooks/use-db-query";
 import { useSqlProjectsBootstrap } from "./hooks/use-sql-workspace";
-import { dbTauri, sqlWorkspaceTauri, type SqlFileTreeItem } from "./lib/tauri";
+import {
+  dbTauri,
+  sqlWorkspaceTauri,
+  type DbDriverId,
+  type SqlFileTreeItem,
+} from "./lib/tauri";
 import { formatError } from "./lib/format-error";
 import { splitStatements, statementAtCursor } from "./lib/sql-statements";
 import {
@@ -70,7 +91,106 @@ export function DatabaseExplorerView() {
   const { state, dispatch } = useDbExplorerStore();
   const { runQuery } = useDbQuery();
   const { vimMode } = useVimMode();
-  const editorRef = useRef<SqlEditorHandle | null>(null);
+  const workspace = useSplitWorkspace();
+  const jumpList = useJumpList();
+  // One handle per split leaf. Run / EXPLAIN flows read from the
+  // *focused* leaf so the user's selection / cursor in that split
+  // drives execution.
+  const leafHandlesRef = useRef<Map<string, SqlEditorHandle>>(new Map());
+  const focusedHandle = useCallback(
+    () => leafHandlesRef.current.get(workspace.focusedLeafId) ?? null,
+    [workspace.focusedLeafId],
+  );
+
+  // Per-leaf selected file path — different splits can show different
+  // SQL files. The store's `state.selectedFilePath` slaves to the
+  // focused leaf's path so file tree / tab strip / run flow keep
+  // working unchanged.
+  const [leafPaths, setLeafPaths] = useState<Record<string, string>>({});
+  const prevFocusedLeafRef = useRef(workspace.focusedLeafId);
+
+  // Effect A — focus change syncs `state.selectedFilePath` to the
+  // new focused leaf's stored path. New (just-split) leaves with
+  // no stored path inherit from the previously-focused leaf.
+  useEffect(() => {
+    const newFocused = workspace.focusedLeafId;
+    const oldFocused = prevFocusedLeafRef.current;
+    prevFocusedLeafRef.current = newFocused;
+    if (newFocused === oldFocused) return;
+    setLeafPaths((prev) => {
+      const stored = prev[newFocused];
+      if (stored) {
+        if (stored !== state.selectedFilePath) {
+          dispatch({ type: "select-file", path: stored });
+        }
+        return prev;
+      }
+      const inherited = prev[oldFocused] ?? state.selectedFilePath;
+      if (!inherited) return prev;
+      return { ...prev, [newFocused]: inherited };
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspace.focusedLeafId]);
+
+  // Effect B — `state.selectedFilePath` changes (sidebar click,
+  // tab strip click) update the focused leaf's stored path.
+  useEffect(() => {
+    if (!state.selectedFilePath) return;
+    setLeafPaths((prev) => {
+      if (prev[workspace.focusedLeafId] === state.selectedFilePath) return prev;
+      return {
+        ...prev,
+        [workspace.focusedLeafId]: state.selectedFilePath!,
+      };
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.selectedFilePath]);
+
+  // Effect C — prune entries for leaves that no longer exist.
+  useEffect(() => {
+    const valid = new Set(leafIds(workspace.tree));
+    setLeafPaths((prev) => {
+      let changed = false;
+      const next: Record<string, string> = {};
+      for (const [k, v] of Object.entries(prev)) {
+        if (valid.has(k)) next[k] = v;
+        else changed = true;
+      }
+      return changed ? next : prev;
+    });
+  }, [workspace.tree]);
+
+  const pathForLeaf = useCallback(
+    (leafId: string) => leafPaths[leafId] ?? state.selectedFilePath ?? null,
+    [leafPaths, state.selectedFilePath],
+  );
+
+  // ── Deterministic per-leaf dispatch (same shape as MarkdownView) ──
+  // `leafPathsRef` is synced *synchronously* in `useLayoutEffect`,
+  // so any keystroke arriving between commit and useEffect (the
+  // window where regular ref-update effects haven't fired yet) sees
+  // an up-to-date map. The change/save callbacks are deliberately
+  // stable so `CodeEditor`'s internal `onChangeRef` / `onSaveRef`
+  // captured at mount never go stale — the lookup happens at fire
+  // time using the *current* ref value, not a captured prop.
+  const leafPathsRef = useRef(leafPaths);
+  const selectedFilePathRef = useRef(state.selectedFilePath);
+  useLayoutEffect(() => {
+    leafPathsRef.current = leafPaths;
+    selectedFilePathRef.current = state.selectedFilePath;
+  });
+  const onLeafEditorChange = useCallback(
+    (leafId: string, next: string) => {
+      const path =
+        leafPathsRef.current[leafId] ?? selectedFilePathRef.current;
+      if (!path) return;
+      dispatch({ type: "set-buffer", path, content: next, dirty: true });
+    },
+    [dispatch],
+  );
+  // (`onLeafEditorSave` is declared further down, after `autoSave`
+  // is initialised — it needs `autoSave.cancel` to short-circuit
+  // the trailing-edge debounce on ⌘S.)
 
   const activeId = state.activeConnectionId;
   const active = useMemo(
@@ -131,28 +251,39 @@ export function DatabaseExplorerView() {
     ? state.activeSchemaByConnection[activeId] ?? null
     : null;
 
-  // Load file content when the user picks a new file in the tree.
-  // We don't blow away an existing in-memory buffer (so re-clicking
-  // a dirty file doesn't lose unsaved edits).
+  // Load file content for *every* leaf path that hasn't been
+  // hydrated yet — covers the "leaf B has its own path P that
+  // hasn't been loaded" case. Re-clicking a dirty file doesn't
+  // lose unsaved edits because `bufferByPath[path]` is checked
+  // first.
   useEffect(() => {
-    if (!selectedPath) return;
-    if (state.bufferByPath[selectedPath] !== undefined) return;
+    const seen = new Set<string>();
+    const pathsToLoad: string[] = [];
+    if (selectedPath && !seen.has(selectedPath)) {
+      seen.add(selectedPath);
+      if (state.bufferByPath[selectedPath] === undefined) {
+        pathsToLoad.push(selectedPath);
+      }
+    }
+    for (const p of Object.values(leafPaths)) {
+      if (seen.has(p)) continue;
+      seen.add(p);
+      if (state.bufferByPath[p] === undefined) pathsToLoad.push(p);
+    }
+    if (pathsToLoad.length === 0) return;
+
     let cancelled = false;
     void (async () => {
-      try {
-        const content = await sqlWorkspaceTauri.readFile(selectedPath);
-        if (cancelled) return;
-        dispatch({
-          type: "set-buffer",
-          path: selectedPath,
-          content,
-          dirty: false,
-        });
-        editorRef.current?.setValue(content);
-      } catch (err) {
-        if (!cancelled) {
-          // eslint-disable-next-line no-console
-          console.error("read file failed", formatError(err));
+      for (const path of pathsToLoad) {
+        try {
+          const content = await sqlWorkspaceTauri.readFile(path);
+          if (cancelled) return;
+          dispatch({ type: "set-buffer", path, content, dirty: false });
+        } catch (err) {
+          if (!cancelled) {
+            // eslint-disable-next-line no-console
+            console.error("read file failed", formatError(err));
+          }
         }
       }
     })();
@@ -160,16 +291,7 @@ export function DatabaseExplorerView() {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedPath]);
-
-  // Keep the editor in sync when switching between already-loaded files.
-  useEffect(() => {
-    if (!selectedPath) return;
-    const cached = state.bufferByPath[selectedPath];
-    if (cached === undefined) return;
-    editorRef.current?.setValue(cached);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedPath]);
+  }, [selectedPath, leafPaths]);
 
   const handleSelectFile = useCallback(
     (item: SqlFileTreeItem) => {
@@ -204,36 +326,27 @@ export function DatabaseExplorerView() {
     ),
   });
 
-  const handleEditorChange = useCallback(
-    (next: string) => {
-      if (!selectedPath) return;
-      dispatch({
-        type: "set-buffer",
-        path: selectedPath,
-        content: next,
-        dirty: true,
-      });
-    },
-    [selectedPath, dispatch],
-  );
-
-  const handleSave = useCallback(
-    async (next: string) => {
-      if (!selectedPath) return;
-      // ⌘S takes the editor's current value as the source of truth
-      // (the autosave hook's pending ref might be one render behind).
-      // Cancel the pending debounce so it can't re-fire with stale
-      // bytes a second later.
-      autoSave.cancel();
+  // Leaf-keyed save — race-free counterpart to `onLeafEditorChange`.
+  // The legacy `handleSave` keyed on `state.selectedFilePath` was
+  // removed; lookups go through `leafPathsRef` so a ⌘S during a
+  // focus transition can't write the focused editor's content into
+  // the previously-focused leaf's path.
+  const autoSaveCancel = autoSave.cancel;
+  const onLeafEditorSave = useCallback(
+    async (leafId: string, next: string) => {
+      const path =
+        leafPathsRef.current[leafId] ?? selectedFilePathRef.current;
+      if (!path) return;
+      autoSaveCancel();
       try {
-        await sqlWorkspaceTauri.writeFile(selectedPath, next);
-        dispatch({ type: "mark-clean", path: selectedPath });
+        await sqlWorkspaceTauri.writeFile(path, next);
+        dispatch({ type: "mark-clean", path });
       } catch (err) {
         // eslint-disable-next-line no-console
         console.error("write file failed", formatError(err));
       }
     },
-    [selectedPath, dispatch, autoSave],
+    [autoSaveCancel, dispatch],
   );
 
   const ctxOpts = useMemo(
@@ -468,8 +581,10 @@ export function DatabaseExplorerView() {
             // task, which is after Radix's blur-the-trigger logic
             // settles. Without this, the user has to click back
             // into the editor to keep typing — the original bug
-            // report.
-            window.setTimeout(() => editorRef.current?.focus(), 0);
+            // report. With split workspaces we route to the focused
+            // leaf's handle so focus lands on the split that fired
+            // the run.
+            window.setTimeout(() => focusedHandle()?.focus(), 0);
             if (!values) {
               resolve(null);
               return;
@@ -497,7 +612,7 @@ export function DatabaseExplorerView() {
         });
       });
     },
-    [activeId, state.placeholderValuesByConnection, dispatch],
+    [activeId, state.placeholderValuesByConnection, dispatch, focusedHandle],
   );
 
   /**
@@ -507,7 +622,7 @@ export function DatabaseExplorerView() {
    * statement-at-cursor when there's no selection.
    */
   const resolveTarget = useCallback((): { sql: string } | null => {
-    const editor = editorRef.current;
+    const editor = focusedHandle();
     if (!editor) return null;
     const selection = editor.getSelection();
     if (selection.trim().length > 0) {
@@ -517,7 +632,7 @@ export function DatabaseExplorerView() {
     const cursor = editor.getCursorOffset();
     const stmt = statementAtCursor(buffer, cursor);
     return stmt ? { sql: stmt.sql } : null;
-  }, []);
+  }, [focusedHandle]);
 
   const handleRun = useCallback(async () => {
     if (!activeId) return;
@@ -564,7 +679,7 @@ export function DatabaseExplorerView() {
    * plan" on a single statement after Run All. */
   const handleRunAll = useCallback(async () => {
     if (!activeId) return;
-    const editor = editorRef.current;
+    const editor = focusedHandle();
     if (!editor) return;
     const buffer = editor.getValue();
     if (buffer.trim().length === 0) return;
@@ -574,7 +689,14 @@ export function DatabaseExplorerView() {
     if (finalSql === null) return;
     ensureCacheForSql(finalSql);
     runQuery(activeId, finalSql, ctxOpts);
-  }, [activeId, runQuery, ctxOpts, ensureCacheForSql, resolvePlaceholders]);
+  }, [
+    activeId,
+    runQuery,
+    ctxOpts,
+    ensureCacheForSql,
+    resolvePlaceholders,
+    focusedHandle,
+  ]);
 
   /**
    * Explicit "Run with plan" — drives the perf visualizer. Uses the
@@ -764,6 +886,67 @@ export function DatabaseExplorerView() {
     });
   }, [activeId, autoExplain, dispatch]);
 
+  // Workspace bridge for `:q` / `:vsplit` / `:hsplit`. `:q` closes
+  // the focused split when there are multiple; otherwise falls back
+  // to closing the active editor tab — matching the rest of the
+  // workspace.
+  const workspaceContext = useMemo<WorkspaceContext>(
+    () => ({
+      closeActive: () => {
+        if (workspace.closeFocused()) return;
+        const path = state.selectedFilePath;
+        if (path) dispatch({ type: "close-editor-tab", path });
+      },
+      split: (direction) => workspace.split(direction),
+      moveFocus: (dir) => workspace.moveFocus(dir),
+    }),
+    [workspace, state.selectedFilePath, dispatch],
+  );
+  useWorkspaceVim(workspaceContext);
+
+  // Push a jump entry on file switch or focused-leaf change so
+  // `Ctrl+O`/`Ctrl+I` can step back through the user's sequence.
+  useEffect(() => {
+    if (!selectedPath) return;
+    const handle = focusedHandle();
+    jumpList.push({
+      leafId: workspace.focusedLeafId,
+      tabId: selectedPath,
+      cursorOffset: handle?.getCursorOffset() ?? 0,
+    });
+  }, [selectedPath, workspace.focusedLeafId, jumpList, focusedHandle]);
+
+  const navigateToJump = useCallback(
+    (entry: JumpEntry | null): boolean => {
+      if (!entry) return false;
+      if (entry.tabId && entry.tabId !== state.selectedFilePath) {
+        dispatch({ type: "select-file", path: entry.tabId });
+      }
+      if (entry.leafId !== workspace.focusedLeafId) {
+        workspace.setFocus(entry.leafId);
+      }
+      requestAnimationFrame(() => {
+        const handle = leafHandlesRef.current.get(entry.leafId);
+        if (handle && entry.cursorOffset > 0) {
+          const value = handle.getValue();
+          const before = value.slice(0, entry.cursorOffset);
+          handle.scrollToLine(before.split("\n").length);
+        }
+        handle?.focus();
+      });
+      return true;
+    },
+    [state.selectedFilePath, dispatch, workspace],
+  );
+  const onJumpBack = useCallback(
+    () => navigateToJump(jumpList.back()),
+    [jumpList, navigateToJump],
+  );
+  const onJumpForward = useCallback(
+    () => navigateToJump(jumpList.forward()),
+    [jumpList, navigateToJump],
+  );
+
 
   return (
     <div className="flex h-full min-h-0 w-full min-w-0 flex-1 overflow-hidden">
@@ -830,38 +1013,80 @@ export function DatabaseExplorerView() {
           autoExplain={autoExplain}
           onToggleAutoExplain={handleToggleAutoExplain}
         />
-        {/* Editor-tab strip — the most prominent "what file am I
-            looking at?" affordance. Sits between the toolbar
-            (raised, action-coloured) and the editor body so it
-            visually anchors the editor to its file. Hidden when
-            no files are open; the empty-editor state takes over. */}
-        <EditorTabStrip />
+        {/* Editor-tab strip moved into each split leaf — every
+            split now has its own tab rail, VS-Code style. */}
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           {!resultsMaximized && (
             <>
               <div className="min-h-0 min-w-0 flex-1 overflow-hidden border-b border-border/60">
                 {selectedPath ? (
-                  <SqlEditor
-                    key={selectedPath}
-                    imperativeRef={editorRef}
-                    driver={active?.driver ?? "postgres"}
-                    // Gate connection-aware features on the live
-                    // status. Without this, the editor's eager
-                    // catalog + column prefetch fires the moment
-                    // the user picks a saved connection — racing
-                    // `db_connect` and producing a stack of
-                    // "connection not found" progress chips. The
-                    // editor still mounts (so the user can type),
-                    // it just runs in keywords-only mode until the
-                    // connection actually comes online.
-                    connectionId={isConnected ? activeId : null}
-                    database={isConnected ? activeDatabase : null}
-                    schema={isConnected ? activeSchema : null}
-                    value={buffer}
-                    onChange={handleEditorChange}
-                    onSave={handleSave}
-                    onRun={handleRun}
-                    vimMode={vimMode}
+                  // One CodeMirror per split leaf — each gets its
+                  // own cursor / undo / scroll AND its own active
+                  // file. The leaf renders the buffer keyed by its
+                  // stored path; cross-leaf edits propagate through
+                  // the store only when leaves point at the same
+                  // path.
+                  <SplitLayout
+                    root={workspace.tree}
+                    focusedLeafId={workspace.focusedLeafId}
+                    onFocusLeaf={workspace.setFocus}
+                    onResize={workspace.resize}
+                    renderLeaf={(leafId, focused) => {
+                      const leafPath = pathForLeaf(leafId);
+                      const leafBuffer = leafPath
+                        ? state.bufferByPath[leafPath] ?? ""
+                        : "";
+                      return (
+                        <SqlLeafShell
+                          // We deliberately do NOT key by leafPath
+                          // here — the tab strip lives inside the
+                          // leaf shell, so a leaf-internal tab
+                          // switch can't be allowed to remount the
+                          // whole shell (which would unmount the
+                          // tab strip mid-click). Per-file CM state
+                          // is instead reset by keying the inner
+                          // SqlEditor on `leafPath` below.
+                          key={leafId}
+                          leafId={leafId}
+                          leafPath={leafPath}
+                          focused={focused}
+                          driver={active?.driver ?? "postgres"}
+                          connectionId={isConnected ? activeId : null}
+                          database={isConnected ? activeDatabase : null}
+                          schema={isConnected ? activeSchema : null}
+                          openPaths={state.openFilePaths}
+                          dirtyByPath={state.dirtyByPath}
+                          initialValue={leafBuffer}
+                          onSelectTab={(path) => {
+                            // Click in this leaf's tab strip —
+                            // focus this leaf AND swap its file.
+                            workspace.setFocus(leafId);
+                            setLeafPaths((prev) =>
+                              prev[leafId] === path
+                                ? prev
+                                : { ...prev, [leafId]: path },
+                            );
+                            if (state.selectedFilePath !== path) {
+                              dispatch({ type: "select-file", path });
+                            }
+                          }}
+                          onCloseTab={(path) => {
+                            dispatch({ type: "close-editor-tab", path });
+                          }}
+                          onChange={onLeafEditorChange}
+                          onSave={onLeafEditorSave}
+                          onRun={handleRun}
+                          vimMode={vimMode}
+                          onMoveFocus={workspace.moveFocus}
+                          onJumpBack={onJumpBack}
+                          onJumpForward={onJumpForward}
+                          registerHandle={(h) => {
+                            if (h) leafHandlesRef.current.set(leafId, h);
+                            else leafHandlesRef.current.delete(leafId);
+                          }}
+                        />
+                      );
+                    }}
                   />
                 ) : (
                   <EmptyEditor />
@@ -1032,6 +1257,139 @@ function EmptyEditor() {
     <div className="flex h-full flex-col items-center justify-center gap-1 text-center text-xs text-muted-foreground">
       <span>No file open.</span>
       <span>Add a project folder on the left, then pick a .sql file.</span>
+    </div>
+  );
+}
+
+/**
+ * One leaf of the SQL editor split workspace. Owns its own
+ * `<SqlEditor>` (independent cursor / scroll / undo) showing this
+ * leaf's `leafPath`. Multiple leaves pointed at the same path
+ * converge through a `setValue` effect that watches `initialValue`
+ * — the underlying CodeEditor's no-op guard prevents the
+ * self-feedback loop when the leaf's own onChange dispatch comes
+ * back round.
+ */
+interface SqlLeafShellProps {
+  leafId: string;
+  leafPath: string | null;
+  focused: boolean;
+  driver: DbDriverId;
+  connectionId: string | null;
+  database: string | null;
+  schema: string | null;
+  openPaths: string[];
+  dirtyByPath: Record<string, boolean>;
+  initialValue: string;
+  onSelectTab: (path: string) => void;
+  onCloseTab: (path: string) => void;
+  /** `(leafId, doc) => void` — stable, leaf-keyed, deterministic. */
+  onChange: (leafId: string, next: string) => void;
+  /** `(leafId, doc) => void` — stable, leaf-keyed, deterministic. */
+  onSave: (leafId: string, next: string) => Promise<void> | void;
+  onRun: () => void;
+  vimMode: boolean;
+  onMoveFocus: (dir: "h" | "j" | "k" | "l") => void;
+  onJumpBack: () => boolean;
+  onJumpForward: () => boolean;
+  registerHandle: (h: SqlEditorHandle | null) => void;
+}
+
+function SqlLeafShell({
+  leafId,
+  leafPath,
+  focused,
+  driver,
+  connectionId,
+  database,
+  schema,
+  openPaths,
+  dirtyByPath,
+  initialValue,
+  onSelectTab,
+  onCloseTab,
+  onChange,
+  onSave,
+  onRun,
+  vimMode,
+  onMoveFocus,
+  onJumpBack,
+  onJumpForward,
+  registerHandle,
+}: SqlLeafShellProps) {
+  const handleRef = useRef<SqlEditorHandle | null>(null);
+
+  useEffect(() => {
+    registerHandle(handleRef.current);
+    return () => registerHandle(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (focused) handleRef.current?.focus();
+  }, [focused]);
+
+  // Cross-leaf convergence — when a sibling leaf editing the same
+  // file types, the store updates and `initialValue` re-flows down
+  // to us. CodeEditor's `setValue` no-op guard short-circuits when
+  // we ourselves were the source of the change.
+  useEffect(() => {
+    handleRef.current?.setValue(initialValue);
+  }, [initialValue]);
+
+  // Stable `(doc) => void` wrappers around the parent's leaf-keyed
+  // callbacks. Identity-stable across renders (deps are the stable
+  // `leafId` prop + already-stable parent callbacks), so the
+  // underlying CodeEditor's onChange/onSave refs captured at mount
+  // never go stale.
+  const handleEditorChange = useCallback(
+    (next: string) => onChange(leafId, next),
+    [leafId, onChange],
+  );
+  const handleEditorSave = useCallback(
+    (next: string) => {
+      void onSave(leafId, next);
+    },
+    [leafId, onSave],
+  );
+
+  return (
+    <div
+      className={
+        focused
+          ? "flex h-full w-full min-h-0 min-w-0 flex-col outline outline-1 outline-primary/40 -outline-offset-1"
+          : "flex h-full w-full min-h-0 min-w-0 flex-col"
+      }
+    >
+      <EditorTabStrip
+        paths={openPaths}
+        activePath={leafPath}
+        dirtyByPath={dirtyByPath}
+        onSelect={onSelectTab}
+        onClose={onCloseTab}
+      />
+      <div className="min-h-0 min-w-0 flex-1">
+        <SqlEditor
+          // Re-mount the inner editor per file so CodeMirror's
+          // undo history doesn't bleed across files. The tab strip
+          // sits OUTSIDE this re-keyed subtree so clicks on it
+          // aren't interrupted by an unmount mid-event.
+          key={leafPath ?? "empty"}
+          imperativeRef={handleRef}
+          driver={driver}
+          connectionId={connectionId}
+          database={database}
+          schema={schema}
+          value={initialValue}
+          onChange={handleEditorChange}
+          onSave={handleEditorSave}
+          onRun={onRun}
+          vimMode={vimMode}
+          onMoveFocus={onMoveFocus}
+          onJumpBack={onJumpBack}
+          onJumpForward={onJumpForward}
+        />
+      </div>
     </div>
   );
 }

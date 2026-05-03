@@ -13,3 +13,24 @@ export {
   type CodeEditorProps,
 } from "./code-editor";
 export { makeEditorTheme } from "./cm-theme";
+export {
+  type MoveDirection,
+  type SplitDirection,
+  type SplitNode,
+  adjacentLeaf,
+  closeLeaf,
+  hasLeaf,
+  leafCount,
+  leafIds,
+  makeRoot,
+  resizeBranch,
+  splitLeaf,
+} from "./split-tree";
+export { SplitLayout, type SplitLayoutProps } from "./split-layout";
+export { type WorkspaceContext } from "./workspace-context";
+export { useWorkspaceVim } from "./use-workspace-vim";
+export { useJumpList, type JumpEntry, type JumpListApi } from "./use-jump-list";
+export {
+  useSplitWorkspace,
+  type SplitWorkspaceApi,
+} from "./use-split-workspace";

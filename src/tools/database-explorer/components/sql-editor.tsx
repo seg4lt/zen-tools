@@ -112,6 +112,12 @@ export interface SqlEditorProps {
   /** Run handler — fired on Mod-Enter. */
   onRun?: () => void;
   vimMode?: boolean;
+  /** `Ctrl+W h/j/k/l` — move focus between split panes. */
+  onMoveFocus?: (dir: "h" | "j" | "k" | "l") => void;
+  /** `Ctrl+O` — workspace-level jump back. Return `true` if handled. */
+  onJumpBack?: () => boolean;
+  /** `Ctrl+I` — workspace-level jump forward. */
+  onJumpForward?: () => boolean;
   imperativeRef?: Ref<SqlEditorHandle>;
 }
 
@@ -125,6 +131,9 @@ export function SqlEditor({
   onSave,
   onRun,
   vimMode = true,
+  onMoveFocus,
+  onJumpBack,
+  onJumpForward,
   imperativeRef,
 }: SqlEditorProps) {
   const { theme } = useTheme();
@@ -564,6 +573,9 @@ export function SqlEditor({
         imperativeRef={imperativeRef}
         extensions={buildExtensions}
         onView={captureViewRef}
+        onMoveFocus={onMoveFocus}
+        onJumpBack={onJumpBack}
+        onJumpForward={onJumpForward}
       />
       {popup ? (
         <SqlActionsPopup
