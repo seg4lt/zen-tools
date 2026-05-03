@@ -166,41 +166,56 @@ pub async fn dictation_get_paths(state: State<'_, DictationTauriState>) -> AppRe
 /// We deliberately bypass `tauri-plugin-shell`'s `Shell::open`. That
 /// plugin's `shell:allow-open` permission validates targets against a
 /// regex that defaults to URL schemes only (`https?://`, `mailto:`,
-/// `tel:`) — local filesystem paths fail validation silently and
-/// nothing happens when the user clicks "Open in Finder". Configuring
-/// a custom scope works but adds capability boilerplate; spawning
-/// `/usr/bin/open` directly is one syscall, has no scope validator,
-/// and matches what every other macOS-native app does.
+/// `tel:`) — local filesystem paths fail validation silently.
+///
+/// **Important:** the bundle identifier is `com.zen-tools.app`, so
+/// the app-data directory is literally named `com.zen-tools.app/`.
+/// `open <dir>` checks for `.app` suffixes and tries to launch the
+/// path as an application bundle — which fails with `"the
+/// application cannot be opened because its executable is missing"`.
+/// We pass `-a Finder` to force Finder as the opener and skip the
+/// bundle heuristic. `-R` (reveal) would also work but it shows the
+/// folder selected inside its parent rather than opening it; `-a
+/// Finder` opens the folder window itself, which is what users
+/// expect for a "Show on disk" affordance.
 ///
 /// We also `create_dir_all` first so a click on "Logs" right after a
 /// fresh install (before any log line has rotated to disk) still
 /// opens the folder instead of erroring.
 async fn open_path_in_finder(path: &Path) -> AppResult<()> {
     if !path.exists() {
-        // Best-effort: the directory should already exist (we
-        // `create_dir_all` in `mod.rs::{models_dir, logs_dir}` at
-        // setup time), but a defensive create lets us recover if the
-        // user nuked the folder.
         std::fs::create_dir_all(path).map_err(|e| {
             AppError::Other(format!("create {}: {}", path.display(), e))
         })?;
     }
     let path_owned = path.to_path_buf();
+    tracing::info!(path = %path_owned.display(), "dictation: opening folder in Finder");
     tokio::task::spawn_blocking(move || {
-        std::process::Command::new("/usr/bin/open")
+        let output = std::process::Command::new("/usr/bin/open")
+            .arg("-a")
+            .arg("Finder")
             .arg(path_owned.as_os_str())
-            .status()
-            .map_err(|e| AppError::Other(format!("open {}: {}", path_owned.display(), e)))
-            .and_then(|s| {
-                if s.success() {
-                    Ok(())
-                } else {
-                    Err(AppError::Other(format!(
-                        "open exited with status {s} for {}",
-                        path_owned.display()
-                    )))
-                }
-            })
+            .output()
+            .map_err(|e| AppError::Other(format!("spawn open: {e}")))?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            // Capture stderr so the failure is visible in our log
+            // file — `open(1)` writes its diagnostics there
+            // (e.g. "the application cannot be opened…").
+            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+            tracing::warn!(
+                status = ?output.status,
+                stderr = %stderr,
+                path = %path_owned.display(),
+                "dictation: open command failed"
+            );
+            Err(AppError::Other(format!(
+                "open {} failed: {}",
+                path_owned.display(),
+                stderr.trim()
+            )))
+        }
     })
     .await
     .map_err(|e| AppError::Other(format!("spawn_blocking: {e}")))?

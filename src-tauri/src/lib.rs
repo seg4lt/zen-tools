@@ -22,7 +22,7 @@ use state::AppState;
 use std::sync::Arc;
 use tauri::{Emitter, Manager};
 use tokio::sync::Mutex;
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
 
 /// Build the `tauri-plugin-global-shortcut` plugin with the PRMaster hotkey
 /// handler baked in. The handler matches against the chord we register in
@@ -62,20 +62,18 @@ fn build_global_shortcut_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
 /// points.
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // Stdout subscriber comes up first so any messages emitted before
-    // `setup()` resolves the app-data dir still land somewhere.
-    // We re-initialise inside `setup()` to add the rolling file
-    // appender at `<app_data_dir>/logs/zen-tools.log`. The non-blocking
-    // worker guard returned by `tracing_appender` lives for the
-    // process lifetime via `Box::leak` (see below); without that the
-    // worker thread tears down and we silently lose log lines on
-    // shutdown.
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,zen=debug")),
-        )
-        .with_target(false)
-        .try_init();
+    // Logging is initialised inside `setup()` once we can resolve the
+    // app-data dir for the rolling file appender. We deliberately do
+    // NOT call `tracing_subscriber::fmt().try_init()` here at the top
+    // of `run()` — doing so installs a global subscriber, and a
+    // second `try_init` from `setup()` (where we add the file layer)
+    // is then a silent no-op, which is exactly the bug that left the
+    // logs file at zero bytes between commits 7a2b063 and 8d2e858.
+    //
+    // The cost: any `tracing::*` macro fired during plugin
+    // construction (i.e. before `setup()` runs) is dropped on the
+    // floor. Tauri's plugin registration is fast and uses `eprintln!`
+    // for genuine errors anyway, so the trade is worth it.
 
     tauri::Builder::default()
         // Default macOS Tao behaviour for `CloseRequested` on a
@@ -134,35 +132,50 @@ pub fn run() {
         // Wrapped in `Arc` so command handlers can clone cheaply.
         .manage(Arc::new(MarkdownIndexRegistry::default()))
         .setup(|app| {
-            // ── File logging ───────────────────────────────────────────
-            // Mirror tracing output to <app_data_dir>/logs/zen-tools.log
-            // (daily-rotated). The Settings → Paths section surfaces
-            // this directory; without the file appender the folder
-            // would always be empty.
+            // ── Logging ────────────────────────────────────────────────
+            // One Registry, two layers: a coloured stdout layer and a
+            // daily-rotating file layer at <app_data_dir>/logs/zen-tools.log.
+            // Both share the same EnvFilter (RUST_LOG override → fall
+            // back to "info,zen=debug").
             //
-            // We deliberately use `add_directive`-friendly EnvFilter,
-            // and intentionally *don't* tear down the bootstrap stdout
-            // subscriber installed at the top of `run()` — instead we
-            // keep both, side by side. tracing's global default is
-            // first-installed-wins, so this layer adds a sink rather
-            // than replacing one. We `Box::leak` the worker guard so
-            // the appender's background thread isn't dropped at the end
-            // of `setup()`.
-            if let Ok(dir) = dictation::logs_dir(app.handle()) {
-                let appender = tracing_appender::rolling::daily(&dir, "zen-tools.log");
-                let (writer, guard) = tracing_appender::non_blocking(appender);
-                Box::leak(Box::new(guard));
-                let _ = tracing_subscriber::fmt()
-                    .with_env_filter(
-                        EnvFilter::try_from_default_env()
-                            .unwrap_or_else(|_| EnvFilter::new("info,zen=debug")),
+            // Installed exactly once via `init()`. The previous shape
+            // — two separate `tracing_subscriber::fmt().try_init()`
+            // calls, one early and one in setup — silently dropped
+            // the second registration because tracing's global default
+            // is first-installed-wins. That's why the on-disk log
+            // file was empty until this commit.
+            //
+            // The non-blocking worker guard from `tracing-appender`
+            // is `Box::leak`'d so it lives the lifetime of the
+            // process; without that the background writer tears down
+            // and log lines emitted just before exit are lost.
+            let env_filter = EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| EnvFilter::new("info,zen=debug"));
+            let stdout_layer = fmt::layer().with_target(false);
+            let file_layer = match dictation::logs_dir(app.handle()) {
+                Ok(dir) => {
+                    let appender = tracing_appender::rolling::daily(&dir, "zen-tools.log");
+                    let (writer, guard) = tracing_appender::non_blocking(appender);
+                    Box::leak(Box::new(guard));
+                    Some(
+                        fmt::layer()
+                            .with_target(false)
+                            .with_ansi(false)
+                            .with_writer(writer)
+                            .boxed(),
                     )
-                    .with_target(false)
-                    .with_ansi(false)
-                    .with_writer(writer)
-                    .try_init();
-                tracing::info!(logs_dir = %dir.display(), "file logging initialised");
-            }
+                }
+                Err(e) => {
+                    eprintln!("zen-tools: file logging disabled — {e}");
+                    None
+                }
+            };
+            tracing_subscriber::registry()
+                .with(env_filter)
+                .with(stdout_layer)
+                .with(file_layer)
+                .init();
+            tracing::info!("zen-tools: logging initialised");
 
             // Open the user-config store FIRST so subsequent setup
             // steps (and every command path) can read settings via

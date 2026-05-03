@@ -214,6 +214,16 @@ export function DictationSection() {
             paste. First use of any model loads the weights from disk into
             memory.
           </p>
+
+          <p className="text-[10px] text-muted-foreground">
+            Models are downloaded from{" "}
+            <code className="font-mono text-[10px]">
+              huggingface.co/ggerganov/whisper.cpp
+            </code>{" "}
+            (the canonical ggml weights for Whisper). Files are written to
+            the Dictation models directory listed in <em>Paths</em> below;
+            click <em>Open in Finder</em> there to inspect them.
+          </p>
         </>
       )}
     </div>
