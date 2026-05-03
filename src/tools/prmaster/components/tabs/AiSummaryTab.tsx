@@ -721,7 +721,15 @@ function FocusedWeekPanel({
       </PanelHeader>
       <PanelContent className="grid gap-2 p-2">
         {gridRepos.length > 0 ? (
-          <div className="grid grid-cols-1 items-start gap-2 md:grid-cols-2 xl:grid-cols-3">
+          // Always-single-column stack, regardless of viewport
+          // width. The previous `md:grid-cols-2 xl:grid-cols-3`
+          // responsive grid made the layout reflow as the window
+          // resized — disorienting when reading a long summary
+          // since neighbouring cards would jump around. With one
+          // column the user reads top-to-bottom and the page
+          // scrolls naturally; the "No commits this week" chip row
+          // below keeps its own flex-wrap layout.
+          <div className="flex flex-col items-stretch gap-2">
             {gridRepos.map((repo) => {
               const card = focusedCards.get(repo);
               const status = cellStatus.get(
