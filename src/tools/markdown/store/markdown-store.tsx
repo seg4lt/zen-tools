@@ -159,7 +159,13 @@ export type MarkdownAction =
   | { type: "setGotoLine"; line: number }
   | { type: "clearGotoLine" }
   | { type: "revealPath"; path: string }
-  | { type: "editDoc"; doc: string }
+  /**
+   * Update the doc for `id` (or the active tab if omitted). Splits
+   * pass the leaf's *own* tab id to avoid the race where `activeTabId`
+   * lags behind a focus shift and edits land on the wrong buffer —
+   * see `MarkdownView.tsx`.
+   */
+  | { type: "editDoc"; id?: string; doc: string }
   /**
    * Clear the dirty flag. With no `path` it clears the active tab
    * (back-compat with the old binary action). With `path` it clears
@@ -329,7 +335,10 @@ function reducer(state: MarkdownState, action: MarkdownAction): MarkdownState {
       return reducer(state, { type: "closeTab", id: state.activeTabId });
 
     case "editDoc": {
-      const id = state.activeTabId;
+      // Prefer an explicit `action.id` from the dispatcher (split
+      // leaves pass their own tab id). Fall back to `activeTabId`
+      // for legacy callers (e.g. the excalidraw dirty sentinel).
+      const id = action.id ?? state.activeTabId;
       if (!id) return state;
       let changed = false;
       const tabs = state.tabs.map((t) => {

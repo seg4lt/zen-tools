@@ -30,7 +30,14 @@
  *   in the +Manage popover up top, not in this rail.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   SplitLayout,
   leafIds,
@@ -151,6 +158,33 @@ export function DatabaseExplorerView() {
     (leafId: string) => leafPaths[leafId] ?? state.selectedFilePath ?? null,
     [leafPaths, state.selectedFilePath],
   );
+
+  // ── Deterministic per-leaf dispatch (same shape as MarkdownView) ──
+  // `leafPathsRef` is synced *synchronously* in `useLayoutEffect`,
+  // so any keystroke arriving between commit and useEffect (the
+  // window where regular ref-update effects haven't fired yet) sees
+  // an up-to-date map. The change/save callbacks are deliberately
+  // stable so `CodeEditor`'s internal `onChangeRef` / `onSaveRef`
+  // captured at mount never go stale — the lookup happens at fire
+  // time using the *current* ref value, not a captured prop.
+  const leafPathsRef = useRef(leafPaths);
+  const selectedFilePathRef = useRef(state.selectedFilePath);
+  useLayoutEffect(() => {
+    leafPathsRef.current = leafPaths;
+    selectedFilePathRef.current = state.selectedFilePath;
+  });
+  const onLeafEditorChange = useCallback(
+    (leafId: string, next: string) => {
+      const path =
+        leafPathsRef.current[leafId] ?? selectedFilePathRef.current;
+      if (!path) return;
+      dispatch({ type: "set-buffer", path, content: next, dirty: true });
+    },
+    [dispatch],
+  );
+  // (`onLeafEditorSave` is declared further down, after `autoSave`
+  // is initialised — it needs `autoSave.cancel` to short-circuit
+  // the trailing-edge debounce on ⌘S.)
 
   const activeId = state.activeConnectionId;
   const active = useMemo(
@@ -275,27 +309,27 @@ export function DatabaseExplorerView() {
     ),
   });
 
-  // `handleSave` intentionally still keys off `selectedPath` (the
-  // focused leaf's path) because ⌘S in a leaf saves *that leaf's*
-  // file — and the focused leaf's path IS `state.selectedFilePath`
-  // by way of the focus-sync effect above.
-  const handleSave = useCallback(
-    async (next: string) => {
-      if (!selectedPath) return;
-      // ⌘S takes the editor's current value as the source of truth
-      // (the autosave hook's pending ref might be one render behind).
-      // Cancel the pending debounce so it can't re-fire with stale
-      // bytes a second later.
-      autoSave.cancel();
+  // Leaf-keyed save — race-free counterpart to `onLeafEditorChange`.
+  // The legacy `handleSave` keyed on `state.selectedFilePath` was
+  // removed; lookups go through `leafPathsRef` so a ⌘S during a
+  // focus transition can't write the focused editor's content into
+  // the previously-focused leaf's path.
+  const autoSaveCancel = autoSave.cancel;
+  const onLeafEditorSave = useCallback(
+    async (leafId: string, next: string) => {
+      const path =
+        leafPathsRef.current[leafId] ?? selectedFilePathRef.current;
+      if (!path) return;
+      autoSaveCancel();
       try {
-        await sqlWorkspaceTauri.writeFile(selectedPath, next);
-        dispatch({ type: "mark-clean", path: selectedPath });
+        await sqlWorkspaceTauri.writeFile(path, next);
+        dispatch({ type: "mark-clean", path });
       } catch (err) {
         // eslint-disable-next-line no-console
         console.error("write file failed", formatError(err));
       }
     },
-    [selectedPath, dispatch, autoSave],
+    [autoSaveCancel, dispatch],
   );
 
   const ctxOpts = useMemo(
@@ -920,16 +954,8 @@ export function DatabaseExplorerView() {
                           onCloseTab={(path) => {
                             dispatch({ type: "close-editor-tab", path });
                           }}
-                          onChange={(next) => {
-                            if (!leafPath) return;
-                            dispatch({
-                              type: "set-buffer",
-                              path: leafPath,
-                              content: next,
-                              dirty: true,
-                            });
-                          }}
-                          onSave={handleSave}
+                          onChange={onLeafEditorChange}
+                          onSave={onLeafEditorSave}
                           onRun={handleRun}
                           vimMode={vimMode}
                           onMoveFocus={workspace.moveFocus}
@@ -1119,8 +1145,10 @@ interface SqlLeafShellProps {
   initialValue: string;
   onSelectTab: (path: string) => void;
   onCloseTab: (path: string) => void;
-  onChange: (next: string) => void;
-  onSave: (next: string) => void;
+  /** `(leafId, doc) => void` — stable, leaf-keyed, deterministic. */
+  onChange: (leafId: string, next: string) => void;
+  /** `(leafId, doc) => void` — stable, leaf-keyed, deterministic. */
+  onSave: (leafId: string, next: string) => Promise<void> | void;
   onRun: () => void;
   vimMode: boolean;
   onMoveFocus: (dir: "h" | "j" | "k" | "l") => void;
@@ -1130,6 +1158,7 @@ interface SqlLeafShellProps {
 }
 
 function SqlLeafShell({
+  leafId,
   leafPath,
   focused,
   driver,
@@ -1170,6 +1199,22 @@ function SqlLeafShell({
     handleRef.current?.setValue(initialValue);
   }, [initialValue]);
 
+  // Stable `(doc) => void` wrappers around the parent's leaf-keyed
+  // callbacks. Identity-stable across renders (deps are the stable
+  // `leafId` prop + already-stable parent callbacks), so the
+  // underlying CodeEditor's onChange/onSave refs captured at mount
+  // never go stale.
+  const handleEditorChange = useCallback(
+    (next: string) => onChange(leafId, next),
+    [leafId, onChange],
+  );
+  const handleEditorSave = useCallback(
+    (next: string) => {
+      void onSave(leafId, next);
+    },
+    [leafId, onSave],
+  );
+
   return (
     <div
       className={
@@ -1198,8 +1243,8 @@ function SqlLeafShell({
           database={database}
           schema={schema}
           value={initialValue}
-          onChange={onChange}
-          onSave={onSave}
+          onChange={handleEditorChange}
+          onSave={handleEditorSave}
           onRun={onRun}
           vimMode={vimMode}
           onMoveFocus={onMoveFocus}

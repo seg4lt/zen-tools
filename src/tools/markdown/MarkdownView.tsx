@@ -12,6 +12,7 @@ import {
   Suspense,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -185,13 +186,64 @@ export function MarkdownView() {
     });
   }, [state.pendingGotoLine, dispatch, workspace.focusedLeafId]);
 
+  // Refocus the focused leaf whenever the search palette closes —
+  // covers two cases:
+  //   1. User picks the *same* file that's already open. `selectTab`
+  //      with no `gotoLine` changes neither `activeTabId` nor
+  //      `pendingGotoLine`, so none of the other focus-driving
+  //      effects fire and the editor would silently lose focus to
+  //      the palette dialog's body.
+  //   2. User dismisses with Esc. They were typing before, they
+  //      probably want to type again — return them to the editor
+  //      instead of leaving focus on the document body.
+  const prevSearchOpenRef = useRef(state.searchOpen);
+  useEffect(() => {
+    const was = prevSearchOpenRef.current;
+    prevSearchOpenRef.current = state.searchOpen;
+    if (was && !state.searchOpen) {
+      requestAnimationFrame(() => {
+        leafHandlesRef.current.get(workspace.focusedLeafId)?.focus();
+      });
+    }
+  }, [state.searchOpen, workspace.focusedLeafId]);
+
   // Vim toggle plumbing — shared `useVimMode` hook reads + writes the
   // same prefs blob every tool reads, so the toggle propagates
   // instantly to the HTTP runner / Database Explorer editors too.
   const { vimMode, setVimMode } = useVimMode();
 
-  const onChange = useCallback(
-    (doc: string) => dispatch({ type: "editDoc", doc }),
+  // ── Deterministic per-leaf dispatch ────────────────────────────
+  //
+  // Two refs hold the workspace's per-leaf state, kept in sync with
+  // committed state via `useLayoutEffect`. `useLayoutEffect` fires
+  // synchronously after every commit and BEFORE the browser paints
+  // or processes the next event — so any keystroke that arrives
+  // between renders sees fully up-to-date refs.
+  //
+  // The change/save callbacks are deliberately stable (deps reference
+  // only `dispatch` and the also-stable autoSave.cancel). That means
+  // `CodeEditor`'s internal `onChangeRef` captures them at mount and
+  // never has to be re-synced — eliminating the
+  // `useEffect`-runs-after-paint window where a keystroke could fire
+  // against a stale handler.
+  //
+  // Callbacks accept `leafId` (a stable prop on each leaf component)
+  // and look up the leaf's *current* tab via `leafTabsRef`. So no
+  // matter when the keystroke fires, it always dispatches to the
+  // tab the leaf is showing right now.
+  const leafTabsRef = useRef(leafTabs);
+  const tabsRef = useRef(state.tabs);
+  useLayoutEffect(() => {
+    leafTabsRef.current = leafTabs;
+    tabsRef.current = state.tabs;
+  });
+
+  const onLeafChange = useCallback(
+    (leafId: string, doc: string) => {
+      const tabId = leafTabsRef.current[leafId];
+      if (!tabId) return;
+      dispatch({ type: "editDoc", id: tabId, doc });
+    },
     [dispatch],
   );
 
@@ -211,13 +263,33 @@ export function MarkdownView() {
     ),
   });
 
-  const onSave = useCallback(
-    (doc: string) => {
-      // ⌘S beats the autosave timer to it — collapse the debounce.
-      autoSave.cancel();
-      void saveCurrent(doc);
+  // (The chrome Save button still goes through `saveCurrent()` — a
+  // button click can't race a focus transition the way an in-editor
+  // ⌘S can, so the activeTab-keyed path is fine there.)
+
+  // Per-leaf save — keyed by leafId, looks up the path through
+  // `leafTabsRef` + `tabsRef` at fire time. Stable across renders
+  // for the same reason as `onLeafChange`: by depending only on
+  // `autoSaveCancel` (a stable function from useAutoSave) and
+  // `dispatch`, the callback identity never changes, so the inner
+  // editor's stable `onSaveRef` always points at the right handler.
+  const autoSaveCancel = autoSave.cancel;
+  const onLeafSave = useCallback(
+    async (leafId: string, doc: string) => {
+      const tabId = leafTabsRef.current[leafId];
+      if (!tabId) return;
+      const tab = tabsRef.current.find((t) => t.id === tabId);
+      if (!tab) return;
+      autoSaveCancel();
+      try {
+        await markdownTauri.writeFile(tab.path, doc);
+        dispatch({ type: "markSaved", path: tab.path });
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error("[markdown] save failed", err);
+      }
     },
-    [autoSave, saveCurrent],
+    [autoSaveCancel, dispatch],
   );
 
   const getDocDir = useCallback(
@@ -249,11 +321,41 @@ export function MarkdownView() {
     return Array.from(seen).sort();
   }, [state.files]);
 
+  // Split-aware "go to file" helper used by `gf` / `gd` and by
+  // wikilink / link clicks. Behaviour:
+  //
+  //   1. If the file is already open in *any* split, move focus
+  //      to that split (first match wins). The user lands on the
+  //      file they wanted without duplicating it across panes.
+  //   2. Otherwise, open it in the focused split as a new tab —
+  //      same as picking the file from the sidebar.
+  const openFileInWorkspace = useCallback(
+    (rawPath: string) => {
+      const normalized = normalizePath(rawPath);
+      // Pass 1 — find a leaf already showing this file.
+      for (const [leafId, tabId] of Object.entries(leafTabs)) {
+        const t = state.tabs.find((tab) => tab.id === tabId);
+        if (t && t.path === normalized) {
+          if (leafId !== workspace.focusedLeafId) {
+            workspace.setFocus(leafId);
+          }
+          return;
+        }
+      }
+      // Pass 2 — not visible anywhere; open in the focused leaf.
+      // `openFile` itself dedupes against `state.tabs` so an already-
+      // opened-but-not-displayed tab gets reused without re-reading
+      // from disk.
+      void openFile(normalized);
+    },
+    [leafTabs, state.tabs, workspace, openFile],
+  );
+
   const onWikilinkOpen = useCallback(
     (label: string) => {
       const path = resolveWikilink(label);
       if (path) {
-        void openFile(path);
+        openFileInWorkspace(path);
       } else {
         // Ambiguous or missing — fall back to the search palette in
         // file mode so the user can pick from candidates.
@@ -264,7 +366,7 @@ export function MarkdownView() {
         });
       }
     },
-    [openFile, resolveWikilink, dispatch],
+    [openFileInWorkspace, resolveWikilink, dispatch],
   );
 
   /**
@@ -324,9 +426,9 @@ export function MarkdownView() {
         );
         return;
       }
-      void openFile(target);
+      openFileInWorkspace(target);
     },
-    [openFile, tab?.path],
+    [openFileInWorkspace, tab?.path],
   );
 
   // After every paste lands, re-walk the open vaults so the new file
@@ -575,8 +677,8 @@ export function MarkdownView() {
                       onCloseTab={(tabId) => {
                         dispatch({ type: "closeTab", id: tabId });
                       }}
-                      onChange={onChange}
-                      onSave={onSave}
+                      onChange={onLeafChange}
+                      onSave={onLeafSave}
                       onMoveFocus={workspace.moveFocus}
                       onJumpBack={onJumpBack}
                       onJumpForward={onJumpForward}
@@ -625,8 +727,15 @@ interface MarkdownLeafShellProps {
   tabs: TabState[];
   onSelectTab: (tabId: string) => void;
   onCloseTab: (tabId: string) => void;
-  onChange: (doc: string) => void;
-  onSave: (doc: string) => void;
+  /**
+   * Edit handler. Stable across renders. Identifies the leaf by its
+   * stable `leafId`; the parent looks up which tab the leaf is
+   * showing through a layout-effect-synced ref so the dispatch is
+   * fully deterministic regardless of React effect timing.
+   */
+  onChange: (leafId: string, doc: string) => void;
+  /** Save handler — same deterministic-by-leafId contract. */
+  onSave: (leafId: string, doc: string) => Promise<void> | void;
   onMoveFocus: (dir: "h" | "j" | "k" | "l") => void;
   onJumpBack: () => boolean;
   onJumpForward: () => boolean;
@@ -642,6 +751,7 @@ interface MarkdownLeafShellProps {
 }
 
 function MarkdownLeafShell({
+  leafId,
   focused,
   leafTab,
   tabs,
@@ -708,6 +818,23 @@ function MarkdownLeafShell({
     if (focused) handleRef.current?.focus();
   }, [focused]);
 
+  // Wrap the parent's `(leafId, doc)` callbacks into the editor's
+  // `(doc) => void` shape. `leafId` is a stable prop and the parent
+  // callbacks are stable, so these wrappers are also stable —
+  // `CodeEditor`'s internal `onChangeRef` / `onSaveRef` capture
+  // them at mount and never go stale, fully closing the
+  // `useEffect`-after-paint race window.
+  const handleEditorChange = useCallback(
+    (doc: string) => onChange(leafId, doc),
+    [leafId, onChange],
+  );
+  const handleEditorSave = useCallback(
+    (doc: string) => {
+      void onSave(leafId, doc);
+    },
+    [leafId, onSave],
+  );
+
   return (
     <div
       className={cn(
@@ -725,8 +852,8 @@ function MarkdownLeafShell({
         <MarkdownEditor
           imperativeRef={handleRef}
           value={leafTab?.doc ?? ""}
-          onChange={onChange}
-          onSave={onSave}
+          onChange={handleEditorChange}
+          onSave={handleEditorSave}
           onMoveFocus={onMoveFocus}
           onJumpBack={onJumpBack}
           onJumpForward={onJumpForward}
