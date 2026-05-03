@@ -30,6 +30,7 @@ export const dictationIpc = {
     invoke<void>("dictation_download_model", { id }),
   openAppDataDir: (): Promise<void> => invoke<void>("dictation_open_app_data_dir"),
   openLogsDir: (): Promise<void> => invoke<void>("dictation_open_logs_dir"),
+  openModelsDir: (): Promise<void> => invoke<void>("dictation_open_models_dir"),
   getPaths: (): Promise<PathsDto> => invoke<PathsDto>("dictation_get_paths"),
 };
 

@@ -3,7 +3,6 @@
 use std::path::Path;
 
 use tauri::{AppHandle, Emitter, Manager, State};
-use tauri_plugin_shell::ShellExt;
 use zen_dictation::ModelId;
 
 use crate::dictation::dto::{DictationStateDto, ModelDto, PathsDto};
@@ -125,23 +124,31 @@ pub async fn dictation_download_model(
     Ok(())
 }
 
-/// Reveal `<app_data_dir>/` in Finder. Uses the existing shell plugin
-/// (`shell:allow-open` is already in capabilities/default.json).
+/// Reveal `<app_data_dir>/` in Finder.
 #[tauri::command]
 pub async fn dictation_open_app_data_dir(
-    app: AppHandle,
+    _app: AppHandle,
     state: State<'_, DictationTauriState>,
 ) -> AppResult<()> {
-    open_path_in_finder(&app, &state.app_data_dir.display().to_string()).await
+    open_path_in_finder(&state.app_data_dir).await
 }
 
 /// Reveal `<app_data_dir>/logs/` in Finder.
 #[tauri::command]
 pub async fn dictation_open_logs_dir(
-    app: AppHandle,
+    _app: AppHandle,
     state: State<'_, DictationTauriState>,
 ) -> AppResult<()> {
-    open_path_in_finder(&app, &state.logs_dir.display().to_string()).await
+    open_path_in_finder(&state.logs_dir).await
+}
+
+/// Reveal `<app_data_dir>/models/` in Finder.
+#[tauri::command]
+pub async fn dictation_open_models_dir(
+    _app: AppHandle,
+    state: State<'_, DictationTauriState>,
+) -> AppResult<()> {
+    open_path_in_finder(&state.models_dir).await
 }
 
 /// Read-only DTO for the Paths section in Settings.
@@ -154,15 +161,47 @@ pub async fn dictation_get_paths(state: State<'_, DictationTauriState>) -> AppRe
     })
 }
 
-async fn open_path_in_finder(app: &AppHandle, path: &str) -> AppResult<()> {
-    // `Shell::open` is marked deprecated in favour of
-    // `tauri-plugin-opener`, but the rest of the project still uses
-    // `tauri-plugin-shell` and adding another plugin just for the
-    // Settings → Paths "Open in Finder" buttons isn't worth it. Once
-    // the wider migration to `tauri-plugin-opener` happens, swap this
-    // out — the call shape is `app.opener().open_path(path, None)`.
-    #[allow(deprecated)]
-    app.shell()
-        .open(path, None)
-        .map_err(|e| AppError::Other(format!("open {path}: {e}")))
+/// Open `path` in Finder via the macOS `open(1)` command.
+///
+/// We deliberately bypass `tauri-plugin-shell`'s `Shell::open`. That
+/// plugin's `shell:allow-open` permission validates targets against a
+/// regex that defaults to URL schemes only (`https?://`, `mailto:`,
+/// `tel:`) — local filesystem paths fail validation silently and
+/// nothing happens when the user clicks "Open in Finder". Configuring
+/// a custom scope works but adds capability boilerplate; spawning
+/// `/usr/bin/open` directly is one syscall, has no scope validator,
+/// and matches what every other macOS-native app does.
+///
+/// We also `create_dir_all` first so a click on "Logs" right after a
+/// fresh install (before any log line has rotated to disk) still
+/// opens the folder instead of erroring.
+async fn open_path_in_finder(path: &Path) -> AppResult<()> {
+    if !path.exists() {
+        // Best-effort: the directory should already exist (we
+        // `create_dir_all` in `mod.rs::{models_dir, logs_dir}` at
+        // setup time), but a defensive create lets us recover if the
+        // user nuked the folder.
+        std::fs::create_dir_all(path).map_err(|e| {
+            AppError::Other(format!("create {}: {}", path.display(), e))
+        })?;
+    }
+    let path_owned = path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        std::process::Command::new("/usr/bin/open")
+            .arg(path_owned.as_os_str())
+            .status()
+            .map_err(|e| AppError::Other(format!("open {}: {}", path_owned.display(), e)))
+            .and_then(|s| {
+                if s.success() {
+                    Ok(())
+                } else {
+                    Err(AppError::Other(format!(
+                        "open exited with status {s} for {}",
+                        path_owned.display()
+                    )))
+                }
+            })
+    })
+    .await
+    .map_err(|e| AppError::Other(format!("spawn_blocking: {e}")))?
 }

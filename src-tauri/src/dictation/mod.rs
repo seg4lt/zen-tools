@@ -4,21 +4,29 @@
 //! commands in [`commands`], and renders an ephemeral mic-icon menu-bar
 //! tray ([`tray`]) while a recording is in progress.
 //!
-//! Gated on the global "app enabled" flag, which is being added in a
-//! parallel branch by another agent. Until that lands the
-//! [`is_app_enabled`] stub returns `false`, so the bootstrap in
-//! `lib.rs` is a no-op and the React Settings page hides the
-//! Dictation section. When the flag arrives, replace the body of
-//! `is_app_enabled` with `cfg.get::<bool>("app.enabled")` (or whatever
-//! key the flag agent settles on).
+//! Gated on the merged main branch's per-tool kill-switch
+//! (`Preferences::disabled_tools`, key `"dictation"`). When the tool
+//! is disabled:
+//!
+//! * No CGEventTap is installed → right-⌘ does nothing dictation-related.
+//! * No mic tray icon ever appears.
+//! * No Whisper model auto-downloads.
+//! * The hotkey handle stored on the manager is dropped, which now
+//!   properly tears down the run-loop source (see
+//!   `zen_dictation::hotkey::macos::TapHandle`'s Drop impl).
+//!
+//! Toggling back on re-arms everything live without an app restart,
+//! mirroring how `prmaster_lifecycle` handles PRMaster.
 
 pub mod commands;
 pub mod dto;
+pub mod lifecycle;
 pub mod state;
 pub mod tray;
 
 use tauri::{AppHandle, Emitter, Manager};
 
+use crate::commands::preferences;
 use crate::user_config::UserConfig;
 use state::DictationTauriState;
 use zen_dictation::{HotkeyEvent, ModelId};
@@ -27,16 +35,17 @@ use zen_dictation::{HotkeyEvent, ModelId};
 /// form, e.g. `"base"`, `"large-v3-turbo"`).
 const SELECTED_MODEL_KEY: &str = "dictation.selected_model";
 
-/// Placeholder for the global app-enabled flag. The other agent will
-/// replace this with a `UserConfig` read once the flag UI ships.
-///
-/// Temporarily defaulted to `true` so the hotkey watcher and base-model
-/// download spin up at launch — that way the local-test loop matches
-/// what users will eventually see when the real flag lands. Flip back
-/// to `false` (or replace with the actual `cfg.get("app.enabled")`
-/// read) once the parallel agent's branch merges.
-pub fn is_app_enabled() -> bool {
-    true
+/// Tool id used in `Preferences::disabled_tools`. Must match the
+/// string the front-end passes to `set_tool_disabled`.
+pub const TOOL_ID: &str = "dictation";
+
+/// Whether the dictation tool is currently enabled. Reads
+/// `Preferences::disabled_tools` from the persisted user config and
+/// returns `false` if `"dictation"` is present.
+pub fn is_app_enabled(app: &AppHandle) -> bool {
+    !preferences::load_preferences(app)
+        .map(|p| p.disabled_tools.iter().any(|id| id == TOOL_ID))
+        .unwrap_or(false)
 }
 
 /// Resolve `<app_data_dir>/models/`, creating the directory if it
@@ -63,16 +72,11 @@ pub fn logs_dir(app: &AppHandle) -> std::io::Result<std::path::PathBuf> {
     Ok(dir)
 }
 
-/// Bootstrap the dictation subsystem from `setup()`:
-///
-/// * Hydrates the persisted selected-model id (or defaults to Base).
-/// * Spawns a background task that ensures the Base model is on disk
-///   when the feature is enabled.
-/// * Installs the long-press right-⌘ watcher on the main thread.
-///
-/// Safe to call regardless of [`is_app_enabled`] — it's a no-op when
-/// the flag is off, so we wire it unconditionally and let the runtime
-/// flag drive activation.
+/// Bootstrap the dictation subsystem from `setup()`. Hydrates the
+/// persisted selected model and, if the tool is enabled, hands off to
+/// [`lifecycle::start`] to install the hotkey watcher and download
+/// the base model. Safe to call regardless of the disabled state —
+/// the lifecycle module is a no-op when the tool is off.
 pub fn bootstrap(app: &AppHandle) {
     // Hydrate the persisted selection (if any).
     if let Some(id_str) = app
@@ -86,50 +90,17 @@ pub fn bootstrap(app: &AppHandle) {
         }
     }
 
-    if !is_app_enabled() {
-        tracing::info!("dictation: app-enabled flag is off, skipping activation");
+    if !is_app_enabled(app) {
+        tracing::info!("dictation: disabled in preferences; skipping activation");
         return;
     }
-
-    activate(app);
+    lifecycle::start(app);
 }
 
-/// Wire up the hotkey watcher and kick off the Base-model download.
-/// Idempotent — calling twice replaces the previous handle.
-pub fn activate(app: &AppHandle) {
-    let dictation_state = match app.try_state::<DictationTauriState>() {
-        Some(s) => s.inner().clone(),
-        None => {
-            tracing::warn!("dictation: state not yet registered; skipping activate");
-            return;
-        }
-    };
-
-    // Ensure base model is on disk (download in background if needed).
-    {
-        let app_for_download = app.clone();
-        let state_for_download = dictation_state.clone();
-        tauri::async_runtime::spawn(async move {
-            if let Err(e) =
-                ensure_model_present(&app_for_download, &state_for_download, ModelId::Base).await
-            {
-                tracing::warn!(?e, "dictation: base model precheck failed");
-            }
-        });
-    }
-
-    // Install the long-press watcher on the main thread (CGEventTap
-    // requires this). The Tauri `setup()` callback already runs on
-    // main, but we use `run_on_main_thread` defensively in case
-    // `activate()` is invoked from elsewhere later.
-    let app_for_main = app.clone();
-    let state_for_main = dictation_state;
-    let _ = app.run_on_main_thread(move || {
-        install_hotkey(&app_for_main, &state_for_main);
-    });
-}
-
-fn install_hotkey(app: &AppHandle, state: &DictationTauriState) {
+/// Install the long-press watcher on the main thread (CGEventTap
+/// requires this). Returns immediately on the calling thread; the
+/// closure runs on the next run-loop tick.
+pub(crate) fn install_hotkey(app: &AppHandle, state: &DictationTauriState) {
     let app_for_cb = app.clone();
     let state_for_cb = state.clone();
     let result = zen_dictation::hotkey::start_long_press_watcher(move |event| {

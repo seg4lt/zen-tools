@@ -99,6 +99,30 @@ impl DictationManager {
         Ok(())
     }
 
+    /// Drop any in-flight microphone capture without transcribing.
+    ///
+    /// Called when the user toggles dictation off while a recording
+    /// is in progress — we don't want a stale paste landing after
+    /// the feature is disabled. Dropping the [`MicCapture`] tears
+    /// down the cpal stream; whatever samples it already buffered
+    /// are released with it.
+    ///
+    /// This does NOT cancel an inference that's already running on a
+    /// worker thread — whisper.cpp's `whisper_full` doesn't expose a
+    /// cancellation hook. The cost is bounded (a few seconds at
+    /// most) and the worker exits silently with the abandoned
+    /// transcript.
+    pub fn abandon_recording(&self) {
+        let mut s = self.inner.lock();
+        s.is_recording = false;
+        if let Some(mic) = s.mic.take() {
+            // Explicit drop so the cpal stream is torn down before
+            // we release the lock — avoids surprise audio thread
+            // activity after we've signalled idle.
+            drop(mic);
+        }
+    }
+
     /// Stop recording, run whisper, and return the transcript.
     /// Pasting is left to the caller because that involves Tauri
     /// signals (clipboard plugin permissions etc.). The selected model

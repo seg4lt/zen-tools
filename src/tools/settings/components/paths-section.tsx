@@ -32,7 +32,7 @@ export function PathsSection() {
       <PathRow
         label="Dictation models"
         path={paths?.models_dir}
-        onOpen={dictationIpc.openAppDataDir}
+        onOpen={dictationIpc.openModelsDir}
       />
     </div>
   );

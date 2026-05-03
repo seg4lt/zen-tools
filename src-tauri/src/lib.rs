@@ -302,15 +302,18 @@ pub fn run() {
 
             // ── Dictation ─────────────────────────────────────────────
             // Resolve the per-app data dirs and register the managed
-            // state. Bootstrap is a no-op while the global app-enabled
-            // flag is off — it just hydrates the persisted model
-            // selection so the dropdown shows the right item once the
-            // user toggles the feature on. The merged main branch ships
-            // a generic `disabled_tools: Vec<String>` mechanism (see
-            // `commands::preferences::set_tool_disabled`); a follow-up
-            // can swap `dictation::is_app_enabled()` to read that list
-            // for `"dictation"` so dictation honours the same
-            // per-tool kill-switch the rest of the app uses.
+            // state, then hand off to `dictation::bootstrap`. That:
+            //
+            //   * Hydrates the persisted selected-model id.
+            //   * Reads `Preferences::disabled_tools`; if "dictation"
+            //     is in the list, it stops here.
+            //   * Otherwise calls `dictation::lifecycle::start` to
+            //     install the CGEventTap and kick off the base-model
+            //     download.
+            //
+            // The Settings UI's enable switch routes through
+            // `set_tool_disabled("dictation", _)` which calls into
+            // the same lifecycle module to flip start/stop live.
             let app_data_dir = app.path().app_data_dir().ok();
             let models_dir_path = dictation::models_dir(app.handle()).ok();
             let logs_dir_path = dictation::logs_dir(app.handle()).ok();
@@ -475,6 +478,7 @@ pub fn run() {
             dictation::commands::dictation_download_model,
             dictation::commands::dictation_open_app_data_dir,
             dictation::commands::dictation_open_logs_dir,
+            dictation::commands::dictation_open_models_dir,
             dictation::commands::dictation_get_paths,
         ])
         .build(tauri::generate_context!())

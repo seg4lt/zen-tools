@@ -35,13 +35,24 @@ use std::time::{Duration, Instant};
 
 use core_foundation::base::TCFType;
 use core_foundation::runloop::{
-    kCFRunLoopCommonModes, CFRunLoop, CFRunLoopAddSource, CFRunLoopSource,
+    kCFRunLoopCommonModes, CFRunLoop, CFRunLoopAddSource, CFRunLoopRemoveSource, CFRunLoopSource,
 };
 use core_graphics::event::{
     CGEvent, CGEventFlags, CGEventTap, CGEventTapLocation, CGEventTapOptions,
     CGEventTapPlacement, CGEventType, EventField,
 };
 use parking_lot::Mutex;
+
+// `CGEventTapEnable` flips the tap on/off without tearing down the
+// mach port. Used in `TapHandle::Drop` to stop event delivery
+// immediately, before we remove the source from the run loop and let
+// the wrapper types release their retains.
+extern "C" {
+    fn CGEventTapEnable(
+        tap: core_foundation::mach_port::CFMachPortRef,
+        enable: bool,
+    );
+}
 
 use crate::error::DictationError;
 use crate::hotkey::HotkeyHandle;
@@ -63,12 +74,50 @@ type EventCallback = dyn FnMut(HotkeyEvent) + Send + 'static;
 
 /// Drop this to remove the tap from the run loop and stop receiving
 /// events.
+///
+/// **Important:** the previous version of this struct relied on
+/// `Drop` of `CGEventTap` + `CFRunLoopSource` to detach the tap.
+/// That isn't enough — `CFRunLoopAddSource` retains the source, so
+/// when our wrappers release their retain on drop the run loop still
+/// holds the source and the tap keeps firing in the background.
+///
+/// The proper teardown order is:
+///   1. `CGEventTapEnable(port, false)` — stops the tap from
+///      delivering events immediately, even before the run-loop
+///      source is removed.
+///   2. `CFRunLoopRemoveSource(rl, source, mode)` — drops the run
+///      loop's retain on the source.
+///   3. Our `_source` drop releases our retain — refcount hits 0 and
+///      the source is freed.
+///   4. Our `_tap` drop releases our retain on the mach port —
+///      refcount hits 0 and the port is freed.
 pub struct TapHandle {
-    // CGEventTap and the corresponding CFRunLoopSource keep themselves
-    // alive via run-loop registration; explicit `drop` is enough to
-    // detach. We hold them so the destructor runs.
-    _tap: CGEventTap<'static>,
-    _source: CFRunLoopSource,
+    tap: CGEventTap<'static>,
+    source: CFRunLoopSource,
+    /// The run loop the source was added to. Stored so `Drop` can
+    /// remove the source from exactly that loop (the main one).
+    run_loop: CFRunLoop,
+}
+
+impl Drop for TapHandle {
+    fn drop(&mut self) {
+        unsafe {
+            // 1. Stop event delivery first.
+            CGEventTapEnable(self.tap.mach_port.as_concrete_TypeRef(), false);
+            // 2. Remove the source from the run loop, releasing its
+            //    retain. Without this the source — and therefore the
+            //    underlying mach port + tap — would survive until the
+            //    process exits.
+            CFRunLoopRemoveSource(
+                self.run_loop.as_concrete_TypeRef(),
+                self.source.as_concrete_TypeRef(),
+                kCFRunLoopCommonModes,
+            );
+        }
+        tracing::info!("dictation: CGEventTap removed from run loop");
+        // 3. & 4. happen automatically when `self.source` and
+        //         `self.tap` go out of scope.
+    }
 }
 
 #[derive(Default)]
@@ -115,9 +164,10 @@ where
         .create_runloop_source(0)
         .map_err(|()| DictationError::Audio("CFMachPortCreateRunLoopSource failed".into()))?;
 
+    let run_loop = CFRunLoop::get_current();
     unsafe {
         CFRunLoopAddSource(
-            CFRunLoop::get_current().as_concrete_TypeRef(),
+            run_loop.as_concrete_TypeRef(),
             source.as_concrete_TypeRef(),
             kCFRunLoopCommonModes,
         );
@@ -128,8 +178,9 @@ where
 
     Ok(HotkeyHandle {
         inner: TapHandle {
-            _tap: tap,
-            _source: source,
+            tap,
+            source,
+            run_loop,
         },
     })
 }
