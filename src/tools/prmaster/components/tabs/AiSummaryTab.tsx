@@ -65,10 +65,12 @@ import { cn } from "@zen-tools/ui";
 import { type SummaryCard } from "../../lib/tauri";
 import {
   calendarYearOfFiscalWeek,
+  fiscalYearOfIsoWeek,
   formatFiscalYear,
   formatRangeLabel,
   formatWeekTag,
   isPastWeek,
+  isoWeekOf,
 } from "../../lib/iso-week";
 import {
   Panel,
@@ -112,6 +114,21 @@ export function AiSummaryTab() {
     focusedCards,
   } = state;
 
+  // Card count scoped to the **selected** fiscal year. Drives both
+  // the Copy button's disabled state and (via the relabel) the
+  // user's expectation of what the click will paste. Cheap O(N)
+  // re-derive — there are at most a few hundred cards across all
+  // years.
+  const selectedYearCardCount = useMemo(() => {
+    let n = 0;
+    for (const c of cards) {
+      if (c.commit_count <= 0) continue;
+      const w = isoWeekOf(new Date(c.since));
+      if (fiscalYearOfIsoWeek(w.year, w.week) === selectedYear) n += 1;
+    }
+    return n;
+  }, [cards, selectedYear]);
+
   return (
     <div className="flex h-full min-h-0 flex-col">
       <Toolbar
@@ -131,6 +148,7 @@ export function AiSummaryTab() {
         onClearAll={() => void actions.clearAll()}
         generating={generating}
         cardCount={cards.length}
+        copyCount={selectedYearCardCount}
         providerStatus={providerStatus}
       />
 
@@ -231,6 +249,7 @@ function Toolbar({
   onClearAll,
   generating,
   cardCount,
+  copyCount,
   providerStatus,
 }: {
   yearOptions: number[];
@@ -245,7 +264,12 @@ function Toolbar({
   onCopyAll: () => void;
   onClearAll: () => void;
   generating: boolean;
+  /** Total card count across all FYs — drives the Clear button's
+   * disabled state. */
   cardCount: number;
+  /** Card count scoped to the selected FY — drives the Copy
+   * button's disabled state (and its pasted output). */
+  copyCount: number;
   providerStatus: ProviderStatus;
 }) {
   const upToDate = !generating && pendingCount === 0 && cardCount > 0;
@@ -337,11 +361,16 @@ function Toolbar({
         <Button
           size="sm"
           variant="ghost"
-          disabled={cardCount === 0}
+          disabled={copyCount === 0}
           onClick={onCopyAll}
+          title={
+            copyCount === 0
+              ? `No summaries in ${formatFiscalYear(selectedYear)} to copy`
+              : `Copy ${copyCount} summary card${copyCount === 1 ? "" : "s"} from ${formatFiscalYear(selectedYear)} to clipboard. To copy a different year, select it first.`
+          }
         >
           <Copy className="size-3.5" />
-          Copy all
+          Copy {formatFiscalYear(selectedYear)}
         </Button>
         <Button
           size="sm"

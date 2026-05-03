@@ -702,6 +702,14 @@ export function AiSummaryStoreProvider({ children }: { children: ReactNode }) {
   const copyAll = useCallback(async () => {
     const lines: string[] = [];
 
+    // Scope: **the currently-selected fiscal year only**. The button
+    // used to copy every card across every FY in one shot, which is
+    // almost never what users want — pasting a multi-year report
+    // into a quarterly review forces them to delete most of it.
+    // If the user wants all years, they cycle the year-strip and
+    // re-copy. The toolbar label reflects this (`Copy FYxxxx`).
+    const targetFy = selectedYear;
+
     // Bucket by (fiscalYear, ISO week). Skip cards where the project
     // had **no commits** in the window — there's nothing useful to
     // paste, and an empty/boilerplate AI summary just adds noise.
@@ -716,6 +724,7 @@ export function AiSummaryStoreProvider({ children }: { children: ReactNode }) {
       if (c.commit_count <= 0) continue;
       const w = isoWeekOf(new Date(c.since));
       const fy = fiscalYearOfIsoWeek(w.year, w.week);
+      if (fy !== targetFy) continue;
       const key = `${fy}|${String(w.week).padStart(2, "0")}`;
       const b = buckets.get(key) ?? {
         fy,
@@ -727,11 +736,11 @@ export function AiSummaryStoreProvider({ children }: { children: ReactNode }) {
       buckets.set(key, b);
     }
 
-    // Order: most-recent fiscal year first, then most-recent week
-    // (chronologically — within a fiscal year that's by Monday date,
-    // not by ISO week number). Repos alphabetical within a bucket.
+    // Within the FY: most-recent week first (chronologically by
+    // Monday date — not ISO week number — so a week-1 in early
+    // January sorts later than a week-52 in late December within
+    // the same FY). Repos alphabetical within a bucket.
     const ordered = [...buckets.values()].sort((a, b) => {
-      if (a.fy !== b.fy) return b.fy - a.fy;
       const aMonday = weekToRange(a.calYear, a.week).since.getTime();
       const bMonday = weekToRange(b.calYear, b.week).since.getTime();
       return bMonday - aMonday;
@@ -753,7 +762,7 @@ export function AiSummaryStoreProvider({ children }: { children: ReactNode }) {
 
     if (lines.length === 0) return;
     await writeText(lines.join("\n").trim() + "\n");
-  }, []);
+  }, [selectedYear]);
 
   const clearAll = useCallback(async () => {
     setCards([]);
