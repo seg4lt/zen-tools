@@ -838,6 +838,23 @@ static int g_next_tab_id = 1;
 // `objc_setAssociatedObject` is the standard sidecar storage.
 static const void * const kTabIdKey = &kTabIdKey;
 
+// Marker associated object set on every GhosttyHostView created via
+// `perform_new_split`. Lets `GhosttyTabClose` distinguish split-
+// created host views (whose ghostty_surface_t is owned only by the
+// C side and must be freed here) from the tab's original host view
+// (whose surface is owned by Rust's `PluginState.surfaces` and freed
+// when the corresponding `View` is dropped).
+static const void * const kSplitCreatedKey = &kSplitCreatedKey;
+static BOOL is_split_created(NSView *v) {
+    NSNumber *n = objc_getAssociatedObject(v, kSplitCreatedKey);
+    return n ? n.boolValue : NO;
+}
+
+// Forward decl — `collect_hosts` is defined further down with the
+// rest of the split-navigation helpers, but `GhosttyTabClose` (just
+// below) needs it now to walk the closing subtree.
+static void collect_hosts(NSView *root, NSMutableArray<GhosttyHostView *> *out);
+
 // Forward declaration — defined in the split-navigation section below.
 static GhosttyHostView *find_first_host_descendant(NSView *root);
 
@@ -959,6 +976,69 @@ BOOL GhosttyTabClose(int tab_id, BOOL *was_last) {
     if (!target) return NO;
     BOOL was_active = !target.hidden;
     NSInteger idx = [g_tab_container.subviews indexOfObject:target];
+
+    // BUG FIX (close-tab-with-split crash): walk the subtree under
+    // `target` BEFORE removeFromSuperview so we can:
+    //   1. Free every split-created ghostty surface (the original
+    //      pane's surface stays alive — Rust's close_tab_native
+    //      drops the matching `View` immediately after this call,
+    //      which calls ghostty_surface_free for that one).
+    //   2. Clear `_surface` on every host view in the subtree so
+    //      AppKit's tear-down doesn't dispatch any further events
+    //      through dangling surface pointers.
+    //   3. Clear `g_host_view` if it currently points at any pane
+    //      under the subtree we're tearing down — perform_goto_split
+    //      / perform_new_split / perform_close_focused_pane would
+    //      otherwise dereference a freed NSView on the next event.
+    //
+    // Wrinkle: `setSurface:NULL` has a side effect of unconditionally
+    // calling `GhosttyRegisterHostView(NULL)` (clobbers g_host_view to
+    // NULL even when self isn't the currently-focused pane). When the
+    // user closes a non-active tab via the HTML `×` button, that side
+    // effect would wrongly null out the global focus pointer for the
+    // OTHER tab. We snapshot g_host_view, do the loop, then restore
+    // if the subtree didn't actually contain the focused pane.
+    {
+        NSMutableArray<GhosttyHostView *> *panes = [NSMutableArray array];
+        collect_hosts(target, panes);
+
+        void *focusedBefore = atomic_load(&g_host_view);
+        BOOL focusedInSubtree = NO;
+        if (focusedBefore) {
+            for (GhosttyHostView *p in panes) {
+                if ((__bridge void *)p == focusedBefore) {
+                    focusedInSubtree = YES;
+                    break;
+                }
+            }
+        }
+
+        // (1) + (2) Free split surfaces, clear all _surface ivars.
+        for (GhosttyHostView *pane in panes) {
+            ghostty_surface_t s = pane.surface;
+            if (is_split_created(pane)) {
+                // Split-created — owned only by C. Free it here.
+                [pane setSurface:NULL];
+                if (s) ghostty_surface_free(s);
+            } else {
+                // Original (Rust-tracked) — only clear the ivar so
+                // events stop routing through it. Rust calls
+                // ghostty_surface_free when it drops the View
+                // immediately after this function returns.
+                [pane setSurface:NULL];
+            }
+        }
+
+        // (3) Restore g_host_view if the closing subtree did not
+        // contain the focused pane. If it did, leave at NULL — the
+        // focused pane is gone, and the calling Rust path
+        // (close_tab_native) will follow up by activating a
+        // neighbour tab which re-registers via becomeFirstResponder.
+        if (!focusedInSubtree) {
+            atomic_store(&g_host_view, focusedBefore);
+        }
+    }
+
     [target removeFromSuperview];
     NSArray<NSView *> *remaining = g_tab_container.subviews;
     if (remaining.count == 0) {
@@ -1030,9 +1110,35 @@ static void collect_hosts(NSView *root, NSMutableArray<GhosttyHostView *> *out) 
 // Find the neighbour of `current` in the requested direction.
 static GhosttyHostView *neighbour_pane(GhosttyHostView *current,
                                        ghostty_action_goto_split_e dir) {
-    NSView *win = current.window.contentView;
+    // BUG FIX (split nav crossed tab boundaries): the original code
+    // walked `current.window.contentView` — the whole window — and
+    // collected every GhosttyHostView under it, including those
+    // inside hidden tabs (each tab's root NSView lives under
+    // `g_tab_container` and is just toggled `.hidden = YES`, so its
+    // descendants are still reachable and have valid frames). That
+    // let cyclic nav (PREVIOUS/NEXT) loop into hidden tabs and
+    // spatial nav (LEFT/RIGHT/UP/DOWN) pick a hidden pane as the
+    // "best" target — visually the cursor stayed put, but keystrokes
+    // routed to a pane in a different tab.
+    //
+    // Scope the search to the ACTIVE tab's root only. We find it by
+    // walking up from `current` until we hit a direct child of
+    // `g_tab_container`. Falls back to the whole window if the walk
+    // can't find it (shouldn't happen in practice — if `current` is
+    // focused it must live in the active tab — but keeps the prior
+    // single-window-no-tabs behaviour as a safety net).
+    NSView *scope = nil;
+    if (g_tab_container) {
+        NSView *walker = current;
+        while (walker && walker.superview != g_tab_container) {
+            walker = walker.superview;
+        }
+        scope = walker;
+    }
+    if (!scope) scope = current.window.contentView;
+
     NSMutableArray<GhosttyHostView *> *all = [NSMutableArray array];
-    collect_hosts(win, all);
+    collect_hosts(scope, all);
     if (all.count <= 1) return nil;
 
     NSUInteger idx = [all indexOfObject:current];
@@ -1187,16 +1293,50 @@ static void perform_new_split(NSView *focused,
 
         NSView *grandparent = parent;
         if (grandparent) {
+            // BUG FIX (tab + split): if `focused` was the tab's root
+            // (i.e. its parent IS the tab container), the tab_id is
+            // attached to `focused`. After the wrap, `targetSplit`
+            // becomes the new direct child of the tab container —
+            // root_for_tab_id walks `g_tab_container.subviews` and
+            // would see `targetSplit` (tab_id 0) instead of `focused`,
+            // making the tab unselectable until the split is unwrapped
+            // again. Transfer the tab_id BEFORE swapping. (The mirror
+            // operation already exists on the unwrap side — see
+            // perform_close_focused_pane lines 1446-1452 of the
+            // pre-fix file: `int tag = tab_id_get(split); ...; if
+            // (tag) tab_id_set(only, tag);`.)
+            int tab_tag = tab_id_get(focused);
+
             // Remove focused from its parent, place split there, then
             // re-add focused as the split's first pane.
             [focused removeFromSuperview];
             [grandparent addSubview:targetSplit];
             [targetSplit addSubview:focused];
+
+            if (tab_tag != 0 && grandparent == g_tab_container) {
+                tab_id_set(targetSplit, tab_tag);
+                // Leave tab_id on `focused` too — harmless (it's no
+                // longer a direct child of g_tab_container, so
+                // root_for_tab_id never queries it). Clearing would
+                // lose the value if a future op rewrapped — keeping
+                // it makes the move resilient to deeper nesting.
+            }
         } else {
             // No parent (shouldn't happen) — just add to split.
             [targetSplit addSubview:focused];
         }
     }
+
+    // BUG FIX (tab + split close): tag every split-created host view
+    // so GhosttyTabClose can distinguish it from the original
+    // Rust-tracked host view and free its surface during tab close.
+    // Without this, splits created via cmd+d/cmd+\ would leak surfaces
+    // when the parent tab closes (Rust's TabState.surfaces only
+    // tracks the original spawn surface — see commands.rs::
+    // spawn_tab_native), AND the dangling g_host_view → freed pane
+    // pointer would crash the next event dispatch.
+    objc_setAssociatedObject(newHost, kSplitCreatedKey, @YES,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
     // Add newHost as a pane in the chosen split.
     NSArray<__kindof NSView *> *existing = targetSplit.arrangedSubviews;
