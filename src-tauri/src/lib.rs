@@ -25,38 +25,73 @@ use tauri::{Emitter, Manager};
 use tokio::sync::Mutex;
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
 
-/// Build the `tauri-plugin-global-shortcut` plugin with the PRMaster hotkey
-/// handler baked in. The handler matches against the chord we register in
-/// `setup` and brings the main window forward + emits `prmaster:focus-route`
-/// so the React router navigates regardless of where the user was.
+/// Build the `tauri-plugin-global-shortcut` plugin with the always-on
+/// hotkey handlers baked in. Two chords are wired up here:
+///
+///   * **⌥⌘⇧P** — focus the main window at `/prmaster`. Registered/
+///     unregistered live by `prmaster_lifecycle` in step with the
+///     PRMaster tool's enabled flag.
+///   * **⌥⌘⇧T** — focus the main window at `/terminal`. Registered
+///     unconditionally in `setup` (no background machinery to gate on);
+///     the `DisabledGuard` on the terminal route handles the case where
+///     the user has the tool disabled by redirecting back out.
+///
+/// Both handlers emit the same `prmaster:focus-route` event the React
+/// `FocusRouteListener` already consumes — the payload (`/prmaster` or
+/// `/terminal`) tells it where to navigate. The event name is now a
+/// misnomer-of-history; the listener treats it as a generic
+/// "navigate-to-route" channel.
 fn build_global_shortcut_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
     use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut, ShortcutState};
     let prmaster_chord = Shortcut::new(
         Some(Modifiers::ALT | Modifiers::SHIFT | Modifiers::SUPER),
         Code::KeyP,
     );
+    let terminal_chord = Shortcut::new(
+        Some(Modifiers::ALT | Modifiers::SHIFT | Modifiers::SUPER),
+        Code::KeyT,
+    );
     tauri_plugin_global_shortcut::Builder::new()
         .with_handler(move |app, sc, ev| {
             if ev.state() != ShortcutState::Pressed {
                 return;
             }
-            if sc == &prmaster_chord {
-                let app = app.clone();
-                tauri::async_runtime::spawn(async move {
-                    if let Some(win) = app.get_webview_window("main") {
-                        let _ = win.unminimize();
-                        let _ = win.show();
-                        let _ = win.set_focus();
-                    }
-                    #[cfg(target_os = "macos")]
-                    {
-                        let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
-                    }
-                    let _ = app.emit("prmaster:focus-route", "/prmaster");
-                });
-            }
+            let route: Option<&'static str> = if sc == &prmaster_chord {
+                Some("/prmaster")
+            } else if sc == &terminal_chord {
+                Some("/terminal")
+            } else {
+                None
+            };
+            let Some(route) = route else { return };
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Some(win) = app.get_webview_window("main") {
+                    let _ = win.unminimize();
+                    let _ = win.show();
+                    let _ = win.set_focus();
+                }
+                #[cfg(target_os = "macos")]
+                {
+                    let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
+                }
+                let _ = app.emit("prmaster:focus-route", route);
+            });
         })
         .build()
+}
+
+/// The terminal `/terminal` global hotkey (⌥⌘⇧T). Mirrors the chord
+/// constructed inside `build_global_shortcut_plugin` — single source of
+/// truth so we don't drift between the handler match and the registration
+/// call below.
+#[cfg(desktop)]
+fn terminal_chord() -> tauri_plugin_global_shortcut::Shortcut {
+    use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut};
+    Shortcut::new(
+        Some(Modifiers::ALT | Modifiers::SHIFT | Modifiers::SUPER),
+        Code::KeyT,
+    )
 }
 
 /// Initialise the Tauri app. Called from `main.rs` and from mobile entry
@@ -308,6 +343,22 @@ pub fn run() {
                 prmaster_lifecycle::start(app.handle());
             } else {
                 tracing::info!("PRMaster disabled in preferences; skipping poll/hotkey");
+            }
+
+            // ── Terminal global hotkey (⌥⌘⇧T) ────────────────────────
+            // Unlike PRMaster's chord, the terminal hotkey has no
+            // background machinery to gate on, so it's registered
+            // unconditionally for the lifetime of the process. If the
+            // user has the terminal tool disabled in preferences the
+            // route's `DisabledGuard` redirects them out — the chord
+            // still works as a "summon zen-tools" hotkey, just lands
+            // them on the first enabled tool instead.
+            #[cfg(desktop)]
+            {
+                use tauri_plugin_global_shortcut::GlobalShortcutExt;
+                if let Err(e) = app.global_shortcut().register(terminal_chord()) {
+                    tracing::warn!(?e, "terminal global-shortcut register failed; ⌥⌘⇧T disabled");
+                }
             }
 
             // Background-agent lifecycle: closing the main window
