@@ -131,6 +131,26 @@ export function terminalSetCloseWindowOnLastTab(value: boolean) {
   });
 }
 
+/**
+ * Hide / show the macOS standard window buttons (close, minimize,
+ * zoom — the traffic-light circles). Used by the terminal route
+ * when entering / leaving distraction-free mode so even the
+ * AppKit-painted controls disappear.
+ *
+ * Be careful to always pair `true` with a matching `false` —
+ * leaving the buttons hidden across tool switches would strand the
+ * user with no clickable affordance to close the window. The
+ * `TerminalView` mount/unmount + DF-toggle effects handle this.
+ *
+ * Note: `cmd+W` and `cmd+Q` continue to work regardless. Hiding the
+ * buttons is purely visual.
+ */
+export function terminalSetTrafficLightsHidden(hidden: boolean) {
+  return invoke<void>("plugin:ghostty|terminal_set_traffic_lights_hidden", {
+    hidden,
+  });
+}
+
 // ---- Event listeners ------------------------------------------------------
 
 /** Subscribe to a tab-lifecycle event. Returns the unlisten fn. */

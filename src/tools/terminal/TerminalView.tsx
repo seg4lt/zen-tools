@@ -36,6 +36,7 @@ import {
   terminalFocusTab,
   terminalNewTab,
   terminalSetChromeInset,
+  terminalSetTrafficLightsHidden,
   type ChromeInset,
 } from "./lib/tauri";
 import "./terminal.css";
@@ -221,6 +222,26 @@ export function TerminalView() {
   useEffect(() => {
     const id = requestAnimationFrame(() => pushInsetRef.current());
     return () => cancelAnimationFrame(id);
+  }, [dfEnabled]);
+
+  // ── DF-triggered traffic-light toggle ────────────────────────────
+  // CSS can't reach the macOS standard window buttons (close /
+  // minimize / zoom) — they're AppKit-painted on top of the
+  // WKWebView under `titleBarStyle: "Overlay"`. We hide them via
+  // `[NSWindow standardWindowButton:]` so true distraction-free
+  // mode has zero chrome, not just zero HTML chrome.
+  //
+  // Always re-show on unmount — switching to another tool with the
+  // buttons still hidden would strand the user.
+  useEffect(() => {
+    void terminalSetTrafficLightsHidden(dfEnabled).catch((e) =>
+      console.error("[terminal] set_traffic_lights_hidden failed:", e),
+    );
+    return () => {
+      void terminalSetTrafficLightsHidden(false).catch((e) =>
+        console.error("[terminal] set_traffic_lights_hidden (restore) failed:", e),
+      );
+    };
   }, [dfEnabled]);
 
   // The pane-tab strip is hidden when there's only one pane — matches

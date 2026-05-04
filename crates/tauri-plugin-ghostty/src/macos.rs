@@ -256,3 +256,32 @@ pub unsafe fn register_host_key_hook_callback(
 ) {
     GhosttyRegisterHostKeyHookCallback(Some(fn_ptr));
 }
+
+/// Hide or show the macOS standard window buttons (close / minimize /
+/// zoom — collectively "the traffic lights") on `ns_window`. Used by
+/// embedding hosts to enter true distraction-free mode where even
+/// the AppKit-painted controls disappear.
+///
+/// CSS can't reach these — they're rendered by AppKit on top of the
+/// WKWebView via `titleBarStyle: "Overlay"` — so we toggle their
+/// `hidden` flag via `[NSWindow standardWindowButton:]`.
+///
+/// # Safety
+/// `ns_window` must be a non-null NSWindow*. Must run on the main
+/// thread (AppKit affinity).
+pub unsafe fn set_traffic_lights_hidden(ns_window: *mut c_void, hidden: bool) {
+    let win = ns_window as *mut AnyObject;
+
+    // NSWindowButton enum:
+    //   NSWindowCloseButton       = 0
+    //   NSWindowMiniaturizeButton = 1
+    //   NSWindowZoomButton        = 2
+    // (NSToolbarButton, NSDocumentIconButton, NSDocumentVersionsButton
+    // exist too but aren't traffic lights.)
+    for kind in [0u64, 1, 2] {
+        let btn: *mut AnyObject = msg_send![win, standardWindowButton: kind];
+        if !btn.is_null() {
+            let _: () = msg_send![btn, setHidden: hidden];
+        }
+    }
+}

@@ -50,6 +50,7 @@ pub fn init() -> TauriPlugin<Wry> {
                 commands::terminal_list_tabs,
                 commands::terminal_set_chrome_inset,
                 commands::terminal_set_close_window_on_last_tab,
+                commands::terminal_set_traffic_lights_hidden,
             ])
             .setup(|app, _api| {
                 tracing::info!("[plugin-ghostty] setup callback running");

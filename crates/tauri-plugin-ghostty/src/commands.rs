@@ -331,6 +331,26 @@ pub fn terminal_set_close_window_on_last_tab(
     Ok(())
 }
 
+/// Hide or show the macOS standard window buttons (close / minimize /
+/// zoom). Used by the React `/terminal` route to enter true
+/// distraction-free mode where even the AppKit-painted controls
+/// disappear. Toggling back un-hides them.
+#[tauri::command]
+pub fn terminal_set_traffic_lights_hidden(
+    window: Window<Wry>,
+    hidden: bool,
+) -> Result<(), String> {
+    run_on_main(&window, move |w| {
+        if let Ok(ns_window) = w.ns_window() {
+            if !ns_window.is_null() {
+                unsafe { macos::set_traffic_lights_hidden(ns_window, hidden) };
+            }
+        }
+    })
+    .map_err(|e| format!("run_on_main: {e}"))?;
+    Ok(())
+}
+
 // ---- Internals ----------------------------------------------------------
 
 fn create_app() -> ghostty_rs::Result<App> {

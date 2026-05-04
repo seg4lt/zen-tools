@@ -14,6 +14,7 @@ Default permissions for the ghostty terminal plugin.
 - `allow-terminal-list-tabs`
 - `allow-terminal-set-chrome-inset`
 - `allow-terminal-set-close-window-on-last-tab`
+- `allow-terminal-set-traffic-lights-hidden`
 
 ## Permission Table
 
@@ -254,6 +255,19 @@ Allows the HTML side to push its measured chrome insets so the native tab conten
 <td>
 
 Toggles the policy of whether closing the last tab also closes the window. Default true; embedders override.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`ghostty:allow-terminal-set-traffic-lights-hidden`
+
+</td>
+<td>
+
+Hides or shows the macOS standard window buttons (close/minimize/zoom). Used by hosts to enter true distraction-free mode.
 
 </td>
 </tr>

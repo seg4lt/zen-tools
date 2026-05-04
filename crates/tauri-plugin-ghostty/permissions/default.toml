@@ -16,6 +16,7 @@ permissions = [
     "allow-terminal-list-tabs",
     "allow-terminal-set-chrome-inset",
     "allow-terminal-set-close-window-on-last-tab",
+    "allow-terminal-set-traffic-lights-hidden",
 ]
 
 [[permission]]
@@ -67,3 +68,8 @@ commands.allow = ["terminal_set_chrome_inset"]
 identifier = "allow-terminal-set-close-window-on-last-tab"
 description = "Toggles the policy of whether closing the last tab also closes the window. Default true; embedders override."
 commands.allow = ["terminal_set_close_window_on_last_tab"]
+
+[[permission]]
+identifier = "allow-terminal-set-traffic-lights-hidden"
+description = "Hides or shows the macOS standard window buttons (close/minimize/zoom). Used by hosts to enter true distraction-free mode."
+commands.allow = ["terminal_set_traffic_lights_hidden"]

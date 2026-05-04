@@ -343,10 +343,10 @@
           "markdownDescription": "Denies the terminal_split command without any pre-configured scope."
         },
         {
-          "description": "Default permissions for the ghostty terminal plugin.\n#### This default permission set includes:\n\n- `allow-terminal-new`\n- `allow-terminal-set-color-scheme`\n- `allow-terminal-split`\n- `allow-terminal-focus-split`\n- `allow-terminal-new-tab`\n- `allow-terminal-focus-tab`\n- `allow-terminal-close-tab`\n- `allow-terminal-list-tabs`\n- `allow-terminal-set-chrome-inset`\n- `allow-terminal-set-close-window-on-last-tab`",
+          "description": "Default permissions for the ghostty terminal plugin.\n#### This default permission set includes:\n\n- `allow-terminal-new`\n- `allow-terminal-set-color-scheme`\n- `allow-terminal-split`\n- `allow-terminal-focus-split`\n- `allow-terminal-new-tab`\n- `allow-terminal-focus-tab`\n- `allow-terminal-close-tab`\n- `allow-terminal-list-tabs`\n- `allow-terminal-set-chrome-inset`\n- `allow-terminal-set-close-window-on-last-tab`\n- `allow-terminal-set-traffic-lights-hidden`",
           "type": "string",
           "const": "default",
-          "markdownDescription": "Default permissions for the ghostty terminal plugin.\n#### This default permission set includes:\n\n- `allow-terminal-new`\n- `allow-terminal-set-color-scheme`\n- `allow-terminal-split`\n- `allow-terminal-focus-split`\n- `allow-terminal-new-tab`\n- `allow-terminal-focus-tab`\n- `allow-terminal-close-tab`\n- `allow-terminal-list-tabs`\n- `allow-terminal-set-chrome-inset`\n- `allow-terminal-set-close-window-on-last-tab`"
+          "markdownDescription": "Default permissions for the ghostty terminal plugin.\n#### This default permission set includes:\n\n- `allow-terminal-new`\n- `allow-terminal-set-color-scheme`\n- `allow-terminal-split`\n- `allow-terminal-focus-split`\n- `allow-terminal-new-tab`\n- `allow-terminal-focus-tab`\n- `allow-terminal-close-tab`\n- `allow-terminal-list-tabs`\n- `allow-terminal-set-chrome-inset`\n- `allow-terminal-set-close-window-on-last-tab`\n- `allow-terminal-set-traffic-lights-hidden`"
         },
         {
           "description": "Allows creating a new terminal surface attached to a window.",
@@ -407,6 +407,12 @@
           "type": "string",
           "const": "allow-terminal-set-close-window-on-last-tab",
           "markdownDescription": "Toggles the policy of whether closing the last tab also closes the window. Default true; embedders override."
+        },
+        {
+          "description": "Hides or shows the macOS standard window buttons (close/minimize/zoom). Used by hosts to enter true distraction-free mode.",
+          "type": "string",
+          "const": "allow-terminal-set-traffic-lights-hidden",
+          "markdownDescription": "Hides or shows the macOS standard window buttons (close/minimize/zoom). Used by hosts to enter true distraction-free mode."
         }
       ]
     }
