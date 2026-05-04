@@ -26,11 +26,11 @@ jobs:
             tauri-args: --target aarch64-apple-darwin
             bundle-subpath: aarch64-apple-darwin/release/bundle
 
-          - name: windows-x64
-            runner: windows-latest
-            target: x86_64-pc-windows-msvc
-            tauri-args: ""
-            bundle-subpath: release/bundle
+          # - name: windows-x64
+          #   runner: windows-latest
+          #   target: x86_64-pc-windows-msvc
+          #   tauri-args: ""
+          #   bundle-subpath: release/bundle
 
           # - name: linux-x64
           #   runner: ubuntu-22.04
@@ -249,10 +249,15 @@ jobs:
 
       - name: Generate updater manifest (latest.json)
         # `createUpdaterArtifacts: true` in tauri.conf.json guarantees
-        # the .app.tar.gz/.sig (macOS) and .exe.sig (Windows) pairs
-        # are present, so missing files here are a hard failure
-        # rather than a quiet skip — same reasoning as the
-        # asset-stage step.
+        # the .app.tar.gz/.sig pair is present, so missing files here
+        # are a hard failure rather than a quiet skip — same reasoning
+        # as the asset-stage step.
+        #
+        # macOS-only today. The Windows asset-stage block above is
+        # gated on `runner.os == 'Windows'` and is dormant while the
+        # Windows matrix row stays commented out; if/when Windows is
+        # reinstated, add a `windows-x86_64` platform entry here too
+        # (and stop hard-failing if its .sig is absent).
         shell: bash
         run: |
           set -euo pipefail
@@ -260,9 +265,7 @@ jobs:
           REPO="${{ github.repository }}"
           PUB_DATE="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
           MAC_SIG_FILE="release-assets/Zen-Tools-${TAG}-macos-arm64.app.tar.gz.sig"
-          WIN_SIG_FILE="release-assets/Zen-Tools-${TAG}-windows-x64-setup.exe.sig"
           MAC_SIG="$(cat "$MAC_SIG_FILE")"
-          WIN_SIG="$(cat "$WIN_SIG_FILE")"
           cat > release-assets/latest.json <<EOF
           {
             "version": "${TAG}",
@@ -272,10 +275,6 @@ jobs:
               "darwin-aarch64": {
                 "signature": "${MAC_SIG}",
                 "url": "https://github.com/${REPO}/releases/download/${TAG}/Zen-Tools-${TAG}-macos-arm64.app.tar.gz"
-              },
-              "windows-x86_64": {
-                "signature": "${WIN_SIG}",
-                "url": "https://github.com/${REPO}/releases/download/${TAG}/Zen-Tools-${TAG}-windows-x64-setup.exe"
               }
             }
           }
@@ -298,13 +297,12 @@ jobs:
             ```sh
             npx @seg4lt/zen-tools
             ```
-            Pulls this release's installer for your platform, runs it, and launches the app.
+            Pulls this release's installer for macOS, runs it, and launches the app.
 
             ### Downloads
             | Platform | File |
             |----------|------|
             | macOS (Apple Silicon) | `Zen-Tools-${{ github.ref_name }}-macos-arm64.dmg` |
-            | Windows (x64)         | `Zen-Tools-${{ github.ref_name }}-windows-x64-setup.exe` |
 
             ### macOS Installation (manual)
             1. Download the `.dmg`, open it, drag the app to `/Applications`.
@@ -312,9 +310,6 @@ jobs:
                ```sh
                xattr -dr com.apple.quarantine "/Applications/Zen Tools.app"
                ```
-
-            ### Windows Installation (manual)
-            Download the `*-setup.exe` and run it. The installer is silent (`/S` flag respected) and registers an Uninstall entry under `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall`.
           draft: false
           prerelease: false
           files: release-assets/*
