@@ -40,6 +40,7 @@
 
 use tauri::{AppHandle, Emitter, Manager};
 
+use super::permissions::is_accessibility_trusted;
 use super::state::DictationTauriState;
 use super::{ensure_model_present, hud, install_hotkey};
 use crate::tray;
@@ -69,6 +70,36 @@ pub fn start(app: &AppHandle) {
                 tracing::warn!(?e, "dictation: base model precheck failed");
             }
         });
+    }
+
+    // Pre-check Accessibility (TCC) before touching the CGEventTap.
+    // macOS keys TCC by bundle id; the recent rename
+    // (`com.zen-tools.app` → `com.seg4lt.zen-tools`) invalidated any
+    // prior grant, so the very first call to `CGEventTapCreate` after
+    // the rename pops the system "Zen Tools would like to control
+    // this computer using accessibility features" dialog. With the
+    // tap install running on every boot, that dialog reappears every
+    // launch until the user grants — terrible UX.
+    //
+    // Skipping the install when not trusted means the boot is
+    // dialog-free; the tray + Settings UI can show a soft prompt
+    // pointing the user to System Settings → Privacy & Security →
+    // Accessibility. Once granted, a relaunch (or a future
+    // "retry install" command) picks up where this left off.
+    if !is_accessibility_trusted() {
+        tracing::warn!(
+            "dictation: Accessibility permission not granted for the current \
+             bundle id (com.seg4lt.zen-tools). Skipping CGEventTap install — \
+             the right-⌘ hotkey will not work until the user grants \
+             Accessibility in System Settings → Privacy & Security and \
+             relaunches. The model precheck still runs."
+        );
+        let _ = app.emit("dictation:lifecycle", "accessibility-required");
+        let _ = app.emit("dictation:status", "needs-accessibility");
+        // Still update the tray so the menu reflects the current
+        // (degraded) state instead of staying stale.
+        tray::update(app);
+        return;
     }
 
     // CGEventTap install must happen on the Cocoa main thread.

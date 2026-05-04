@@ -21,6 +21,7 @@
 pub mod commands;
 pub mod dto;
 pub mod lifecycle;
+pub mod permissions;
 pub mod state;
 
 // Note: dictation no longer owns its own menu-bar tray. The unified
