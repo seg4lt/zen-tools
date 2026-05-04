@@ -1,0 +1,14 @@
+[tools]
+# Toolchain pins for zen-tools.
+#
+# - zig 0.15.2     required by upstream ghostty 1.3.x. The build of
+#                  `crates/ghostty-sys` invokes `zig build install`
+#                  against `vendor/ghostty/` to produce `libghostty.a`.
+#                  Newer Zig releases have not been verified against
+#                  our vendored ghostty build patches.
+#
+# Rust / Node / pnpm versions are not pinned here because the existing
+# zen-tools toolchain (rustup default + the `packageManager` field in
+# `package.json`) is already authoritative. Add pins here later if
+# CI starts reproducing version-skew bugs.
+zig = "0.15.2"
