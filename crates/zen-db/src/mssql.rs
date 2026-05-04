@@ -65,9 +65,22 @@ pub struct MsSqlConnection {
 
 impl MsSqlConnection {
     pub async fn connect(cfg: ConnectionConfig) -> DbResult<Self> {
+        // ── Sanitize the host string ────────────────────────────────
+        // The Azure portal's "Server name" field copies as
+        // `myserver.database.windows.net,1433` (comma-port suffix —
+        // ADO.NET / SSMS parse this, tiberius does NOT). If the user
+        // pastes that form whole, DNS lookup fails on the literal
+        // string. Strip the suffix here; if a port was embedded and
+        // the form-side `port` is still the default, adopt the
+        // embedded port too.
+        //
+        // We also strip an explicit `tcp:` prefix (another
+        // Microsoft-style protocol marker users sometimes copy).
+        let (host, port) = parse_host_port(&cfg.host, cfg.port);
+
         let mut tib_cfg = Config::new();
-        tib_cfg.host(&cfg.host);
-        tib_cfg.port(cfg.port);
+        tib_cfg.host(&host);
+        tib_cfg.port(port);
         if !cfg.database.is_empty() {
             tib_cfg.database(&cfg.database);
         }
@@ -98,7 +111,20 @@ impl MsSqlConnection {
         //                                the first query after macOS
         //                                wake doesn't pay a full
         //                                handshake.
-        //   - `connection_timeout(8s)`— same as PG `acquire_timeout`.
+        //   - `connection_timeout(30s)`— Azure SQL needs the headroom.
+        //                                A cold first connect on Azure
+        //                                does TLS + PRELOGIN + LOGIN7
+        //                                + a routing-token redirect to
+        //                                the actual node + a SECOND
+        //                                full handshake. 5–15s is
+        //                                normal; 8s (the original
+        //                                value, kept for parity with
+        //                                Postgres) timed out before the
+        //                                routing redirect could land.
+        //                                Local mssql containers still
+        //                                connect well under 30s, so
+        //                                this is purely additive
+        //                                headroom.
         //   - `idle_timeout(10 min)`  — recycle long-idle pool conns
         //                                proactively so we don't hold
         //                                a fleet of server-side
@@ -114,14 +140,35 @@ impl MsSqlConnection {
         let pool = Pool::builder()
             .max_size(4)
             .min_idle(Some(1))
-            .connection_timeout(Duration::from_secs(8))
+            .connection_timeout(Duration::from_secs(30))
             .idle_timeout(Some(Duration::from_secs(10 * 60)))
             .test_on_check_out(true)
             .build(mgr)
             .await
-            .map_err(|e| DbError::Connect(e.to_string()))?;
+            .map_err(|e| {
+                // bb8's `RunError` wraps the underlying tiberius error;
+                // its `Display` impl flattens the chain to just the
+                // outer "pool error" string and drops the actual cause
+                // ("certificate verification failed", "Login failed
+                // for user", "tcp connect: connection refused", etc.).
+                // Walk the cause chain manually so the user sees the
+                // root reason — that's the difference between a
+                // useless "connect failed" toast and an actionable
+                // "your username needs the @servername suffix on
+                // Azure SQL" message.
+                let chain = format_error_chain(&e);
+                tracing::warn!(error = %chain, host = %host, port = port, "mssql connect failed");
+                DbError::Connect(chain)
+            })?;
 
-        Ok(Self { pool, cfg })
+        Ok(Self {
+            pool,
+            cfg: ConnectionConfig {
+                host: host.clone(),
+                port,
+                ..cfg
+            },
+        })
     }
 
     /// Pull one tiberius client out of the pool. The returned
@@ -1444,4 +1491,130 @@ fn collapse_indexes(rows: Vec<(String, bool, String, i32)>) -> Vec<IndexDescript
         });
     }
     out
+}
+
+/// Strip Microsoft-style protocol prefix / port suffix from a host
+/// string and return `(host, port)`. Handles the two flavours users
+/// most commonly paste from the Azure portal / SSMS:
+///
+///   * `myserver.database.windows.net,1433`  →  `("myserver…", 1433)`
+///   * `tcp:myserver.database.windows.net,1433` →  same
+///   * plain `myserver.database.windows.net` (no comma) →
+///     `("myserver…", default_port)`
+///
+/// `default_port` is the form-side port the user already typed (or 1433
+/// from the UI default); we only override when an embedded port is
+/// present AND the form-side port is still the default — that way users
+/// who explicitly typed a different port in the port field don't get
+/// overridden by a stale comma in the host field.
+fn parse_host_port(raw: &str, default_port: u16) -> (String, u16) {
+    let mut s = raw.trim();
+    // Strip `tcp:` (case-insensitive) — Microsoft's protocol marker.
+    if s.len() >= 4 && s[..4].eq_ignore_ascii_case("tcp:") {
+        s = &s[4..];
+    }
+    if let Some((host, port_str)) = s.split_once(',') {
+        // A comma is not legal in a DNS hostname, so whatever follows
+        // it is unambiguously a port-attempt regardless of whether it
+        // parses. We always strip it before handing the host to
+        // tiberius — passing `myserver,garbage` straight through would
+        // just give a confusing DNS lookup failure.
+        let host = host.trim().to_string();
+        if let Ok(p) = port_str.trim().parse::<u16>() {
+            // Adopt the embedded port only if the UI form is still on
+            // the default (1433). Anything else is an explicit user
+            // choice we mustn't override.
+            let port = if default_port == 1433 { p } else { default_port };
+            return (host, port);
+        }
+        return (host, default_port);
+    }
+    (s.to_string(), default_port)
+}
+
+/// Render a chained error (e.g. `bb8::RunError` wrapping a
+/// `tiberius::Error`) as a human-readable string that includes every
+/// cause level. `bb8::RunError`'s own `Display` impl truncates to just
+/// the outer message — useless for diagnosing Azure SQL failures
+/// where the actual reason ("Login failed for user 'foo'",
+/// "certificate verification failed: invalid issuer", "tcp connect:
+/// timed out") only shows up two or three levels deep in the chain.
+fn format_error_chain<E: std::error::Error>(err: &E) -> String {
+    let mut out = err.to_string();
+    let mut src: Option<&dyn std::error::Error> = err.source();
+    while let Some(s) = src {
+        let msg = s.to_string();
+        // Avoid duplicating the same string when bb8 / tiberius wrap
+        // an error whose Display matches the outer.
+        if !out.contains(&msg) {
+            out.push_str(": ");
+            out.push_str(&msg);
+        }
+        src = s.source();
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_host_port;
+
+    #[test]
+    fn plain_host_keeps_default_port() {
+        assert_eq!(
+            parse_host_port("myserver.database.windows.net", 1433),
+            ("myserver.database.windows.net".to_string(), 1433),
+        );
+    }
+
+    #[test]
+    fn comma_port_suffix_is_extracted() {
+        assert_eq!(
+            parse_host_port("myserver.database.windows.net,1433", 1433),
+            ("myserver.database.windows.net".to_string(), 1433),
+        );
+    }
+
+    #[test]
+    fn tcp_prefix_is_stripped() {
+        assert_eq!(
+            parse_host_port("tcp:myserver.database.windows.net,1433", 1433),
+            ("myserver.database.windows.net".to_string(), 1433),
+        );
+    }
+
+    #[test]
+    fn explicit_form_port_wins_over_embedded() {
+        // User typed 1500 in the port field — don't override with the
+        // 1433 they pasted into the host field.
+        assert_eq!(
+            parse_host_port("myserver.example.com,1433", 1500),
+            ("myserver.example.com".to_string(), 1500),
+        );
+    }
+
+    #[test]
+    fn embedded_port_overrides_default_only() {
+        // Form-side port is the default (1433), embedded is non-default.
+        assert_eq!(
+            parse_host_port("myserver.example.com,2433", 1433),
+            ("myserver.example.com".to_string(), 2433),
+        );
+    }
+
+    #[test]
+    fn malformed_port_falls_back_to_default() {
+        assert_eq!(
+            parse_host_port("myserver,not-a-number", 1433),
+            ("myserver".to_string(), 1433),
+        );
+    }
+
+    #[test]
+    fn whitespace_is_trimmed() {
+        assert_eq!(
+            parse_host_port("  myserver.example.com , 1433 ", 1433),
+            ("myserver.example.com".to_string(), 1433),
+        );
+    }
 }
