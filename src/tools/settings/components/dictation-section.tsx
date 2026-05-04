@@ -22,6 +22,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  DICTATION_PERMISSIONS_KEY,
   DICTATION_STATE_KEY,
   dictationIpc,
   listenDownloadProgress,
@@ -109,6 +110,31 @@ export function DictationSection() {
     onSuccess: () => qc.invalidateQueries({ queryKey: DICTATION_STATE_KEY }),
   });
 
+  // ── macOS Accessibility permission UX ──────────────────────────────
+  // Refetched on every focus/visibility change so a grant the user
+  // just toggled in System Settings shows up here without a manual
+  // refresh. Cheap (one `AXIsProcessTrusted()` syscall on the backend).
+  const { data: perms, refetch: refetchPerms } = useQuery({
+    queryKey: DICTATION_PERMISSIONS_KEY,
+    queryFn: dictationIpc.getPermissions,
+    enabled: isLoaded && enabled,
+    refetchOnWindowFocus: true,
+  });
+
+  const resetAccessibility = useMutation({
+    mutationFn: dictationIpc.resetAccessibility,
+    onSuccess: () => qc.invalidateQueries({ queryKey: DICTATION_PERMISSIONS_KEY }),
+  });
+  const resetMicrophone = useMutation({
+    mutationFn: dictationIpc.resetMicrophone,
+  });
+  const openAxPane = useMutation({
+    mutationFn: () => dictationIpc.openPrivacyPane("Privacy_Accessibility"),
+  });
+  const openMicPane = useMutation({
+    mutationFn: () => dictationIpc.openPrivacyPane("Privacy_Microphone"),
+  });
+
   const selected = state?.models.find((m) => m.id === state.selected_model);
   const showDownloadButton =
     enabled && selected && !selected.is_downloaded && !progress[selected.id];
@@ -130,6 +156,79 @@ export function DictationSection() {
           aria-label="Enable dictation"
         />
       </div>
+
+      {enabled && perms?.accessibility_granted === false && (
+        <div className="rounded-md border border-amber-500/40 bg-amber-500/5 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
+          <div className="font-medium">Accessibility permission required</div>
+          <p className="mt-1 text-[11px] text-amber-700/80 dark:text-amber-300/80">
+            The right-⌘ hotkey can't fire without this. macOS won't
+            re-prompt once an entry exists in TCC, so use{" "}
+            <em>Reset & re-prompt</em> below if the toggle in System
+            Settings is dead (typical after reinstalling an unsigned
+            build — the cdhash changes and the existing entry no
+            longer matches).
+          </p>
+          <div className="mt-2 flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => resetAccessibility.mutate()}
+              disabled={resetAccessibility.isPending}
+              className="rounded-md border border-border/60 bg-card px-2.5 py-1 text-[11px] hover:bg-accent disabled:opacity-50"
+            >
+              {resetAccessibility.isPending ? "Resetting…" : "Reset & re-prompt"}
+            </button>
+            <button
+              type="button"
+              onClick={() => openAxPane.mutate()}
+              className="rounded-md border border-border/60 bg-card px-2.5 py-1 text-[11px] hover:bg-accent"
+            >
+              Open System Settings
+            </button>
+            <button
+              type="button"
+              onClick={() => refetchPerms()}
+              className="rounded-md border border-border/60 bg-card px-2.5 py-1 text-[11px] hover:bg-accent"
+            >
+              Re-check
+            </button>
+          </div>
+          {resetAccessibility.error instanceof Error && (
+            <p className="mt-1 text-[10px] text-red-500">
+              {resetAccessibility.error.message}
+            </p>
+          )}
+        </div>
+      )}
+
+      {enabled && (
+        <div className="flex flex-wrap items-center gap-2 rounded-md border border-border/60 bg-card/40 px-3 py-2 text-[11px]">
+          <span className="font-medium">Microphone</span>
+          <span className="text-muted-foreground">
+            asks on first use; macOS re-prompts on each install only when
+            the app is unsigned (cdhash changes between builds).
+          </span>
+          <button
+            type="button"
+            onClick={() => resetMicrophone.mutate()}
+            disabled={resetMicrophone.isPending}
+            className="rounded-md border border-border/60 bg-card px-2 py-0.5 hover:bg-accent disabled:opacity-50"
+          >
+            {resetMicrophone.isPending ? "Resetting…" : "Reset"}
+          </button>
+          <button
+            type="button"
+            onClick={() => openMicPane.mutate()}
+            className="rounded-md border border-border/60 bg-card px-2 py-0.5 hover:bg-accent"
+          >
+            Open System Settings
+          </button>
+          {resetMicrophone.error instanceof Error && (
+            <span className="text-[10px] text-red-500">
+              {resetMicrophone.error.message}
+            </span>
+          )}
+        </div>
+      )}
 
       {enabled && (
         <>

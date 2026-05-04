@@ -20,6 +20,18 @@ import type {
 export const DICTATION_STATE_KEY = ["dictation", "state"] as const;
 /** React-Query key for the on-disk paths panel. */
 export const DICTATION_PATHS_KEY = ["dictation", "paths"] as const;
+/** React-Query key for the macOS TCC permissions snapshot. */
+export const DICTATION_PERMISSIONS_KEY = ["dictation", "permissions"] as const;
+
+/**
+ * macOS TCC permission state for the bits dictation cares about.
+ * `accessibilityGranted: null` on non-macOS where TCC doesn't exist;
+ * `false` when the entry is missing OR explicitly denied (the two
+ * look the same to `AXIsProcessTrusted`).
+ */
+export interface PermissionsDto {
+  accessibility_granted: boolean | null;
+}
 
 export const dictationIpc = {
   isSupported: (): Promise<boolean> => invoke<boolean>("dictation_is_supported"),
@@ -33,6 +45,23 @@ export const dictationIpc = {
   openLogsDir: (): Promise<void> => invoke<void>("dictation_open_logs_dir"),
   openModelsDir: (): Promise<void> => invoke<void>("dictation_open_models_dir"),
   getPaths: (): Promise<PathsDto> => invoke<PathsDto>("dictation_get_paths"),
+  // Permissions UX — recovers users stuck behind a stale TCC entry
+  // that won't re-prompt (typical after an unsigned-build reinstall
+  // changes the cdhash). See `src-tauri/src/dictation/permissions.rs`.
+  getPermissions: (): Promise<PermissionsDto> =>
+    invoke<PermissionsDto>("dictation_get_permissions"),
+  /** Run `tccutil reset Accessibility <bundle>` then re-prompt. */
+  resetAccessibility: (): Promise<void> =>
+    invoke<void>("dictation_reset_accessibility"),
+  /** Run `tccutil reset Microphone <bundle>`. */
+  resetMicrophone: (): Promise<void> =>
+    invoke<void>("dictation_reset_microphone"),
+  /**
+   * Deep-link into a System Settings privacy pane.
+   * `pane` is one of `"Privacy_Accessibility"`, `"Privacy_Microphone"`.
+   */
+  openPrivacyPane: (pane: "Privacy_Accessibility" | "Privacy_Microphone"): Promise<void> =>
+    invoke<void>("dictation_open_privacy_pane", { pane }),
 };
 
 /**

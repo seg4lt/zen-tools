@@ -123,6 +123,13 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 # bringing in `objc2-app-kit` for a single selector.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.5"
+# Used by `dictation::permissions::prompt_accessibility` for the
+# `AXIsProcessTrustedWithOptions` FFI call (the function takes a
+# CFDictionary of options keyed by the CFString constant
+# `kAXTrustedCheckOptionPrompt`). Already in the dep graph
+# transitively via zen-dictation; the explicit dep here is so the
+# `core_foundation::*` paths resolve in src-tauri's own modules.
+core-foundation = "0.10"
 # Native ghostty-backed terminal tab. Plugin lives at
 # `crates/tauri-plugin-ghostty/`; it pulls in `ghostty-sys` (Zig-built
 # libghostty.a from `vendor/ghostty/`) + `ghostty-rs` + an ObjC NSView

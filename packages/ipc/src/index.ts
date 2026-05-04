@@ -8,6 +8,7 @@ export { pickDirectory, readFileContent, writeFileContent } from "./files";
 export {
   DICTATION_STATE_KEY,
   DICTATION_PATHS_KEY,
+  DICTATION_PERMISSIONS_KEY,
   dictationIpc,
   listenDownloadProgress,
   listenDictationStatus,
@@ -16,4 +17,5 @@ export {
   type DictationStateDto,
   type DownloadProgressDto,
   type PathsDto,
+  type PermissionsDto,
 } from "./dictation";

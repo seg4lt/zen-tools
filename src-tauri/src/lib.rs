@@ -574,6 +574,14 @@ pub fn run() {
             dictation::commands::dictation_open_logs_dir,
             dictation::commands::dictation_open_models_dir,
             dictation::commands::dictation_get_paths,
+            // Permissions UX — recovers users who got stuck after a
+            // bundle-id rename / unsigned-reinstall left a stale TCC
+            // entry that won't re-prompt. See
+            // `crate::dictation::permissions` for the rationale.
+            dictation::commands::dictation_get_permissions,
+            dictation::commands::dictation_reset_accessibility,
+            dictation::commands::dictation_reset_microphone,
+            dictation::commands::dictation_open_privacy_pane,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

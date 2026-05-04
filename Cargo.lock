@@ -9275,6 +9275,7 @@ dependencies = [
  "ahash",
  "anyhow",
  "chrono",
+ "core-foundation 0.10.1",
  "dunce",
  "fff-search",
  "objc2 0.5.2",

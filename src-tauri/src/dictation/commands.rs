@@ -173,6 +173,93 @@ pub async fn dictation_get_paths(state: State<'_, DictationTauriState>) -> AppRe
     })
 }
 
+/// Snapshot of the macOS TCC permissions dictation cares about.
+/// Both fields are tri-state-ish: `Some(true)` granted,
+/// `Some(false)` an entry exists in TCC but is denied (or no entry
+/// has ever been created and the call hasn't prompted yet — the two
+/// look the same to `AXIsProcessTrusted` / AVAuthorization), `None`
+/// when the platform doesn't support the check (non-macOS).
+#[derive(Debug, serde::Serialize)]
+pub struct PermissionsDto {
+    /// Whether the macOS Accessibility TCC entry currently grants
+    /// access. `None` on non-macOS targets where TCC doesn't exist;
+    /// `Some(false)` when the entry is missing OR explicitly denied
+    /// (the two states look identical to `AXIsProcessTrusted`).
+    pub accessibility_granted: Option<bool>,
+}
+
+/// Probe the current Accessibility-permission state. Cheap (one
+/// `AXIsProcessTrusted()` syscall) — the UI can re-fetch on a focus
+/// or visibility change to reflect changes the user just made in
+/// System Settings.
+#[tauri::command]
+pub async fn dictation_get_permissions() -> AppResult<PermissionsDto> {
+    Ok(PermissionsDto {
+        accessibility_granted: if cfg!(target_os = "macos") {
+            Some(crate::dictation::permissions::is_accessibility_trusted())
+        } else {
+            None
+        },
+    })
+}
+
+/// Wipe the Accessibility TCC entry for our bundle id and trigger
+/// the system prompt afresh, so the user can grant without having to
+/// know about `tccutil` or hunt through System Settings.
+///
+/// Workflow: the user opens dictation Settings, sees "Accessibility:
+/// not granted" with a "Reset & re-prompt" button. Click → we run
+/// `tccutil reset Accessibility com.seg4lt.zen-tools` (which
+/// invalidates any stale entry — common after an unsigned-build
+/// reinstall, where the cdhash no longer matches the TCC row) and
+/// then call `prompt_accessibility()` to fire the system dialog.
+/// User clicks Allow → next `lifecycle::start` finds Accessibility
+/// trusted and installs the CGEventTap.
+///
+/// Sequencing matters: prompting BEFORE the reset is a no-op when an
+/// entry exists. Resetting BEFORE the prompt is what makes the dialog
+/// appear.
+#[tauri::command]
+pub async fn dictation_reset_accessibility(app: AppHandle) -> AppResult<()> {
+    let bundle_id = app
+        .config()
+        .identifier
+        .clone();
+    crate::dictation::permissions::reset_tcc_entry("Accessibility", &bundle_id)
+        .map_err(AppError::Other)?;
+    // Fire the prompt straight after reset — tccutil's effect is
+    // synchronous so by the time the next call lands, the entry is
+    // gone and macOS will prompt fresh.
+    let _ = crate::dictation::permissions::prompt_accessibility();
+    // Re-attempt the lifecycle start so the CGEventTap installs as
+    // soon as the user clicks Allow (without waiting for an app
+    // relaunch). `lifecycle::start` is idempotent and itself
+    // re-checks `is_accessibility_trusted()` before touching the tap.
+    crate::dictation::lifecycle::start(&app);
+    Ok(())
+}
+
+/// Wipe the Microphone TCC entry for our bundle id. The user
+/// triggers the actual prompt themselves by starting a recording —
+/// AVCaptureDevice's first capture-attempt is what shows the system
+/// "Zen Tools would like to access the microphone" dialog. We can't
+/// fire that dialog standalone (no public API), so the UX is:
+/// click Reset → next dictation gesture re-prompts.
+#[tauri::command]
+pub async fn dictation_reset_microphone(app: AppHandle) -> AppResult<()> {
+    let bundle_id = app.config().identifier.clone();
+    crate::dictation::permissions::reset_tcc_entry("Microphone", &bundle_id)
+        .map_err(AppError::Other)
+}
+
+/// Deep-link into the Accessibility / Microphone privacy pane in
+/// System Settings. Convenience for when the user wants to inspect
+/// or toggle the entry directly rather than reset it.
+#[tauri::command]
+pub async fn dictation_open_privacy_pane(pane: String) -> AppResult<()> {
+    crate::dictation::permissions::open_privacy_pane(&pane).map_err(AppError::Other)
+}
+
 /// Open `path` as a folder in Finder.
 ///
 /// We deliberately bypass `tauri-plugin-shell`'s `Shell::open`. That
