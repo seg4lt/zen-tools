@@ -12,10 +12,12 @@ export {
   dictationIpc,
   listenDownloadProgress,
   listenDictationStatus,
+  listenPermissionsChanged,
   type DictationStatus,
   type ModelDto,
   type DictationStateDto,
   type DownloadProgressDto,
   type PathsDto,
   type PermissionsDto,
+  type MicrophoneStatus,
 } from "./dictation";

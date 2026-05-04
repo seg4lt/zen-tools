@@ -186,20 +186,71 @@ pub struct PermissionsDto {
     /// `Some(false)` when the entry is missing OR explicitly denied
     /// (the two states look identical to `AXIsProcessTrusted`).
     pub accessibility_granted: Option<bool>,
+    /// Microphone authorization state from
+    /// `AVCaptureDevice.authorizationStatus(for: .audio)`. Mirrors
+    /// `MicAuthStatus::as_wire_str` exactly: `"notDetermined" |
+    /// "restricted" | "denied" | "authorized"`. `None` on non-macOS.
+    pub microphone_status: Option<String>,
+    /// Whether the auto-recovery flow has decided the current
+    /// Accessibility-denied state is a deliberate revocation (same
+    /// install id as the last observed grant). The UI uses this to
+    /// distinguish "we tried to auto-fix but the user revoked" from
+    /// "we haven't auto-fixed yet" — the banner stays out of the way
+    /// in the second case.
+    pub accessibility_deliberate_denial: bool,
+    /// Same idea for microphone.
+    pub microphone_deliberate_denial: bool,
 }
 
-/// Probe the current Accessibility-permission state. Cheap (one
-/// `AXIsProcessTrusted()` syscall) — the UI can re-fetch on a focus
-/// or visibility change to reflect changes the user just made in
-/// System Settings.
+/// Probe the current Accessibility + Microphone permission state.
+/// Cheap (one syscall + one objc msg-send); the UI re-fetches on
+/// window focus / `dictation:permissions-changed` event so changes
+/// the user just made in System Settings reflect without a manual
+/// refresh.
 #[tauri::command]
-pub async fn dictation_get_permissions() -> AppResult<PermissionsDto> {
+pub async fn dictation_get_permissions(app: AppHandle) -> AppResult<PermissionsDto> {
+    if !cfg!(target_os = "macos") {
+        return Ok(PermissionsDto {
+            accessibility_granted: None,
+            microphone_status: None,
+            accessibility_deliberate_denial: false,
+            microphone_deliberate_denial: false,
+        });
+    }
+
+    let ax_granted = crate::dictation::permissions::is_accessibility_trusted();
+    let mic_status = crate::dictation::permissions::microphone_authorization_status();
+
+    // Cross-reference with the persisted install-id record to
+    // surface "deliberate denial" vs "stuck stale entry" so the UI
+    // banner can phrase its copy accordingly.
+    let cfg = app.state::<UserConfig>();
+    let current = crate::dictation::install_id::current(&app);
+    let prior = crate::dictation::install_id::read(cfg.inner())
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+
+    let ax_deliberate = !ax_granted
+        && prior
+            .accessibility
+            .as_ref()
+            .map(|r| r.install_id == current)
+            .unwrap_or(false);
+
+    let mic_denied = mic_status == crate::dictation::permissions::MicAuthStatus::Denied;
+    let mic_deliberate = mic_denied
+        && prior
+            .microphone
+            .as_ref()
+            .map(|r| r.install_id == current)
+            .unwrap_or(false);
+
     Ok(PermissionsDto {
-        accessibility_granted: if cfg!(target_os = "macos") {
-            Some(crate::dictation::permissions::is_accessibility_trusted())
-        } else {
-            None
-        },
+        accessibility_granted: Some(ax_granted),
+        microphone_status: Some(mic_status.as_wire_str().to_string()),
+        accessibility_deliberate_denial: ax_deliberate,
+        microphone_deliberate_denial: mic_deliberate,
     })
 }
 

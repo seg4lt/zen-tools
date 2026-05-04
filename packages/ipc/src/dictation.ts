@@ -25,12 +25,42 @@ export const DICTATION_PERMISSIONS_KEY = ["dictation", "permissions"] as const;
 
 /**
  * macOS TCC permission state for the bits dictation cares about.
- * `accessibilityGranted: null` on non-macOS where TCC doesn't exist;
- * `false` when the entry is missing OR explicitly denied (the two
- * look the same to `AXIsProcessTrusted`).
+ * Mirrors `src-tauri/src/dictation/commands.rs::PermissionsDto`.
+ *
+ * - `accessibility_granted: null` on non-macOS; `false` when the
+ *   entry is missing OR explicitly denied (the two look the same to
+ *   `AXIsProcessTrusted`).
+ * - `microphone_status` is the richer AVCaptureDevice tri-state.
+ * - The two `_deliberate_denial` booleans tell the UI whether the
+ *   denied state matches a previously-observed grant ON THIS SAME
+ *   install — i.e. the user revoked it on purpose and we should
+ *   leave the TCC entry alone. When false, the auto-recovery flow
+ *   has either already attempted a fix (and we're waiting for the
+ *   user to click the system prompt) or hasn't fired yet.
  */
+export type MicrophoneStatus =
+  | "notDetermined"
+  | "restricted"
+  | "denied"
+  | "authorized";
+
 export interface PermissionsDto {
   accessibility_granted: boolean | null;
+  microphone_status: MicrophoneStatus | null;
+  accessibility_deliberate_denial: boolean;
+  microphone_deliberate_denial: boolean;
+}
+
+/**
+ * Subscribe to permission-state changes the backend has just observed
+ * (e.g. the user just clicked Allow on the AVCaptureDevice prompt).
+ * Lets the Settings UI re-fetch the permissions snapshot the moment
+ * a grant lands instead of waiting for window focus.
+ */
+export function listenPermissionsChanged(
+  cb: (granted: boolean) => void,
+): Promise<UnlistenFn> {
+  return listen<boolean>("dictation:permissions-changed", (e) => cb(e.payload));
 }
 
 export const dictationIpc = {

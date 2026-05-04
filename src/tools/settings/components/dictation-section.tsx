@@ -26,6 +26,7 @@ import {
   DICTATION_STATE_KEY,
   dictationIpc,
   listenDownloadProgress,
+  listenPermissionsChanged,
   type DownloadProgressDto,
 } from "@zen-tools/ipc";
 import {
@@ -110,10 +111,22 @@ export function DictationSection() {
     onSuccess: () => qc.invalidateQueries({ queryKey: DICTATION_STATE_KEY }),
   });
 
-  // ── macOS Accessibility permission UX ──────────────────────────────
-  // Refetched on every focus/visibility change so a grant the user
-  // just toggled in System Settings shows up here without a manual
-  // refresh. Cheap (one `AXIsProcessTrusted()` syscall on the backend).
+  // ── macOS Accessibility + Microphone permission UX ─────────────────
+  // The backend's auto-recovery flow handles the common stale-cdhash
+  // case automatically (see `src-tauri/src/dictation/lifecycle.rs`).
+  // The UI's job is reduced to:
+  //
+  //   * showing a banner only when the auto-fix can't / shouldn't
+  //     proceed (deliberate denial, restricted-by-MDM, or auto-fix
+  //     attempted but the user dismissed the prompt), and
+  //   * exposing the manual reset / deep-link buttons as a fallback
+  //     for the cases the heuristic doesn't catch.
+  //
+  // The query refetches on window focus AND on
+  // `dictation:permissions-changed` events the backend emits the
+  // moment a grant lands — so the banner clears the instant the user
+  // clicks Allow on the system prompt, without waiting for them to
+  // alt-tab back into the app.
   const { data: perms, refetch: refetchPerms } = useQuery({
     queryKey: DICTATION_PERMISSIONS_KEY,
     queryFn: dictationIpc.getPermissions,
@@ -121,12 +134,26 @@ export function DictationSection() {
     refetchOnWindowFocus: true,
   });
 
+  useEffect(() => {
+    if (!enabled) return;
+    let unlisten: (() => void) | undefined;
+    void listenPermissionsChanged(() => {
+      void qc.invalidateQueries({ queryKey: DICTATION_PERMISSIONS_KEY });
+    }).then((fn) => {
+      unlisten = fn;
+    });
+    return () => {
+      unlisten?.();
+    };
+  }, [enabled, qc]);
+
   const resetAccessibility = useMutation({
     mutationFn: dictationIpc.resetAccessibility,
     onSuccess: () => qc.invalidateQueries({ queryKey: DICTATION_PERMISSIONS_KEY }),
   });
   const resetMicrophone = useMutation({
     mutationFn: dictationIpc.resetMicrophone,
+    onSuccess: () => qc.invalidateQueries({ queryKey: DICTATION_PERMISSIONS_KEY }),
   });
   const openAxPane = useMutation({
     mutationFn: () => dictationIpc.openPrivacyPane("Privacy_Accessibility"),
@@ -134,6 +161,17 @@ export function DictationSection() {
   const openMicPane = useMutation({
     mutationFn: () => dictationIpc.openPrivacyPane("Privacy_Microphone"),
   });
+
+  // Banner-suppression rule: don't show the manual-fix UI while the
+  // backend is mid-auto-fix. We approximate "mid-auto-fix" as "denied
+  // AND the install-id heuristic does NOT classify this as a
+  // deliberate denial" — in that window the system prompt is on
+  // screen (or about to be) and the user just needs to click Allow.
+  const axNeedsManual =
+    perms?.accessibility_granted === false && perms.accessibility_deliberate_denial;
+  const micNeedsManual =
+    perms?.microphone_status === "denied" && perms.microphone_deliberate_denial;
+  const micRestricted = perms?.microphone_status === "restricted";
 
   const selected = state?.models.find((m) => m.id === state.selected_model);
   const showDownloadButton =
@@ -157,16 +195,15 @@ export function DictationSection() {
         />
       </div>
 
-      {enabled && perms?.accessibility_granted === false && (
+      {enabled && axNeedsManual && (
         <div className="rounded-md border border-amber-500/40 bg-amber-500/5 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
-          <div className="font-medium">Accessibility permission required</div>
+          <div className="font-medium">Accessibility permission denied</div>
           <p className="mt-1 text-[11px] text-amber-700/80 dark:text-amber-300/80">
-            The right-⌘ hotkey can't fire without this. macOS won't
-            re-prompt once an entry exists in TCC, so use{" "}
-            <em>Reset & re-prompt</em> below if the toggle in System
-            Settings is dead (typical after reinstalling an unsigned
-            build — the cdhash changes and the existing entry no
-            longer matches).
+            We previously had Accessibility on this build but the
+            toggle is now off. If you turned it off on purpose, leave
+            it; the right-⌘ hotkey will stay disabled until you flip
+            it back. If you're stuck (toggling the System Settings
+            switch does nothing), use <em>Reset & re-prompt</em>.
           </p>
           <div className="mt-2 flex flex-wrap gap-2">
             <button
@@ -200,32 +237,47 @@ export function DictationSection() {
         </div>
       )}
 
-      {enabled && (
-        <div className="flex flex-wrap items-center gap-2 rounded-md border border-border/60 bg-card/40 px-3 py-2 text-[11px]">
-          <span className="font-medium">Microphone</span>
-          <span className="text-muted-foreground">
-            asks on first use; macOS re-prompts on each install only when
-            the app is unsigned (cdhash changes between builds).
-          </span>
-          <button
-            type="button"
-            onClick={() => resetMicrophone.mutate()}
-            disabled={resetMicrophone.isPending}
-            className="rounded-md border border-border/60 bg-card px-2 py-0.5 hover:bg-accent disabled:opacity-50"
-          >
-            {resetMicrophone.isPending ? "Resetting…" : "Reset"}
-          </button>
-          <button
-            type="button"
-            onClick={() => openMicPane.mutate()}
-            className="rounded-md border border-border/60 bg-card px-2 py-0.5 hover:bg-accent"
-          >
-            Open System Settings
-          </button>
+      {enabled && micRestricted && (
+        <div className="rounded-md border border-red-500/40 bg-red-500/5 px-3 py-2 text-xs text-red-700 dark:text-red-300">
+          <div className="font-medium">Microphone access is restricted</div>
+          <p className="mt-1 text-[11px] text-red-700/80 dark:text-red-300/80">
+            Your device's configuration profile or parental controls
+            block microphone access. Dictation can't be enabled until
+            an administrator lifts the restriction.
+          </p>
+        </div>
+      )}
+
+      {enabled && micNeedsManual && (
+        <div className="rounded-md border border-amber-500/40 bg-amber-500/5 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
+          <div className="font-medium">Microphone permission denied</div>
+          <p className="mt-1 text-[11px] text-amber-700/80 dark:text-amber-300/80">
+            You denied microphone access on this build. If that was
+            intentional, leave it; dictation stays disabled. To grant,
+            either flip the toggle in System Settings or use{" "}
+            <em>Reset & re-prompt</em>.
+          </p>
+          <div className="mt-2 flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => resetMicrophone.mutate()}
+              disabled={resetMicrophone.isPending}
+              className="rounded-md border border-border/60 bg-card px-2.5 py-1 text-[11px] hover:bg-accent disabled:opacity-50"
+            >
+              {resetMicrophone.isPending ? "Resetting…" : "Reset & re-prompt"}
+            </button>
+            <button
+              type="button"
+              onClick={() => openMicPane.mutate()}
+              className="rounded-md border border-border/60 bg-card px-2.5 py-1 text-[11px] hover:bg-accent"
+            >
+              Open System Settings
+            </button>
+          </div>
           {resetMicrophone.error instanceof Error && (
-            <span className="text-[10px] text-red-500">
+            <p className="mt-1 text-[10px] text-red-500">
               {resetMicrophone.error.message}
-            </span>
+            </p>
           )}
         </div>
       )}

@@ -38,13 +38,31 @@
 //! Idempotent — calling [`start`] when already running, or [`stop`]
 //! when already off, is a no-op.
 
+use std::time::Duration;
+
 use tauri::{AppHandle, Emitter, Manager};
 
-use super::permissions::is_accessibility_trusted;
+use super::install_id::{
+    self, decide_autofix, AutoFixDecision,
+};
+use super::permissions::{
+    is_accessibility_trusted, microphone_authorization_status, prompt_accessibility,
+    request_microphone_access, reset_tcc_entry, MicAuthStatus,
+};
 use super::state::DictationTauriState;
 use super::{ensure_model_present, hud, install_hotkey};
 use crate::tray;
+use crate::user_config::UserConfig;
 use zen_dictation::ModelId;
+
+/// Maximum window we poll `AXIsProcessTrusted()` for after firing the
+/// system Accessibility prompt. macOS caches the trust state in the
+/// running process — even after the user clicks Allow, the same
+/// process may keep returning `false` for a few seconds. We poll at
+/// 1 Hz; this caps the worst case before we give up and let the user
+/// fall back to the manual UI.
+const AX_POLL_TIMEOUT: Duration = Duration::from_secs(30);
+const AX_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Light up the dictation pipeline. Idempotent: if a hotkey handle is
 /// already installed we leave it alone and only re-trigger the base
@@ -73,56 +91,268 @@ pub fn start(app: &AppHandle) {
     }
 
     // Pre-check Accessibility (TCC) before touching the CGEventTap.
-    // macOS keys TCC by bundle id; the recent rename
-    // (`com.zen-tools.app` → `com.seg4lt.zen-tools`) invalidated any
-    // prior grant, so the very first call to `CGEventTapCreate` after
-    // the rename pops the system "Zen Tools would like to control
-    // this computer using accessibility features" dialog. With the
-    // tap install running on every boot, that dialog reappears every
-    // launch until the user grants — terrible UX.
+    // The auto-fix flow handles three scenarios:
     //
-    // Skipping the install when not trusted means the boot is
-    // dialog-free; the tray + Settings UI can show a soft prompt
-    // pointing the user to System Settings → Privacy & Security →
-    // Accessibility. Once granted, a relaunch (or a future
-    // "retry install" command) picks up where this left off.
-    if !is_accessibility_trusted() {
-        tracing::warn!(
-            "dictation: Accessibility permission not granted for the current \
-             bundle id (com.seg4lt.zen-tools). Skipping CGEventTap install — \
-             the right-⌘ hotkey will not work until the user grants \
-             Accessibility in System Settings → Privacy & Security and \
-             relaunches. The model precheck still runs."
-        );
+    //   * Already trusted → install the tap directly, persist the
+    //     observation so future deliberate denials are recognised.
+    //   * Not trusted, no prior record (or new install) → fire the
+    //     system prompt; if a stale entry is blocking it, run
+    //     `tccutil reset` first so the prompt actually appears.
+    //   * Not trusted, same install as a prior grant → the user
+    //     deliberately revoked; surface the banner, do NOT auto-reset.
+    //
+    // The matrix is in `install_id::decide_autofix` (pure logic,
+    // unit-tested). This block just wires the side-effects.
+    handle_accessibility_precheck(app);
+
+    // Microphone has a richer authorization-status API; precheck it
+    // in parallel with accessibility. No CGEventTap dependency, but
+    // the recording pipeline can't fire without it, so we want the
+    // user prompted at the same moment they enable dictation rather
+    // than discovering it's broken on first long-press.
+    handle_microphone_precheck(app);
+
+    // CGEventTap install must happen on the Cocoa main thread, but
+    // ONLY if accessibility is trusted RIGHT NOW. The precheck above
+    // may have kicked off a prompt; if so, the tap install is
+    // deferred to the post-prompt poll loop, which calls
+    // `install_tap_now` once `AXIsProcessTrusted()` flips true.
+    if is_accessibility_trusted() {
+        install_tap_now(app);
+        let _ = app.emit("dictation:lifecycle", "started");
+    } else {
+        // Repaint the tray so the menu reflects the degraded state
+        // until the prompt is answered.
+        tray::update(app);
         let _ = app.emit("dictation:lifecycle", "accessibility-required");
         let _ = app.emit("dictation:status", "needs-accessibility");
-        // Still update the tray so the menu reflects the current
-        // (degraded) state instead of staying stale.
-        tray::update(app);
-        return;
     }
+}
 
-    // CGEventTap install must happen on the Cocoa main thread.
-    // Idempotent — `install_hotkey` overwrites any previous handle on
-    // the manager, so a stop→start cycle correctly tears down the
-    // old tap (via its Drop impl) and registers a fresh one.
+/// Install (or reinstall) the CGEventTap on the Cocoa main thread.
+/// Idempotent — `install_hotkey` overwrites any previous handle on
+/// the manager, so a stop→start cycle correctly tears down the old
+/// tap (via its Drop impl) and registers a fresh one. Pulled out of
+/// `start` so the post-prompt poll can call it once Accessibility
+/// flips trusted without duplicating the main-thread dance.
+fn install_tap_now(app: &AppHandle) {
+    let dictation_state = match app.try_state::<DictationTauriState>() {
+        Some(s) => s.inner().clone(),
+        None => return,
+    };
+
     let app_for_main = app.clone();
     let state_for_main = dictation_state;
     let _ = app.run_on_main_thread(move || {
-        // If the manager already has a hotkey handle, drop it first
-        // so we don't leak a tap. `set_hotkey_handle(None)` swaps
-        // the option, the old handle drops, its Drop impl runs and
-        // detaches the previous CGEventTap from the run loop.
         state_for_main.manager.set_hotkey_handle(None);
         install_hotkey(&app_for_main, &state_for_main);
-        tracing::info!("dictation: lifecycle started");
+        tracing::info!("dictation: hotkey watcher installed");
     });
 
-    // Repaint the unified Zen Tools tray so the "Disable dictation"
-    // menu item flips from disabled to enabled.
     tray::update(app);
+}
 
-    let _ = app.emit("dictation:lifecycle", "started");
+/// Implements the accessibility decision matrix. See module docs for
+/// the matrix; this fn is just the side-effect dispatcher.
+fn handle_accessibility_precheck(app: &AppHandle) {
+    let granted = is_accessibility_trusted();
+    let cfg_handle = app.state::<UserConfig>();
+    let cfg = cfg_handle.inner();
+
+    let current = install_id::current(app);
+    let prior = install_id::read(cfg)
+        .ok()
+        .flatten()
+        .and_then(|p| p.accessibility);
+    let decision = decide_autofix(granted, &current, prior.as_ref());
+
+    tracing::info!(
+        ?decision,
+        version = %current.version,
+        "dictation: accessibility precheck"
+    );
+
+    match decision {
+        AutoFixDecision::AlreadyGranted => {
+            // Persist the observation so future revocations on this
+            // same install are recognised as deliberate.
+            if let Err(e) = install_id::record_accessibility_grant(cfg, current.clone()) {
+                tracing::warn!(?e, "dictation: failed to persist AX grant record");
+            }
+        }
+        AutoFixDecision::PromptFresh => {
+            let _ = prompt_accessibility();
+            spawn_accessibility_poll(app);
+        }
+        AutoFixDecision::ResetThenPrompt => {
+            let bundle_id = app.config().identifier.clone();
+            tracing::info!(
+                %bundle_id,
+                "dictation: stale Accessibility TCC entry detected (install id changed); resetting and re-prompting"
+            );
+            if let Err(e) = reset_tcc_entry("Accessibility", &bundle_id) {
+                tracing::warn!(?e, "dictation: tccutil reset Accessibility failed; falling back to manual UI");
+            }
+            let _ = prompt_accessibility();
+            spawn_accessibility_poll(app);
+        }
+        AutoFixDecision::DeliberateDenial => {
+            tracing::info!(
+                "dictation: Accessibility denied on a binary that previously had it granted; \
+                 treating as deliberate revocation, leaving TCC entry alone"
+            );
+        }
+        AutoFixDecision::Unknown => {
+            tracing::warn!(
+                "dictation: could not determine current install id; surfacing manual UI without auto-reset"
+            );
+        }
+    }
+}
+
+/// Poll `AXIsProcessTrusted()` for up to [`AX_POLL_TIMEOUT`] after
+/// firing the system prompt. The first `true` reading installs the
+/// tap and persists the grant record. Times out silently if the user
+/// dismisses the prompt or the dialog never reaches the foreground.
+///
+/// The poll is best-effort: if `lifecycle::stop` runs (user toggles
+/// off), the spawned task observes the missing `DictationTauriState`
+/// on its next iteration and exits — there is no zombie loop.
+fn spawn_accessibility_poll(app: &AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let deadline = std::time::Instant::now() + AX_POLL_TIMEOUT;
+        loop {
+            tokio::time::sleep(AX_POLL_INTERVAL).await;
+            if std::time::Instant::now() > deadline {
+                tracing::info!(
+                    "dictation: accessibility poll timed out; manual UI takes over"
+                );
+                return;
+            }
+            // If the user disabled dictation while we were waiting,
+            // bail out — `stop()` will have already cleared the tray
+            // and the manager.
+            if app.try_state::<DictationTauriState>().is_none() {
+                return;
+            }
+            if is_accessibility_trusted() {
+                tracing::info!("dictation: Accessibility granted; installing CGEventTap");
+                if let Some(cfg) = app.try_state::<UserConfig>() {
+                    let id = install_id::current(&app);
+                    if let Err(e) =
+                        install_id::record_accessibility_grant(cfg.inner(), id)
+                    {
+                        tracing::warn!(?e, "dictation: persist AX grant failed");
+                    }
+                }
+                install_tap_now(&app);
+                let _ = app.emit("dictation:lifecycle", "started");
+                let _ = app.emit("dictation:status", "idle");
+                return;
+            }
+        }
+    });
+}
+
+/// Implements the microphone decision matrix. Mirrors the
+/// accessibility flow but uses `AVCaptureDevice.authorizationStatus`
+/// (richer state) so we don't need the install-id heuristic to
+/// distinguish "no prior entry" from "denied" — `notDetermined` and
+/// `denied` are separate enum values.
+fn handle_microphone_precheck(app: &AppHandle) {
+    let status = microphone_authorization_status();
+    let cfg_handle = app.state::<UserConfig>();
+    let cfg = cfg_handle.inner();
+    let current = install_id::current(app);
+
+    tracing::info!(?status, "dictation: microphone precheck");
+
+    match status {
+        MicAuthStatus::Authorized => {
+            if let Err(e) = install_id::record_microphone_grant(cfg, current) {
+                tracing::warn!(?e, "dictation: failed to persist mic grant record");
+            }
+        }
+        MicAuthStatus::NotDetermined => {
+            // No entry exists yet; `requestAccess` will prompt
+            // directly, no `tccutil reset` needed.
+            spawn_microphone_request(app, false);
+        }
+        MicAuthStatus::Denied => {
+            let prior = install_id::read(cfg)
+                .ok()
+                .flatten()
+                .and_then(|p| p.microphone);
+            let decision = decide_autofix(false, &current, prior.as_ref());
+            match decision {
+                AutoFixDecision::ResetThenPrompt => {
+                    let bundle_id = app.config().identifier.clone();
+                    tracing::info!(
+                        %bundle_id,
+                        "dictation: stale Microphone TCC entry detected; resetting and re-prompting"
+                    );
+                    if let Err(e) = reset_tcc_entry("Microphone", &bundle_id) {
+                        tracing::warn!(
+                            ?e,
+                            "dictation: tccutil reset Microphone failed; falling back to manual UI"
+                        );
+                    }
+                    spawn_microphone_request(app, true);
+                }
+                AutoFixDecision::DeliberateDenial => {
+                    tracing::info!(
+                        "dictation: Microphone denied on the same install that previously had it; \
+                         treating as deliberate, leaving TCC entry alone"
+                    );
+                }
+                _ => {
+                    // PromptFresh / Unknown / AlreadyGranted are
+                    // unreachable when status == Denied (Denied
+                    // implies an entry exists, so the install-id
+                    // heuristic above must produce one of the two
+                    // matched arms). If we somehow get here, fall
+                    // through to the manual UI.
+                }
+            }
+        }
+        MicAuthStatus::Restricted => {
+            tracing::warn!(
+                "dictation: Microphone access is restricted (managed by configuration profile); \
+                 dictation cannot be enabled on this device"
+            );
+        }
+    }
+}
+
+/// Fire `AVCaptureDevice.requestAccess(for: .audio)`. Persists the
+/// grant on success so future revocations are recognised as
+/// deliberate.
+///
+/// `from_reset` is purely diagnostic — included in the log line so
+/// when reading the trace it's obvious whether the prompt followed a
+/// fresh first-run or a heuristic-driven `tccutil reset`.
+fn spawn_microphone_request(app: &AppHandle, from_reset: bool) {
+    let app = app.clone();
+    request_microphone_access(move |granted| {
+        tracing::info!(
+            granted,
+            from_reset,
+            "dictation: microphone permission completion"
+        );
+        if granted {
+            if let Some(cfg) = app.try_state::<UserConfig>() {
+                let id = install_id::current(&app);
+                if let Err(e) = install_id::record_microphone_grant(cfg.inner(), id) {
+                    tracing::warn!(?e, "dictation: persist mic grant failed");
+                }
+            }
+        }
+        // Repaint UI so the warning banner clears the moment the
+        // user clicks Allow, without waiting for a window-focus
+        // refresh.
+        let _ = app.emit("dictation:permissions-changed", granted);
+    });
 }
 
 /// Tear the dictation pipeline down. After this returns nothing about

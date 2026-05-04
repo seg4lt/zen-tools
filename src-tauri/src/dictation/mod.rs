@@ -20,6 +20,7 @@
 
 pub mod commands;
 pub mod dto;
+pub mod install_id;
 pub mod lifecycle;
 pub mod permissions;
 pub mod state;

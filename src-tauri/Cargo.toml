@@ -123,6 +123,14 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 # bringing in `objc2-app-kit` for a single selector.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.5"
+# Companion crate to objc2: ships `RcBlock`, the `FnMut`/`Fn`
+# wrapper used to pass Rust closures across the Objective-C FFI as
+# blocks. Needed for AVFoundation's
+# `requestAccessForMediaType:completionHandler:` — Apple's API
+# expects `^(BOOL granted)`, which on the Rust side is a
+# `RcBlock<dyn Fn(bool)>`. Pinned to the 0.5 series so the
+# `objc2 = "0.5"` ABI matches.
+block2 = "0.5"
 # Used by `dictation::permissions::prompt_accessibility` for the
 # `AXIsProcessTrustedWithOptions` FFI call (the function takes a
 # CFDictionary of options keyed by the CFString constant

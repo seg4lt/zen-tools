@@ -32,6 +32,17 @@ extern "C" {
     static kAXTrustedCheckOptionPrompt: core_foundation::string::CFStringRef;
 }
 
+// Force AVFoundation to be linked for the dynamic `class!(AVCaptureDevice)`
+// lookup in `microphone_authorization_status` / `request_microphone_access`.
+// Without this, dyld doesn't load AVFoundation eagerly and the first objc
+// `class!()` call returns a null Class — `objc_msgSend` to nil silently
+// returns 0, which would mis-report the mic as `NotDetermined` even when
+// the user has actually denied. The empty extern block is enough to force
+// the framework into the load command list.
+#[cfg(target_os = "macos")]
+#[link(name = "AVFoundation", kind = "framework")]
+extern "C" {}
+
 /// Returns true iff the current process has Accessibility
 /// permission. macOS-only — returns `false` on every other platform
 /// so callers naturally short-circuit.
@@ -139,4 +150,166 @@ pub fn open_privacy_pane(pane: &str) -> Result<(), String> {
 #[cfg(not(target_os = "macos"))]
 pub fn open_privacy_pane(_pane: &str) -> Result<(), String> {
     Err("System Settings deep-link is macOS-only".to_string())
+}
+
+// ── Microphone permission probing & re-prompting ──────────────────
+//
+// Apple keeps the rich state for mic permission in
+// `AVCaptureDevice.authorizationStatus(for:)`, an Objective-C class
+// method that returns a tri-state-plus enum:
+//
+//   * `notDetermined` (0) — TCC has no entry for this app yet; calling
+//     `requestAccess(for:completionHandler:)` will fire the system
+//     dialog.
+//   * `restricted` (1) — managed by configuration profile / parental
+//     controls; the user can't grant.
+//   * `denied` (2) — TCC entry exists with the toggle off.
+//   * `authorized` (3) — TCC entry exists with the toggle on.
+//
+// AccessKit (the Accessibility API) only exposes a boolean; mic gives
+// us enough state to skip the install-id heuristic in the
+// "notDetermined" case (we know there's no entry, so a plain
+// `requestAccess` will prompt without needing a `tccutil reset`).
+
+/// Tri-state-plus enum mirroring `AVAuthorizationStatus` from
+/// AVFoundation. The integer discriminants match Apple's enum exactly
+/// so the FFI cast is direct.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MicAuthStatus {
+    /// No TCC entry exists yet; calling `request_microphone_access`
+    /// will fire the system dialog.
+    NotDetermined = 0,
+    /// Managed by configuration profile / parental controls; the
+    /// user can't grant. UI should surface a "managed by your
+    /// administrator" message rather than offer a Reset button.
+    Restricted = 1,
+    /// TCC entry exists with the toggle off. May be a deliberate
+    /// denial (handled by `decide_autofix`) or a stale entry from a
+    /// prior install.
+    Denied = 2,
+    /// TCC entry exists with the toggle on; recording works.
+    Authorized = 3,
+}
+
+impl MicAuthStatus {
+    /// Map raw integer from `AVCaptureDevice.authorizationStatus(for:)`
+    /// onto the typed enum. Defends against unexpected values by
+    /// reporting `NotDetermined` (the safest fallback — caller will
+    /// trigger a fresh prompt rather than block silently).
+    fn from_raw(raw: i64) -> Self {
+        match raw {
+            1 => MicAuthStatus::Restricted,
+            2 => MicAuthStatus::Denied,
+            3 => MicAuthStatus::Authorized,
+            _ => MicAuthStatus::NotDetermined,
+        }
+    }
+
+    /// Wire form for the IPC DTO. Stable strings; UI keys off them.
+    pub fn as_wire_str(self) -> &'static str {
+        match self {
+            MicAuthStatus::NotDetermined => "notDetermined",
+            MicAuthStatus::Restricted => "restricted",
+            MicAuthStatus::Denied => "denied",
+            MicAuthStatus::Authorized => "authorized",
+        }
+    }
+}
+
+/// Probe the current Microphone TCC state.
+#[cfg(target_os = "macos")]
+pub fn microphone_authorization_status() -> MicAuthStatus {
+    use objc2::{class, msg_send, runtime::AnyObject};
+
+    // Apple's media-type constant `AVMediaTypeAudio` is an
+    // `NSString` exported by AVFoundation. `[AVCaptureDevice
+    // authorizationStatusForMediaType:AVMediaTypeAudio]` returns
+    // an `AVAuthorizationStatus` (NSInteger). We send the message
+    // directly via objc2 instead of linking to the constant — a raw
+    // `NSString` literal `"soun"` is what `AVMediaTypeAudio`
+    // actually decodes to under the hood (the four-char-code for
+    // sound media), and using the literal lets us skip a
+    // build-time `extern static` dance.
+    //
+    // SAFETY: Single synchronous Objective-C message send to a
+    // class method with a stable signature; no Rust references
+    // escape. The returned NSInteger is plain data.
+    unsafe {
+        let media_type: *mut AnyObject = msg_send![
+            class!(NSString),
+            stringWithUTF8String: c"soun".as_ptr()
+        ];
+        let raw: i64 = msg_send![
+            class!(AVCaptureDevice),
+            authorizationStatusForMediaType: media_type
+        ];
+        MicAuthStatus::from_raw(raw)
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn microphone_authorization_status() -> MicAuthStatus {
+    MicAuthStatus::NotDetermined
+}
+
+/// Trigger the macOS Microphone-permission system dialog. The
+/// completion callback fires on a private AVFoundation queue once the
+/// user clicks Allow / Don't Allow (or immediately if the entry is
+/// already in a terminal state). `granted` reflects the post-prompt
+/// status.
+///
+/// Calling this when the entry is already `denied` is a no-op (no
+/// dialog, callback fires `false` immediately) — to force a re-prompt
+/// in that case, `tccutil reset Microphone <bundle>` first to wipe
+/// the entry, then call this.
+///
+/// The callback is `'static` because AVFoundation owns the block and
+/// can invoke it after this Rust frame has long since returned.
+#[cfg(target_os = "macos")]
+pub fn request_microphone_access<F>(callback: F)
+where
+    F: FnOnce(bool) + Send + Sync + 'static,
+{
+    use block2::RcBlock;
+    use objc2::runtime::Bool;
+    use objc2::{class, msg_send, runtime::AnyObject};
+
+    // AVFoundation's `requestAccessForMediaType:completionHandler:`
+    // takes an Objective-C block `^(BOOL granted)`. The Objective-C
+    // `BOOL` is `signed char`, NOT a C99 `_Bool`, so block2 / objc2
+    // model it as `objc2::runtime::Bool` rather than Rust's `bool`.
+    // Using `bool` here would generate a wrong Objective-C type
+    // encoding and the runtime would reject the block.
+    //
+    // We wrap our FnOnce in `Mutex<Option<F>>` so we can call it
+    // from inside an `Fn` block (block2 0.5 only supports `Fn`,
+    // and AVFoundation guarantees a single completion call so the
+    // `take()` consumes the slot exactly once in practice).
+    use std::sync::Mutex;
+    let cell: Mutex<Option<F>> = Mutex::new(Some(callback));
+    let block = RcBlock::new(move |granted: Bool| {
+        if let Some(cb) = cell.lock().ok().and_then(|mut g| g.take()) {
+            cb(granted.as_bool());
+        }
+    });
+
+    unsafe {
+        let media_type: *mut AnyObject = msg_send![
+            class!(NSString),
+            stringWithUTF8String: c"soun".as_ptr()
+        ];
+        let _: () = msg_send![
+            class!(AVCaptureDevice),
+            requestAccessForMediaType: media_type,
+            completionHandler: &*block
+        ];
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn request_microphone_access<F>(callback: F)
+where
+    F: FnOnce(bool) + Send + 'static,
+{
+    callback(false);
 }
