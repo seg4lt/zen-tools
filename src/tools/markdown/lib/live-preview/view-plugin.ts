@@ -63,6 +63,22 @@ class BulletWidget extends WidgetType {
 const WIKILINK_RE = /\[\[([^\[\]\n]+?)\]\]/g;
 
 /**
+ * Standard markdown link `[text](url)`.
+ *
+ * Used as a **fallback** for cases lezer-markdown's CommonMark parser
+ * rejects — most importantly, link destinations containing literal
+ * spaces (`[notes](My Folder/Some Note.md)`). Per CommonMark spec a
+ * bare-parens destination must not contain spaces (the `<…>` form is
+ * required), so lezer never emits a `Link` node for those, but our
+ * users write them anyway. We honour the looser style.
+ *
+ * The negative look-behind `(?<!!)` skips image-link syntax
+ * `![alt](src)` so we don't double-process those — they have their
+ * own widget rendering path.
+ */
+const STD_LINK_RE = /(?<!!)\[([^\[\]\n]+?)\]\(([^()\n]+?)\)/g;
+
+/**
  * Build the decoration set for the current doc + selection.
  *
  * Lifecycle (called on every update + on first construct):
@@ -84,6 +100,10 @@ function buildDecorations(
   const cursor = state.selection.main.head;
   const cursorLine = state.doc.lineAt(cursor).number;
   const tree = syntaxTree(state);
+  // Ranges of every lezer-recognised `Link` node, used by the
+  // STD_LINK_RE fallback below to skip already-handled links so we
+  // don't double-decorate the common case.
+  const lezerLinkRanges: Array<[number, number]> = [];
 
   // ── Pass 1: syntax-tree walk ────────────────────────────────────
   tree.iterate({
@@ -212,16 +232,27 @@ function buildDecorations(
         return;
       }
 
-      // Standard markdown links — style the body, hide brackets.
-      // We also pull the URL out of the lezer subtree and stash it on
+      // Standard markdown links — style the body, hide brackets +
+      // URL. We pull the URL out of the lezer subtree and stash it on
       // the decoration as `data-link-url`; the click handler below
       // reads that attribute to navigate without re-walking the tree.
+      //
+      // The `[`, `](`, `)` runs are hidden separately by the
+      // `LinkMark` pass below. The `URL` child gets its own replace
+      // decoration here so preview readers see only the link's
+      // display text — without it the raw `https://example.com`
+      // stays visible alongside the styled label, which is what the
+      // user reported as broken.
       if (type === "Link") {
         let url = "";
+        let urlFrom = -1;
+        let urlTo = -1;
         const cur = node.node.cursor();
         if (cur.firstChild()) {
           do {
             if (cur.type.name === "URL") {
+              urlFrom = cur.from;
+              urlTo = cur.to;
               url = state.doc.sliceString(cur.from, cur.to).trim();
               break;
             }
@@ -233,6 +264,21 @@ function buildDecorations(
             attributes: url ? { "data-link-url": url } : {},
           }).range(node.from, node.to),
         );
+        // Hide the URL run on lines where the cursor isn't parked
+        // (mirrors how heading hashes / emphasis stars vanish in
+        // preview). On the cursor line we leave it visible so the
+        // user can edit the destination.
+        const linkLine = state.doc.lineAt(node.from);
+        if (
+          urlFrom >= 0 &&
+          urlTo > urlFrom &&
+          linkLine.number !== cursorLine
+        ) {
+          decorations.push(
+            Decoration.replace({}).range(urlFrom, urlTo),
+          );
+        }
+        lezerLinkRanges.push([node.from, node.to]);
         return;
       }
 
@@ -288,10 +334,73 @@ function buildDecorations(
     },
   });
 
-  // ── Pass 2: wikilink scan ──────────────────────────────────────
+  // ── Pass 2a: fallback `[text](url)` scan ───────────────────────
+  // lezer-markdown follows CommonMark strictly: `[text](url)` only
+  // counts as a Link if the destination either has no spaces or is
+  // wrapped in `<…>`. Our users routinely write
+  // `[notes](My Folder/Some Note.md)`, which lezer skips, so the
+  // link stays as raw text in preview. We scan for that pattern
+  // ourselves and decorate any match lezer didn't already cover.
+  //
+  // The lezer-handled ranges we collected during Pass 1 short-
+  // circuit duplicate work for the well-formed common case.
+  const docText = state.doc.toString();
+  STD_LINK_RE.lastIndex = 0;
+  let stdLinkMatch: RegExpExecArray | null;
+  while ((stdLinkMatch = STD_LINK_RE.exec(docText)) !== null) {
+    const start = stdLinkMatch.index;
+    const end = start + stdLinkMatch[0].length;
+    // Skip if a lezer Link covers (or contains) this match — it
+    // already got decorated in Pass 1.
+    const alreadyHandled = lezerLinkRanges.some(
+      ([from, to]) => start >= from && end <= to,
+    );
+    if (alreadyHandled) continue;
+    const label = stdLinkMatch[1];
+    const url = stdLinkMatch[2];
+    // Compute child offsets:
+    //   `[`           : start … start+1
+    //   label         : start+1 … closeBracketAt
+    //   `]`           : closeBracketAt … openParenAt
+    //   `(`           : openParenAt … urlStart
+    //   url           : urlStart … urlEnd
+    //   `)`           : urlEnd … end
+    const closeBracketAt = start + 1 + label.length;
+    const openParenAt = closeBracketAt + 1;
+    const urlStart = openParenAt + 1;
+    const urlEnd = urlStart + url.length;
+    const stdLinkLine = state.doc.lineAt(start);
+    if (stdLinkLine.number === cursorLine) {
+      // Editing — keep the raw markup visible, just style it.
+      decorations.push(
+        Decoration.mark({
+          class: "cm-md-link",
+          attributes: { "data-link-url": url },
+        }).range(start, end),
+      );
+    } else {
+      decorations.push(
+        Decoration.mark({
+          class: "cm-md-link",
+          attributes: { "data-link-url": url },
+        }).range(start, end),
+      );
+      // Hide `[`
+      decorations.push(Decoration.replace({}).range(start, start + 1));
+      // Hide `](`
+      decorations.push(
+        Decoration.replace({}).range(closeBracketAt, urlStart),
+      );
+      // Hide URL
+      decorations.push(Decoration.replace({}).range(urlStart, urlEnd));
+      // Hide `)`
+      decorations.push(Decoration.replace({}).range(urlEnd, end));
+    }
+  }
+
+  // ── Pass 2b: wikilink scan ─────────────────────────────────────
   // lezer-markdown doesn't know `[[…]]`, so we scan visible lines
   // ourselves.  Cheap (typical doc has a handful of wikilinks).
-  const docText = state.doc.toString();
   WIKILINK_RE.lastIndex = 0;
   let m: RegExpExecArray | null;
   while ((m = WIKILINK_RE.exec(docText)) !== null) {
