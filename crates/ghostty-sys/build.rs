@@ -121,25 +121,54 @@ fn build_libghostty(ghostty_root: &std::path::Path) -> PathBuf {
         try_mise.unwrap_or_else(|| "zig".to_string())
     });
 
-    // Locate the xcrun shim. Search workspace `tools/`, then /tmp fallback.
+    // Locate the xcrun shim. The shim lives at workspace-root
+    // `tools/ghostty-xcrun-shim/xcrun`. From `crates/ghostty-sys/`'s
+    // perspective: ghostty_root = WORKSPACE/vendor/ghostty, so we
+    // need TWO `parent()` hops to reach the workspace root before
+    // joining `tools/...` (the previous code did one hop and looked
+    // under `vendor/tools/...`, which never existed — locally that
+    // silently fell back to `/tmp/ghostty-xcrun-shim` from a prior
+    // dev session, but on a fresh CI runner the fallback is missing
+    // and `xcrun metal` ends up running against /usr/bin/xcrun under
+    // the CLT toolchain that has no metal compiler → build failure).
     let workspace_shim = ghostty_root
         .parent()
+        .and_then(|p| p.parent())
         .map(|p| p.join("tools/ghostty-xcrun-shim"));
     let tmp_shim = PathBuf::from("/tmp/ghostty-xcrun-shim");
     let shim_dir = workspace_shim
         .filter(|p| p.exists())
         .unwrap_or(tmp_shim);
 
-    let sdk_path = std::env::var("GHOSTTY_SDK_PATH").unwrap_or_else(|_| {
-        "/Library/Developer/CommandLineTools/SDKs/MacOSX15.sdk".to_string()
-    });
+    // SDK + DEVELOPER_DIR resolution. Three branches:
+    //
+    //   1. `GHOSTTY_SDK_PATH` set explicitly → use it (and set
+    //      DEVELOPER_DIR to CLT so `xcrun --show-sdk-path` doesn't
+    //      surprise us with a different default).
+    //   2. CLT MacOSX15.sdk exists locally → use it (this is the
+    //      normal local-dev path on macOS-26+ hosts where Zig 0.15.2
+    //      can't parse the host SDK's libSystem.tbd).
+    //   3. Neither → leave DEVELOPER_DIR / SDKROOT inherited from the
+    //      environment (typical CI runner with full Xcode 14/15.x —
+    //      Zig + the metal compiler resolve via `xcrun` against the
+    //      runner's pre-selected Xcode without overrides).
+    let env_sdk = std::env::var("GHOSTTY_SDK_PATH").ok();
+    let clt_sdk = "/Library/Developer/CommandLineTools/SDKs/MacOSX15.sdk";
+    let clt_sdk_exists = std::path::Path::new(clt_sdk).exists();
+    let (sdk_path, override_developer_dir) = if let Some(ref s) = env_sdk {
+        (Some(s.clone()), true)
+    } else if clt_sdk_exists {
+        (Some(clt_sdk.to_string()), true)
+    } else {
+        (None, false)
+    };
 
     // Compose PATH with the shim first.
     let cur_path = std::env::var("PATH").unwrap_or_default();
     let new_path = format!("{}:{}", shim_dir.display(), cur_path);
 
-    let status = Command::new(&zig)
-        .current_dir(ghostty_root)
+    let mut cmd = Command::new(&zig);
+    cmd.current_dir(ghostty_root)
         .args([
             "build", "install",
             "-Dapp-runtime=none",
@@ -150,12 +179,16 @@ fn build_libghostty(ghostty_root: &std::path::Path) -> PathBuf {
             "--prefix",
         ])
         .arg(&install_dir)
-        .env("PATH", &new_path)
-        .env("GHOSTTY_SDK_PATH", &sdk_path)
-        .env("DEVELOPER_DIR", "/Library/Developer/CommandLineTools")
-        .env("SDKROOT", &sdk_path)
-        .status()
-        .expect("invoke zig build");
+        .env("PATH", &new_path);
+
+    if let Some(ref sdk) = sdk_path {
+        cmd.env("GHOSTTY_SDK_PATH", sdk).env("SDKROOT", sdk);
+    }
+    if override_developer_dir {
+        cmd.env("DEVELOPER_DIR", "/Library/Developer/CommandLineTools");
+    }
+
+    let status = cmd.status().expect("invoke zig build");
 
     if !status.success() {
         panic!(
