@@ -28,6 +28,8 @@
  */
 
 import { useEffect, useRef } from "react";
+import { listen } from "@tauri-apps/api/event";
+import { useDistractionFree } from "./store/distraction-free";
 import { useTerminalStore } from "./store/terminal-store";
 import {
   terminalCloseTab,
@@ -50,6 +52,7 @@ const HIDDEN_INSET: ChromeInset = {
 
 export function TerminalView() {
   const { panes, activeId, ensureBootstrapped } = useTerminalStore();
+  const { enabled: dfEnabled, toggle: toggleDF } = useDistractionFree();
   const containerRef = useRef<HTMLDivElement | null>(null);
   const tabBarRef = useRef<HTMLDivElement | null>(null);
   // The "growth area" div BELOW the tab bar — its top edge is where
@@ -65,6 +68,32 @@ export function TerminalView() {
   useEffect(() => {
     void ensureBootstrapped();
   }, [ensureBootstrapped]);
+
+  // ── Distraction-free toggle (cmd+opt+f) ──────────────────────────
+  // The plugin's NSEvent monitor catches the chord on the native side
+  // (works regardless of WKWebView vs NSView focus) and emits the
+  // `terminal:host-key-hook:cmd-opt-f` Tauri event. We toggle on
+  // every event — the plugin guarantees one event per press.
+  //
+  // Subscribed in TerminalView (not at app shell) because there's no
+  // good reason to react to the chord while the user isn't on the
+  // /terminal route — and the listener naturally torn down on unmount
+  // means switching away unbinds.
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    let cancelled = false;
+    void (async () => {
+      const u = await listen("terminal:host-key-hook:cmd-opt-f", () => {
+        toggleDF();
+      });
+      if (cancelled) u();
+      else unlisten = u;
+    })();
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [toggleDF]);
 
   // ── Hand focus to the GhosttyHostView ────────────────────────────
   // Without this, when the user navigates from another tool to
@@ -110,6 +139,14 @@ export function TerminalView() {
   // plugin whenever it changes. The plugin's
   // `commands::terminal_set_chrome_inset` re-frames the native tab
   // container to fit inside `contentView.bounds` minus the inset.
+  //
+  // `push` is captured into a ref so the distraction-free effect
+  // below can trigger a fresh measurement when DF toggles (the
+  // ResizeObserver only catches *element* size changes; toggling
+  // DF removes the TitleBar from the DOM which moves the growth
+  // area's top edge — but the growth element's own size may not
+  // change in a way the observer notices until the layout settles).
+  const pushInsetRef = useRef<() => void>(() => {});
   useEffect(() => {
     const push = () => {
       // Measure the GROWTH AREA (the div below the tab bar), not the
@@ -146,6 +183,7 @@ export function TerminalView() {
         console.error("[terminal] set_chrome_inset failed:", e),
       );
     };
+    pushInsetRef.current = push;
 
     push();
     // Watch BOTH the growth area (its top moves when the tab bar
@@ -162,6 +200,7 @@ export function TerminalView() {
     return () => {
       ro.disconnect();
       window.removeEventListener("resize", push);
+      pushInsetRef.current = () => {};
       // Hide the NSView when the user navigates away. Reset the
       // dedupe cache so the next mount always re-pushes.
       lastInset.current = { top: -1, right: -1, bottom: -1, left: -1 };
@@ -170,6 +209,19 @@ export function TerminalView() {
       );
     };
   }, []);
+
+  // ── DF-triggered inset re-push ───────────────────────────────────
+  // Toggling DF mounts/unmounts the host TitleBar, which moves the
+  // growth area's top edge by ~50pt but doesn't necessarily resize
+  // the growth element itself in a way the ResizeObserver above
+  // catches in the same tick. requestAnimationFrame defers the
+  // measurement to after React has flushed the new layout — by that
+  // point `getBoundingClientRect().top` reflects the post-toggle
+  // position and the inset push lines the NSView up correctly.
+  useEffect(() => {
+    const id = requestAnimationFrame(() => pushInsetRef.current());
+    return () => cancelAnimationFrame(id);
+  }, [dfEnabled]);
 
   // The pane-tab strip is hidden when there's only one pane — matches
   // the prototype's behaviour exactly (see

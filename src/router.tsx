@@ -6,6 +6,7 @@ import {
   Outlet,
   redirect,
   useNavigate,
+  useRouterState,
 } from "@tanstack/react-router";
 import { listen } from "@tauri-apps/api/event";
 import { AppProviders } from "@/components/app-shell/app-providers";
@@ -20,6 +21,7 @@ import { DatabaseExplorerShell } from "@/tools/database-explorer/DatabaseExplore
 import { PRMasterShell } from "@/tools/prmaster/PRMasterShell";
 import { SettingsView } from "@/tools/settings/SettingsView";
 import { TerminalShell } from "@/tools/terminal/TerminalShell";
+import { useDistractionFree } from "@/tools/terminal/store/distraction-free";
 import { readLastRoute } from "@/hooks/use-last-route";
 import { useToolOrder } from "@/hooks/use-tool-order";
 import { isPrmasterPopover } from "@/lib/window-kind";
@@ -31,10 +33,18 @@ const rootRoute = createRootRoute({
     // window — it just skips the TitleBar so the popover is pure tool
     // chrome. We detect it by Tauri window label (set in the config).
     const isPopover = isPrmasterPopover();
+    // Distraction-free mode (cmd+opt+f from inside /terminal) hides
+    // the TitleBar so the terminal NSView fills the whole window.
+    // The flag is gated to the /terminal route below — if the user
+    // somehow lands on another route while DF is on, the TitleBar
+    // still renders (so they can navigate normally).
+    const { enabled: dfEnabled } = useDistractionFree();
+    const pathname = useRouterState({ select: (s) => s.location.pathname });
+    const dfActive = dfEnabled && pathname.startsWith("/terminal");
     return (
       <div className="flex h-screen w-screen flex-col overflow-hidden bg-background text-foreground">
-        {!isPopover && <TitleBar />}
-        {!isPopover && <UpdateBanner />}
+        {!isPopover && !dfActive && <TitleBar />}
+        {!isPopover && !dfActive && <UpdateBanner />}
         <main className="flex min-h-0 flex-1">
           <AppProviders>
             <FocusRouteListener />

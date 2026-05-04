@@ -4,6 +4,7 @@ import { ThemeProvider } from "@/hooks/use-theme";
 import { TooltipProvider } from "@zen-tools/ui";
 import { UpdaterProvider } from "@/lib/updater/use-updater";
 import { router } from "@/router";
+import { DistractionFreeProvider } from "@/tools/terminal/store/distraction-free";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -26,7 +27,13 @@ export default function App() {
               for the yellow-dot indicator on the Settings icon. The
               banner above the router uses the same source. */}
           <UpdaterProvider>
-            <RouterProvider router={router} />
+            {/* Distraction-free mode (cmd+opt+f on the terminal route)
+                hides the host TitleBar. Provider sits above the router
+                so both <TitleBar> (in the root route) and <TerminalView>
+                (inside <Outlet>) read/write the same state. */}
+            <DistractionFreeProvider>
+              <RouterProvider router={router} />
+            </DistractionFreeProvider>
           </UpdaterProvider>
         </TooltipProvider>
       </ThemeProvider>

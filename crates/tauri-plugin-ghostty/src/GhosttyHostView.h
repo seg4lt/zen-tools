@@ -36,6 +36,17 @@ void GhosttyInstallEventMonitor(ghostty_surface_t surface);
 /// Remove a previously installed monitor. Idempotent.
 void GhosttyRemoveEventMonitor(void);
 
+/// Register a callback that fires when the NSEvent monitor sees a
+/// chord that the embedding host (e.g. zen-tools) wants to handle
+/// instead of forwarding to ghostty. The callback is called with a
+/// stable string identifier for the chord (currently the only one
+/// emitted is "cmd-opt-f", reserved for the host's distraction-free
+/// toggle). Hosts that don't care can leave this unset; the chord is
+/// consumed regardless so it never reaches ghostty as an unhandled
+/// keystroke.
+typedef void (*GhosttyHostKeyHookFn)(const char *chord);
+void GhosttyRegisterHostKeyHookCallback(GhosttyHostKeyHookFn fn);
+
 /// Replace `WryWebViewParent`'s `-[keyDown:]` IMP with a no-op via the
 /// Objective-C runtime. Wry's original implementation panics on macOS
 /// 26 because it dereferences `MainThreadMarker::new().unwrap()` from

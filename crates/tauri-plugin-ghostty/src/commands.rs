@@ -94,6 +94,7 @@ pub fn terminal_new(
         unsafe {
             macos::register_tab_event_callback(tab_event_trampoline);
             macos::register_tab_action_callback(tab_action_trampoline);
+            macos::register_host_key_hook_callback(host_key_hook_trampoline);
         }
 
         // Allocate the first GhosttyHostView for this terminal.
@@ -566,4 +567,28 @@ extern "C" fn tab_action_trampoline(kind: i32, arg: i64) {
             unsafe { macos::tab_focus(target) };
         }
     }
+}
+
+/// Embedding-host passthrough trampoline. Fired by the NSEvent monitor
+/// (see `GhosttyHostView.m::g_host_key_hook_fn`) when it sees a chord
+/// the host wants to handle instead of forwarding to ghostty.
+///
+/// Currently the only chord is `cmd-opt-f`, used by zen-tools to
+/// toggle distraction-free mode (hides the TitleBar so the terminal
+/// fills the whole window). The Tauri event name is namespaced under
+/// `terminal:host-key-hook:` so future chords get a stable channel
+/// each (`terminal:host-key-hook:cmd-opt-f`,
+/// `terminal:host-key-hook:cmd-shift-x`, …) without overloading
+/// payload parsing.
+extern "C" fn host_key_hook_trampoline(chord: *const c_char) {
+    let app = match APP_HANDLE_FOR_TABS.get() {
+        Some(a) => a,
+        None => return,
+    };
+    if chord.is_null() {
+        return;
+    }
+    let chord_str = unsafe { std::ffi::CStr::from_ptr(chord) }.to_string_lossy();
+    let event_name = format!("terminal:host-key-hook:{chord_str}");
+    let _ = app.emit(&event_name, ());
 }

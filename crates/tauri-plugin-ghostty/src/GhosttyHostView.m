@@ -1633,6 +1633,23 @@ void GhosttyHandleCloseSurface(bool process_alive) {
 static id g_event_monitor = nil;
 static ghostty_surface_t g_monitor_surface = NULL;
 
+// Embedding-host passthrough callback. Wired by Rust at terminal_new
+// time; fires when the NSEvent monitor sees a chord we want the
+// embedding host (zen-tools) to handle instead of forwarding to
+// ghostty. Currently used for the distraction-free toggle
+// (cmd+opt+f), which the host hides its TitleBar in response to.
+//
+// String values are stable identifiers chosen by this module
+// (currently just "cmd-opt-f"). Hosts that don't care can ignore
+// the callback entirely; the chord is consumed regardless so it
+// doesn't reach ghostty as a stray keystroke.
+typedef void (*GhosttyHostKeyHookFn)(const char *chord);
+static GhosttyHostKeyHookFn g_host_key_hook_fn = NULL;
+
+void GhosttyRegisterHostKeyHookCallback(GhosttyHostKeyHookFn fn) {
+    g_host_key_hook_fn = fn;
+}
+
 void GhosttyInstallEventMonitor(ghostty_surface_t surface) {
     g_monitor_surface = surface;
     if (g_event_monitor) return; // idempotent — installed once per process
@@ -1645,6 +1662,25 @@ void GhosttyInstallEventMonitor(ghostty_surface_t surface) {
             if (!(event.modifierFlags & NSEventModifierFlagCommand)) {
                 return event;
             }
+
+            // Embedding-host passthrough chords. Checked BEFORE the
+            // ghostty forward so they never reach ghostty as
+            // unhandled keystrokes. Chord set is intentionally tiny
+            // (one entry today); each new chord is one branch here.
+            //
+            // cmd+opt+f → host distraction-free toggle. Match
+            // exactly cmd+opt (no shift / ctrl) so cmd+opt+shift+f
+            // and friends still flow to ghostty.
+            NSEventModifierFlags devMods = event.modifierFlags &
+                (NSEventModifierFlagCommand | NSEventModifierFlagOption |
+                 NSEventModifierFlagShift   | NSEventModifierFlagControl);
+            NSString *chars = event.charactersIgnoringModifiers;
+            if (devMods == (NSEventModifierFlagCommand | NSEventModifierFlagOption)
+                && [chars isEqualToString:@"f"]) {
+                if (g_host_key_hook_fn) g_host_key_hook_fn("cmd-opt-f");
+                return nil; // consume — do NOT forward to ghostty
+            }
+
             // Look up the CURRENTLY focused pane (not the cached one
             // from install time). With splits, the focused surface
             // changes — without this lookup, every Cmd-shortcut

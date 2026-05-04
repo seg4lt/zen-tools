@@ -38,6 +38,14 @@ extern "C" {
     fn GhosttyRegisterTabActionCallback(
         fn_ptr: Option<extern "C" fn(kind: i32, arg: i64)>,
     );
+
+    // Embedding-host passthrough chord (currently just cmd+opt+f for
+    // distraction-free toggle). The plugin's NSEvent monitor consumes
+    // the chord and fires this callback with a stable identifier
+    // string. See `GhosttyHostView.h::GhosttyRegisterHostKeyHookCallback`.
+    fn GhosttyRegisterHostKeyHookCallback(
+        fn_ptr: Option<extern "C" fn(chord: *const c_char)>,
+    );
 }
 
 /// Ensure the tab content container is mounted as a subview of the
@@ -237,4 +245,14 @@ pub unsafe fn register_tab_action_callback(
     fn_ptr: extern "C" fn(kind: i32, arg: i64),
 ) {
     GhosttyRegisterTabActionCallback(Some(fn_ptr));
+}
+
+/// Install the embedding-host key-hook callback. Fires when the
+/// NSEvent monitor sees a chord that the host wants to handle
+/// instead of forwarding to ghostty (currently just `cmd+opt+f`,
+/// emitted as the C string `"cmd-opt-f"`). Runs on the main thread.
+pub unsafe fn register_host_key_hook_callback(
+    fn_ptr: extern "C" fn(chord: *const c_char),
+) {
+    GhosttyRegisterHostKeyHookCallback(Some(fn_ptr));
 }
