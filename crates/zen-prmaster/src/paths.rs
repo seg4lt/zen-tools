@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 /// Bundle identifier the Tauri app uses for its data directory.
 /// Mirrors `tauri.conf.json`'s `identifier`.
-const APP_BUNDLE: &str = "com.zen-tools.app";
+const APP_BUNDLE: &str = "com.seg4lt.zen-tools";
 
 /// Subfolder inside the app data dir for everything PRMaster owns
 /// (notification state, AI summary cache, filter DB, …).

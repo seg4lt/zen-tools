@@ -2,7 +2,7 @@
 //! `Sources/PRMaster/Models/NotificationFilter.swift`.
 //!
 //! Storage: a SQLite database opened at
-//! `~/Library/Application Support/com.zen-tools.app/prmaster/prmaster.db`.
+//! `~/Library/Application Support/com.seg4lt.zen-tools/prmaster/prmaster.db`.
 //! The schema is pinned by the constants below; future migrations land
 //! in this module via incrementing `SCHEMA_VERSION`.
 

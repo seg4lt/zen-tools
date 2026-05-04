@@ -6,6 +6,7 @@
 #![warn(missing_docs)]
 
 pub mod commands;
+pub mod data_dir_migration;
 pub mod dictation;
 pub mod dto;
 pub mod error;
@@ -189,6 +190,26 @@ pub fn run() {
                 .with(file_layer)
                 .init();
             tracing::info!("zen-tools: logging initialised");
+
+            // ── Bundle-id rename migration ────────────────────────────
+            // Old builds wrote to `~/Library/Application Support/
+            // com.zen-tools.app/`; the bundle id is now
+            // `com.seg4lt.zen-tools` so Tauri's `app_data_dir()`
+            // resolves to a different sibling under the same parent.
+            // This step copies the old dir into the new one ONCE, so
+            // existing users keep their PRMaster filters / dictation
+            // settings / run history / schema cache across the rename.
+            //
+            // Idempotent — short-circuits when the new dir already
+            // contains a settled marker (user_config.db /
+            // preferences.json). Safe to leave in place across
+            // versions; remove a few releases after the rename ships.
+            //
+            // Runs BEFORE `user_config::open` because that call
+            // creates `user_config.db` in the new dir, which would
+            // trip the migration's "already settled" guard on the
+            // very same boot.
+            data_dir_migration::migrate_legacy_app_data_dir(app.handle());
 
             // Open the user-config store FIRST so subsequent setup
             // steps (and every command path) can read settings via

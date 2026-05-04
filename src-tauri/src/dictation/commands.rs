@@ -173,25 +173,37 @@ pub async fn dictation_get_paths(state: State<'_, DictationTauriState>) -> AppRe
     })
 }
 
-/// Open `path` in Finder via the macOS `open(1)` command.
+/// Open `path` as a folder in Finder.
 ///
 /// We deliberately bypass `tauri-plugin-shell`'s `Shell::open`. That
 /// plugin's `shell:allow-open` permission validates targets against a
 /// regex that defaults to URL schemes only (`https?://`, `mailto:`,
 /// `tel:`) — local filesystem paths fail validation silently.
 ///
-/// **Important:** the bundle identifier is `com.zen-tools.app`, so
-/// the app-data directory is literally named `com.zen-tools.app/`.
-/// `open <dir>` checks for `.app` suffixes and tries to launch the
-/// path as an application bundle — which fails with `"the
-/// application cannot be opened because its executable is missing"`.
-/// We pass `-a Finder` to force Finder as the opener and skip the
-/// bundle heuristic. `-R` (reveal) would also work but it shows the
-/// folder selected inside its parent rather than opening it; `-a
-/// Finder` opens the folder window itself, which is what users
-/// expect for a "Show on disk" affordance.
+/// History — and why this is osascript, not `open(1)`:
 ///
-/// We also `create_dir_all` first so a click on "Logs" right after a
+/// The original implementation used `open -a Finder <path>`. Under
+/// the previous bundle id `com.zen-tools.app`, the app-data dir
+/// path ended in `.app`, and Finder would (despite the explicit
+/// `-a Finder`) honour the `.app` suffix as "this is an application
+/// bundle to launch" rather than "this is a folder to open". That
+/// either errored out ("the application cannot be opened because
+/// its executable is missing") or, in some macOS versions, locked
+/// up Finder entirely.
+///
+/// The bundle id is now `com.seg4lt.zen-tools` (no `.app` suffix),
+/// so the `open(1)` heuristic wouldn't trip today — but we still
+/// use osascript here because:
+///
+///   1. It's unambiguous: "tell Finder to open this POSIX file"
+///      bypasses every suffix-based heuristic in `open(1)` and in
+///      Finder's own routing logic. Future bundle-id changes can't
+///      regress us.
+///   2. Same code path works for `Open in Finder` on the Logs and
+///      Models dirs, which today don't have `.app`-suffixed names
+///      but might one day live under a path that does.
+///
+/// We `create_dir_all` first so a click on "Logs" right after a
 /// fresh install (before any log line has rotated to disk) still
 /// opens the folder instead of erroring.
 async fn open_path_in_finder(path: &Path) -> AppResult<()> {
@@ -203,30 +215,64 @@ async fn open_path_in_finder(path: &Path) -> AppResult<()> {
     let path_owned = path.to_path_buf();
     tracing::info!(path = %path_owned.display(), "dictation: opening folder in Finder");
     tokio::task::spawn_blocking(move || {
-        let output = std::process::Command::new("/usr/bin/open")
-            .arg("-a")
-            .arg("Finder")
-            .arg(path_owned.as_os_str())
+        // Build the AppleScript: `tell application "Finder" to open
+        // POSIX file "<path>"`. POSIX paths can legally contain
+        // double-quotes and backslashes — escape both before
+        // interpolating into the script string.
+        let escaped = path_owned
+            .display()
+            .to_string()
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"");
+        let script = format!(
+            "tell application \"Finder\" to open POSIX file \"{}\"",
+            escaped
+        );
+
+        let output = std::process::Command::new("/usr/bin/osascript")
+            .arg("-e")
+            .arg(&script)
             .output()
-            .map_err(|e| AppError::Other(format!("spawn open: {e}")))?;
+            .map_err(|e| AppError::Other(format!("spawn osascript: {e}")))?;
+
         if output.status.success() {
             Ok(())
         } else {
-            // Capture stderr so the failure is visible in our log
-            // file — `open(1)` writes its diagnostics there
-            // (e.g. "the application cannot be opened…").
-            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+            // Fall back to `open -R` (reveal — selects the target in
+            // its parent dir) so the user at least gets near the
+            // folder they asked for, even if direct-open via
+            // osascript failed. Not great UX (one extra click),
+            // but strictly better than a silent error.
+            let osa_stderr = String::from_utf8_lossy(&output.stderr).into_owned();
             tracing::warn!(
                 status = ?output.status,
-                stderr = %stderr,
+                stderr = %osa_stderr,
                 path = %path_owned.display(),
-                "dictation: open command failed"
+                "dictation: osascript open failed; falling back to `open -R`"
             );
-            Err(AppError::Other(format!(
-                "open {} failed: {}",
-                path_owned.display(),
-                stderr.trim()
-            )))
+            let reveal = std::process::Command::new("/usr/bin/open")
+                .arg("-R")
+                .arg(path_owned.as_os_str())
+                .output()
+                .map_err(|e| AppError::Other(format!("spawn open -R: {e}")))?;
+            if reveal.status.success() {
+                Ok(())
+            } else {
+                let reveal_stderr =
+                    String::from_utf8_lossy(&reveal.stderr).into_owned();
+                tracing::warn!(
+                    status = ?reveal.status,
+                    stderr = %reveal_stderr,
+                    path = %path_owned.display(),
+                    "dictation: open -R fallback also failed"
+                );
+                Err(AppError::Other(format!(
+                    "open {} failed: osascript={}; open -R={}",
+                    path_owned.display(),
+                    osa_stderr.trim(),
+                    reveal_stderr.trim()
+                )))
+            }
         }
     })
     .await

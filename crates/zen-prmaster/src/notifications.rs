@@ -2,7 +2,7 @@
 //! `Sources/PRMaster/Services/CacheService.swift`.
 //!
 //! Two on-disk JSON files live next to the filter SQLite under
-//! `~/Library/Application Support/com.zen-tools.app/prmaster/`:
+//! `~/Library/Application Support/com.seg4lt.zen-tools/prmaster/`:
 //!
 //! * **`pr_cache.json`** — last refresh's enriched PR lists, used to
 //!   warm the popover instantly on launch.
