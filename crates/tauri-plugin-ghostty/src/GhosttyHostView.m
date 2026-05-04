@@ -18,6 +18,15 @@
 #import <stdatomic.h>
 #import <dispatch/dispatch.h>
 
+// Forward declaration — `g_host_view` is a `static _Atomic(void *)`
+// defined further down alongside the other action-state slots, but
+// `resignFirstResponder` in the @implementation block below needs to
+// clear the slot when the resigning view is the cached one. We can't
+// `extern`-forward-declare a `static` (the qualifiers conflict), so we
+// expose the conditional-clear via this small helper instead — it's
+// defined after the slot itself further down the file.
+static void clear_host_view_if_matches(void *expected);
+
 @interface GhosttyHostView : NSView <NSTextInputClient> {
     ghostty_surface_t          _surface;
     NSTrackingArea            *_tracking;
@@ -272,10 +281,25 @@
 
 - (BOOL)resignFirstResponder {
     BOOL r = [super resignFirstResponder];
-    if (r && _surface) {
-        ghostty_surface_set_focus(_surface, false);
-        // Force a redraw so the cursor flips from solid → hollow.
-        ghostty_surface_refresh(_surface);
+    if (r) {
+        // Clear the global "focused host view" pointer if (and only if)
+        // it still names self. Without this, the application-level
+        // NSEvent monitor (see `GhosttyInstallEventMonitor`) keeps
+        // routing every Cmd-modified keystroke to this surface even
+        // after focus moved to the WKWebView (i.e. the user navigated
+        // to a different tool tab). End result: Cmd+C / Cmd+V on
+        // /database-explorer, /markdown, /http-runner etc. were
+        // silently consumed by ghostty instead of acting on the
+        // active webview. We only clear when the slot still names us
+        // because `becomeFirstResponder` on a NEW pane runs BEFORE the
+        // old pane's `resignFirstResponder` (AppKit's documented
+        // ordering), and we mustn't stomp the new pane's registration.
+        clear_host_view_if_matches((__bridge void *)self);
+        if (_surface) {
+            ghostty_surface_set_focus(_surface, false);
+            // Force a redraw so the cursor flips from solid → hollow.
+            ghostty_surface_refresh(_surface);
+        }
     }
     return r;
 }
@@ -802,6 +826,20 @@ static _Atomic(void *) g_app = NULL;
 
 void GhosttyRegisterHostView(void *view) {
     atomic_store(&g_host_view, view);
+}
+
+// Conditional clear used by `resignFirstResponder`. Declared at the top
+// of the file (above @implementation) so the ObjC method body can call
+// it; defined here because that's where `g_host_view` itself lives.
+// The compare-and-clear shape is needed because AppKit fires the new
+// responder's `becomeFirstResponder` BEFORE the old one's
+// `resignFirstResponder`, so a blind clear would wipe out the new
+// pane's registration mid-focus-swap.
+static void clear_host_view_if_matches(void *expected) {
+    void *current = atomic_load(&g_host_view);
+    if (current == expected) {
+        atomic_store(&g_host_view, NULL);
+    }
 }
 
 void GhosttyRegisterApp(void *app) {
@@ -1687,7 +1725,6 @@ void GhosttyHandleCloseSurface(bool process_alive) {
 // the buggy dispatch path never runs.
 
 static id g_event_monitor = nil;
-static ghostty_surface_t g_monitor_surface = NULL;
 
 // Embedding-host passthrough callback. Wired by Rust at terminal_new
 // time; fires when the NSEvent monitor sees a chord we want the
@@ -1715,7 +1752,14 @@ void GhosttyRegisterReloadConfigCallback(GhosttyReloadConfigFn fn) {
 }
 
 void GhosttyInstallEventMonitor(ghostty_surface_t surface) {
-    g_monitor_surface = surface;
+    // The `surface` argument is no longer used as a fallback target —
+    // the monitor now resolves the target dynamically from the
+    // window's firstResponder + the `g_host_view` cache, so the
+    // install-time surface would be a stale answer the moment a split
+    // / new tab takes focus. Kept as a parameter so callers
+    // (commands.rs:terminal_new) don't have to change signatures, but
+    // intentionally unreferenced here.
+    (void)surface;
     if (g_event_monitor) return; // idempotent — installed once per process
     g_event_monitor = [NSEvent
         addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown
@@ -1745,11 +1789,33 @@ void GhosttyInstallEventMonitor(ghostty_surface_t surface) {
                 return nil; // consume — do NOT forward to ghostty
             }
 
+            // Only intercept when a GhosttyHostView is actually the
+            // window's first responder. Without this gate the monitor
+            // is application-wide and steals every Cmd-shortcut even
+            // when the user is on /database-explorer, /markdown, etc.
+            // — eating Cmd+C / Cmd+V / Cmd+A across the whole app.
+            //
+            // We check `event.window.firstResponder` rather than only
+            // the cached `g_host_view` pointer because the cache can
+            // legitimately lag (the user just clicked into the
+            // webview; AppKit moved focus before our
+            // `resignFirstResponder` runs). The cached pointer is
+            // still useful as the *target* for the dispatch when we
+            // DO intercept (it survives splits — `becomeFirstResponder`
+            // updates it before keyDown lands), so we use both:
+            //   * firstResponder check → SHOULD we intercept at all?
+            //   * g_host_view → WHICH surface gets the event?
+            NSResponder *fr = event.window.firstResponder;
+            if (![fr isKindOfClass:[GhosttyHostView class]]) {
+                return event; // pass through to AppKit / WKWebView
+            }
+
             // Look up the CURRENTLY focused pane (not the cached one
             // from install time). With splits, the focused surface
             // changes — without this lookup, every Cmd-shortcut
             // (Cmd+=/-/0 font size, Cmd+W close, Cmd+C copy) targets
-            // pane #1 forever.
+            // pane #1 forever. Falls back to the firstResponder
+            // surface itself when the cache is stale.
             ghostty_surface_t target = NULL;
             void *vp = atomic_load(&g_host_view);
             if (vp) {
@@ -1758,8 +1824,13 @@ void GhosttyInstallEventMonitor(ghostty_surface_t surface) {
                     target = [(GhosttyHostView *)view surface];
                 }
             }
-            if (!target) target = g_monitor_surface;
-            if (target) send_key_event(target, event, GHOSTTY_ACTION_PRESS);
+            if (!target) target = [(GhosttyHostView *)fr surface];
+            if (!target) {
+                // No surface to forward to — let AppKit dispatch
+                // normally rather than swallowing the keystroke.
+                return event;
+            }
+            send_key_event(target, event, GHOSTTY_ACTION_PRESS);
             return nil;
         }];
 }
@@ -1769,7 +1840,6 @@ void GhosttyRemoveEventMonitor(void) {
         [NSEvent removeMonitor:g_event_monitor];
         g_event_monitor = nil;
     }
-    g_monitor_surface = NULL;
 }
 
 // ---- Disarm wry's panicking keyDown -------------------------------------
