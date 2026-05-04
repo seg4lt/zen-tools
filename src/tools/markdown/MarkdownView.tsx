@@ -26,11 +26,11 @@ import {
   SplitLayout,
   leafIds,
   useJumpList,
-  useSplitWorkspace,
   useWorkspaceVim,
   type JumpEntry,
   type WorkspaceContext,
 } from "@zen-tools/editor";
+import { useMarkdownWorkspace } from "./store/markdown-workspace";
 import { VaultSidebar } from "./components/vault-sidebar";
 import { SearchPalette } from "./components/search-palette";
 import { EmptyState } from "./components/empty-state";
@@ -67,15 +67,20 @@ export function MarkdownView() {
   const leafHandlesRef = useRef<Map<string, MarkdownEditorHandle>>(new Map());
 
   // Split workspace state — owns `splitTree`, `focusedLeafId`, and
-  // the `:vsplit` / `:hsplit` / `:q` / `Ctrl+W` actions.
-  const workspace = useSplitWorkspace();
+  // the `:vsplit` / `:hsplit` / `:q` / `Ctrl+W` actions. Hoisted
+  // into `MarkdownWorkspaceProvider` (rendered inside
+  // `MarkdownStoreProvider` at `<AppProviders>`) so the layout
+  // survives navigation between zen-tools tools — without that
+  // hoist, switching to e.g. Terminal and back collapsed all
+  // splits because `useSplitWorkspace` was called per `MarkdownView`
+  // mount and reset on every remount.
+  const { workspace, leafTabs, setLeafTabs } = useMarkdownWorkspace();
   const jumpList = useJumpList();
 
-  // Per-leaf tab id — gives each split independent file selection.
-  // The store's `activeTabId` slaves to the *focused* leaf's stored
-  // tab so existing consumers (search palette, autosave keyed on
-  // active tab path, etc.) continue to work.
-  const [leafTabs, setLeafTabs] = useState<Record<string, string>>({});
+  // Local-only ref — bookkeeping for the focus-sync effect below.
+  // Doesn't need to persist across MarkdownView remounts: when we
+  // remount we should re-sync the active tab to whatever the
+  // (persistent) focused leaf currently maps to.
   const prevFocusedLeafRef = useRef(workspace.focusedLeafId);
 
   // Effect A — focus change syncs `state.activeTabId` to the new

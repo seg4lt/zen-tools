@@ -32,6 +32,7 @@ import {
   type ReactNode,
 } from "react";
 import { markdownTauri, type MarkdownVaultDto } from "../lib/tauri";
+import { MarkdownWorkspaceProvider } from "./markdown-workspace";
 
 export interface OpenFileState {
   path: string;
@@ -474,7 +475,18 @@ export function MarkdownStoreProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
-  return <StoreCtx.Provider value={value}>{children}</StoreCtx.Provider>;
+  return (
+    <StoreCtx.Provider value={value}>
+      {/* Split workspace state (split tree + per-leaf tab map +
+          focused leaf id) lives in its own provider so it can
+          survive tool-tab navigation. Without this nesting, every
+          /markdown remount would lose the user's split layout —
+          the file tabs / dirty docs survived (they're in this
+          store), but the layout collapsed back to single-leaf
+          default. See `markdown-workspace.tsx` for the rationale. */}
+      <MarkdownWorkspaceProvider>{children}</MarkdownWorkspaceProvider>
+    </StoreCtx.Provider>
+  );
 }
 
 export function useMarkdownStore() {
