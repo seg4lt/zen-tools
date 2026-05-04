@@ -12,10 +12,7 @@ on:
 #
 # Mirrors the flowstate build pipeline: a `build` matrix job assembles
 # the Tauri bundle on each runner, a separate `release` job downloads
-# the artifacts and publishes a GitHub Release.  Mac-only for now —
-# adding Windows / Linux is a matrix-row addition; the scaffolding is
-# kept (matrix.include style, runner.os branches in the asset-stage
-# step) so reinstating them is a localised diff.
+# the artifacts and publishes a GitHub Release.
 
 jobs:
   build:
@@ -29,11 +26,11 @@ jobs:
             tauri-args: --target aarch64-apple-darwin
             bundle-subpath: aarch64-apple-darwin/release/bundle
 
-          # - name: windows-x64
-          #   runner: windows-latest
-          #   target: x86_64-pc-windows-msvc
-          #   tauri-args: ""
-          #   bundle-subpath: release/bundle
+          - name: windows-x64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            tauri-args: ""
+            bundle-subpath: release/bundle
 
           # - name: linux-x64
           #   runner: ubuntu-22.04
@@ -124,20 +121,36 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
+      # Windows: Rust's dependency tree (especially the heavy crates
+      # like `notify`, `cargo`, etc.) hits the legacy MAX_PATH limit
+      # without long-paths enabled. Mirrors flowstate's Windows step.
+      - name: Enable long paths (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: git config --system core.longpaths true
+
       - name: Build
         env:
-          # Minisign key for the Tauri updater.  Built bundles are
-          # signed with this; the matching pubkey would be embedded
-          # in `tauri.conf.json` (`plugins.updater.pubkey`) once the
-          # updater plugin is enabled.  Today no updater is wired up,
-          # so this env var is a harmless pass-through unless the
-          # user ships an updater later — leaving it set up means
-          # turning on auto-updates is a config-only change, no CI
-          # rewrite.  The CI key was generated with
+          # Minisign key for the Tauri updater. Tauri signs the macOS
+          # `.app.tar.gz` and the Windows `*-setup.exe` automatically
+          # when `createUpdaterArtifacts: true` is set in
+          # tauri.conf.json (it is). The CI key was generated with
           # `tauri signer generate --ci` (no password), so PASSWORD
           # stays empty.
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+          # Windows-only build env (harmless on macOS — the runners
+          # ignore vars the toolchain doesn't recognise):
+          #
+          # WEBVIEW2_STATIC=1 bundles the WebView2 bootstrapper into
+          # the NSIS installer so end users don't need a separate
+          # WebView2 download.
+          #
+          # RUSTFLAGS=-C target-feature=+crt-static statically links
+          # the MSVC CRT, producing a self-contained .exe with no
+          # VC++ redistributable dependency.
+          WEBVIEW2_STATIC: "1"
+          RUSTFLAGS: ${{ runner.os == 'Windows' && '-C target-feature=+crt-static' || '' }}
         # `env -u CI`: some Rust deps' build.rs scripts misbehave when
         # the `CI` env var is set (e.g. fff-search 0.5.2 hard-panics
         # whenever `env::var("CI").is_ok()` regardless of value).
@@ -145,8 +158,7 @@ jobs:
         # this single command picks the same path local dev uses.
         # `shell: bash` is required because `env -u` isn't recognised
         # by the default pwsh on Windows runners — Git Bash ships on
-        # every GitHub runner image so this works once Windows comes
-        # back online in the matrix.
+        # every GitHub runner image so this works on Windows too.
         shell: bash
         run: env -u CI pnpm tauri build ${{ matrix.tauri-args }}
 
@@ -194,14 +206,18 @@ jobs:
             cp "$APP_SIG" "release-assets/Zen-Tools-${TAG}-macos-arm64.app.tar.gz.sig"
           fi
 
-          # Windows row reinstated later — kept for symmetry with the
-          # commented matrix row above.
-          # if [ "${{ runner.os }}" = "Windows" ]; then
-          #   MSI=$(find . -name "*.msi" -path "*/release/bundle/msi/*" | head -1)
-          #   EXE=$(find . -name "*-setup.exe" -path "*/release/bundle/nsis/*" | head -1)
-          #   cp "$MSI" "release-assets/Zen-Tools-${TAG}-windows-x64.msi"
-          #   cp "$EXE" "release-assets/Zen-Tools-${TAG}-windows-x64-setup.exe"
-          # fi
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            # Tauri's NSIS bundler emits the installer as
+            # `*-setup.exe` and (with createUpdaterArtifacts: true) a
+            # matching `*-setup.exe.sig` minisign signature next to it.
+            # Both are mandatory — a missing .sig means the updater
+            # manifest in the release job can't generate the
+            # `windows-x86_64` platform entry.
+            EXE=$(find . -name "*-setup.exe" -path "*/release/bundle/nsis/*" | head -1)
+            EXE_SIG=$(find . -name "*-setup.exe.sig" -path "*/release/bundle/nsis/*" | head -1)
+            cp "$EXE" "release-assets/Zen-Tools-${TAG}-windows-x64-setup.exe"
+            cp "$EXE_SIG" "release-assets/Zen-Tools-${TAG}-windows-x64-setup.exe.sig"
+          fi
 
       - name: Upload release assets
         uses: actions/upload-artifact@v4
@@ -233,9 +249,10 @@ jobs:
 
       - name: Generate updater manifest (latest.json)
         # `createUpdaterArtifacts: true` in tauri.conf.json guarantees
-        # the .app.tar.gz/.sig pair is present, so missing files here
-        # are a hard failure rather than a quiet skip — same reasoning
-        # as the asset-stage step.
+        # the .app.tar.gz/.sig (macOS) and .exe.sig (Windows) pairs
+        # are present, so missing files here are a hard failure
+        # rather than a quiet skip — same reasoning as the
+        # asset-stage step.
         shell: bash
         run: |
           set -euo pipefail
@@ -243,7 +260,9 @@ jobs:
           REPO="${{ github.repository }}"
           PUB_DATE="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
           MAC_SIG_FILE="release-assets/Zen-Tools-${TAG}-macos-arm64.app.tar.gz.sig"
+          WIN_SIG_FILE="release-assets/Zen-Tools-${TAG}-windows-x64-setup.exe.sig"
           MAC_SIG="$(cat "$MAC_SIG_FILE")"
+          WIN_SIG="$(cat "$WIN_SIG_FILE")"
           cat > release-assets/latest.json <<EOF
           {
             "version": "${TAG}",
@@ -253,6 +272,10 @@ jobs:
               "darwin-aarch64": {
                 "signature": "${MAC_SIG}",
                 "url": "https://github.com/${REPO}/releases/download/${TAG}/Zen-Tools-${TAG}-macos-arm64.app.tar.gz"
+              },
+              "windows-x86_64": {
+                "signature": "${WIN_SIG}",
+                "url": "https://github.com/${REPO}/releases/download/${TAG}/Zen-Tools-${TAG}-windows-x64-setup.exe"
               }
             }
           }
@@ -271,17 +294,27 @@ jobs:
           body: |
             ## Zen Tools ${{ github.ref_name }}
 
+            ### One-line install
+            ```sh
+            npx @seg4lt/zen-tools
+            ```
+            Pulls this release's installer for your platform, runs it, and launches the app.
+
             ### Downloads
             | Platform | File |
             |----------|------|
             | macOS (Apple Silicon) | `Zen-Tools-${{ github.ref_name }}-macos-arm64.dmg` |
+            | Windows (x64)         | `Zen-Tools-${{ github.ref_name }}-windows-x64-setup.exe` |
 
-            ### macOS Installation
+            ### macOS Installation (manual)
             1. Download the `.dmg`, open it, drag the app to `/Applications`.
             2. The app is unsigned, so first launch may be quarantined by Gatekeeper.  Clear it with:
                ```sh
                xattr -dr com.apple.quarantine "/Applications/Zen Tools.app"
                ```
+
+            ### Windows Installation (manual)
+            Download the `*-setup.exe` and run it. The installer is silent (`/S` flag respected) and registers an Uninstall entry under `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall`.
           draft: false
           prerelease: false
           files: release-assets/*
