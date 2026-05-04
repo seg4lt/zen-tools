@@ -46,6 +46,22 @@ extern "C" {
     fn GhosttyRegisterHostKeyHookCallback(
         fn_ptr: Option<extern "C" fn(chord: *const c_char)>,
     );
+
+    // Reload-config action handler. Ghostty fires
+    // `GHOSTTY_ACTION_RELOAD_CONFIG` after color-scheme / conditional
+    // state changes; we MUST handle it (rebuild + push config) or the
+    // theme switch is a visual no-op. See
+    // `GhosttyHostView.h::GhosttyRegisterReloadConfigCallback`.
+    fn GhosttyRegisterReloadConfigCallback(
+        fn_ptr: Option<extern "C" fn(app: *mut c_void, soft: bool)>,
+    );
+
+    // Walk every live GhosttyHostView under the tab container and
+    // push a color-scheme change to its surface. Catches split-
+    // created surfaces that aren't in Rust's `PluginState.surfaces`
+    // map (those are allocated entirely on the C side from
+    // `perform_new_split`). Returns the count of surfaces touched.
+    fn GhosttySetColorSchemeAll(dark: i32) -> i32;
 }
 
 /// Ensure the tab content container is mounted as a subview of the
@@ -255,6 +271,24 @@ pub unsafe fn register_host_key_hook_callback(
     fn_ptr: extern "C" fn(chord: *const c_char),
 ) {
     GhosttyRegisterHostKeyHookCallback(Some(fn_ptr));
+}
+
+/// Install the reload-config callback. Fires when ghostty's action_cb
+/// dispatches `GHOSTTY_ACTION_RELOAD_CONFIG` — most importantly after
+/// `ghostty_app_set_color_scheme()`. Runs on the main thread.
+pub unsafe fn register_reload_config_callback(
+    fn_ptr: extern "C" fn(app: *mut c_void, soft: bool),
+) {
+    GhosttyRegisterReloadConfigCallback(Some(fn_ptr));
+}
+
+/// Push a color-scheme change to every live surface (every
+/// `GhosttyHostView` mounted under the tab container — including
+/// split-created panes the Rust side doesn't know about). Returns
+/// the count of surfaces touched. MUST be called on the main thread
+/// (callee touches AppKit views via subviews iteration).
+pub unsafe fn set_color_scheme_all(dark: bool) -> i32 {
+    GhosttySetColorSchemeAll(if dark { 1 } else { 0 })
 }
 
 /// Hide or show the macOS standard window buttons (close / minimize /

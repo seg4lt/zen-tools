@@ -8,6 +8,7 @@ use crate::{
 use ghostty_sys::{
     ghostty_app_free, ghostty_app_new, ghostty_app_set_color_scheme,
     ghostty_app_set_focus, ghostty_app_t, ghostty_app_tick,
+    ghostty_app_update_config,
     ghostty_color_scheme_e_GHOSTTY_COLOR_SCHEME_DARK,
     ghostty_color_scheme_e_GHOSTTY_COLOR_SCHEME_LIGHT,
     ghostty_runtime_config_s,
@@ -80,8 +81,21 @@ impl App {
         unsafe { ghostty_app_set_color_scheme(self.inner, mode) };
     }
 
-    /// Raw pointer access — for `View::new` and other intra-crate use.
-    pub(crate) fn raw(&self) -> ghostty_app_t {
+    /// Push an updated `Config` to a running app. Used by the apprt's
+    /// `RELOAD_CONFIG` action handler — ghostty fires that action
+    /// after `set_color_scheme()` to ask us to re-derive colors with
+    /// the new conditional state. Ghostty reads from `config` (per
+    /// `*const Config` in the FFI signature) and we retain ownership;
+    /// drop frees ours.
+    pub fn update_config(&self, config: &Config) {
+        unsafe { ghostty_app_update_config(self.inner, config.raw()) };
+    }
+
+    /// Raw pointer access — for `View::new` and host-side FFI calls
+    /// that need to dispatch directly (e.g. from a queued main-thread
+    /// closure where keeping a `&App` borrow alive would compete
+    /// with the host's own state lock).
+    pub fn raw(&self) -> ghostty_app_t {
         self.inner
     }
 }

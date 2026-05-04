@@ -47,6 +47,32 @@ void GhosttyRemoveEventMonitor(void);
 typedef void (*GhosttyHostKeyHookFn)(const char *chord);
 void GhosttyRegisterHostKeyHookCallback(GhosttyHostKeyHookFn fn);
 
+/// Register a callback that fires when ghostty asks the host to
+/// reload its config (apprt action `RELOAD_CONFIG`). This is what
+/// `ghostty_app_set_color_scheme` (and per-surface theme changes)
+/// dispatch under the hood — without this hook the call is a no-op
+/// because ghostty relies on the host to rebuild + push the config.
+///
+/// The callback receives the ghostty_app_t pointer (so it can look
+/// up Rust state if it stores per-app context elsewhere) and the
+/// `soft` flag from the action struct (true = scheme/conditional
+/// change, false = full user-initiated reload). Implementations
+/// should build a fresh ghostty_config_t and call
+/// `ghostty_app_update_config(app, config)` (or
+/// `ghostty_surface_update_config` per surface).
+typedef void (*GhosttyReloadConfigFn)(void *app, bool soft);
+void GhosttyRegisterReloadConfigCallback(GhosttyReloadConfigFn fn);
+
+/// Push a color-scheme change to every live `GhosttyHostView` under
+/// the tab container — including split-created surfaces that the
+/// Rust side never sees. Walks the actual NSView tree, so it
+/// catches whatever's mounted regardless of how it got there.
+///
+/// `dark` is 1 for dark, 0 for light (matches
+/// `ghostty_color_scheme_e`). Returns the count of surfaces
+/// updated, useful for diagnostics.
+int GhosttySetColorSchemeAll(int dark);
+
 /// Replace `WryWebViewParent`'s `-[keyDown:]` IMP with a no-op via the
 /// Objective-C runtime. Wry's original implementation panics on macOS
 /// 26 because it dereferences `MainThreadMarker::new().unwrap()` from

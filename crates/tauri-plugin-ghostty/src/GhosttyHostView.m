@@ -1081,6 +1081,33 @@ int GhosttyTabActiveId(void) {
     return 0;
 }
 
+// Walk every GhosttyHostView under the tab container and call
+// ghostty_surface_set_color_scheme on each one's surface. Used by
+// the React `terminal_set_color_scheme` Tauri command to push a
+// theme change into all live panes — including split-created
+// surfaces that aren't tracked in the Rust `PluginState.surfaces`
+// map (those are allocated directly in `perform_new_split` above
+// without round-tripping through Rust).
+//
+// `dark` is `bool` (BOOL on ObjC) → maps to ghostty's color-scheme
+// enum (LIGHT=0, DARK=1) which matches `ghostty_color_scheme_e`.
+//
+// Safe to call when no tabs exist; iterates nothing and returns 0.
+// Returns the count of surfaces touched, useful for diagnostics.
+int GhosttySetColorSchemeAll(int dark) {
+    if (!g_tab_container) return 0;
+    NSMutableArray<GhosttyHostView *> *all = [NSMutableArray array];
+    collect_hosts(g_tab_container, all);
+    int n = 0;
+    for (GhosttyHostView *pane in all) {
+        ghostty_surface_t s = pane.surface;
+        if (!s) continue;
+        ghostty_surface_set_color_scheme(s, (ghostty_color_scheme_e)dark);
+        n += 1;
+    }
+    return n;
+}
+
 // --- Split navigation ----------------------------------------------------
 //
 // `goto_split` finds the neighbouring GhosttyHostView in the requested
@@ -1407,6 +1434,15 @@ static void dispatch_tab_action(int kind, long arg) {
     if (g_tab_action_fn) g_tab_action_fn(kind, arg);
 }
 
+// Reload-config callback slot. Wired by Rust at terminal_new time —
+// fires from the GHOSTTY_ACTION_RELOAD_CONFIG case in the action
+// handler below. The actual `GhosttyRegisterReloadConfigCallback`
+// registration entry point lives further down with the other
+// callback-registration entry points; only the typedef + slot live
+// here so the action handler (immediately below) can reference them.
+typedef void (*GhosttyReloadConfigFn)(void *app, bool soft);
+static GhosttyReloadConfigFn g_reload_config_fn = NULL;
+
 bool GhosttyHandleAction(void *app, void *target, void *action) {
     (void)app;
     if (!action) return false;
@@ -1515,6 +1551,26 @@ bool GhosttyHandleAction(void *app, void *target, void *action) {
         }
         case GHOSTTY_ACTION_QUIT: {
             [NSApp terminate:nil];
+            return true;
+        }
+        case GHOSTTY_ACTION_RELOAD_CONFIG: {
+            // ghostty fires this most importantly after
+            // `ghostty_app_set_color_scheme` updates the internal
+            // conditional theme state — without us building + pushing
+            // a fresh config back via `ghostty_app_update_config`,
+            // the theme switch is a visual no-op. Forwarded to Rust
+            // because the Config wrapper + finalisation lives there.
+            //
+            // Soft = true: scheme/conditional change (don't re-read
+            // user config files, just re-derive). Soft = false: full
+            // user-initiated reload.
+            //
+            // The trampoline accepts either via `bool soft` and
+            // currently always rebuilds from scratch; refining the
+            // soft path is a future optimisation.
+            if (g_reload_config_fn) {
+                g_reload_config_fn(app, act->action.reload_config.soft);
+            }
             return true;
         }
         // Render is fired ~every frame; ghostty handles its own
@@ -1648,6 +1704,14 @@ static GhosttyHostKeyHookFn g_host_key_hook_fn = NULL;
 
 void GhosttyRegisterHostKeyHookCallback(GhosttyHostKeyHookFn fn) {
     g_host_key_hook_fn = fn;
+}
+
+// Reload-config callback registration entry point. The typedef and
+// static slot itself live higher in the file (near other action-side
+// state) because GhosttyHandleAction's RELOAD_CONFIG case needs to
+// reference the slot — C requires the declaration before use.
+void GhosttyRegisterReloadConfigCallback(GhosttyReloadConfigFn fn) {
+    g_reload_config_fn = fn;
 }
 
 void GhosttyInstallEventMonitor(ghostty_surface_t surface) {

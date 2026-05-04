@@ -121,6 +121,28 @@ impl View {
         unsafe { ghostty_surface_set_focus(self.inner, focused) };
     }
 
+    /// Push a color-scheme change to this surface. Each surface
+    /// independently tracks its `config_conditional_state.theme`,
+    /// and ghostty re-derives the palette from the user's
+    /// conditional-themed config when this is called. The App-level
+    /// `App::set_color_scheme` only updates the app's own conditional
+    /// state and doesn't cascade to surfaces — so this per-surface
+    /// call is the one that actually changes the visible colors.
+    ///
+    /// Internally calls `ghostty_surface_set_color_scheme`, which
+    /// fires a per-surface `RELOAD_CONFIG` action. If the apprt
+    /// handles that action by calling `App::update_config`, surfaces
+    /// re-derive with their (just-updated) conditional state and
+    /// repaint.
+    pub fn set_color_scheme(&self, dark: bool) {
+        let mode = if dark {
+            ghostty_color_scheme_e_GHOSTTY_COLOR_SCHEME_DARK
+        } else {
+            ghostty_color_scheme_e_GHOSTTY_COLOR_SCHEME_LIGHT
+        };
+        unsafe { ghostty_surface_set_color_scheme(self.inner, mode) };
+    }
+
     pub fn set_occlusion(&self, occluded: bool) {
         unsafe { ghostty_surface_set_occlusion(self.inner, occluded) };
     }

@@ -95,6 +95,7 @@ pub fn terminal_new(
             macos::register_tab_event_callback(tab_event_trampoline);
             macos::register_tab_action_callback(tab_action_trampoline);
             macos::register_host_key_hook_callback(host_key_hook_trampoline);
+            macos::register_reload_config_callback(reload_config_trampoline);
         }
 
         // Allocate the first GhosttyHostView for this terminal.
@@ -141,13 +142,92 @@ pub fn terminal_new(
 
 #[tauri::command]
 pub fn terminal_set_color_scheme(
+    window: tauri::Window<Wry>,
     state: State<'_, PluginState>,
     dark: bool,
 ) -> Result<(), String> {
-    let inner = state.inner.lock();
-    if let Some(app) = inner.app.as_ref() {
-        app.set_color_scheme(dark);
+    // Two layers of internal state need to flip in lockstep, or
+    // either existing-pane or future-pane rendering goes stale:
+    //
+    // 1. **App.config_conditional_state.theme** — read by
+    //    `ghostty_surface_new` (Surface.zig:606,
+    //    `.config_conditional_state = app.config_conditional_state`)
+    //    when allocating a fresh surface. If this is wrong, every
+    //    newly spawned tab / split starts in the boot-time theme
+    //    regardless of what the user has toggled to since.
+    //    Updated via `ghostty_app_set_color_scheme`.
+    //
+    // 2. **Surface.config_conditional_state.theme** — applied by
+    //    `Surface.updateConfig` to derive the actual palette. The
+    //    App-level call does NOT cascade here (`App.updateConfig`
+    //    hands each surface the original config and asks the surface
+    //    to apply its own state). If this is stale, currently-open
+    //    panes never visibly re-theme even after a config reload.
+    //    Updated via per-surface `ghostty_surface_set_color_scheme`.
+    //
+    // For (2) we MUST NOT iterate `inner.surfaces` — that map only
+    // tracks surfaces created via `terminal_new` /
+    // `terminal_new_tab` (the Rust path that wraps each surface in
+    // a `View`). Splits are created entirely on the C side from
+    // `perform_new_split` in `GhosttyHostView.m` and are not
+    // round-tripped through Rust state. Iterating only Rust-tracked
+    // surfaces would miss every split pane.
+    //
+    // The fix: hand off to the C-side `GhosttySetColorSchemeAll`
+    // which walks the actual NSView tree (every `GhosttyHostView`
+    // under the tab container) and calls
+    // `ghostty_surface_set_color_scheme` on each live surface.
+    //
+    // Both the app-level call and the tree-walking surface call
+    // fire `RELOAD_CONFIG` apprt actions; the trampoline at
+    // `reload_config_trampoline` defers each via
+    // `run_on_main_thread`, rebuilds the Config, and calls
+    // `App::update_config` which propagates to all surfaces.
+    //
+    // Re-entrancy hazard: ghostty fires `RELOAD_CONFIG` synchronously
+    // on the calling thread. We must NOT hold `PluginState.inner`
+    // when invoking either FFI (the trampoline tries to lock the
+    // same mutex). Snapshot the App pointer as `usize` (Send-safe
+    // for the queued closure), drop the lock, then dispatch.
+    let app_ptr_usize: Option<usize> = {
+        let inner = state.inner.lock();
+        inner.app.as_ref().map(|a| a.raw() as usize)
+    };
+
+    if app_ptr_usize.is_none() {
+        // ghostty_app hasn't been allocated yet (terminal_new
+        // hasn't run). Not an error — the React `[bootstrapped]`
+        // effect will re-fire immediately after bootstrap, calling
+        // us again with a non-null app.
+        return Ok(());
     }
+
+    let mode_dark = dark;
+    window
+        .run_on_main_thread(move || {
+            let mode = if mode_dark {
+                ghostty_sys::ghostty_color_scheme_e_GHOSTTY_COLOR_SCHEME_DARK
+            } else {
+                ghostty_sys::ghostty_color_scheme_e_GHOSTTY_COLOR_SCHEME_LIGHT
+            };
+
+            // (1) App-level: updates App.config_conditional_state
+            // so future ghostty_surface_new calls inherit the right
+            // theme. Fires app-scope RELOAD_CONFIG (handled by the
+            // trampoline → main-thread-deferred App::update_config).
+            if let Some(app_ptr) = app_ptr_usize {
+                let app = app_ptr as *mut std::ffi::c_void;
+                unsafe { ghostty_sys::ghostty_app_set_color_scheme(app, mode) };
+            }
+
+            // (2) Walk every live GhosttyHostView under the tab
+            // container and call set_color_scheme on its surface.
+            // Catches split-created panes that aren't tracked in
+            // Rust state. Returns the count for diagnostics.
+            let n = unsafe { macos::set_color_scheme_all(mode_dark) };
+            tracing::debug!(panes = n, dark = mode_dark, "ghostty: pushed color scheme to all live panes");
+        })
+        .map_err(|e| format!("run_on_main: {e}"))?;
     Ok(())
 }
 
@@ -611,4 +691,66 @@ extern "C" fn host_key_hook_trampoline(chord: *const c_char) {
     let chord_str = unsafe { std::ffi::CStr::from_ptr(chord) }.to_string_lossy();
     let event_name = format!("terminal:host-key-hook:{chord_str}");
     let _ = app.emit(&event_name, ());
+}
+
+/// Reload-config trampoline. Fired by ObjC's `GhosttyHandleAction`
+/// when ghostty dispatches `GHOSTTY_ACTION_RELOAD_CONFIG` (most
+/// importantly after `ghostty_app_set_color_scheme()` updates the
+/// internal conditional theme state). Without this handler, the
+/// scheme switch is a visual no-op — ghostty has updated its
+/// `config_conditional_state.theme` but never re-derives colors
+/// because the apprt (us) hasn't pushed a fresh config.
+///
+/// **Re-entrancy hazard.** `terminal_set_color_scheme` holds
+/// `PluginState.inner.lock()` while it calls
+/// `App::set_color_scheme()`, and ghostty fires the
+/// `RELOAD_CONFIG` action **synchronously on the same thread**
+/// before the FFI call returns. If we tried to re-acquire the lock
+/// here we'd deadlock instantly. The fix: queue the rebuild onto
+/// the next main-thread tick via `run_on_main_thread`. By the time
+/// the closure runs, `terminal_set_color_scheme` has returned and
+/// the lock is free. The visual delay is one frame at most —
+/// imperceptible.
+///
+/// Inside the deferred closure we build a fresh Config (re-reads
+/// `~/.config/ghostty/config`, runs finalize so conditional state
+/// branches resolve), then call `App::update_config`.
+///
+/// Currently always rebuilds from scratch regardless of `_soft`.
+/// The `soft` flag exists for cases where ghostty knows the config
+/// file hasn't changed (e.g. just a theme flip) and a cheaper
+/// "re-derive from current Config + new conditional state" would
+/// suffice. Optimisation for later — full rebuild is correct, just
+/// slightly slower (one config-file parse per OS-theme toggle).
+extern "C" fn reload_config_trampoline(_app_ptr: *mut std::ffi::c_void, _soft: bool) {
+    let app_handle = match APP_HANDLE_FOR_TABS.get() {
+        Some(a) => a.clone(),
+        None => return,
+    };
+    let _ = app_handle.clone().run_on_main_thread(move || {
+        let state = app_handle.state::<PluginState>();
+        let inner = state.inner.lock();
+        let app = match inner.app.as_ref() {
+            Some(a) => a,
+            None => {
+                tracing::warn!(
+                    "ghostty: reload_config fired before app was initialised; ignoring"
+                );
+                return;
+            }
+        };
+
+        let mut config = match Config::new() {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(?e, "ghostty: reload_config: Config::new failed");
+                return;
+            }
+        };
+        config.load_default_files();
+        config.finalize();
+        app.update_config(&config);
+        // `config` drops here, freeing the underlying ghostty_config_t.
+        // ghostty has already read what it needs.
+    });
 }

@@ -28,6 +28,7 @@ import {
   useRef,
   type ReactNode,
 } from "react";
+import { useTheme } from "@/hooks/use-theme";
 import {
   onTabClosed,
   onTabCreated,
@@ -36,6 +37,7 @@ import {
   terminalListTabs,
   terminalNew,
   terminalSetCloseWindowOnLastTab,
+  terminalSetColorScheme,
   type PaneInfo,
 } from "../lib/tauri";
 
@@ -190,6 +192,35 @@ export function TerminalStoreProvider({ children }: { children: ReactNode }) {
 
     return bootstrapPromise.current;
   }, [state.bootstrapped]);
+
+  // ── Live theme sync ───────────────────────────────────────────────
+  // libghostty reads the OS appearance once at `ghostty_app_new` time
+  // and never re-checks. So:
+  //   1. If the user has a manual override in zen-tools' Settings
+  //      that differs from the OS, the terminal would render in the
+  //      OS theme while the rest of the app uses the chosen one. We
+  //      need to push at least once after bootstrap.
+  //   2. If the user toggles macOS Light/Dark while zen-tools is
+  //      running, ghostty would stay on the boot-time scheme until a
+  //      relaunch. We need to push every time the theme changes.
+  //
+  // `useTheme()` already resolves to "light" | "dark" with both the
+  // OS-`matchMedia('change')` listener AND the user-override path
+  // wired in (see src/hooks/use-theme.tsx). Subscribing here gets
+  // both for free.
+  //
+  // Gated on `state.bootstrapped` because the plugin command no-ops
+  // (returns Ok) when the GhosttyApp hasn't been created yet, but
+  // we'd be flooding logs with successful no-ops; cleaner to wait.
+  // Re-fires when bootstrap flips true so the manual-override case
+  // is handled on the very first /terminal visit.
+  const { theme } = useTheme();
+  useEffect(() => {
+    if (!state.bootstrapped) return;
+    void terminalSetColorScheme(theme === "dark").catch((e) =>
+      console.error("[terminal] set_color_scheme failed:", e),
+    );
+  }, [theme, state.bootstrapped]);
 
   const value = useMemo<ContextValue>(
     () => ({ ...state, ensureBootstrapped }),

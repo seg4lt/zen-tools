@@ -42,6 +42,14 @@ impl Config {
         std::mem::forget(self);
         p
     }
+
+    /// Borrow the raw pointer for read-only FFI calls (e.g.
+    /// `ghostty_app_update_config` which takes `*const Config` —
+    /// caller retains ownership). Drop still frees ours when the
+    /// `Config` goes out of scope.
+    pub fn raw(&self) -> ghostty_config_t {
+        self.inner
+    }
 }
 
 impl Drop for Config {

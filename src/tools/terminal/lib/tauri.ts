@@ -132,6 +132,34 @@ export function terminalSetCloseWindowOnLastTab(value: boolean) {
 }
 
 /**
+ * Push the active color scheme to ghostty (`true` → Dark, `false` →
+ * Light). Calls `ghostty_app_set_color_scheme` on the underlying
+ * libghostty App, which immediately repaints every live surface in
+ * the new scheme.
+ *
+ * libghostty reads the system appearance natively at `ghostty_app_new`
+ * time, so the very first paint after `terminal_new` is correct
+ * without us calling this. But:
+ *
+ *   1. The user may have a manual theme override in zen-tools'
+ *      Settings (e.g. "Light" while macOS is in Dark Mode). Without a
+ *      push at bootstrap, the terminal would render in the OS theme
+ *      while the rest of zen-tools is in the user's chosen one.
+ *   2. Ghostty does NOT re-read system appearance on its own, and the
+ *      plugin's NSEvent monitor doesn't observe
+ *      `AppleInterfaceThemeChangedNotification`. So a runtime
+ *      OS-theme toggle would leave the terminal stuck on the boot-time
+ *      scheme until the user relaunches.
+ *
+ * `TerminalStoreProvider` subscribes to `useTheme()` and calls this
+ * whenever the resolved theme changes (and once on bootstrap). See
+ * `store/terminal-store.tsx` for the wiring.
+ */
+export function terminalSetColorScheme(dark: boolean) {
+  return invoke<void>("plugin:ghostty|terminal_set_color_scheme", { dark });
+}
+
+/**
  * Hide / show the macOS standard window buttons (close, minimize,
  * zoom — the traffic-light circles). Used by the terminal route
  * when entering / leaving distraction-free mode so even the
