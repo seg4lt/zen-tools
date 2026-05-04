@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-terminal-focus-split"
+description = "Enables the terminal_focus_split command without any pre-configured scope."
+commands.allow = ["terminal_focus_split"]
+
+[[permission]]
+identifier = "deny-terminal-focus-split"
+description = "Denies the terminal_focus_split command without any pre-configured scope."
+commands.deny = ["terminal_focus_split"]

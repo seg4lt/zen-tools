@@ -47,6 +47,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # Pulls `vendor/ghostty` (submodule pinned in `.gitmodules`).
+          # Required for `crates/ghostty-sys/build.rs` to find the
+          # ghostty source to apply patches over and Zig-build.
+          submodules: recursive
 
       # `packageManager: pnpm@<version>` in package.json is what
       # corepack uses to pick the right pnpm version; pnpm/action-setup
@@ -70,11 +75,46 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      # Install zig (and any other tools) from `mise.toml`. Pinned at
+      # 0.15.2 because that's the only Zig release we've validated
+      # against `vendor/ghostty/`. Required only for the cold-build
+      # path of `crates/ghostty-sys`; cache hits below skip it.
+      # macOS-only today (Tauri matrix is mac-only); add a `runner.os`
+      # gate here when Linux/Windows rows are reinstated, since the
+      # ghostty stack is `cfg(target_os = "macos")`.
+      - name: Install mise toolchain (zig 0.15.2)
+        if: runner.os == 'macOS'
+        uses: jdx/mise-action@v2
+        with:
+          experimental: true
+
       - name: Cache Rust target
         uses: Swatinem/rust-cache@v2
         with:
           # Single workspace at the repo root — `target/` lives here.
           workspaces: . -> target
+
+      # libghostty.a is a 135 MB static archive produced by a 2-8 minute
+      # `zig build` over `vendor/ghostty/`. Cache it keyed on the
+      # vendored sources + the build script + the CLT shim so the .a is
+      # only rebuilt when one of those genuinely changes. See pr.yml for
+      # the full reasoning. macOS-only today.
+      - name: Cache libghostty.a
+        if: runner.os == 'macOS'
+        id: ghostty-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/ghostty-prebuilt
+          # See pr.yml for the full reasoning behind these key inputs:
+          # `vendor/ghostty/**` (pinned submodule SHA), `patches/ghostty/**`
+          # (local delta), `build.rs` + `xcrun-shim` (build logic).
+          key: libghostty-${{ runner.os }}-${{ hashFiles('vendor/ghostty/**', 'patches/ghostty/**', 'crates/ghostty-sys/build.rs', 'tools/ghostty-xcrun-shim/**') }}
+
+      - name: Use cached libghostty.a
+        if: runner.os == 'macOS' && steps.ghostty-cache.outputs.cache-hit == 'true'
+        run: |
+          echo "GHOSTTY_LIB_DIR=$HOME/ghostty-prebuilt" >> "$GITHUB_ENV"
+          ls -lh "$HOME/ghostty-prebuilt"
 
       - name: Install bun
         uses: oven-sh/setup-bun@v2
@@ -109,6 +149,26 @@ jobs:
         # back online in the matrix.
         shell: bash
         run: env -u CI pnpm tauri build ${{ matrix.tauri-args }}
+
+      # Cold-build path only: stash the freshly built libghostty.a so
+      # the cache action's post-step saves it under the new key. See
+      # the matching step in pr.yml for the full reasoning.
+      - name: Save libghostty.a to cache path
+        if: runner.os == 'macOS' && steps.ghostty-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/ghostty-prebuilt"
+          # Tauri's release build lives under `target/<arch>/release`,
+          # but `ghostty-sys`'s `OUT_DIR` is still keyed off the
+          # workspace `target/`. Glob both layouts.
+          SRC=$(find target -path "*/ghostty-sys-*/out/ghostty-install/lib/libghostty.a" | head -1)
+          if [ -z "$SRC" ]; then
+            echo "::error::libghostty.a not found under target/ — Zig build must have failed silently"
+            exit 1
+          fi
+          cp "$SRC" "$HOME/ghostty-prebuilt/libghostty.a"
+          ls -lh "$HOME/ghostty-prebuilt"
 
       - name: Stage release assets
         shell: bash

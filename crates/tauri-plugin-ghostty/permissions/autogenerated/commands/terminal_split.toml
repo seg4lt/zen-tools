@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-terminal-split"
+description = "Enables the terminal_split command without any pre-configured scope."
+commands.allow = ["terminal_split"]
+
+[[permission]]
+identifier = "deny-terminal-split"
+description = "Denies the terminal_split command without any pre-configured scope."
+commands.deny = ["terminal_split"]

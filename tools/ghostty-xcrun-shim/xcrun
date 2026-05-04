@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# Shim for xcrun:
+#  1. `xcrun --sdk macosx --show-sdk-path` → return $GHOSTTY_SDK_PATH
+#  2. `xcrun --sdk macosx --show-sdk-version` → version of $GHOSTTY_SDK_PATH
+#  3. `xcrun -sdk macosx metal ...` or `xcrun --sdk macosx metal ...` → forward
+#     to Xcode's metal compiler (CLT lacks it, but the macOS Metal toolchain is
+#     globally findable via xcrun without DEVELOPER_DIR override). We do this
+#     because we run zig under DEVELOPER_DIR=CLT for SDK selection, but the
+#     metal compiler lives in Xcode.
+#  4. Anything else → forward to /usr/bin/xcrun.
+
+# Normalize "-sdk" to "--sdk" for matching.
+if [ "$1" = "-sdk" ]; then set -- "--sdk" "${@:2}"; fi
+
+if [ "$1" = "--sdk" ] && [ "$2" = "macosx" ]; then
+    case "$3" in
+        --show-sdk-path)
+            if [ -n "$GHOSTTY_SDK_PATH" ]; then echo "$GHOSTTY_SDK_PATH"; exit 0; fi
+            ;;
+        --show-sdk-version)
+            if [ -n "$GHOSTTY_SDK_PATH" ] && [ -f "$GHOSTTY_SDK_PATH/SDKSettings.json" ]; then
+                /usr/bin/python3 -c "import json,sys; print(json.load(open('$GHOSTTY_SDK_PATH/SDKSettings.json'))['Version'])" 2>/dev/null || echo "15.4"
+                exit 0
+            fi
+            ;;
+        metal|metallib|metal-ar)
+            tool="$3"
+            shift 3
+            # Resolve the tool against the global toolchain (DEVELOPER_DIR unset)
+            # so the Metal toolchain can be found independent of our CLT override.
+            metal_bin=$(env -u DEVELOPER_DIR /usr/bin/xcrun -f "$tool" 2>/dev/null)
+            if [ -z "$metal_bin" ]; then
+                echo "xcrun-shim: could not locate '$tool'" >&2
+                exit 72
+            fi
+            # Pass --sysroot so the metal compiler uses our 15.4 SDK.
+            if [ -n "$GHOSTTY_SDK_PATH" ] && [ "$tool" = "metal" ]; then
+                exec "$metal_bin" -isysroot "$GHOSTTY_SDK_PATH" "$@"
+            fi
+            exec "$metal_bin" "$@"
+            ;;
+    esac
+fi
+exec /usr/bin/xcrun "$@"

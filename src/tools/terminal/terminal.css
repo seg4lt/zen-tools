@@ -1,0 +1,143 @@
+/*
+ * Terminal route — pointer-events scoping + tab-bar styling.
+ *
+ * Two responsibilities in one file:
+ *
+ *   1. Pointer-events scoping. The Ghostty NSView lives BELOW the
+ *      WKWebView in the AppKit compositor. For the user to actually
+ *      click into the terminal, the HTML on top must have
+ *      `pointer-events: none` so clicks fall through to the native
+ *      layer. Applying that globally would break every other tool, so
+ *      it's scoped via the `body.terminal-route-active` class that
+ *      `TerminalView` toggles on mount/unmount.
+ *
+ *   2. Tab-bar look. Ported verbatim from the original
+ *      `tauri-terminal/packages/ui/index.html` so embedding into
+ *      zen-tools matches the prototype the user already approved:
+ *      32px-tall near-black frosted bar, 24px tab pills, hover-only
+ *      close buttons, 22px "+" affordance.
+ */
+
+:root {
+  /* Tab-bar palette — copied byte-for-byte from the reference app's
+     index.html. Lives at :root so the TerminalView can opt back into
+     `pointer-events: auto` selectively without redefining each color. */
+  --term-bar-bg: rgba(28, 28, 30, 0.92);
+  --term-bar-fg: #e8e8e8;
+  --term-bar-fg-dim: #888;
+  --term-tab-bg-active: rgba(255, 255, 255, 0.10);
+  --term-tab-bg-hover: rgba(255, 255, 255, 0.05);
+  --term-bar-border: rgba(255, 255, 255, 0.08);
+}
+
+/* ── 1. Pointer-events scoping ─────────────────────────────────── */
+
+body.terminal-route-active main {
+  pointer-events: none;
+  /* Route content must be transparent so the Metal-rendered terminal
+     below shows through. Tailwind's `bg-background` on the root flex
+     container would otherwise paint over the NSView. */
+  background-color: transparent !important;
+}
+
+body.terminal-route-active main .terminal-chrome,
+body.terminal-route-active main .terminal-chrome * {
+  pointer-events: auto;
+}
+
+/* ── 2. Tab-bar — ported from prototype ────────────────────────── */
+
+.terminal-tab-bar {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  height: 32px;
+  flex: 0 0 auto;
+  background: var(--term-bar-bg);
+  border-bottom: 1px solid var(--term-bar-border);
+  padding: 0 6px;
+  /* macOS-native font stack — matches the prototype. */
+  font: 12px -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+  color: var(--term-bar-fg);
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.terminal-tab-list {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+}
+
+.terminal-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 180px;
+  height: 24px;
+  padding: 0 8px;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--term-bar-fg-dim);
+  cursor: default;
+  white-space: nowrap;
+  border: 0;
+  /* shadcn / Tailwind 'preflight' resets buttons to bg-transparent;
+     restate explicitly so the prototype's look survives. */
+  font: inherit;
+}
+
+.terminal-tab:hover { background: var(--term-tab-bg-hover); }
+.terminal-tab.is-active { background: var(--term-tab-bg-active); color: var(--term-bar-fg); }
+
+.terminal-tab__label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 140px;
+}
+
+.terminal-tab__close {
+  opacity: 0;
+  width: 14px;
+  height: 14px;
+  line-height: 14px;
+  text-align: center;
+  border-radius: 3px;
+  font-size: 11px;
+  color: var(--term-bar-fg-dim);
+  border: 0;
+  background: transparent;
+  padding: 0;
+  cursor: default;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.terminal-tab:hover .terminal-tab__close,
+.terminal-tab.is-active .terminal-tab__close { opacity: 1; }
+
+.terminal-tab__close:hover {
+  background: rgba(255, 255, 255, 0.12);
+  color: var(--term-bar-fg);
+}
+
+.terminal-tab-add {
+  margin-left: 4px;
+  width: 22px;
+  height: 22px;
+  border-radius: 5px;
+  line-height: 20px;
+  text-align: center;
+  font-size: 14px;
+  color: var(--term-bar-fg-dim);
+  cursor: default;
+  border: 0;
+  background: transparent;
+  padding: 0;
+}
+
+.terminal-tab-add:hover {
+  background: var(--term-tab-bg-hover);
+  color: var(--term-bar-fg);
+}

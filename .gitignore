@@ -53,6 +53,24 @@ src-tauri/gen/schemas
 # `exclude`), so cargo creates a sibling target dir here too.
 crates/zen-test-server/target/
 
+# Ghostty / Zig build cache. `vendor/ghostty/` is a git submodule
+# pinned to a clean upstream tag (currently v1.3.1); our local
+# build/SDK plumbing fixes live as ordered patch files under
+# `patches/ghostty/*.patch` and are applied to the submodule working
+# tree by `crates/ghostty-sys/build.rs::apply_patches` before invoking
+# zig (idempotent — uses `git apply -R --check` to detect already-
+# applied patches and no-op).
+#
+# These ignores cover the .zig-cache / .zig-out the Zig build drops
+# inside the submodule's working tree on every cargo build. The
+# submodule has its own `.gitignore` that mostly handles this, but
+# adding belt-and-suspenders here means a stray `git status` from the
+# submodule never leaks build artefacts up to the parent repo's
+# tracked changes.
+vendor/ghostty/.zig-cache/
+vendor/ghostty/zig-cache/
+vendor/ghostty/zig-out/
+
 # Env & secrets
 .env
 .env.local

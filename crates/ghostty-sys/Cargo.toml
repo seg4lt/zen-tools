@@ -1,0 +1,14 @@
+[package]
+name = "ghostty-sys"
+version = "0.0.1"
+edition = "2021"
+description = "Raw FFI bindings to libghostty (vendor/ghostty). macOS-only."
+publish = false
+
+[lib]
+# No tests yet — bindings only.
+test = false
+doctest = false
+
+[build-dependencies]
+bindgen = "0.70"

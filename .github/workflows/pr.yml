@@ -35,12 +35,27 @@ jobs:
     name: Rust workspace
     runs-on: macos-14
     steps:
+      # `submodules: recursive` fetches `vendor/ghostty` (pinned to a
+      # clean upstream tag in `.gitmodules`). Required — the
+      # `ghostty-sys` build.rs reads from `vendor/ghostty/`, applies
+      # `patches/ghostty/*.patch` over it, then runs `zig build`.
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+
+      # Install zig (and any other tools) from `mise.toml`. Pinned at
+      # 0.15.2 because that's the only Zig release we've validated
+      # against `vendor/ghostty/`. Required only for the cold-build
+      # path of `crates/ghostty-sys`; cache hits below skip it.
+      - name: Install mise toolchain (zig 0.15.2)
+        uses: jdx/mise-action@v2
+        with:
+          experimental: true
 
       # Restore cargo registry + git index + target dir between runs.
       # Key on Cargo.lock so a dependency bump invalidates correctly.
@@ -55,8 +70,63 @@ jobs:
           restore-keys: |
             cargo-${{ runner.os }}-
 
+      # libghostty.a is a 135 MB static archive produced by a 2-8 minute
+      # `zig build` over `vendor/ghostty/`. We cache the install dir
+      # keyed on the inputs the Zig build actually consumes:
+      #
+      #   * the entire `vendor/ghostty/` tree
+      #   * `crates/ghostty-sys/build.rs` (controls the build invocation)
+      #   * `tools/ghostty-xcrun-shim/` (the CLT-only Zig wrapper)
+      #
+      # On cache hit we set `GHOSTTY_LIB_DIR` to the cache dir; the
+      # build script's early-return branch then skips the Zig step
+      # entirely (`crates/ghostty-sys/build.rs` line 39).
+      #
+      # On cache miss we don't set `GHOSTTY_LIB_DIR`, the Zig build
+      # runs as normal, and the post-build step below copies the
+      # produced .a into the cache path so the action's post-step
+      # saves it under the new key.
+      - name: Cache libghostty.a
+        id: ghostty-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/ghostty-prebuilt
+          # Cache key inputs:
+          #   - `vendor/ghostty/**`: the upstream submodule tree (its
+          #     contents are deterministic for a given pinned SHA, so
+          #     this captures "ghostty version was bumped").
+          #   - `patches/ghostty/**`: our local delta. A patch edit
+          #     invalidates the cache even if the submodule SHA didn't
+          #     move.
+          #   - `crates/ghostty-sys/build.rs` + `tools/ghostty-xcrun-shim/**`:
+          #     the build/wrapper logic itself.
+          key: libghostty-${{ runner.os }}-${{ hashFiles('vendor/ghostty/**', 'patches/ghostty/**', 'crates/ghostty-sys/build.rs', 'tools/ghostty-xcrun-shim/**') }}
+
+      - name: Use cached libghostty.a
+        if: steps.ghostty-cache.outputs.cache-hit == 'true'
+        run: |
+          echo "GHOSTTY_LIB_DIR=$HOME/ghostty-prebuilt" >> "$GITHUB_ENV"
+          ls -lh "$HOME/ghostty-prebuilt"
+
       - name: cargo build --workspace
         run: cargo build --workspace --locked
+
+      # Cold-build path only: stash the freshly built libghostty.a so
+      # the cache action's post-step saves it under the new key.
+      - name: Save libghostty.a to cache path
+        if: steps.ghostty-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/ghostty-prebuilt"
+          # The OUT_DIR layout is `target/<profile>/build/ghostty-sys-<hash>/out/ghostty-install/lib/libghostty.a`.
+          # The hash component is non-deterministic, so glob it.
+          SRC=$(find target -path "*/ghostty-sys-*/out/ghostty-install/lib/libghostty.a" | head -1)
+          if [ -z "$SRC" ]; then
+            echo "::error::libghostty.a not found under target/ — Zig build must have failed silently"
+            exit 1
+          fi
+          cp "$SRC" "$HOME/ghostty-prebuilt/libghostty.a"
+          ls -lh "$HOME/ghostty-prebuilt"
 
       - name: cargo test --workspace
         run: cargo test --workspace --locked --lib

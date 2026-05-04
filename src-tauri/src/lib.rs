@@ -75,7 +75,20 @@ pub fn run() {
     // floor. Tauri's plugin registration is fast and uses `eprintln!`
     // for genuine errors anyway, so the trade is worth it.
 
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+
+    // ── Native terminal tab (macOS-only) ─────────────────────────
+    // tauri-plugin-ghostty embeds libghostty as a CAMetalLayer-backed
+    // NSView living *below* the WKWebView. The plugin owns the PTY,
+    // surface, tab list, and chrome-inset feedback. Registered before
+    // the rest of the chain so its commands are available the instant
+    // the React `/terminal` route mounts.
+    #[cfg(target_os = "macos")]
+    {
+        builder = builder.plugin(tauri_plugin_ghostty::init());
+    }
+
+    builder
         // Default macOS Tao behaviour for `CloseRequested` on a
         // non-main window is `[NSWindow orderOut:]` — the WKWebView is
         // hidden but its `WebContent` subprocess stays resident,

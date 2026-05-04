@@ -37,6 +37,7 @@ import { MarkdownStoreProvider } from "@/tools/markdown/store/markdown-store";
 import { ProcessMonitorStoreProvider } from "@/tools/process-monitor/store/process-monitor-store";
 import { AiSummaryStoreProvider } from "@/tools/prmaster/store/ai-summary-store";
 import { PrMasterStoreProvider } from "@/tools/prmaster/store/prmaster-store";
+import { TerminalStoreProvider } from "@/tools/terminal/store/terminal-store";
 import { useToolOrder } from "@/hooks/use-tool-order";
 
 export function AppProviders({ children }: { children: ReactNode }) {
@@ -73,6 +74,17 @@ export function AppProviders({ children }: { children: ReactNode }) {
       <AiSummaryStoreProvider>{kids}</AiSummaryStoreProvider>
     </PrMasterStoreProvider>
   ));
+  // Terminal pane store. Survives navigation so the inner pane-tab
+  // strip doesn't lose state when the user briefly switches to
+  // another tool. The actual NSView + PTY lives in the Rust
+  // `tauri-plugin-ghostty` plugin state and is shared across mounts
+  // regardless. The provider is no-op-cheap when the user never
+  // visits /terminal — the four `tab:*` event listeners are
+  // attached at mount but no shell is spawned until the
+  // `ensureBootstrapped` call inside `TerminalView`'s mount effect.
+  const Terminal = gate("terminal", (kids) => (
+    <TerminalStoreProvider>{kids}</TerminalStoreProvider>
+  ));
 
   return HttpRunner(
     ProcessMonitor(
@@ -80,17 +92,19 @@ export function AppProviders({ children }: { children: ReactNode }) {
         Markdown(
           DbExplorer(
             PrMaster(
-              <>
-                {/* Bootstrap hooks need to live inside the providers
-                    whose state they touch. `useProjectsBootstrap`
-                    uses React Query (already wired in App.tsx) plus
-                    the http-runner backend; doesn't actually depend
-                    on the http-runner store, but keeping it here
-                    groups all "fire-once at app start" effects in
-                    one place so they're easy to find. */}
-                <Bootstrappers httpRunnerEnabled={!isDisabled("http-runner")} />
-                {children}
-              </>,
+              Terminal(
+                <>
+                  {/* Bootstrap hooks need to live inside the providers
+                      whose state they touch. `useProjectsBootstrap`
+                      uses React Query (already wired in App.tsx) plus
+                      the http-runner backend; doesn't actually depend
+                      on the http-runner store, but keeping it here
+                      groups all "fire-once at app start" effects in
+                      one place so they're easy to find. */}
+                  <Bootstrappers httpRunnerEnabled={!isDisabled("http-runner")} />
+                  {children}
+                </>,
+              ),
             ),
           ),
         ),

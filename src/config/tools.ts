@@ -9,8 +9,29 @@ import {
   FileText,
   GitPullRequest,
   Sparkles,
+  TerminalSquare,
   Zap,
 } from "lucide-react";
+
+/**
+ * `true` when the current binary is running on macOS. Used to gate
+ * macOS-only tools (currently just the Terminal — its native
+ * `tauri-plugin-ghostty` crate is `cfg(target_os = "macos")` and
+ * compiles to a no-op `init()` on other platforms, so the pill
+ * should not appear there).
+ *
+ * We use `navigator.userAgent` rather than the Tauri `platform()`
+ * API so this stays a synchronous module-level constant — the
+ * `TOOLS` array is read during initial render and we don't want
+ * the Terminal pill to flicker in / out across an async resolve.
+ *
+ * The check is conservative: in the unlikely case `navigator` isn't
+ * around (SSR, very old WebKit), it falls back to false → no Terminal
+ * pill, which is the safer default than crashing the host.
+ */
+const IS_MACOS =
+  typeof navigator !== "undefined" &&
+  /Mac|iPhone|iPad|iPod/i.test(navigator.userAgent);
 
 export interface Tool {
   /** Stable identifier (used for route segments and persistence keys). */
@@ -69,6 +90,21 @@ export const TOOLS: readonly Tool[] = [
     description:
       "GitHub PR review dashboard — Mine, To Review, Done, Conversations, AI Summary",
   },
+  // Native macOS terminal (Ghostty). Only registered on macOS — the
+  // `tauri-plugin-ghostty` crate is `cfg(target_os = "macos")` and
+  // exposes a no-op `init()` on other platforms.
+  ...(IS_MACOS
+    ? ([
+        {
+          id: "terminal",
+          label: "Terminal",
+          icon: TerminalSquare,
+          route: "/terminal",
+          description:
+            "Native Ghostty terminal — multi-pane, GPU-accelerated, reads your ~/.config/ghostty/config",
+        },
+      ] as const)
+    : ([] as const)),
 ] as const;
 
 /** The tool that should be the active default on first launch. */

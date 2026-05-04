@@ -1,0 +1,13 @@
+[package]
+name = "ghostty-rs"
+version = "0.0.1"
+edition = "2021"
+description = "Safe Rust wrappers over libghostty's embedding C API."
+publish = false
+
+[lib]
+doctest = false
+
+[dependencies]
+ghostty-sys = { path = "../ghostty-sys" }
+thiserror = "2"

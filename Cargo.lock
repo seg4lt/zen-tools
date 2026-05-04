@@ -2040,6 +2040,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "ghostty-rs"
+version = "0.0.1"
+dependencies = [
+ "ghostty-sys",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "ghostty-sys"
+version = "0.0.1"
+dependencies = [
+ "bindgen 0.70.1",
+]
+
+[[package]]
 name = "gio"
 version = "0.18.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6586,6 +6601,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "tauri-plugin-ghostty"
+version = "0.0.1"
+dependencies = [
+ "cc",
+ "ghostty-rs",
+ "ghostty-sys",
+ "objc2 0.5.2",
+ "objc2-app-kit 0.2.2",
+ "objc2-foundation 0.2.2",
+ "parking_lot",
+ "serde",
+ "tauri",
+ "tauri-plugin",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
 name = "tauri-plugin-global-shortcut"
 version = "2.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9255,6 +9288,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-clipboard-manager",
  "tauri-plugin-dialog",
+ "tauri-plugin-ghostty",
  "tauri-plugin-global-shortcut",
  "tauri-plugin-notification",
  "tauri-plugin-process",

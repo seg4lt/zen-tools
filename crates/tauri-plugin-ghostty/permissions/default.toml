@@ -1,0 +1,69 @@
+# Default permission set for tauri-plugin-ghostty. Granting this gives
+# the host app permission to invoke every command this plugin exposes.
+
+"$schema" = "schemas/schema.json"
+
+[default]
+description = "Default permissions for the ghostty terminal plugin."
+permissions = [
+    "allow-terminal-new",
+    "allow-terminal-set-color-scheme",
+    "allow-terminal-split",
+    "allow-terminal-focus-split",
+    "allow-terminal-new-tab",
+    "allow-terminal-focus-tab",
+    "allow-terminal-close-tab",
+    "allow-terminal-list-tabs",
+    "allow-terminal-set-chrome-inset",
+    "allow-terminal-set-close-window-on-last-tab",
+]
+
+[[permission]]
+identifier = "allow-terminal-new"
+description = "Allows creating a new terminal surface attached to a window."
+commands.allow = ["terminal_new"]
+
+[[permission]]
+identifier = "allow-terminal-set-color-scheme"
+description = "Allows setting the dark/light color scheme on the ghostty app."
+commands.allow = ["terminal_set_color_scheme"]
+
+[[permission]]
+identifier = "allow-terminal-split"
+description = "Allows splitting an existing terminal surface."
+commands.allow = ["terminal_split"]
+
+[[permission]]
+identifier = "allow-terminal-focus-split"
+description = "Allows moving keyboard focus between split panes."
+commands.allow = ["terminal_focus_split"]
+
+[[permission]]
+identifier = "allow-terminal-new-tab"
+description = "Allows creating a new tab (a fresh GhosttyHostView + surface mounted in the tab container)."
+commands.allow = ["terminal_new_tab"]
+
+[[permission]]
+identifier = "allow-terminal-focus-tab"
+description = "Allows switching the active tab by id."
+commands.allow = ["terminal_focus_tab"]
+
+[[permission]]
+identifier = "allow-terminal-close-tab"
+description = "Allows closing a tab by id (frees the surfaces under that tab)."
+commands.allow = ["terminal_close_tab"]
+
+[[permission]]
+identifier = "allow-terminal-list-tabs"
+description = "Allows enumerating currently mounted tabs."
+commands.allow = ["terminal_list_tabs"]
+
+[[permission]]
+identifier = "allow-terminal-set-chrome-inset"
+description = "Allows the HTML side to push its measured chrome insets so the native tab content area is sized correctly."
+commands.allow = ["terminal_set_chrome_inset"]
+
+[[permission]]
+identifier = "allow-terminal-set-close-window-on-last-tab"
+description = "Toggles the policy of whether closing the last tab also closes the window. Default true; embedders override."
+commands.allow = ["terminal_set_close_window_on_last_tab"]

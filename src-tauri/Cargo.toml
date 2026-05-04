@@ -123,3 +123,11 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 # bringing in `objc2-app-kit` for a single selector.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.5"
+# Native ghostty-backed terminal tab. Plugin lives at
+# `crates/tauri-plugin-ghostty/`; it pulls in `ghostty-sys` (Zig-built
+# libghostty.a from `vendor/ghostty/`) + `ghostty-rs` + an ObjC NSView
+# host. macOS-only by construction — the crate's `lib.rs` exposes a
+# `stub.rs` no-op `init()` on other platforms so plugin registration
+# in `src/lib.rs` can stay unconditional, but we still gate the dep
+# itself to keep non-macOS builds light.
+tauri-plugin-ghostty = { path = "../crates/tauri-plugin-ghostty" }

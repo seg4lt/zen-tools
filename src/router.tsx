@@ -19,6 +19,7 @@ import { MarkdownShell } from "@/tools/markdown/MarkdownShell";
 import { DatabaseExplorerShell } from "@/tools/database-explorer/DatabaseExplorerShell";
 import { PRMasterShell } from "@/tools/prmaster/PRMasterShell";
 import { SettingsView } from "@/tools/settings/SettingsView";
+import { TerminalShell } from "@/tools/terminal/TerminalShell";
 import { readLastRoute } from "@/hooks/use-last-route";
 import { useToolOrder } from "@/hooks/use-tool-order";
 import { isPrmasterPopover } from "@/lib/window-kind";
@@ -272,6 +273,22 @@ const prmasterRoute = createRoute({
   ),
 });
 
+// Native Ghostty terminal — see `crates/tauri-plugin-ghostty/`. The
+// route is registered on every platform; on non-macOS the plugin's
+// no-op `init()` means the commands fail and the view will simply
+// log warnings, but the route is also hidden from the title-bar
+// pills via the `IS_MACOS` gate in `src/config/tools.ts`, so the
+// user shouldn't reach it.
+const terminalRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/terminal",
+  component: () => (
+    <DisabledGuard toolId="terminal">
+      <TerminalShell />
+    </DisabledGuard>
+  ),
+});
+
 const routeTree = rootRoute.addChildren([
   indexRoute,
   httpRunnerRoute.addChildren([
@@ -284,6 +301,7 @@ const routeTree = rootRoute.addChildren([
   markdownRoute,
   databaseExplorerRoute,
   prmasterRoute,
+  terminalRoute,
   settingsRoute,
 ]);
 

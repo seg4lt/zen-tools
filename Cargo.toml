@@ -17,6 +17,13 @@ members = [
     "crates/zen-prmaster",
     "crates/zen-whisper",
     "crates/zen-dictation",
+    # Native terminal stack (macOS-only at link time, but the manifests
+    # build on every platform — the macOS-only deps are gated inside
+    # tauri-plugin-ghostty's own `Cargo.toml` via
+    # `[target.'cfg(target_os = "macos")'.dependencies]`).
+    "crates/ghostty-sys",
+    "crates/ghostty-rs",
+    "crates/tauri-plugin-ghostty",
     "src-tauri",
 ]
 # zen-test-server is a standalone dev tool. It has its own [workspace] and is

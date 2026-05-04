@@ -1,0 +1,43 @@
+[package]
+name = "tauri-plugin-ghostty"
+version = "0.0.1"
+edition = "2021"
+description = "Tauri 2 plugin embedding Ghostty as a native NSView terminal."
+publish = false
+# `links` is how Tauri's plugin scaffolding discovers the permission set
+# emitted by build.rs. It must match `package.name`.
+links = "tauri-plugin-ghostty"
+
+[lib]
+doctest = false
+
+[build-dependencies]
+cc = "1"
+tauri-plugin = { version = "2", features = ["build"] }
+
+# Direct (non-inherited) deps — keeps this crate parseable in any
+# workspace, including hosts (like zen-tools) whose workspace.deps
+# section doesn't list `tauri` / `tracing` for inheritance.
+[dependencies]
+tauri = "2"
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+parking_lot = "0.12"
+tracing = "0.1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+ghostty-rs = { path = "../ghostty-rs" }
+ghostty-sys = { path = "../ghostty-sys" }
+objc2 = "0.5"
+objc2-app-kit = { version = "0.2", features = [
+    "NSWindow",
+    "NSView",
+    "NSResponder",
+    "NSScreen",
+    "NSApplication",
+] }
+objc2-foundation = { version = "0.2", features = [
+    "NSObject",
+    "NSGeometry",
+    "NSString",
+] }
