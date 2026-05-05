@@ -1,27 +1,27 @@
 /**
- * Conversations footer for the PR Review page.
+ * PR-level comments footer for the PR Review page.
  *
- * Hangs underneath the file-tree + diff workspace and lists every
- * unresolved review thread + top-level comment on the PR (the
- * unfiltered set, not the user-involvement-filtered set the global
- * Conversations tab shows).
- *
- * Each row reuses `ConversationThreadRow` from `ConversationThread.tsx`
- * so the visual matches the rest of the app pixel-for-pixel. On
- * review-thread rows that carry a `filePath`, an extra "Jump" pill
- * lets the reviewer click straight from the discussion to the
- * relevant file in the diff editor — the parent owns `selectedPath`,
- * so the jump is just a callback.
+ * Hangs underneath the file-tree + diff workspace and lists ONLY
+ * top-level PR comments / @-mentions on the PR. **Code-anchored
+ * review threads are deliberately excluded** — those render inline
+ * beneath their target line in the diff editor (Pierre's
+ * `renderAnnotation` slot), where the reviewer can read the comment
+ * next to the actual code it's about. Surfacing review threads here
+ * too would duplicate the same content in two places.
  *
  * The footer collapses on demand. The open/closed preference is
  * persisted in `localStorage` under `prmaster.reviewConversationsOpen`
  * so the user's last choice survives navigation away and back.
- * Default: open when at least one thread needs the user's reply.
+ * Default: open when at least one PR-level comment needs the user's
+ * reply.
+ *
+ * The expanded body is capped at ~40vh with internal scrolling so a
+ * long discussion never pushes the diff editor off-screen.
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ChevronDown, ChevronRight, FileText, Loader2 } from "lucide-react";
-import { Button, cn } from "@zen-tools/ui";
+import { ChevronDown, ChevronRight, Loader2 } from "lucide-react";
+import { cn } from "@zen-tools/ui";
 import {
   ConversationThreadRow,
   conversationNeedsUserReply,
@@ -35,10 +35,6 @@ interface Props {
   currentUser: string | null;
   loading: boolean;
   error: string | null;
-  /** Optional jump-to-file callback. When provided, every review-thread
-   *  row that has a `filePath` renders a small "Jump" pill that calls
-   *  this with the path so the parent can sync the diff editor. */
-  onSelectPath?: (path: string) => void;
 }
 
 /** Read the persisted open/closed flag. `null` → never set. */
@@ -58,19 +54,23 @@ export function PrConversationsFooter({
   currentUser,
   loading,
   error,
-  onSelectPath,
 }: Props) {
+  // Filter to PR-level comments / @-mentions only. Review threads are
+  // anchored to specific code lines and render inline in the diff
+  // editor via Pierre's annotations — duplicating them here would
+  // just be noise.
   const { needsReply, others, total } = useMemo(() => {
+    const filtered = conversations.filter((c) => c.kind === "mention_comment");
     const needsReply: ConversationItem[] = [];
     const others: ConversationItem[] = [];
-    for (const c of conversations) {
+    for (const c of filtered) {
       if (conversationNeedsUserReply(c, currentUser)) {
         needsReply.push(c);
       } else {
         others.push(c);
       }
     }
-    return { needsReply, others, total: conversations.length };
+    return { needsReply, others, total: filtered.length };
   }, [conversations, currentUser]);
 
   // Lazy-init: stored choice wins; fall back to "open when something
@@ -96,11 +96,11 @@ export function PrConversationsFooter({
   const toggle = useCallback(() => setOpen((o) => !o), []);
 
   // Empty + happy path: don't burn screen real estate when there are
-  // no conversations at all and we're not still loading.
+  // no PR-level comments at all (and we're not still loading).
   if (!loading && !error && total === 0) return null;
 
   return (
-    <div className="grid shrink-0 gap-1.5">
+    <div className="grid min-h-0 shrink-0 gap-1.5">
       <button
         type="button"
         onClick={toggle}
@@ -116,7 +116,7 @@ export function PrConversationsFooter({
         ) : (
           <ChevronRight className="size-3.5 text-muted-foreground" />
         )}
-        <span className="font-medium">Conversations</span>
+        <span className="font-medium">PR Comments</span>
         <span className="text-muted-foreground">
           {total} total
           {needsReply.length > 0 &&
@@ -130,7 +130,10 @@ export function PrConversationsFooter({
       </button>
 
       {open && (
-        <div className="grid gap-2 px-1 pb-1.5">
+        // Cap the expanded body so a long discussion can't push the
+        // diff editor off-screen — the body scrolls internally
+        // instead of growing the page-level grid.
+        <div className="grid max-h-[40vh] min-h-0 gap-2 overflow-y-auto px-1 pb-1.5">
           {error && (
             <div className="rounded border border-destructive/40 bg-destructive/5 px-2 py-1.5 text-xs text-destructive">
               {error}
@@ -141,19 +144,15 @@ export function PrConversationsFooter({
               label="Needs your reply"
               emphasis
               items={needsReply}
-              onSelectPath={onSelectPath}
             />
           )}
           {others.length > 0 && (
-            <FooterSection
-              label="Other threads"
-              items={others}
-              onSelectPath={onSelectPath}
-            />
+            <FooterSection label="Other comments" items={others} />
           )}
           {!loading && !error && total === 0 && (
             <div className="text-xs italic text-muted-foreground">
-              No outstanding conversations on this PR.
+              No PR-level comments. Code-anchored discussion shows
+              inline in the diff above.
             </div>
           )}
         </div>
@@ -166,17 +165,9 @@ interface SectionProps {
   label: string;
   items: ConversationItem[];
   emphasis?: boolean;
-  onSelectPath?: (path: string) => void;
 }
 
-/**
- * Like `ConversationSection` from `ConversationThread.tsx`, but with
- * an inline "Jump" pill on review-thread rows that carry a file path.
- * Implemented as a sibling component (rather than extending the
- * shared one) to avoid leaking the review-page-specific jump action
- * into the firehose view.
- */
-function FooterSection({ label, items, emphasis, onSelectPath }: SectionProps) {
+function FooterSection({ label, items, emphasis }: SectionProps) {
   if (items.length === 0) return null;
   return (
     <div className="grid gap-2 py-1">
@@ -189,24 +180,7 @@ function FooterSection({ label, items, emphasis, onSelectPath }: SectionProps) {
         {label}
       </div>
       {items.map((item) => (
-        <div key={item.id} className="grid gap-1">
-          <ConversationThreadRow item={item} />
-          {onSelectPath && item.filePath && (
-            <div className="flex">
-              <Button
-                size="xs"
-                variant="ghost"
-                className="ml-auto h-5 gap-1 px-2 text-[10px]"
-                onClick={() => onSelectPath(item.filePath!)}
-                title="Open this file in the diff editor"
-              >
-                <FileText className="size-3" />
-                Jump to {item.filePath}
-                {item.lineNumber ? `:${item.lineNumber}` : ""}
-              </Button>
-            </div>
-          )}
-        </div>
+        <ConversationThreadRow key={item.id} item={item} />
       ))}
     </div>
   );

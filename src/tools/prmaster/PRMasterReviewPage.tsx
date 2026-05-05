@@ -217,7 +217,6 @@ export function PRMasterReviewPage() {
               currentUser={state.currentUser}
               loading={convoLoading}
               error={convoError}
-              onSelectPath={setSelectedPath}
             />
           </>
         ) : (

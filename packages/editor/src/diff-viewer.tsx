@@ -255,14 +255,56 @@ function AnnotationBlock({
   onSubmit,
   onCancel,
 }: AnnotationBlockProps) {
+  // Inline styles, not className: Pierre slots annotations into a Shadow
+  // DOM via `<slot>` projection. Slotted content technically inherits
+  // document CSS, but Pierre's `:host` sheet sets a number of variables
+  // (font, line-height, color-scheme) that win over our utility classes
+  // in some browsers. Inline styles bypass that entirely so the comment
+  // block is always visible regardless of host theme drift.
   return (
-    <div className="diff-viewer-annotation">
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        gap: 4,
+        margin: "4px 0 4px 32px",
+        padding: "8px 10px",
+        background: "color-mix(in oklch, var(--muted, rgba(120,120,130,0.12)) 70%, transparent)",
+        borderLeft: "3px solid var(--primary, #3b82f6)",
+        borderRadius: 4,
+        fontSize: 12,
+        fontFamily: "ui-sans-serif, system-ui, sans-serif",
+        lineHeight: 1.5,
+      }}
+    >
       {comments.map((c) => (
-        <div key={c.id} className="diff-viewer-annotation-comment">
-          <span className="diff-viewer-annotation-author">
+        <div
+          key={c.id}
+          style={{
+            display: "flex",
+            gap: 6,
+            alignItems: "baseline",
+          }}
+        >
+          <span
+            style={{
+              fontFamily: "ui-monospace, SFMono-Regular, monospace",
+              fontSize: 11,
+              fontWeight: 600,
+              opacity: 0.85,
+              flexShrink: 0,
+            }}
+          >
             {c.authorLogin ? `@${c.authorLogin}` : "(unknown)"}
           </span>
-          <span className="diff-viewer-annotation-body">{c.body}</span>
+          <span
+            style={{
+              flex: 1,
+              whiteSpace: "pre-wrap",
+            }}
+          >
+            {c.body}
+          </span>
         </div>
       ))}
       {composerOpen && onSubmit && (
@@ -303,22 +345,36 @@ function Composer({ line, side, onSubmit, onCancel }: ComposerProps) {
     try {
       await onSubmit(trimmed);
     } catch {
-      // Host already surfaces failures; just unlock the form so the
-      // user can edit + retry.
       setSubmitting(false);
     }
   }, [body, submitting, onSubmit]);
 
+  // Inline styles for the same reason as AnnotationBlock — Pierre's
+  // shadow DOM `:host` rules can win over utility classes.
   return (
-    <div className="diff-viewer-composer">
-      <div className="diff-viewer-composer-hint">
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        gap: 6,
+        marginTop: 6,
+      }}
+    >
+      <div
+        style={{
+          fontSize: 10,
+          fontWeight: 500,
+          letterSpacing: "0.05em",
+          textTransform: "uppercase",
+          opacity: 0.7,
+        }}
+      >
         {side === "LEFT"
           ? `Commenting on deleted line ${line} (LEFT)`
           : `Commenting on line ${line} (RIGHT)`}
       </div>
       <textarea
         ref={taRef}
-        className="diff-viewer-composer-textarea"
         rows={3}
         value={body}
         placeholder="Leave a review comment…  (⌘+Enter to submit, Esc to cancel)"
@@ -333,21 +389,61 @@ function Composer({ line, side, onSubmit, onCancel }: ComposerProps) {
           }
         }}
         disabled={submitting}
+        style={{
+          width: "100%",
+          minHeight: 60,
+          padding: "6px 8px",
+          border: "1px solid rgba(120,120,130,0.4)",
+          borderRadius: 4,
+          background: "var(--background, rgba(255,255,255,0.6))",
+          color: "inherit",
+          fontFamily: "inherit",
+          fontSize: 12,
+          lineHeight: 1.5,
+          resize: "vertical",
+          boxSizing: "border-box",
+        }}
       />
-      <div className="diff-viewer-composer-actions">
+      <div
+        style={{
+          display: "flex",
+          gap: 6,
+          justifyContent: "flex-end",
+        }}
+      >
         <button
           type="button"
-          className="diff-viewer-composer-cancel"
           onClick={onCancel}
           disabled={submitting}
+          style={{
+            padding: "4px 12px",
+            border: "1px solid rgba(120,120,130,0.4)",
+            borderRadius: 4,
+            background: "transparent",
+            color: "inherit",
+            fontSize: 11,
+            fontWeight: 500,
+            cursor: submitting ? "not-allowed" : "pointer",
+            opacity: submitting ? 0.5 : 1,
+          }}
         >
           Cancel
         </button>
         <button
           type="button"
-          className="diff-viewer-composer-submit"
           onClick={submit}
           disabled={submitting || body.trim().length === 0}
+          style={{
+            padding: "4px 12px",
+            border: "1px solid var(--primary, #3b82f6)",
+            borderRadius: 4,
+            background: "var(--primary, #3b82f6)",
+            color: "var(--primary-foreground, #fff)",
+            fontSize: 11,
+            fontWeight: 500,
+            cursor: submitting || body.trim().length === 0 ? "not-allowed" : "pointer",
+            opacity: submitting || body.trim().length === 0 ? 0.5 : 1,
+          }}
         >
           {submitting ? "Posting…" : "Comment"}
         </button>

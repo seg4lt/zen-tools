@@ -17,6 +17,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ExternalLink,
+  Eye,
+  EyeOff,
   Loader2,
   PanelLeftClose,
   PanelLeftOpen,
@@ -92,6 +94,28 @@ export function PrFilesChangedView({
   }, [onSelectPath]);
   // UI: tree visibility.
   const [treeOpen, setTreeOpen] = useState(true);
+  // Hide-comments toggle. When false, the diff editor receives an
+  // empty comments array (and `onAddComment` undefined to also hide
+  // the gutter "+") so the reviewer can read the code without any
+  // overlay. Persisted in localStorage so the choice survives
+  // navigating between PRs.
+  const [showComments, setShowComments] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem("prmaster.reviewShowComments") !== "false";
+    } catch {
+      return true;
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        "prmaster.reviewShowComments",
+        String(showComments),
+      );
+    } catch {
+      // private browsing / quota — non-fatal.
+    }
+  }, [showComments]);
   // Bumped by the refresh button to force the load effect to re-run.
   // The local-git path will re-`git fetch` origin and the REST path
   // re-hits the API, so refresh always gets the freshest state.
@@ -331,6 +355,24 @@ export function PrFilesChangedView({
           <Button
             size="xs"
             variant="ghost"
+            onClick={() => setShowComments((v) => !v)}
+            title={
+              showComments
+                ? "Hide review comments — read the code without overlay"
+                : "Show review comments back on the diff"
+            }
+            className="h-5 gap-1 px-1.5"
+          >
+            {showComments ? (
+              <Eye className="size-3" />
+            ) : (
+              <EyeOff className="size-3" />
+            )}
+            {showComments ? "Hide comments" : "Show comments"}
+          </Button>
+          <Button
+            size="xs"
+            variant="ghost"
             onClick={handleRefresh}
             disabled={refreshing}
             title={
@@ -387,9 +429,9 @@ export function PrFilesChangedView({
                 fileName={selected.path}
                 isDark={isDark}
                 viewMode={viewMode}
-                comments={commentsForSelected}
+                comments={showComments ? commentsForSelected : []}
                 onAddComment={
-                  diff.headSha ? handleAddComment : undefined
+                  showComments && diff.headSha ? handleAddComment : undefined
                 }
               />
             )

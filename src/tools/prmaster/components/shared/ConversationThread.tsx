@@ -9,7 +9,12 @@
  */
 
 import { useState } from "react";
-import { ExternalLink, MessageSquare } from "lucide-react";
+import {
+  ChevronDown,
+  ChevronRight,
+  ExternalLink,
+  MessageSquare,
+} from "lucide-react";
 import { open as openUrl } from "@tauri-apps/plugin-shell";
 import { Badge } from "@zen-tools/ui";
 import { Button } from "@zen-tools/ui";
@@ -41,7 +46,13 @@ export function ConversationThreadRow({ item }: { item: ConversationItem }) {
         type="button"
         onClick={() => setOpen((o) => !o)}
         className="flex w-full items-start gap-2 px-3 py-2 text-left text-xs transition-colors hover:bg-accent/40"
+        aria-expanded={open}
       >
+        {open ? (
+          <ChevronDown className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
+        ) : (
+          <ChevronRight className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
+        )}
         <Badge
           variant={item.kind === "review_thread" ? "secondary" : "outline"}
           className="shrink-0"
