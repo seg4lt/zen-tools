@@ -57,7 +57,10 @@
     ],
     "macOS": {
       "entitlements": "entitlements.plist",
-      "minimumSystemVersion": "11.0"
+      "minimumSystemVersion": "11.0",
+      "frameworks": [
+        "../target/release/libzen_apple_speech_bridge.dylib"
+      ]
     }
   }
 }
