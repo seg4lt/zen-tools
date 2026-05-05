@@ -28,6 +28,28 @@ impl Config {
         unsafe { ghostty_sys::ghostty_config_load_default_files(self.inner) };
     }
 
+    /// Load an additional config file. Same key-value format as the
+    /// default user config (`window-padding-balance = true`, etc.).
+    /// Calling this AFTER `load_default_files` lets overrides win
+    /// (ghostty's parser applies values left-to-right and the last
+    /// write wins for any given key).
+    ///
+    /// Errors if the path contains an interior NUL byte. Missing /
+    /// unreadable files are NOT an error here — ghostty silently
+    /// ignores them; that matches the upstream Swift wrapper's
+    /// behaviour (`Ghostty.App+Config.swift:loadFile`).
+    pub fn load_file(&mut self, path: &std::path::Path) -> Result<()> {
+        let path_str = path
+            .to_str()
+            .ok_or(Error::ConfigCreateFailed)?;
+        let cstring = std::ffi::CString::new(path_str)
+            .map_err(|_| Error::ConfigCreateFailed)?;
+        unsafe {
+            ghostty_sys::ghostty_config_load_file(self.inner, cstring.as_ptr())
+        };
+        Ok(())
+    }
+
     /// Finalise the config — must be called before passing to `App::new`.
     pub fn finalize(&mut self) {
         unsafe { ghostty_sys::ghostty_config_finalize(self.inner) };

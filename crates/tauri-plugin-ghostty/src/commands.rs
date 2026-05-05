@@ -436,6 +436,7 @@ pub fn terminal_set_traffic_lights_hidden(
 fn create_app() -> ghostty_rs::Result<App> {
     let mut config = Config::new()?;
     config.load_default_files();
+    apply_zen_tools_overrides(&mut config);
     config.finalize();
 
     // v1 callbacks: ghostty's wakeup is a no-op for now (we'll wire it
@@ -444,6 +445,55 @@ fn create_app() -> ghostty_rs::Result<App> {
     let callbacks = RuntimeCallbacks::no_op();
 
     App::new(config, callbacks)
+}
+
+/// Write a small overrides file to a temp path and load it AFTER
+/// `load_default_files`, so the override values win in ghostty's
+/// last-write-wins parser.
+///
+/// We override:
+///
+///   * `window-padding-balance = true` — by default ghostty dumps
+///     all sub-cell residual into the bottom-and-right padding,
+///     producing a visible strip of background pixels at the bottom
+///     edge of the cell grid that's especially noticeable on
+///     non-integer-multiple window heights. Balancing splits the
+///     residual evenly across all four sides so the gap shrinks
+///     in half AND lands where the eye expects breathing room
+///     (top + bottom equally) rather than as an asymmetric strip
+///     at the bottom alone.
+///
+///   * `window-padding-y = 0` — removes ghostty's default 2-px
+///     vertical padding. With balance on the residual already gives
+///     us breathing room; the explicit padding is redundant in our
+///     embedded layout where the React title bar already provides
+///     the visual gutter at the top.
+///
+/// Failure modes are non-fatal: if the temp file can't be written,
+/// or `load_file` fails, the user just keeps ghostty's defaults.
+/// This is purely a polish step and we don't want to block the app
+/// from starting on a bad I/O day.
+fn apply_zen_tools_overrides(config: &mut Config) {
+    let body = "window-padding-balance = true\nwindow-padding-y = 0\n";
+    let dir = std::env::temp_dir();
+    // Bundle-id-namespaced filename so multiple installs / dev
+    // builds don't collide on the same file.
+    let path = dir.join("zen-tools-ghostty-overrides.conf");
+    if let Err(e) = std::fs::write(&path, body) {
+        tracing::warn!(
+            error = %e,
+            path = %path.display(),
+            "ghostty: failed to write padding override file; using defaults"
+        );
+        return;
+    }
+    if let Err(e) = config.load_file(&path) {
+        tracing::warn!(
+            error = ?e,
+            path = %path.display(),
+            "ghostty: failed to load padding override file; using defaults"
+        );
+    }
 }
 
 fn run_on_main<F, T>(window: &Window<Wry>, f: F) -> tauri::Result<T>
