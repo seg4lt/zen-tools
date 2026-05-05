@@ -19,6 +19,7 @@ import { CleanerShell } from "@/tools/cleaner/CleanerShell";
 import { MarkdownShell } from "@/tools/markdown/MarkdownShell";
 import { DatabaseExplorerShell } from "@/tools/database-explorer/DatabaseExplorerShell";
 import { PRMasterShell } from "@/tools/prmaster/PRMasterShell";
+import { PRMasterReviewPage } from "@/tools/prmaster/PRMasterReviewPage";
 import { SettingsView } from "@/tools/settings/SettingsView";
 import { TerminalShell } from "@/tools/terminal/TerminalShell";
 import { useDistractionFree } from "@/tools/terminal/store/distraction-free";
@@ -283,6 +284,19 @@ const prmasterRoute = createRoute({
   ),
 });
 
+// Dedicated review page — see `PRMasterReviewPage.tsx`. Sits one
+// level deep under the prmaster shell so list → detail → review
+// is a clean linear chain, deep-linkable via URL params.
+const prmasterReviewRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/prmaster/review/$owner/$repo/$number",
+  component: () => (
+    <DisabledGuard toolId="prmaster">
+      <PRMasterReviewPage />
+    </DisabledGuard>
+  ),
+});
+
 // Native Ghostty terminal — see `crates/tauri-plugin-ghostty/`. The
 // route is registered on every platform; on non-macOS the plugin's
 // no-op `init()` means the commands fail and the view will simply
@@ -311,6 +325,7 @@ const routeTree = rootRoute.addChildren([
   markdownRoute,
   databaseExplorerRoute,
   prmasterRoute,
+  prmasterReviewRoute,
   terminalRoute,
   settingsRoute,
 ]);

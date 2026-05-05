@@ -3,26 +3,28 @@
  *
  * Loads the diff via `prmaster_get_pr_diff` (local-git first, gh REST
  * fallback) on mount. Selected file's `patch` feeds the `<DiffViewer>`,
- * which renders a CodeMirror 6 unified merge view with inline-comment
- * widgets. New comments post via `prmaster_add_review_comment` and
- * appear immediately in the local list (full sync happens on the next
- * background refresh).
+ * which renders a CodeMirror 6 merge view (unified or split, controlled
+ * by `viewMode`) with inline-comment widgets. New comments post via
+ * `prmaster_add_review_comment` and appear immediately in the local
+ * list (full sync happens on the next background refresh).
+ *
+ * Used exclusively from the dedicated `/prmaster/review/...` page —
+ * the surrounding page owns its own header, so this component is a
+ * "fill the container" subview with its own toolbar but no extra
+ * window-chrome of its own.
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ExternalLink,
   Loader2,
-  Maximize2,
-  Minimize2,
   PanelLeftClose,
   PanelLeftOpen,
   RefreshCw,
 } from "lucide-react";
 import { open as openUrl } from "@tauri-apps/plugin-shell";
 import { Button } from "@zen-tools/ui";
-import { cn } from "@zen-tools/ui";
-import { DiffViewer, type InlineComment } from "@zen-tools/editor";
+import { DiffViewer, type DiffViewMode, type InlineComment } from "@zen-tools/editor";
 import { useTheme } from "@/hooks/use-theme";
 import {
   prmasterTauri,
@@ -36,6 +38,9 @@ import { PrFileTree } from "./PrFileTree";
 
 interface Props {
   pr: EnrichedPullRequest;
+  /** Which CodeMirror view mode to use for the diff editor. Owned by
+   *  the parent (review page) so the toggle can persist user choice. */
+  viewMode: DiffViewMode;
 }
 
 interface LocalComment extends InlineComment {
@@ -43,7 +48,7 @@ interface LocalComment extends InlineComment {
   filePath: string;
 }
 
-export function PrFilesChangedView({ pr }: Props) {
+export function PrFilesChangedView({ pr, viewMode }: Props) {
   const ref = prRefFor(pr.pr);
   const baseRef = pr.detail?.baseRefName ?? null;
   const headRef = pr.detail?.headRefName ?? null;
@@ -56,9 +61,8 @@ export function PrFilesChangedView({ pr }: Props) {
   const [loading, setLoading] = useState(true);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [comments, setComments] = useState<LocalComment[]>([]);
-  // UI: tree visibility + viewport-fill toggle.
+  // UI: tree visibility.
   const [treeOpen, setTreeOpen] = useState(true);
-  const [maximized, setMaximized] = useState(false);
   // Bumped by the refresh button to force the load effect to re-run.
   // The local-git path will re-`git fetch` origin and the REST path
   // re-hits the API, so refresh always gets the freshest state.
@@ -110,16 +114,6 @@ export function PrFilesChangedView({ pr }: Props) {
     setRefreshing(true);
     setRefreshTick((n) => n + 1);
   }, []);
-
-  // Esc exits maximized mode — matches the rest of the app.
-  useEffect(() => {
-    if (!maximized) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setMaximized(false);
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [maximized]);
 
   const selected = useMemo<FileDiff | null>(() => {
     if (!diff || !selectedPath) return null;
@@ -216,12 +210,9 @@ export function PrFilesChangedView({ pr }: Props) {
     { add: 0, del: 0 },
   );
 
-  // Layout numbers vary with the maximized toggle:
-  //   - maximized=false: lives inside the detail-panel section, capped
-  //     at 70vh so the rest of the panel can still scroll alongside.
-  //   - maximized=true: fixed-positioned over the viewport with only a
-  //     padding gutter so the diff actually has room to breathe. Esc
-  //     or the Restore button drops back to the inline form.
+  // Two-column layout — file tree (collapsible) on the left, the
+  // CodeMirror diff editor on the right. The component fills its
+  // container; the parent review page owns viewport sizing.
   const gridColumns = treeOpen
     ? "minmax(180px, 260px) minmax(0, 1fr)"
     : // Collapsed tree → only the diff column. minmax(0, 1fr) prevents
@@ -230,17 +221,8 @@ export function PrFilesChangedView({ pr }: Props) {
       "minmax(0, 1fr)";
 
   return (
-    <div
-      className={cn(
-        "grid gap-1.5 rounded-md border bg-card/40 p-1.5",
-        maximized
-          ? "fixed inset-2 z-50 grid-rows-[auto_1fr] shadow-2xl"
-          : "",
-      )}
-    >
-      {/* Toolbar — counts + actions. Sticky to the top of the
-          maximized overlay so it stays reachable while the diff
-          scrolls. */}
+    <div className="grid h-full min-h-0 grid-rows-[auto_1fr] gap-1.5 rounded-md border bg-card/40 p-1.5">
+      {/* Toolbar — counts + actions. */}
       <div className="flex items-center justify-between gap-2 px-1 text-[11px] text-muted-foreground">
         <span className="flex items-center gap-2">
           <Button
@@ -278,31 +260,9 @@ export function PrFilesChangedView({ pr }: Props) {
             }
           >
             <RefreshCw
-              className={cn("size-3", refreshing && "animate-spin")}
+              className={refreshing ? "size-3 animate-spin" : "size-3"}
             />
             {refreshing ? "Refreshing…" : "Refresh"}
-          </Button>
-          <Button
-            size="xs"
-            variant="ghost"
-            onClick={() => setMaximized((v) => !v)}
-            title={
-              maximized
-                ? "Exit full-screen (Esc)"
-                : "Expand to full screen — gives the diff the whole viewport"
-            }
-          >
-            {maximized ? (
-              <>
-                <Minimize2 className="size-3" />
-                Restore
-              </>
-            ) : (
-              <>
-                <Maximize2 className="size-3" />
-                Maximize
-              </>
-            )}
           </Button>
           <Button
             size="xs"
@@ -319,10 +279,6 @@ export function PrFilesChangedView({ pr }: Props) {
         className="grid min-h-0 gap-1.5 rounded-md"
         style={{
           gridTemplateColumns: gridColumns,
-          // In-panel: cap height so the rest of the detail panel
-          // remains scrollable. Maximized: fill the remaining
-          // overlay row (`auto 1fr` parent grid).
-          height: maximized ? "100%" : "min(70vh, 640px)",
         }}
       >
         {treeOpen && (
@@ -350,6 +306,7 @@ export function PrFilesChangedView({ pr }: Props) {
                 patch={selected.patch}
                 fileName={selected.path}
                 isDark={isDark}
+                viewMode={viewMode}
                 comments={commentsForSelected}
                 onAddComment={
                   diff.headSha ? handleAddComment : undefined

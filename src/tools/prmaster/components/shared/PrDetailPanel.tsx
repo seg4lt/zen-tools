@@ -16,8 +16,11 @@
  *   4. **Reviewers + Checks** — two side-by-side blocks (collapses
  *      to stacked on narrow widths) so the heaviest detail is
  *      visible without scrolling.
- *   5. **Files changed** — collapsible list of file paths (we only
- *      have paths today; per-file diffs are a future enhancement).
+ *   5. **Review Pull Request** — a single button that navigates to
+ *      `/prmaster/review/$owner/$repo/$number` (the dedicated diff
+ *      workspace). The previous in-place "Files changed" accordion
+ *      cramped the diff editor; reviewing now happens on its own
+ *      full-window page with a Unified / Split toggle.
  *   6. **Conversations** — review threads + @-mention comments on
  *      this PR, filtered out of the global conversations list. Same
  *      `ConversationThreadRow` component the firehose tab uses, so
@@ -34,8 +37,6 @@ import {
   AlertTriangle,
   ArrowDown,
   Check,
-  ChevronDown,
-  ChevronRight,
   CircleHelp,
   Copy,
   ExternalLink,
@@ -49,6 +50,7 @@ import {
 } from "lucide-react";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { open as openUrl } from "@tauri-apps/plugin-shell";
+import { useNavigate } from "@tanstack/react-router";
 import { Badge } from "@zen-tools/ui";
 import { Button } from "@zen-tools/ui";
 import { Label } from "@zen-tools/ui";
@@ -66,7 +68,6 @@ import {
   ConversationSection,
   conversationNeedsUserReply,
 } from "./ConversationThread";
-import { PrFilesChangedView } from "./PrFilesChangedView";
 import { ReviewerAvatars } from "./ReviewerAvatars";
 
 interface Props {
@@ -84,9 +85,9 @@ export function PrDetailPanel({ pr, currentUser, onActionDone }: Props) {
   const [showRequestForm, setShowRequestForm] = useState(false);
   const [requestBody, setRequestBody] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const [filesOpen, setFilesOpen] = useState(false);
 
   const { state } = usePrMasterStore();
+  const navigate = useNavigate();
   const ref = prRefFor(pr.pr);
   const detail = pr.detail;
   const rollup = detail?.commits?.nodes[0]?.commit.statusCheckRollup ?? null;
@@ -362,16 +363,33 @@ export function PrDetailPanel({ pr, currentUser, onActionDone }: Props) {
         <CiChecks rollup={rollup} />
       </Section>
 
-      {/* ── 6. Files changed ────────────────────────────────────── */}
+      {/* ── 6. Review Pull Request — opens the dedicated review page
+              (`/prmaster/review/$owner/$repo/$number`). Replaces the
+              previous in-place "Files changed" accordion: reviewing
+              now happens on a full-window page where the diff editor
+              has room to breathe (and a Unified / Split toggle). */}
       {fileCount > 0 && (
-        <Section
-          label={`Files changed (${fileCount})`}
-          collapsible
-          open={filesOpen}
-          onToggle={() => setFilesOpen((o) => !o)}
+        <Button
+          size="sm"
+          className="w-full justify-center gap-2"
+          onClick={() =>
+            void navigate({
+              to: "/prmaster/review/$owner/$repo/$number",
+              params: {
+                owner: ref.owner,
+                repo: ref.repo,
+                number: String(ref.number),
+              },
+            })
+          }
+          title="Open the dedicated review workspace for this PR"
         >
-          {filesOpen && <PrFilesChangedView pr={pr} />}
-        </Section>
+          <FileDiff className="size-3.5" />
+          Review Pull Request
+          <span className="rounded bg-primary-foreground/15 px-1.5 py-0.5 text-[10px] font-mono">
+            {fileCount} {fileCount === 1 ? "file" : "files"}
+          </span>
+        </Button>
       )}
 
       {/* ── 6. Conversations on this PR ─────────────────────────── */}
@@ -395,43 +413,29 @@ export function PrDetailPanel({ pr, currentUser, onActionDone }: Props) {
 // ── Section wrapper ──────────────────────────────────────────────
 
 /**
- * Standard label-on-top block. Optionally collapsible — used by the
- * Files changed list and (in the future) the diff viewer to keep
- * the panel digestible when there are many files.
+ * Standard label-on-top block. Used by Reviewers / Checks /
+ * Conversations rows to keep spacing + label styling consistent.
+ *
+ * Previously this also supported a `collapsible` mode used by the
+ * Files Changed accordion; that surface is now a "Review Pull
+ * Request" navigation button (`/prmaster/review/...`) so the
+ * collapsible branch was retired — kept the wrapper non-collapsible
+ * so existing call sites (Reviewers, Checks, Conversations) stay
+ * unchanged.
  */
 function Section({
   label,
   children,
-  collapsible = false,
-  open = true,
-  onToggle,
 }: {
   label: string;
   children: React.ReactNode;
-  collapsible?: boolean;
-  open?: boolean;
-  onToggle?: () => void;
 }) {
-  const Header = collapsible ? "button" : "div";
   return (
     <div className="grid gap-1.5">
-      <Header
-        type={collapsible ? "button" : undefined}
-        onClick={collapsible ? onToggle : undefined}
-        className={cn(
-          "flex items-center gap-1 text-[10px] uppercase tracking-wide text-muted-foreground",
-          collapsible && "cursor-pointer hover:text-foreground",
-        )}
-      >
-        {collapsible &&
-          (open ? (
-            <ChevronDown className="size-3" />
-          ) : (
-            <ChevronRight className="size-3" />
-          ))}
+      <div className="flex items-center gap-1 text-[10px] uppercase tracking-wide text-muted-foreground">
         <span>{label}</span>
-      </Header>
-      {(!collapsible || open) && children}
+      </div>
+      {children}
     </div>
   );
 }

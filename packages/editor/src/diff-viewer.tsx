@@ -1,10 +1,20 @@
 /**
  * `<DiffViewer>` — reads a unified-diff patch (the kind `git diff`
- * emits) and renders it via CodeMirror 6 + `@codemirror/merge`'s
- * `unifiedMergeView`. The editor doc is the "after" file; the
- * `original` extension config is the "before" file. CodeMirror does
- * the heavy lifting (line gutters, syntax highlight, +/- block
- * rendering, fold-unchanged).
+ * emits) and renders it via CodeMirror 6 + `@codemirror/merge`.
+ *
+ * Two render modes, switched at runtime via the `viewMode` prop:
+ *
+ *   - **unified** — single editor showing the "after" file with
+ *     deleted chunks rendered inline as block widgets
+ *     (`unifiedMergeView`). The composer can post comments anchored
+ *     to RIGHT-side (after) lines only — the deleted chunks aren't
+ *     real document lines so they have no gutter to click.
+ *   - **split** — two editors side by side via `MergeView`. The
+ *     LEFT editor shows the before-image; the RIGHT editor shows
+ *     the after-image. The "+" gutter, syntax highlight, and
+ *     comment widgets are wired to BOTH editors so the user can
+ *     comment on deleted lines (LEFT) AND added/context lines
+ *     (RIGHT) — matches GitHub's split-view behaviour.
  *
  * The patch's hunks are reconstructed into "before"/"after" buffers
  * with `@@ ... unchanged ...` placeholders between hunks so the user
@@ -20,8 +30,9 @@
  *     EVERY line — overwhelming on big diffs. Now only one composer
  *     is open at a time, opened deliberately.
  *   - Submitting the composer posts the comment immediately via
- *     `onAddComment` and clears the composer back to the gutter
- *     state. Esc closes without posting.
+ *     `onAddComment` (with the correct `side` for the editor that was
+ *     clicked) and clears the composer back to the gutter state. Esc
+ *     closes without posting.
  */
 
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -30,6 +41,7 @@ import {
   StateEffect,
   StateField,
   RangeSetBuilder,
+  Facet,
   type Extension,
 } from "@codemirror/state";
 import {
@@ -48,7 +60,7 @@ import {
   foldGutter,
 } from "@codemirror/language";
 import { tags as t } from "@lezer/highlight";
-import { unifiedMergeView } from "@codemirror/merge";
+import { unifiedMergeView, MergeView } from "@codemirror/merge";
 import { languages } from "@codemirror/language-data";
 import { makeEditorTheme } from "./cm-theme";
 
@@ -57,13 +69,16 @@ import { makeEditorTheme } from "./cm-theme";
 /** A single inline comment rendered beneath a line. */
 export interface InlineComment {
   id: string;
-  /** 1-based line number in the editor's doc (the "after" side). */
+  /** 1-based line number in the side's doc (RIGHT=after, LEFT=before). */
   line: number;
   /** Side the comment was anchored to. */
   side: "LEFT" | "RIGHT";
   authorLogin: string | null;
   body: string;
 }
+
+/** Which view to render. */
+export type DiffViewMode = "unified" | "split";
 
 export interface DiffViewerProps {
   /** Raw unified-diff body for one file (with the `diff --git` header). */
@@ -74,6 +89,12 @@ export interface DiffViewerProps {
   isDark?: boolean;
   /** Existing review comments to display. */
   comments?: InlineComment[];
+  /**
+   * View mode — `"unified"` (single editor, default) or `"split"`
+   * (side-by-side via `MergeView`). In split mode the LEFT editor
+   * also accepts comments — composer posts them with `side: "LEFT"`.
+   */
+  viewMode?: DiffViewMode;
   /** Called when the user submits a new comment. */
   onAddComment?: (input: {
     line: number;
@@ -93,7 +114,7 @@ export interface DiffViewerProps {
 interface ReconstructedPatch {
   before: string;
   after: string;
-  /** Per "after"-side line — null when the line corresponds to a
+  /** Per "after"-side editor line — null when the line corresponds to a
    *  deleted hunk row. */
   beforeLineByAfter: Map<number, number>;
 }
@@ -207,6 +228,22 @@ function reconstructPatch(raw: string): ReconstructedPatch {
   };
 }
 
+// ── Side facet ───────────────────────────────────────────────────
+
+/**
+ * Which side a given editor instance represents. Configured per
+ * extension list at build time — the LEFT editor in a `MergeView`
+ * gets `"LEFT"`, every other case (unified single editor, RIGHT
+ * editor in split) gets `"RIGHT"`.
+ *
+ * Read by `AddCommentGutterMarker` and `CommentBlockWidget` to:
+ *   1. Filter `comments` to those targeting this side.
+ *   2. Stamp the right `side` value on `onAddComment` payloads.
+ */
+const editorSide = Facet.define<"LEFT" | "RIGHT", "LEFT" | "RIGHT">({
+  combine: (values) => values[0] ?? "RIGHT",
+});
+
 // ── Comment widgets ──────────────────────────────────────────────
 
 interface CommentBundle {
@@ -265,6 +302,7 @@ class CommentBlockWidget extends WidgetType {
   constructor(
     readonly comments: InlineComment[],
     readonly line: number,
+    readonly side: "LEFT" | "RIGHT",
     readonly onAdd: DiffViewerProps["onAddComment"],
     readonly showComposer: boolean,
   ) {
@@ -275,6 +313,7 @@ class CommentBlockWidget extends WidgetType {
     // Two widgets are equal when they'd render identically. Cheap
     // structural check — comment ids + count + open-composer flag.
     if (other.line !== this.line) return false;
+    if (other.side !== this.side) return false;
     if (other.showComposer !== this.showComposer) return false;
     if (other.comments.length !== this.comments.length) return false;
     for (let i = 0; i < this.comments.length; i++) {
@@ -303,6 +342,15 @@ class CommentBlockWidget extends WidgetType {
     if (this.showComposer && this.onAdd) {
       const composer = document.createElement("div");
       composer.className = "cm-pr-comment-composer";
+      // Side hint so the user can see whether their comment will be
+      // attached to the deleted (LEFT) or added/context (RIGHT) line.
+      const hint = document.createElement("div");
+      hint.className = "cm-pr-comment-side-hint";
+      hint.textContent =
+        this.side === "LEFT"
+          ? `Commenting on deleted line ${this.line} (LEFT)`
+          : `Commenting on line ${this.line} (RIGHT)`;
+      composer.appendChild(hint);
       const ta = document.createElement("textarea");
       ta.placeholder = "Leave a review comment…  (⌘+Enter to submit, Esc to cancel)";
       ta.rows = 3;
@@ -333,7 +381,7 @@ class CommentBlockWidget extends WidgetType {
         submit.disabled = true;
         cancel.disabled = true;
         try {
-          await this.onAdd({ line: this.line, side: "RIGHT", body });
+          await this.onAdd({ line: this.line, side: this.side, body });
           // Success — close the composer. The host's next
           // `setComments` dispatch will surface the new comment in
           // the existing-comments list above.
@@ -367,7 +415,13 @@ class CommentBlockWidget extends WidgetType {
   }
 
   ignoreEvent(): boolean {
-    return false;
+    // Return `true` (CodeMirror's default) so events inside this
+    // widget are NOT routed through the editor's own handlers. The
+    // textarea + Cancel/Comment buttons need to receive their own
+    // keystrokes / clicks; previously this was `false`, which made
+    // CodeMirror intercept keypresses and silently break typing in
+    // the composer. Don't change this without testing typing again.
+    return true;
   }
 }
 
@@ -430,9 +484,15 @@ const commentDecorations = EditorView.decorations.compute(
   (state) => {
     const bundle = state.field(commentsField);
     const composerLine = state.field(composerLineField);
+    const side = state.facet(editorSide);
     const lineCount = state.doc.lines;
     const byLine = new Map<number, InlineComment[]>();
     for (const c of bundle.comments) {
+      // Only surface comments whose `side` matches this editor — in
+      // split mode each editor is one side, in unified mode the host
+      // configures the editor as RIGHT and LEFT comments aren't
+      // shown (the user can switch to split view to see them).
+      if (c.side !== side) continue;
       const list = byLine.get(c.line) ?? [];
       list.push(c);
       byLine.set(c.line, list);
@@ -455,6 +515,7 @@ const commentDecorations = EditorView.decorations.compute(
           widget: new CommentBlockWidget(
             list ?? [],
             n,
+            side,
             bundle.onAddComment,
             showComposer,
           ),
@@ -542,6 +603,13 @@ const diffViewerTheme = EditorView.theme({
     flex: "1",
     whiteSpace: "pre-wrap",
   },
+  ".cm-pr-comment-side-hint": {
+    fontSize: "10px",
+    opacity: "0.7",
+    fontWeight: "500",
+    textTransform: "uppercase",
+    letterSpacing: "0.05em",
+  },
   ".cm-pr-comment-composer": {
     display: "flex",
     flexDirection: "column",
@@ -602,6 +670,12 @@ const diffViewerTheme = EditorView.theme({
     opacity: "0.5",
     cursor: "wait",
   },
+  // ── Split (MergeView) layout ──────────────────────────────────
+  // MergeView's default styling lays the two editors out without an
+  // explicit height; we cap to 100% so the wrapping flex container
+  // controls the size and the inner editors scroll independently.
+  ".cm-mergeView": { height: "100%" },
+  ".cm-mergeViewEditors": { height: "100%" },
 });
 
 // ── Syntax highlight (matches the rest of the app) ───────────────
@@ -622,15 +696,70 @@ const baseHighlight = HighlightStyle.define([
 
 // ── Component ────────────────────────────────────────────────────
 
+/**
+ * Build the per-side extension list. Same set of features (gutter,
+ * line numbers, fold, syntax highlight, theme, comments) — only the
+ * `editorSide` facet and the `unifiedMergeView`/no-merge bit differ.
+ *
+ * In split mode each editor is built with `merge: false` because
+ * `MergeView` does its own diff highlighting on the wrapper level;
+ * adding `unifiedMergeView` per-side would double-render.
+ */
+function buildExtensions(opts: {
+  side: "LEFT" | "RIGHT";
+  isDark: boolean;
+  languageExt: Extension | null;
+  /** When provided, mounts `unifiedMergeView` (single-editor mode);
+   *  null skips it (split mode). */
+  unifiedOriginal: string | null;
+}): Extension[] {
+  const exts: Extension[] = [
+    // Add-comment gutter sits BEFORE the line numbers so the "+"
+    // appears at the very left margin — same column users expect
+    // from GitHub's diff view.
+    addCommentGutter(),
+    lineNumbers(),
+    foldGutter(),
+    drawSelection(),
+    bracketMatching(),
+    syntaxHighlighting(baseHighlight),
+    ...(opts.languageExt ? [opts.languageExt] : []),
+    EditorState.readOnly.of(true),
+    EditorView.editable.of(false),
+    EditorView.lineWrapping,
+    makeEditorTheme(opts.isDark),
+    diffViewerTheme,
+    editorSide.of(opts.side),
+    commentsField,
+    composerLineField,
+    commentDecorations,
+  ];
+  if (opts.unifiedOriginal !== null) {
+    exts.push(
+      unifiedMergeView({
+        original: opts.unifiedOriginal,
+        mergeControls: false,
+        gutter: true,
+        highlightChanges: true,
+        collapseUnchanged: { margin: 3, minSize: 4 },
+      }),
+    );
+  }
+  return exts;
+}
+
 export function DiffViewer({
   patch,
   fileName,
   isDark = false,
   comments = [],
+  viewMode = "unified",
   onAddComment,
 }: DiffViewerProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
-  const viewRef = useRef<EditorView | null>(null);
+  // Both layouts populate this ref with the editors that need
+  // `setComments` dispatches when comments change.
+  const viewsRef = useRef<EditorView[]>([]);
 
   const reconstructed = useMemo(() => reconstructPatch(patch), [patch]);
   const [languageExt, setLanguageExt] = useState<Extension | null>(null);
@@ -662,66 +791,84 @@ export function DiffViewer({
     };
   }, [fileName]);
 
-  const extensions = useMemo<Extension[]>(() => {
-    return [
-      // Add-comment gutter sits BEFORE the line numbers so the "+"
-      // appears at the very left margin — same column users expect
-      // from GitHub's diff view.
-      addCommentGutter(),
-      lineNumbers(),
-      foldGutter(),
-      drawSelection(),
-      bracketMatching(),
-      syntaxHighlighting(baseHighlight),
-      ...(languageExt ? [languageExt] : []),
-      EditorState.readOnly.of(true),
-      EditorView.editable.of(false),
-      EditorView.lineWrapping,
-      makeEditorTheme(isDark),
-      diffViewerTheme,
-      unifiedMergeView({
-        original: reconstructed.before,
-        mergeControls: false,
-        gutter: true,
-        highlightChanges: true,
-        collapseUnchanged: { margin: 3, minSize: 4 },
-      }),
-      commentsField,
-      composerLineField,
-      commentDecorations,
-    ];
-    // languageExt updates after async load; rebuild extensions then.
-  }, [reconstructed, isDark, languageExt]);
-
-  // Mount / re-mount when the patch (and therefore extensions) changes.
+  // Mount / re-mount when patch, viewMode, languageExt, or isDark
+  // changes — every one of those rebuilds the extension list and
+  // CodeMirror's `EditorState` is immutable on these axes.
   useEffect(() => {
-    if (!hostRef.current) return;
+    const host = hostRef.current;
+    if (!host) return;
+    // Clear any prior children defensively (StrictMode double-mount,
+    // viewMode flip, etc.).
+    while (host.firstChild) host.removeChild(host.firstChild);
+    viewsRef.current = [];
+
+    if (viewMode === "split") {
+      const merge = new MergeView({
+        a: {
+          doc: reconstructed.before,
+          extensions: buildExtensions({
+            side: "LEFT",
+            isDark,
+            languageExt,
+            unifiedOriginal: null,
+          }),
+        },
+        b: {
+          doc: reconstructed.after,
+          extensions: buildExtensions({
+            side: "RIGHT",
+            isDark,
+            languageExt,
+            unifiedOriginal: null,
+          }),
+        },
+        parent: host,
+        highlightChanges: true,
+        gutter: true,
+        collapseUnchanged: { margin: 3, minSize: 4 },
+      });
+      viewsRef.current = [merge.a, merge.b];
+      // Initial comment seed — the hot-update effect below handles
+      // subsequent changes.
+      for (const v of viewsRef.current) {
+        v.dispatch({ effects: setComments.of({ comments, onAddComment }) });
+      }
+      return () => {
+        merge.destroy();
+        viewsRef.current = [];
+      };
+    }
+
+    // Unified mode (default).
     const view = new EditorView({
       state: EditorState.create({
         doc: reconstructed.after,
-        extensions,
+        extensions: buildExtensions({
+          side: "RIGHT",
+          isDark,
+          languageExt,
+          unifiedOriginal: reconstructed.before,
+        }),
       }),
-      parent: hostRef.current,
+      parent: host,
     });
-    view.dispatch({
-      effects: setComments.of({ comments, onAddComment }),
-    });
-    viewRef.current = view;
+    view.dispatch({ effects: setComments.of({ comments, onAddComment }) });
+    viewsRef.current = [view];
     return () => {
       view.destroy();
-      viewRef.current = null;
+      viewsRef.current = [];
     };
-    // We deliberately rebuild on patch changes — the unified merge
-    // view's `original` is fixed at construction time.
-  }, [extensions, reconstructed.after]);
+    // We deliberately rebuild on these axes — `unifiedMergeView`'s
+    // `original` and `MergeView`'s `a`/`b` docs are fixed at
+    // construction time.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reconstructed.before, reconstructed.after, viewMode, languageExt, isDark]);
 
-  // Hot-update comments without rebuilding the editor.
+  // Hot-update comments without rebuilding the editor(s).
   useEffect(() => {
-    const view = viewRef.current;
-    if (!view) return;
-    view.dispatch({
-      effects: setComments.of({ comments, onAddComment }),
-    });
+    for (const v of viewsRef.current) {
+      v.dispatch({ effects: setComments.of({ comments, onAddComment }) });
+    }
   }, [comments, onAddComment]);
 
   return <div ref={hostRef} className="h-full w-full overflow-hidden" />;

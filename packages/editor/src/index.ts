@@ -15,6 +15,7 @@ export {
 export {
   DiffViewer,
   type DiffViewerProps,
+  type DiffViewMode,
   type InlineComment,
 } from "./diff-viewer";
 export { makeEditorTheme } from "./cm-theme";
