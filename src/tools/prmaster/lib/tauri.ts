@@ -100,6 +100,13 @@ export interface FileDiff {
   /** Unified-diff body for this file, including the `diff --git` header. */
   patch: string;
   binary: boolean;
+  /** Full file contents at the base revision (populated by the
+   *  local-git path). When present alongside `newContent`, the diff
+   *  viewer can expand unchanged hunks all the way to the whole
+   *  file. Absent for the gh-REST fallback path. */
+  oldContent?: string;
+  /** Full file contents at the head revision. See `oldContent`. */
+  newContent?: string;
 }
 
 /** Where the diff payload came from. */
@@ -115,6 +122,32 @@ export interface PrDiff {
 
 /** Side a comment is attached to (LEFT = old, RIGHT = new). */
 export type DiffSide = "LEFT" | "RIGHT";
+
+/**
+ * One inline review comment on a PR. Mirrors `zen_github::ReviewComment`.
+ * Sourced from the REST `/repos/.../pulls/{n}/comments` endpoint —
+ * outdated comments (whose target line was removed) are filtered at
+ * the engine boundary so every entry the frontend sees has a valid
+ * `(path, line, side)` anchor.
+ *
+ * Replies inherit `path`/`line`/`side` from their parent comment, so
+ * grouping a thread with N replies just means picking out every entry
+ * with the same triple — no extra plumbing needed.
+ */
+export interface ReviewComment {
+  /** Stable id (REST numeric id stringified). */
+  id: string;
+  path: string;
+  /** 1-based line number on the side this comment is anchored to. */
+  line: number;
+  side: DiffSide;
+  body: string;
+  authorLogin?: string;
+  /** Parent comment's id, when this entry is a reply. */
+  inReplyToId?: string;
+  /** ISO-8601 timestamp the comment was created at. */
+  createdAt: string;
+}
 
 export interface PrDetail {
   headRefName: string | null;
@@ -350,13 +383,13 @@ export const prmasterTauri = {
   getConversations: () =>
     invoke<ConversationGroup[]>("prmaster_get_conversations"),
   /**
-   * Every unresolved review thread + top-level comment on a single PR.
-   * Unfiltered — returns the full set even on PRs the current user
-   * has never touched. Drives the Conversations footer on the
-   * dedicated review page.
+   * Every inline review comment on `pr` (sourced from the REST
+   * endpoint, paginated). Drives the diff editor's inline annotations
+   * on the dedicated review page. Outdated comments are filtered at
+   * the engine boundary so every result has a valid line anchor.
    */
-  getPrConversations: (pr: PrRef) =>
-    invoke<ConversationItem[]>("prmaster_get_pr_conversations", { pr }),
+  listReviewComments: (pr: PrRef) =>
+    invoke<ReviewComment[]>("prmaster_list_review_comments", { pr }),
   approve: (pr: PrRef) => invoke<void>("prmaster_approve_pr", { pr }),
   requestChanges: (pr: PrRef, body: string) =>
     invoke<void>("prmaster_request_changes", { pr, body }),

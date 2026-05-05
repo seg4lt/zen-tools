@@ -8,6 +8,7 @@ pub mod diff;
 pub mod pull_request;
 pub mod repository;
 pub mod review;
+pub mod review_comment;
 
 pub use auth::AuthStatus;
 pub use author::Author;
@@ -16,6 +17,7 @@ pub use conversation::{
     ConversationGroup, ConversationItem, ConversationKind, ConversationMessage,
 };
 pub use diff::{split_git_diff, DiffSide, DiffSource, FileDiff, FileStatus, PrDiff};
+pub use review_comment::ReviewComment;
 pub use pull_request::{
     ChangedFile, ChangedFileNodes, CommentInfo, CommitInfo, CommitNode, CommitNodes,
     EnrichedPullRequest, MergedBy, PrDetail, PrRef, PullRequest, ReviewEvent, ReviewNodes,

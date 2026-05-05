@@ -31,11 +31,11 @@ import { useTheme } from "@/hooks/use-theme";
 import {
   prmasterTauri,
   prRefFor,
-  type ConversationItem,
   type DiffSide,
   type EnrichedPullRequest,
   type FileDiff,
   type PrDiff,
+  type ReviewComment,
 } from "../../lib/tauri";
 import { PrFileTree } from "./PrFileTree";
 
@@ -44,17 +44,6 @@ interface Props {
   /** Diff view mode — owned by the parent (review page) so the toggle
    *  can persist user choice. */
   viewMode: DiffViewMode;
-  /** Outstanding review threads + @-mention comments on this PR.
-   *  Review-thread items are seeded into the diff viewer's inline
-   *  comments so reviewers see existing discussion right next to the
-   *  code, not just under a separate "Conversations" section. */
-  conversations: ConversationItem[];
-  /** Selected file path — lifted to the parent so an external panel
-   *  (the Conversations footer) can drive selection by clicking a
-   *  thread row. */
-  selectedPath: string | null;
-  /** Updates the selected file path. */
-  onSelectPath: (path: string | null) => void;
 }
 
 interface LocalComment extends InlineComment {
@@ -62,13 +51,7 @@ interface LocalComment extends InlineComment {
   filePath: string;
 }
 
-export function PrFilesChangedView({
-  pr,
-  viewMode,
-  conversations,
-  selectedPath,
-  onSelectPath,
-}: Props) {
+export function PrFilesChangedView({ pr, viewMode }: Props) {
   const ref = prRefFor(pr.pr);
   const baseRef = pr.detail?.baseRefName ?? null;
   const headRef = pr.detail?.headRefName ?? null;
@@ -79,19 +62,20 @@ export function PrFilesChangedView({
   const [diff, setDiff] = useState<PrDiff | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [comments, setComments] = useState<LocalComment[]>([]);
-  // Mirrors of the lifted state + setter so the diff-load effect can
-  // read/write them inside its async `.then()` without re-keying on
-  // every click (which would re-fire the diff fetch and stutter the
-  // editor mount).
+  // Server-canonical inline review comments fetched from the REST
+  // endpoint. Re-loaded every time the PR or refresh tick changes.
+  // Merged with the optimistic local set (deduped by id) before being
+  // handed to the diff viewer.
+  const [reviewComments, setReviewComments] = useState<ReviewComment[]>([]);
+  // Mirror of `selectedPath` so the diff-load effect can read the
+  // latest user selection inside its async `.then()` without re-keying
+  // on every click (which would re-fire the diff fetch).
   const selectedPathRef = useRef(selectedPath);
-  const onSelectPathRef = useRef(onSelectPath);
   useEffect(() => {
     selectedPathRef.current = selectedPath;
   }, [selectedPath]);
-  useEffect(() => {
-    onSelectPathRef.current = onSelectPath;
-  }, [onSelectPath]);
   // UI: tree visibility.
   const [treeOpen, setTreeOpen] = useState(true);
   // Hide-comments toggle. When false, the diff editor receives an
@@ -150,7 +134,7 @@ export function PrFilesChangedView({
           return;
         }
         const first = d.files.find((f) => !f.binary && f.patch);
-        onSelectPathRef.current(first?.path ?? d.files[0]?.path ?? null);
+        setSelectedPath(first?.path ?? d.files[0]?.path ?? null);
       })
       .catch((err) => {
         if (!cancelled) setError(formatError(err));
@@ -166,6 +150,28 @@ export function PrFilesChangedView({
     };
   }, [ref.owner, ref.repo, ref.number, baseRef, headRef, refreshTick]);
 
+  // Load inline review comments for this PR via the REST endpoint.
+  // Re-runs on the same triggers as the diff load so the two stay in
+  // sync (refresh ticks both).
+  useEffect(() => {
+    let cancelled = false;
+    prmasterTauri
+      .listReviewComments(ref)
+      .then((cs) => {
+        if (cancelled) return;
+        setReviewComments(cs);
+      })
+      .catch((err) => {
+        // Don't block the diff editor on a comments-load failure —
+        // the user can still review the code. Log so we can find it
+        // in devtools if it happens consistently.
+        console.warn("[prmaster] listReviewComments failed:", err);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [ref.owner, ref.repo, ref.number, refreshTick]);
+
   const handleRefresh = useCallback(() => {
     setRefreshing(true);
     setRefreshTick((n) => n + 1);
@@ -176,41 +182,25 @@ export function PrFilesChangedView({
     return diff.files.find((f) => f.path === selectedPath) ?? null;
   }, [diff, selectedPath]);
 
-  // Seed comments derived from the unfiltered conversations fetch.
-  // Each message in a `review_thread` becomes one `LocalComment`;
-  // Pierre groups multiple comments at the same `(side, line)` cell so
-  // the thread renders stacked under the line, mirroring GitHub's
-  // inline-thread layout.
-  //
-  // TODO: GitHub GraphQL exposes `originalLine` + a per-thread `side`
-  // for threads anchored to deleted lines (LEFT). The current
-  // ConversationItem model only carries `lineNumber`, so we hardcode
-  // RIGHT here; threads on `-` lines render at the wrong row until
-  // the model adds a `side` field. Tracked alongside the LEFT-side
-  // composer work.
-  const seedComments = useMemo<LocalComment[]>(() => {
-    const out: LocalComment[] = [];
-    for (const c of conversations) {
-      if (c.kind !== "review_thread") continue;
-      if (!c.filePath || c.lineNumber == null) continue;
-      for (const m of c.messages) {
-        out.push({
-          id: m.id,
-          line: c.lineNumber,
-          side: "RIGHT",
-          authorLogin: m.authorLogin,
-          body: m.body,
-          filePath: c.filePath,
-        });
-      }
-    }
-    return out;
-  }, [conversations]);
+  // Seed comments derived from the REST review-comments fetch. Pierre
+  // groups multiple comments at the same `(side, line)` cell so a
+  // thread with replies stacks naturally under the line.
+  const seedComments = useMemo<LocalComment[]>(
+    () =>
+      reviewComments.map((c) => ({
+        id: c.id,
+        line: c.line,
+        side: c.side,
+        authorLogin: c.authorLogin ?? null,
+        body: c.body,
+        filePath: c.path,
+      })),
+    [reviewComments],
+  );
 
   // Server-canonical seed ∪ optimistic local inserts, deduped by id.
-  // The local set wins (so a freshly-posted comment keeps its
-  // optimistic id until the next conversations refresh folds in the
-  // server version).
+  // The local set wins so a freshly-posted comment keeps its
+  // optimistic id until the next refresh folds in the server version.
   const allComments = useMemo<LocalComment[]>(() => {
     const seen = new Set<string>();
     const merged: LocalComment[] = [];
@@ -408,7 +398,7 @@ export function PrFilesChangedView({
             <PrFileTree
               files={diff.files}
               selectedPath={selectedPath}
-              onSelect={onSelectPath}
+              onSelect={setSelectedPath}
               commentsByPath={commentsByPath}
             />
           </div>
@@ -427,6 +417,8 @@ export function PrFilesChangedView({
               <DiffViewer
                 patch={selected.patch}
                 fileName={selected.path}
+                oldContent={selected.oldContent}
+                newContent={selected.newContent}
                 isDark={isDark}
                 viewMode={viewMode}
                 comments={showComments ? commentsForSelected : []}

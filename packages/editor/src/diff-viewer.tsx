@@ -1,41 +1,39 @@
 /**
- * `<DiffViewer>` — wraps `@pierre/diffs/react`'s `PatchDiff` with the
- * project's domain types (`InlineComment`, `DiffViewMode`, the
- * `onAddComment` contract).
+ * `<DiffViewer>` — wraps `@pierre/diffs/react` with the project's
+ * domain types (`InlineComment`, `DiffViewMode`, the `onAddComment`
+ * contract).
  *
- * Why Pierre Diffs over the previous CodeMirror-based viewer:
- *   - First-class `diffStyle: 'unified' | 'split'` toggle (no
- *     custom MergeView wiring).
- *   - Native `enableGutterUtility` — the "+" hover affordance ships
- *     with the library, deduplicating the gutter machinery we used
- *     to hand-build with CodeMirror gutters.
- *   - Annotations are React nodes (`renderAnnotation` returns
- *     `ReactNode`), so the comment composer's textarea is just
- *     React and types correctly without the event-routing
- *     workarounds we needed when the composer lived inside a
- *     CodeMirror widget.
- *   - Shiki-based syntax highlighting auto-detected from the patch
- *     header (`diff --git a/foo.ts b/foo.ts`), with paired
- *     `pierre-dark` / `pierre-light` themes that flip on `isDark`.
+ * Two render paths, picked based on what the host gives us:
  *
- * Public API (unchanged from before — callers don't need to know we
- * swapped engines):
- *   - `patch` — unified-diff body (with the `diff --git` header).
- *   - `fileName` — kept for compatibility; Pierre infers from the
- *     patch header so this is currently informational only.
- *   - `isDark`, `comments`, `viewMode`, `onAddComment` — same as
- *     before. `onAddComment` is invoked with `side: "LEFT" | "RIGHT"`
- *     (LEFT = deleted line, RIGHT = added/context). Pierre's
- *     internal `'deletions' | 'additions'` is translated at the
- *     boundary so the rest of the app keeps speaking the GitHub
- *     REST vocabulary.
+ *   - **Full-file mode** (preferred): when `oldContent` and
+ *     `newContent` are both supplied, mounts `<MultiFileDiff>` with
+ *     the complete pre/post images. This unlocks Pierre's
+ *     `expandUnchanged` affordance — the "..." button between hunks
+ *     that lets the reviewer expand surrounding context all the way
+ *     to the entire file. It's the experience reviewers actually
+ *     want when reading non-trivial PRs.
+ *   - **Patch-only mode** (fallback): when full contents aren't
+ *     available (gh-REST source path), mounts `<PatchDiff>` with the
+ *     unified-diff string. Hunk expansion isn't possible here — the
+ *     patch only contains the changed regions plus a few lines of
+ *     surrounding context — but everything else (syntax highlight,
+ *     gutter "+", inline annotations) works identically.
+ *
+ * Public API (`InlineComment`, `viewMode`, `comments`, `onAddComment`)
+ * is unchanged. Callers just pass `oldContent`/`newContent` when
+ * they have them and the viewer picks the right mode.
+ *
+ * Pierre's internal `'deletions' | 'additions'` side vocabulary is
+ * translated to `'LEFT' | 'RIGHT'` at the boundary so the rest of
+ * the stack keeps speaking the GitHub REST dialect.
  */
 
 import { useCallback, useMemo, useState } from "react";
-import { PatchDiff } from "@pierre/diffs/react";
+import { MultiFileDiff, PatchDiff } from "@pierre/diffs/react";
 import type {
   AnnotationSide,
   DiffLineAnnotation,
+  FileContents,
   FileDiffOptions,
   SelectedLineRange,
 } from "@pierre/diffs";
@@ -58,12 +56,20 @@ export interface InlineComment {
 export type DiffViewMode = "unified" | "split";
 
 export interface DiffViewerProps {
-  /** Raw unified-diff body for one file (with the `diff --git` header). */
+  /** Raw unified-diff body for one file (with the `diff --git` header).
+   *  Used as a fallback when `oldContent`/`newContent` aren't both
+   *  available — in that case hunks can't expand. */
   patch: string;
-  /** Hint for syntax highlighting — Pierre auto-detects from the
-   *  patch header so this is currently informational; kept on the
-   *  prop set for API parity with earlier consumers. */
+  /** Hint for syntax highlighting and `MultiFileDiff` headers. Pierre
+   *  also infers from the patch header in patch-only mode. */
   fileName?: string;
+  /** Full file contents at the base revision. When supplied alongside
+   *  `newContent`, the viewer renders `<MultiFileDiff>` and unlocks
+   *  hunk expansion (click "..." between hunks to reveal more
+   *  context, all the way to the whole file). */
+  oldContent?: string;
+  /** Full file contents at the head revision. See `oldContent`. */
+  newContent?: string;
   /** Whether to render in dark mode. */
   isDark?: boolean;
   /** Existing review comments to display. */
@@ -112,7 +118,9 @@ interface ComposerTarget {
 
 export function DiffViewer({
   patch,
-  fileName: _fileName,
+  fileName,
+  oldContent,
+  newContent,
   isDark = false,
   comments = [],
   viewMode = "unified",
@@ -196,16 +204,23 @@ export function DiffViewer({
   );
 
   // Pierre's `FileDiffOptions` — diff style, theme pair (auto-flips
-  // on themeType), and the per-line gutter "+" affordance. The
-  // gutter-utility click hands us a SelectedLineRange whose `start`
-  // is the line and `side` is `'deletions' | 'additions'` — exactly
-  // what we need to open the composer.
+  // on themeType), the per-line gutter "+" affordance, and (when
+  // we're in full-file mode) hunk expansion.
+  const fullFileMode = oldContent != null && newContent != null;
   const options = useMemo<FileDiffOptions<AnnotationData>>(() => {
     const opts: FileDiffOptions<AnnotationData> = {
       diffStyle: viewMode,
       theme: { dark: "pierre-dark", light: "pierre-light" },
       themeType: isDark ? "dark" : "light",
     };
+    if (fullFileMode) {
+      // Click "..." between hunks to reveal more context. Without
+      // full file contents Pierre can't honour this option (the
+      // patch alone doesn't carry the unchanged lines), so we only
+      // turn it on when we're rendering MultiFileDiff.
+      opts.expandUnchanged = true;
+      opts.expansionLineCount = 20;
+    }
     if (onAddComment) {
       opts.enableGutterUtility = true;
       opts.onGutterUtilityClick = (range: SelectedLineRange) => {
@@ -217,21 +232,46 @@ export function DiffViewer({
       };
     }
     return opts;
-  }, [viewMode, isDark, onAddComment]);
+  }, [viewMode, isDark, onAddComment, fullFileMode]);
+
+  // Stable `FileContents` objects — Pierre's `MultiFileDiff` re-runs
+  // diff parsing whenever `oldFile`/`newFile` reference change, so
+  // recreating these on every render would burn cycles for nothing.
+  const oldFile = useMemo<FileContents | null>(
+    () =>
+      oldContent != null
+        ? { name: fileName ?? "before", contents: oldContent }
+        : null,
+    [oldContent, fileName],
+  );
+  const newFile = useMemo<FileContents | null>(
+    () =>
+      newContent != null
+        ? { name: fileName ?? "after", contents: newContent }
+        : null,
+    [newContent, fileName],
+  );
 
   return (
     <div className="diff-viewer-host h-full w-full overflow-auto">
-      <PatchDiff<AnnotationData>
-        patch={patch}
-        options={options}
-        lineAnnotations={annotations}
-        renderAnnotation={renderAnnotation}
-        // Worker pool adds complexity (needs a Provider, dynamic
-        // imports under a custom protocol) without buying us much
-        // for a per-file viewer — disable for now; revisit if
-        // we ever review files large enough for it to matter.
-        disableWorkerPool
-      />
+      {fullFileMode && oldFile && newFile ? (
+        <MultiFileDiff<AnnotationData>
+          oldFile={oldFile}
+          newFile={newFile}
+          options={options}
+          lineAnnotations={annotations}
+          renderAnnotation={renderAnnotation}
+          disableWorkerPool
+        />
+      ) : (
+        <PatchDiff<AnnotationData>
+          patch={patch}
+          options={options}
+          lineAnnotations={annotations}
+          renderAnnotation={renderAnnotation}
+          disableWorkerPool
+        />
+      )}
     </div>
   );
 }

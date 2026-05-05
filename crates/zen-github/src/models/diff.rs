@@ -70,6 +70,21 @@ pub struct FileDiff {
     pub patch: String,
     /// `true` when GitHub reported this as binary (no patch text).
     pub binary: bool,
+    /// Full contents of the file at the base revision. Populated by
+    /// the local-git path (`git show base:path`) so the frontend's
+    /// diff viewer can expand unchanged hunks all the way to the
+    /// whole file. `None` when:
+    ///  * the file was added (no base revision contained it),
+    ///  * the diff came from the gh REST fallback (we don't fetch
+    ///    contents per-file there yet), or
+    ///  * `git show` failed (e.g. binary file).
+    #[serde(rename = "oldContent", skip_serializing_if = "Option::is_none")]
+    pub old_content: Option<String>,
+    /// Full contents of the file at the head revision. Mirror of
+    /// `old_content` for the post-change side. `None` when the file
+    /// was removed, the diff came from REST, or `git show` failed.
+    #[serde(rename = "newContent", skip_serializing_if = "Option::is_none")]
+    pub new_content: Option<String>,
 }
 
 /// Where the diff came from — exposed so the UI can show a hint
@@ -232,6 +247,8 @@ fn parse_file_chunk(chunk: &str) -> Option<FileDiff> {
         deletions,
         patch: chunk.to_string(),
         binary,
+        old_content: None,
+        new_content: None,
     })
 }
 

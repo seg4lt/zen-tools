@@ -20,6 +20,7 @@ use crate::models::diff::{
 use crate::models::pull_request::{
     EnrichedPullRequest, PrDetail, PrRef, PullRequest, ReviewEvent,
 };
+use crate::models::review_comment::ReviewComment;
 
 /// Default `--json` field list reused by every `gh search prs` call so the
 /// resulting [`PullRequest`] always has the same shape.
@@ -522,7 +523,7 @@ impl GhClient {
             let user = user_lower.clone();
             handles.push(tokio::spawn(async move {
                 match this.fetch_conversation_detail(&pr_clone).await {
-                    Ok(detail) => detail.into_items(&pr_clone, &user, true),
+                    Ok(detail) => detail.into_items(&pr_clone, &user),
                     Err(e) => {
                         tracing::warn!(
                             pr = %pr_clone.id(),
@@ -579,101 +580,6 @@ impl GhClient {
                 )
         });
         Ok(out)
-    }
-
-    /// Fetch every unresolved review thread + top-level comment for a
-    /// single PR, **without** the user-involvement filter that
-    /// [`fetch_conversations`] applies. Powers the dedicated PR review
-    /// page where the reviewer needs to see every outstanding thread,
-    /// not just the ones they've already touched.
-    pub async fn fetch_pr_review_threads(
-        &self,
-        pr_ref: &PrRef,
-        current_user: &str,
-    ) -> GhResult<Vec<ConversationItem>> {
-        let detail = self.fetch_conversation_detail_for_ref(pr_ref).await?;
-        // Build a synthetic PR record for `into_items` to stamp on every
-        // produced ConversationItem. We carry over the title + url from
-        // the GraphQL response (so jump-back links land on the right PR
-        // page); state/dates/author aren't read by `into_items` so they
-        // can stay as defaults.
-        let synthetic = synthetic_pull_request(pr_ref, &detail);
-        Ok(detail.into_items(&synthetic, &current_user.to_ascii_lowercase(), false))
-    }
-
-    async fn fetch_conversation_detail_for_ref(
-        &self,
-        pr_ref: &PrRef,
-    ) -> GhResult<ConversationDetailGraphql> {
-        let query = format!(
-            r#"query {{
-  repository(owner: "{owner}", name: "{repo}") {{
-    pullRequest(number: {number}) {{
-      number
-      title
-      url
-      comments(first: 50) {{
-        nodes {{
-          id
-          body
-          createdAt
-          url
-          author {{ login }}
-        }}
-      }}
-      reviewThreads(first: 50) {{
-        nodes {{
-          id
-          isResolved
-          path
-          line
-          originalLine
-          comments(first: 50) {{
-            nodes {{
-              id
-              body
-              createdAt
-              url
-              author {{ login }}
-            }}
-          }}
-        }}
-      }}
-    }}
-  }}
-}}"#,
-            owner = pr_ref.owner,
-            repo = pr_ref.repo,
-            number = pr_ref.number
-        );
-
-        let label = format!(
-            "graphql conversations {}/{}#{}",
-            pr_ref.owner, pr_ref.repo, pr_ref.number
-        );
-        let stdout = self
-            .gh_retry(&label, &["api", "graphql", "-f", &format!("query={query}")])
-            .await?;
-
-        let parsed: Value = serde_json::from_str(&stdout)
-            .map_err(|e| GhError::decode(label.clone(), e))?;
-        if let Some(errors) = parsed.get("errors").and_then(|e| e.as_array()) {
-            if let Some(first) = errors.first() {
-                let msg = first
-                    .get("message")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown");
-                return Err(GhError::Graphql(msg.to_string()));
-            }
-        }
-        let value = parsed
-            .get("data")
-            .and_then(|d| d.get("repository"))
-            .and_then(|r| r.get("pullRequest"))
-            .ok_or_else(|| GhError::Unexpected("missing pullRequest in conversation response".into()))?
-            .clone();
-        serde_json::from_value::<ConversationDetailGraphql>(value)
-            .map_err(|e| GhError::decode(label, e))
     }
 
     async fn fetch_conversation_detail(
@@ -969,7 +875,47 @@ impl GhClient {
             .run_in_dir(local_path, "git", &diff_args)
             .await
             .map_err(GhError::Shell)?;
-        let files = split_git_diff(&out.stdout);
+        let mut files = split_git_diff(&out.stdout);
+
+        // Fetch full file contents for both sides of every non-binary
+        // file so the frontend can expand unchanged hunks (Pierre's
+        // `MultiFileDiff` needs the whole pre/post images to compute
+        // expansion). Two `git show` calls per file is cheap on a
+        // local clone (the objects are already there post-fetch) and
+        // happens entirely in parallel with the rest of the UI mount
+        // because the engine's command runs on a Tokio worker.
+        //
+        // For added files, the base object doesn't exist → leave
+        // `old_content = None`. For removed files, head doesn't have
+        // it → leave `new_content = None`. Binary files skip both.
+        for file in &mut files {
+            if file.binary {
+                continue;
+            }
+            // Base side — use the rename-aware old path when present
+            // so we read the file from where it lived before the move.
+            let base_path = file.old_path.as_deref().unwrap_or(&file.path);
+            if !matches!(file.status, FileStatus::Added) {
+                file.old_content = git_show(
+                    &self.inner.exec,
+                    local_path,
+                    &format!("origin/{base_ref}"),
+                    base_path,
+                )
+                .await;
+            }
+            // Head side — `path` is post-rename so it points at the
+            // current location.
+            if !matches!(file.status, FileStatus::Removed) {
+                file.new_content = git_show(
+                    &self.inner.exec,
+                    local_path,
+                    &format!("origin/{head_ref}"),
+                    &file.path,
+                )
+                .await;
+            }
+        }
 
         self.inner
             .log
@@ -980,6 +926,77 @@ impl GhClient {
             head_sha,
             source: DiffSource::LocalGit,
         })
+    }
+
+    // ─── Review comments (inline, anchored to file:line:side) ──────────
+
+    /// List every inline review comment on `pr` via the REST endpoint
+    /// `/repos/{owner}/{repo}/pulls/{n}/comments` (paginated). Each
+    /// entry already carries the `path`, `line`, and `side` we need to
+    /// anchor it in the diff viewer; replies inherit those three from
+    /// their parent so a thread's grouping happens for free in the
+    /// frontend.
+    ///
+    /// Outdated comments — ones whose `line` came back null because
+    /// the line they targeted no longer exists in the latest commit
+    /// — are dropped here rather than surfaced and rendered against
+    /// the wrong row. Surfacing them is a future-feature (the
+    /// frontend would need a "outdated" affordance + a per-comment
+    /// `original_line` so it knows it's not anchoring fresh).
+    pub async fn list_pr_review_comments(
+        &self,
+        pr: &PrRef,
+    ) -> GhResult<Vec<ReviewComment>> {
+        let path = format!(
+            "repos/{}/{}/pulls/{}/comments",
+            pr.owner, pr.repo, pr.number
+        );
+        let label = format!(
+            "pr review comments {}/{}#{}",
+            pr.owner, pr.repo, pr.number
+        );
+        let stdout = self
+            .gh_retry(&label, &["api", &path, "--paginate", "-X", "GET"])
+            .await?;
+        if stdout.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+        // `--paginate` concatenates pages by stitching JSON arrays
+        // (`][` between pages). Same trick `pr_diff_rest` uses.
+        let normalised = stdout.replace("][", ",");
+        let raw: Vec<RestReviewComment> = serde_json::from_str(&normalised)
+            .map_err(|e| GhError::decode(label.clone(), e))?;
+        let mut out = Vec::with_capacity(raw.len());
+        for r in raw {
+            // Skip outdated comments (their target line was removed
+            // in a later push). The frontend would render them in
+            // the wrong place if we passed `original_line` through
+            // without an "outdated" affordance.
+            let Some(line) = r.line else {
+                continue;
+            };
+            // GitHub returns `side` lowercase OR uppercase depending
+            // on the endpoint version — normalise to uppercase before
+            // mapping to our enum.
+            let side = match r.side.as_deref().unwrap_or("RIGHT").to_ascii_uppercase().as_str() {
+                "LEFT" => DiffSide::Left,
+                _ => DiffSide::Right,
+            };
+            out.push(ReviewComment {
+                id: r.id.to_string(),
+                path: r.path,
+                line,
+                side,
+                body: r.body,
+                author_login: r.user.and_then(|u| u.login),
+                in_reply_to_id: r.in_reply_to_id.map(|n| n.to_string()),
+                created_at: r.created_at,
+            });
+        }
+        // Stable order by created_at so reply chains land in
+        // chronological order under their parent line.
+        out.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        Ok(out)
     }
 
     async fn pr_diff_rest(&self, pr: &PrRef) -> GhResult<PrDiff> {
@@ -1041,6 +1058,15 @@ impl GhClient {
                 deletions: entry.deletions,
                 patch,
                 binary,
+                // REST fallback doesn't fetch full file contents
+                // (would require an extra API call per file). The
+                // diff viewer falls back to patch-only mode when
+                // these are absent — hunk expansion isn't available
+                // in that case, which matches the user's likely
+                // expectation: "I get expansion when I'm reviewing
+                // a repo I have cloned locally".
+                old_content: None,
+                new_content: None,
             });
         }
 
@@ -1145,14 +1171,6 @@ impl Default for GhClient {
 
 #[derive(Debug, Deserialize)]
 struct ConversationDetailGraphql {
-    /// PR title, surfaced by the GraphQL query. Populated for the
-    /// per-ref fetch; unused (and `None`) for the original by-PullRequest
-    /// fetch where the caller already has the full PR record.
-    #[serde(default)]
-    title: Option<String>,
-    /// PR canonical URL — same provenance as `title`.
-    #[serde(default)]
-    url: Option<String>,
     #[serde(default)]
     comments: Option<ConversationCommentNodes>,
     #[serde(default, rename = "reviewThreads")]
@@ -1214,28 +1232,13 @@ impl ConversationCommentGql {
 
 impl ConversationDetailGraphql {
     /// Mirrors `ConversationPRDetail.conversationItems(for:)` in Swift.
-    ///
     /// `current_user` is expected to be lower-cased already.
-    ///
-    /// `require_user_involvement = true` (the original behaviour, used by
-    /// the global Conversations tab) keeps only review threads where the
-    /// user has participated or was @-mentioned, and only top-level PR
-    /// comments that @-mention the user. Set to `false` (used by the per-
-    /// PR review page) to surface every unresolved review thread + every
-    /// top-level comment so a reviewer can see the entire outstanding
-    /// discussion, not just the slice that names them.
-    fn into_items(
-        self,
-        pr: &PullRequest,
-        current_user: &str,
-        require_user_involvement: bool,
-    ) -> Vec<ConversationItem> {
+    fn into_items(self, pr: &PullRequest, current_user: &str) -> Vec<ConversationItem> {
         let pr_id = pr.id();
         let mut out = Vec::new();
 
-        // Review threads: always drop resolved threads (they're closed
-        // discussions). Drop unresolved threads only when the caller
-        // wants the user-involvement filter.
+        // Review threads: include if unresolved AND the user participated
+        // or was @-mentioned anywhere in the thread.
         if let Some(threads) = self.review_threads {
             for thread in threads.nodes {
                 if thread.is_resolved {
@@ -1247,18 +1250,15 @@ impl ConversationDetailGraphql {
                     .into_iter()
                     .map(|c| c.into_message())
                     .collect();
-                if require_user_involvement {
-                    let user_participated = messages.iter().any(|m| {
-                        m.author_login
-                            .as_deref()
-                            .map(|s| s.eq_ignore_ascii_case(current_user))
-                            .unwrap_or(false)
-                    });
-                    let user_mentioned =
-                        messages.iter().any(|m| body_mentions(&m.body, current_user));
-                    if !(user_participated || user_mentioned) {
-                        continue;
-                    }
+                let user_participated = messages.iter().any(|m| {
+                    m.author_login
+                        .as_deref()
+                        .map(|s| s.eq_ignore_ascii_case(current_user))
+                        .unwrap_or(false)
+                });
+                let user_mentioned = messages.iter().any(|m| body_mentions(&m.body, current_user));
+                if !(user_participated || user_mentioned) {
+                    continue;
                 }
                 let Some(latest) = messages.iter().map(|m| m.created_at).max() else {
                     continue;
@@ -1289,13 +1289,10 @@ impl ConversationDetailGraphql {
             }
         }
 
-        // Top-level PR comments. The user-filter mode keeps only the
-        // ones that @-mention the user (matches the global Conversations
-        // tab); unfiltered mode keeps every top-level comment so the
-        // reviewer sees the full outstanding discussion.
+        // Top-level comments that @-mention the user.
         if let Some(comments) = self.comments {
             for comment in comments.nodes {
-                if require_user_involvement && !body_mentions(&comment.body, current_user) {
+                if !body_mentions(&comment.body, current_user) {
                     continue;
                 }
                 let msg = comment.into_message();
@@ -1321,35 +1318,6 @@ impl ConversationDetailGraphql {
     }
 }
 
-/// Build a minimal `PullRequest` record from a `PrRef` plus the per-ref
-/// GraphQL fetch. Only the fields read by [`ConversationDetailGraphql::into_items`]
-/// (number, title, url, repository) need real values; the rest stay at
-/// type-default placeholders since the conversation surface never reads
-/// them.
-fn synthetic_pull_request(
-    pr_ref: &PrRef,
-    detail: &ConversationDetailGraphql,
-) -> PullRequest {
-    let name_with_owner = format!("{}/{}", pr_ref.owner, pr_ref.repo);
-    PullRequest {
-        number: pr_ref.number,
-        title: detail.title.clone().unwrap_or_default(),
-        url: detail
-            .url
-            .clone()
-            .unwrap_or_else(|| format!("https://github.com/{name_with_owner}/pull/{}", pr_ref.number)),
-        state: "OPEN".to_string(),
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
-        is_draft: false,
-        author: None,
-        repository: crate::models::Repository {
-            name: pr_ref.repo.clone(),
-            name_with_owner,
-        },
-    }
-}
-
 /// REST entry returned by `gh api .../pulls/{n}/files`.
 #[derive(Debug, Deserialize)]
 struct RestFileEntry {
@@ -1363,6 +1331,58 @@ struct RestFileEntry {
     patch: Option<String>,
     #[serde(default)]
     previous_filename: Option<String>,
+}
+
+/// REST entry returned by `gh api .../pulls/{n}/comments`. Only the
+/// fields we surface to the frontend; everything else (commit_id,
+/// position, html_url, _links, …) is ignored at decode time.
+#[derive(Debug, Deserialize)]
+struct RestReviewComment {
+    id: i64,
+    path: String,
+    /// Line in the LATEST diff. `null` for outdated comments — those
+    /// are dropped at the parsing stage rather than rendered against
+    /// the wrong row.
+    #[serde(default)]
+    line: Option<u32>,
+    /// "LEFT" or "RIGHT". Case can vary between API versions; we
+    /// normalise downstream.
+    #[serde(default)]
+    side: Option<String>,
+    body: String,
+    #[serde(default)]
+    user: Option<RestReviewCommentUser>,
+    #[serde(default, rename = "in_reply_to_id")]
+    in_reply_to_id: Option<i64>,
+    created_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RestReviewCommentUser {
+    #[serde(default)]
+    login: Option<String>,
+}
+
+/// `git show {ref}:{path}` → file contents at that revision, or `None`
+/// when the object doesn't exist (added/removed file on the wrong
+/// side, binary blob without a textual representation, etc.). Errors
+/// are swallowed and reported at the caller's discretion — failing
+/// here would block the entire diff render, which the frontend can
+/// already cope with by falling back to patch-only mode.
+async fn git_show(
+    exec: &ShellExecutor,
+    cwd: &Path,
+    revision: &str,
+    path: &str,
+) -> Option<String> {
+    let spec = format!("{revision}:{path}");
+    match exec.run_in_dir(cwd, "git", &["show", &spec]).await {
+        Ok(out) => Some(out.stdout),
+        Err(e) => {
+            tracing::debug!(spec = %spec, error = %e, "git show failed; treating as missing");
+            None
+        }
+    }
 }
 
 /// Word-boundary `@username` matcher. Mirrors Swift's `String.containsMention(of:)`.

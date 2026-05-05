@@ -14,8 +14,8 @@ use tauri::{AppHandle, Manager, State};
 use tokio::sync::Mutex;
 
 use zen_github::{
-    AuthStatus, CheckContext, ConversationGroup, ConversationItem, DiffSide, EnrichedPullRequest,
-    GhCall, PrDiff, PrRef,
+    AuthStatus, CheckContext, ConversationGroup, DiffSide, EnrichedPullRequest, GhCall, PrDiff,
+    PrRef, ReviewComment,
 };
 use zen_prmaster::{
     AiSummaryParams, NotificationFilter, PrMasterSettings, SummaryCard,
@@ -225,22 +225,21 @@ pub async fn prmaster_get_conversations(
     Ok(engine.list_conversations().await?)
 }
 
-/// Every unresolved review thread and top-level comment on a single PR —
-/// returns the full set regardless of whether the current user is
-/// involved. Drives the Conversations footer on the dedicated review
-/// page (`/prmaster/review/$owner/$repo/$number`), where a reviewer
-/// needs to see every open discussion, not just the threads naming
-/// them.
+/// Every inline review comment on `pr` — anchored to a file:line:side.
+/// Drives the diff editor's inline annotations on the dedicated review
+/// page. Outdated comments (whose line was removed in a later push)
+/// are filtered out at the engine level so they don't render in the
+/// wrong place.
 #[tauri::command]
-pub async fn prmaster_get_pr_conversations(
+pub async fn prmaster_list_review_comments(
     state: State<'_, Mutex<AppState>>,
     pr: PrRef,
-) -> AppResult<Vec<ConversationItem>> {
+) -> AppResult<Vec<ReviewComment>> {
     let engine = {
         let s = state.lock().await;
         engine(&s)
     };
-    Ok(engine.list_pr_conversations(&pr).await?)
+    Ok(engine.list_review_comments(&pr).await?)
 }
 
 /// Snapshot of the rolling `gh` call log (drives the API Stats tab — P7
