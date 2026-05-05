@@ -35,40 +35,52 @@ pub enum DbError {
 
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
+
+    /// The query was cancelled by the user (Stop button) before the
+    /// driver finished. Distinct from [`DbError::Query`] so the UI
+    /// can render a calm "Cancelled" tab instead of a red error
+    /// card.
+    #[error("query cancelled")]
+    Cancelled,
 }
 
 pub type DbResult<T> = Result<T, DbError>;
 
 /// One open connection to a database. Implementations are expected to be
-/// `Send + Sync` and to be wrapped in a per-entry mutex inside the
-/// [`crate::ConnectionRegistry`].
+/// `Send + Sync`. Methods take `&self` so the [`crate::ConnectionRegistry`]
+/// can dispatch concurrent operations through a single registered
+/// connection — every driver impl is internally pool-backed (sqlx +
+/// bb8-tiberius), so concurrent calls multiplex over the pool's slots
+/// without contending on a registry-level mutex. This is what lets
+/// schema indexing, autocomplete fetches, and user queries all run
+/// in parallel on the same connection id.
 #[async_trait]
 pub trait DbConnection: Send + Sync {
     /// Cheap round-trip — used by the "Test connection" button.
-    async fn ping(&mut self) -> DbResult<()>;
+    async fn ping(&self) -> DbResult<()>;
 
     /// Top-level catalogues / databases visible to this connection.
-    async fn list_databases(&mut self) -> DbResult<Vec<String>>;
+    async fn list_databases(&self) -> DbResult<Vec<String>>;
 
     /// Schemas in the given database. Postgres respects the current
     /// database (cross-database queries are rare); MSSQL switches `USE`.
-    async fn list_schemas(&mut self, database: &str) -> DbResult<Vec<String>>;
+    async fn list_schemas(&self, database: &str) -> DbResult<Vec<String>>;
 
     /// Tables (and views) in `database.schema`.
-    async fn list_tables(&mut self, database: &str, schema: &str) -> DbResult<Vec<String>>;
+    async fn list_tables(&self, database: &str, schema: &str) -> DbResult<Vec<String>>;
 
     /// Every relation (table or view) visible in `database`, grouped by
     /// schema. Single round-trip — used by the SQL editor's autocomplete
     /// to seed schema + qualified-table completions cold, without one
     /// `list_tables` call per schema.
-    async fn list_all_tables(&mut self, database: &str) -> DbResult<Vec<TableSummary>>;
+    async fn list_all_tables(&self, database: &str) -> DbResult<Vec<TableSummary>>;
 
     /// Describe a single table: columns + keys + foreign keys +
     /// indexes + checks + triggers. Drivers fill what they cheaply can;
     /// the shape is stable so the cache payload survives later
     /// upgrades.
     async fn describe_table(
-        &mut self,
+        &self,
         database: &str,
         schema: &str,
         table: &str,
@@ -80,13 +92,13 @@ pub trait DbConnection: Send + Sync {
     /// query is one round-trip and the results churn alongside
     /// migrations.
     async fn list_routines(
-        &mut self,
+        &self,
         database: &str,
         schema: &str,
     ) -> DbResult<Vec<RoutineDescription>>;
 
     /// Execute a single SQL statement and materialise the result.
-    async fn execute(&mut self, sql: &str) -> DbResult<QueryResult>;
+    async fn execute(&self, sql: &str) -> DbResult<QueryResult>;
 
     /// Run the user query through the dialect-appropriate
     /// "execute + explain" path and return the captured plan.
@@ -105,7 +117,7 @@ pub trait DbConnection: Send + Sync {
     /// Used by the `db_explain_query` Tauri command for the
     /// performance-visualizer "Run with plan" path.
     async fn explain_query(
-        &mut self,
+        &self,
         database: Option<&str>,
         schema: Option<&str>,
         sql: &str,
@@ -123,7 +135,7 @@ pub trait DbConnection: Send + Sync {
     /// - MSSQL: `database` triggers `USE [db]`. `schema` is ignored —
     ///   T-SQL doesn't have a session-level schema, callers qualify.
     async fn execute_batch(
-        &mut self,
+        &self,
         database: Option<&str>,
         schema: Option<&str>,
         statements: &[&str],
@@ -142,7 +154,7 @@ pub trait DbConnection: Send + Sync {
     /// `execute_batch`, so drivers without lock support are fine
     /// not to override this method.
     async fn execute_batch_with_options(
-        &mut self,
+        &self,
         database: Option<&str>,
         schema: Option<&str>,
         statements: &[&str],

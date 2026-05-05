@@ -15,7 +15,7 @@ futures = { workspace = true }
 # Drivers
 sqlx = { version = "0.8", default-features = false, features = ["postgres", "runtime-tokio-rustls", "chrono", "uuid", "macros"] }
 tiberius = { version = "0.12", default-features = false, features = ["rustls", "chrono", "tds73"] }
-tokio-util = { version = "0.7", features = ["compat"] }
+tokio-util = { version = "0.7", features = ["compat", "rt"] }
 
 # Connection pool for tiberius. tiberius itself ships with no pool —
 # `bb8-tiberius` wraps the bb8 generic async pool around it. We pick

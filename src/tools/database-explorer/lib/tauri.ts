@@ -412,6 +412,16 @@ export const dbTauri = {
        * observation.
        */
       lockSampleIntervalMs?: number;
+      /**
+       * Opaque identifier (typically a UUID) the backend uses to
+       * register a cancellation token for this run. Pass the
+       * same id to {@link cancelQuery} to stop the in-flight
+       * query from another caller (the per-tab "Stop" button).
+       *
+       * Optional: omitting it falls back to the legacy
+       * uncancellable path so existing call sites keep working.
+       */
+      queryId?: string;
     },
   ) =>
     invoke<DbQueryResult[]>("db_query", {
@@ -421,7 +431,19 @@ export const dbTauri = {
       schema: opts?.schema ?? null,
       captureLocks: opts?.captureLocks ?? false,
       lockSampleIntervalMs: opts?.lockSampleIntervalMs ?? null,
+      queryId: opts?.queryId ?? null,
     }),
+
+  /**
+   * Cancel an in-flight {@link query} by its `queryId`. Returns
+   * `true` if the backend found and signalled a matching token,
+   * `false` otherwise (already finished, never started, or wrong
+   * id). Idempotent — safe to call repeatedly. The `query` call
+   * will resolve with a `db: query cancelled` error once the
+   * driver future unwinds.
+   */
+  cancelQuery: (queryId: string) =>
+    invoke<boolean>("db_cancel_query", { queryId }),
 
   /**
    * Run the user SQL through the dialect's "execute + explain"

@@ -85,7 +85,7 @@ impl PostgresConnection {
 
 #[async_trait]
 impl DbConnection for PostgresConnection {
-    async fn ping(&mut self) -> DbResult<()> {
+    async fn ping(&self) -> DbResult<()> {
         sqlx::query("SELECT 1")
             .execute(&self.pool)
             .await
@@ -93,7 +93,7 @@ impl DbConnection for PostgresConnection {
         Ok(())
     }
 
-    async fn list_databases(&mut self) -> DbResult<Vec<String>> {
+    async fn list_databases(&self) -> DbResult<Vec<String>> {
         // sqlx pools are bound to a single Postgres database — querying
         // a different one requires a fresh connection. Listing every
         // database in the cluster would be misleading because expanding
@@ -107,7 +107,7 @@ impl DbConnection for PostgresConnection {
         Ok(vec![current.0])
     }
 
-    async fn list_schemas(&mut self, _database: &str) -> DbResult<Vec<String>> {
+    async fn list_schemas(&self, _database: &str) -> DbResult<Vec<String>> {
         // sqlx connection is bound to one database; cross-DB switching is
         // not supported in v1. The UI passes the database it's connected
         // to, so we ignore the argument here.
@@ -124,7 +124,7 @@ impl DbConnection for PostgresConnection {
         Ok(rows)
     }
 
-    async fn list_tables(&mut self, _database: &str, schema: &str) -> DbResult<Vec<String>> {
+    async fn list_tables(&self, _database: &str, schema: &str) -> DbResult<Vec<String>> {
         let rows = sqlx::query_scalar::<_, String>(
             "SELECT table_name FROM information_schema.tables \
              WHERE table_schema = $1 \
@@ -137,7 +137,7 @@ impl DbConnection for PostgresConnection {
         Ok(rows)
     }
 
-    async fn list_all_tables(&mut self, _database: &str) -> DbResult<Vec<TableSummary>> {
+    async fn list_all_tables(&self, _database: &str) -> DbResult<Vec<TableSummary>> {
         // sqlx is bound to the connection's database; cross-DB browsing
         // isn't supported in v1 (mirrors `list_schemas` / `list_tables`).
         // The query excludes system schemas and toast tables — same
@@ -172,7 +172,7 @@ impl DbConnection for PostgresConnection {
     }
 
     async fn describe_table(
-        &mut self,
+        &self,
         database: &str,
         schema: &str,
         table: &str,
@@ -461,7 +461,7 @@ impl DbConnection for PostgresConnection {
     }
 
     async fn list_routines(
-        &mut self,
+        &self,
         _database: &str,
         schema: &str,
     ) -> DbResult<Vec<RoutineDescription>> {
@@ -520,7 +520,7 @@ impl DbConnection for PostgresConnection {
             .collect())
     }
 
-    async fn execute(&mut self, sql: &str) -> DbResult<QueryResult> {
+    async fn execute(&self, sql: &str) -> DbResult<QueryResult> {
         // No context — single statement on whichever pool conn is free.
         // Used by `ping`-equivalent paths and the simple `db_query`
         // fallback. For batches (which need a stable session) callers
@@ -534,7 +534,7 @@ impl DbConnection for PostgresConnection {
     }
 
     async fn explain_query(
-        &mut self,
+        &self,
         _database: Option<&str>,
         schema: Option<&str>,
         sql: &str,
@@ -641,7 +641,7 @@ impl DbConnection for PostgresConnection {
     }
 
     async fn execute_batch(
-        &mut self,
+        &self,
         database: Option<&str>,
         schema: Option<&str>,
         statements: &[&str],
@@ -653,7 +653,7 @@ impl DbConnection for PostgresConnection {
     }
 
     async fn execute_batch_with_options(
-        &mut self,
+        &self,
         _database: Option<&str>,
         schema: Option<&str>,
         statements: &[&str],

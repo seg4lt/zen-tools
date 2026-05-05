@@ -412,21 +412,35 @@ export function SqlEditor({
     // every schema in the catalog breaks that cycle.
     void ensureCatalog(connectionId, database)
       .then((catalog) => {
-        // Sort: tables in the editor's effective schema first.
-        const sorted = [...catalog].sort((a, b) => {
-          const aDef = a.schema === effectiveSchema ? 0 : 1;
-          const bDef = b.schema === effectiveSchema ? 0 : 1;
-          return aDef - bDef;
-        });
-        const limited = sorted.slice(0, PREFETCH_LIMIT);
-        const buckets = new Map<string, string[]>();
-        for (const t of limited) {
-          const list = buckets.get(t.schema) ?? [];
-          list.push(t.name);
-          buckets.set(t.schema, list);
-        }
-        for (const [sch, names] of buckets) {
-          void ensureTables(connectionId, database, sch, names).catch(() => {});
+        // Scope the eager describe-fan-out to the user's CURRENTLY
+        // SELECTED schema only. Earlier we'd prefetch the first
+        // PREFETCH_LIMIT tables across every schema in the catalog,
+        // which is exactly the fleet of "indexing X tables" jobs
+        // that bogs down a connection on a multi-schema cluster
+        // — `dbo` users don't need to wait for `[every other
+        // schema]` to land before column completions work.
+        //
+        // Concretely: the user picks `foo` → `dbo` from the
+        // context picker; we only describe `foo.dbo.*`. Switching
+        // the picker re-fires this effect (it depends on
+        // `effectiveSchema`) and indexes the new schema. The work
+        // is fire-and-forget — the registry's pool-backed
+        // concurrent execute path means user queries can run side
+        // by side with this without waiting on a mutex.
+        //
+        // Tables in *other* schemas still resolve on demand: the
+        // typing-debounce path (`ensureTablesForSql`) consults
+        // the catalog and fires per-schema `ensureTables` calls
+        // for whatever the user actually references.
+        const inSchema = catalog.filter((t) => t.schema === effectiveSchema);
+        const limited = inSchema.slice(0, PREFETCH_LIMIT);
+        if (limited.length > 0) {
+          void ensureTables(
+            connectionId,
+            database,
+            effectiveSchema,
+            limited.map((t) => t.name),
+          ).catch(() => {});
         }
       })
       .catch(() => {

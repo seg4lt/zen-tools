@@ -88,20 +88,19 @@ export function RunToolbar({
   autoExplain,
   onToggleAutoExplain,
 }: RunToolbarProps) {
-  // Roll up timing across data + plan tabs so the right-hand summary
-  // still works after the ResultTab discriminated-union refactor.
+  // Roll up timing across completed data + plan tabs only — running /
+  // error / cancelled tabs don't have a duration to roll up.
   const totalMs =
-    results?.reduce(
-      (acc, r) =>
-        acc + (r.kind === "data" ? r.data.durationMs : r.explain.durationMs),
-      0,
-    ) ?? null;
+    results?.reduce((acc, r) => {
+      if (r.kind === "data") return acc + r.data.durationMs;
+      if (r.kind === "explain") return acc + r.explain.durationMs;
+      return acc;
+    }, 0) ?? null;
   const lastDataTab = results
     ?.slice()
     .reverse()
-    .find((r) => r.kind === "data");
-  const lastDataRows =
-    lastDataTab && lastDataTab.kind === "data" ? lastDataTab.data.rows.length : 0;
+    .find((r): r is Extract<ResultTab, { kind: "data" }> => r.kind === "data");
+  const lastDataRows = lastDataTab ? lastDataTab.data.rows.length : 0;
 
   // Are *any* opt-in modes selected? Drives the "Run with…" button's
   // tone — when nothing is checked, clicking it is a no-op (so we

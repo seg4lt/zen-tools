@@ -65,7 +65,7 @@ import { RunToolbar, type RunModes } from "./components/run-toolbar";
 import { ResultsPane } from "./components/results-pane";
 import { PlaceholderDialog } from "./components/placeholder-dialog";
 import { useDbExplorerStore } from "./store/db-explorer-store";
-import { useDbQuery } from "./hooks/use-db-query";
+import { useDbQuery, makeQueryId } from "./hooks/use-db-query";
 import { useSqlProjectsBootstrap } from "./hooks/use-sql-workspace";
 import {
   dbTauri,
@@ -473,6 +473,9 @@ export function DatabaseExplorerView() {
       analyze: boolean,
     ) => {
       if (!activeId) return;
+      const explainTabId = makeQueryId();
+      const explainStarted = Date.now();
+      const explainPreview = sqlText.replace(/\s+/g, " ").trim().slice(0, 120);
       try {
         const explain = await dbTauri.explainQuery(activeId, sqlText, {
           ...ctxOpts,
@@ -482,7 +485,16 @@ export function DatabaseExplorerView() {
           dispatch({
             type: "set-results",
             id: activeId,
-            results: [{ kind: "explain", explain }],
+            results: [
+              {
+                id: explainTabId,
+                startedAt: explainStarted,
+                status: "ok",
+                sqlPreview: explainPreview,
+                kind: "explain",
+                explain,
+              },
+            ],
           });
           dispatch({ type: "set-error", id: activeId, error: null });
         } else {
@@ -497,7 +509,14 @@ export function DatabaseExplorerView() {
           dispatch({
             type: "append-result",
             id: activeId,
-            tab: { kind: "explain", explain },
+            tab: {
+              id: explainTabId,
+              startedAt: explainStarted,
+              status: "ok",
+              sqlPreview: explainPreview,
+              kind: "explain",
+              explain,
+            },
             activate: mode === "append-explicit",
           });
         }

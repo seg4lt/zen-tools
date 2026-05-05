@@ -25,13 +25,52 @@ import {
 } from "../lib/tauri";
 
 /**
+ * Lifecycle state of a result tab. Drives the per-tab indicator
+ * (spinner / Stop button / row count / "Cancelled" / red bar).
+ *
+ *   - `running` — the query is in flight on the backend. The tab
+ *                 shows a Stop button that wires through to
+ *                 `dbTauri.cancelQuery(queryId)`.
+ *   - `ok`      — the run completed; payload is `data` or `explain`.
+ *   - `error`   — the run failed; `error` carries the message.
+ *   - `cancelled` — the user clicked Stop; the tab stays around so
+ *                   the user can re-run by clicking it.
+ */
+export type ResultTabStatus = "running" | "ok" | "error" | "cancelled";
+
+/**
  * One result tab in the results pane. Either the rows from a normal
  * query (rendered as a data grid) or a captured EXPLAIN plan
  * (rendered via the perf visualizer's Raw / Plan / Flame views).
+ *
+ * Tabs are persistent across runs — every Run / Run all / Run
+ * with… invocation appends a NEW tab (open as `running`) so the
+ * user can run multiple queries in parallel and see each result
+ * land in its own tab. Tabs can be individually closed via the X
+ * button on the strip, or stopped while running via the Stop
+ * button rendered on the tab body.
+ *
+ * `id` is the `queryId` minted at run dispatch — same id flows to
+ * the backend for cancellation routing.
  */
+export interface ResultTabBase {
+  /** Stable id for the tab's lifetime — also the cancellation
+   * token id passed to the backend. */
+  id: string;
+  /** Wall-clock ms (`Date.now()`) at run dispatch — drives the
+   * "started Xs ago" badge on running tabs. */
+  startedAt: number;
+  status: ResultTabStatus;
+  /** Truncated SQL preview shown on the tab + tooltip. */
+  sqlPreview: string;
+}
+
 export type ResultTab =
-  | { kind: "data"; data: DbQueryResult }
-  | { kind: "explain"; explain: DbExplainResult };
+  | (ResultTabBase & { kind: "data"; data: DbQueryResult })
+  | (ResultTabBase & { kind: "explain"; explain: DbExplainResult })
+  | (ResultTabBase & { kind: "running"; mode: "data" | "explain" })
+  | (ResultTabBase & { kind: "error"; error: string })
+  | (ResultTabBase & { kind: "cancelled" });
 
 export type ConnectionStatus = "disconnected" | "connecting" | "connected" | "error";
 
@@ -227,6 +266,22 @@ type Action =
        */
       activate?: boolean;
     }
+  | {
+      /**
+       * Replace an existing tab in-place by `tabId`. Used by the
+       * run-tab pipeline: the dispatcher appends a `running` tab
+       * synchronously and later swaps it for the resolved
+       * `data` / `explain` / `error` / `cancelled` tab once the
+       * backend round-trip lands. Keeps the tab's strip position
+       * stable across the running → resolved transition so the
+       * user's eye doesn't have to chase it. No-op when the id
+       * is no longer present (the tab was closed mid-flight).
+       */
+      type: "replace-result";
+      id: string;
+      tabId: string;
+      tab: ResultTab;
+    }
   | { type: "push-explain-history"; id: string; explain: DbExplainResult }
   | { type: "set-auto-explain"; id: string; enabled: boolean }
   | { type: "set-analyze-on-explain"; id: string; enabled: boolean }
@@ -349,6 +404,22 @@ function reducer(state: DbExplorerState, action: Action): DbExplorerState {
           [action.id]: 0,
         },
       };
+
+    case "replace-result": {
+      const cur = state.resultsByConnection[action.id];
+      if (!cur) return state;
+      const idx = cur.findIndex((t) => t.id === action.tabId);
+      if (idx < 0) return state;
+      const next = cur.slice();
+      next[idx] = action.tab;
+      return {
+        ...state,
+        resultsByConnection: {
+          ...state.resultsByConnection,
+          [action.id]: next,
+        },
+      };
+    }
 
     case "append-result": {
       // Used by the auto-EXPLAIN piggyback to add a Plan tab next to

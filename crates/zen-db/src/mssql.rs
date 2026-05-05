@@ -186,7 +186,7 @@ impl MsSqlConnection {
 
 #[async_trait]
 impl DbConnection for MsSqlConnection {
-    async fn ping(&mut self) -> DbResult<()> {
+    async fn ping(&self) -> DbResult<()> {
         // Just acquiring from the pool runs `is_valid` (= `SELECT 1`)
         // because we set `test_on_check_out(true)`. That is the
         // ping. If the cached connection was stale, bb8 swaps it
@@ -197,7 +197,7 @@ impl DbConnection for MsSqlConnection {
         Ok(())
     }
 
-    async fn list_databases(&mut self) -> DbResult<Vec<String>> {
+    async fn list_databases(&self) -> DbResult<Vec<String>> {
         // The pool's `test_on_check_out(true)` setting makes every
         // `acquire()` ping the connection first; if our cached
         // session died (typical after macOS sleep) bb8 swaps it
@@ -212,7 +212,7 @@ impl DbConnection for MsSqlConnection {
         .await
     }
 
-    async fn list_schemas(&mut self, database: &str) -> DbResult<Vec<String>> {
+    async fn list_schemas(&self, database: &str) -> DbResult<Vec<String>> {
         let mut conn = self.acquire().await?;
         // `USE [db]` only affects the connection it runs on, so we
         // pin one connection across both statements. If we let the
@@ -235,7 +235,7 @@ impl DbConnection for MsSqlConnection {
         .await
     }
 
-    async fn list_tables(&mut self, database: &str, schema: &str) -> DbResult<Vec<String>> {
+    async fn list_tables(&self, database: &str, schema: &str) -> DbResult<Vec<String>> {
         let mut conn = self.acquire().await?;
         let use_stmt = format!("USE [{}]", escape_ident(database));
         conn.simple_query(use_stmt)
@@ -257,7 +257,7 @@ impl DbConnection for MsSqlConnection {
         run_string_column(&mut conn, &q, "name").await
     }
 
-    async fn list_all_tables(&mut self, database: &str) -> DbResult<Vec<TableSummary>> {
+    async fn list_all_tables(&self, database: &str) -> DbResult<Vec<TableSummary>> {
         // Pin one pool connection so `USE` + the catalog query run
         // on the same logical session.
         let mut conn = self.acquire().await?;
@@ -323,7 +323,7 @@ impl DbConnection for MsSqlConnection {
     }
 
     async fn describe_table(
-        &mut self,
+        &self,
         database: &str,
         schema: &str,
         table: &str,
@@ -762,7 +762,7 @@ impl DbConnection for MsSqlConnection {
     }
 
     async fn list_routines(
-        &mut self,
+        &self,
         database: &str,
         schema: &str,
     ) -> DbResult<Vec<RoutineDescription>> {
@@ -894,7 +894,7 @@ impl DbConnection for MsSqlConnection {
     }
 
     async fn explain_query(
-        &mut self,
+        &self,
         database: Option<&str>,
         _schema: Option<&str>,
         sql: &str,
@@ -1003,7 +1003,7 @@ impl DbConnection for MsSqlConnection {
     }
 
     async fn execute_batch(
-        &mut self,
+        &self,
         database: Option<&str>,
         schema: Option<&str>,
         statements: &[&str],
@@ -1013,7 +1013,7 @@ impl DbConnection for MsSqlConnection {
     }
 
     async fn execute_batch_with_options(
-        &mut self,
+        &self,
         database: Option<&str>,
         _schema: Option<&str>,
         statements: &[&str],
@@ -1114,7 +1114,7 @@ impl DbConnection for MsSqlConnection {
         Ok(out)
     }
 
-    async fn execute(&mut self, sql: &str) -> DbResult<QueryResult> {
+    async fn execute(&self, sql: &str) -> DbResult<QueryResult> {
         // Standalone single-statement path — fresh pool checkout,
         // no session state to preserve. `execute_batch_with_options`
         // is what user-visible Run goes through; this method is

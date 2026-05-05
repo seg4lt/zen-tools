@@ -346,6 +346,15 @@ pub async fn db_list_all_tables(
 /// `lockSampleIntervalMs` (default: driver default, currently 25 ms)
 /// sets the polling cadence. The "Run with locks" UI button passes
 /// `captureLocks: true`.
+///
+/// `queryId` is an optional opaque identifier minted by the
+/// front-end (typically a UUID). When supplied, the registry
+/// registers a cancellation token under that id for the duration of
+/// the run; calling [`db_cancel_query`] with the same id while the
+/// query is in flight aborts the driver future and returns
+/// `DbError::Cancelled` to the caller. Without `queryId` the run is
+/// uncancellable — same behaviour as before this command grew the
+/// parameter.
 #[tauri::command]
 pub async fn db_query(
     id: String,
@@ -354,6 +363,7 @@ pub async fn db_query(
     schema: Option<String>,
     capture_locks: Option<bool>,
     lock_sample_interval_ms: Option<u64>,
+    query_id: Option<String>,
     state: tauri::State<'_, Mutex<AppState>>,
 ) -> AppResult<Vec<QueryResult>> {
     let registry = {
@@ -376,15 +386,46 @@ pub async fn db_query(
         lock_sample_interval_ms,
     };
 
-    Ok(registry
-        .execute_batch_with_options(
-            &id,
-            database.as_deref(),
-            schema.as_deref(),
-            &trimmed,
-            &options,
-        )
-        .await?)
+    let result = if let Some(qid) = query_id {
+        registry
+            .execute_batch_cancellable(
+                &id,
+                &qid,
+                database.as_deref(),
+                schema.as_deref(),
+                &trimmed,
+                &options,
+            )
+            .await
+    } else {
+        registry
+            .execute_batch_with_options(
+                &id,
+                database.as_deref(),
+                schema.as_deref(),
+                &trimmed,
+                &options,
+            )
+            .await
+    };
+
+    Ok(result?)
+}
+
+/// Cancel a running query by its `query_id`. Returns `true` if a
+/// matching in-flight query was found and signalled, `false`
+/// otherwise (already finished, never started, or wrong id).
+/// Idempotent — safe to call repeatedly.
+#[tauri::command]
+pub async fn db_cancel_query(
+    query_id: String,
+    state: tauri::State<'_, Mutex<AppState>>,
+) -> AppResult<bool> {
+    let registry = {
+        let s = state.lock().await;
+        registry(&s)
+    };
+    Ok(registry.cancel(&query_id))
 }
 
 /// Run the user SQL through the dialect's "explain + analyze" path
