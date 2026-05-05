@@ -16,10 +16,12 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  AlertTriangle,
   ExternalLink,
   Eye,
   EyeOff,
   Loader2,
+  MessageSquare,
   PanelLeftClose,
   PanelLeftOpen,
   RefreshCw,
@@ -69,6 +71,15 @@ export function PrFilesChangedView({ pr, viewMode }: Props) {
   // Merged with the optimistic local set (deduped by id) before being
   // handed to the diff viewer.
   const [reviewComments, setReviewComments] = useState<ReviewComment[]>([]);
+  // Visible status of the most recent comment-fetch attempt. Drives
+  // the "Comments: …" indicator in the toolbar so the user can see
+  // at a glance whether comments loaded, are still loading, or
+  // failed — without having to crack open devtools.
+  const [commentsStatus, setCommentsStatus] = useState<
+    | { kind: "loading" }
+    | { kind: "ok"; count: number }
+    | { kind: "error"; message: string }
+  >({ kind: "loading" });
   // Mirror of `selectedPath` so the diff-load effect can read the
   // latest user selection inside its async `.then()` without re-keying
   // on every click (which would re-fire the diff fetch).
@@ -152,17 +163,17 @@ export function PrFilesChangedView({ pr, viewMode }: Props) {
 
   // Load inline review comments for this PR via the REST endpoint.
   // Re-runs on the same triggers as the diff load so the two stay in
-  // sync (refresh ticks both).
+  // sync (refresh ticks both). The status is mirrored into a piece
+  // of state so the toolbar can render a visible indicator (count /
+  // loading / error) — devtools console isn't always reachable for
+  // the user, especially on a shipped build.
   useEffect(() => {
     let cancelled = false;
+    setCommentsStatus({ kind: "loading" });
     prmasterTauri
       .listReviewComments(ref)
       .then((cs) => {
         if (cancelled) return;
-        // Diagnostic — we want to know whether the REST endpoint is
-        // returning anything at all when reviewers report missing
-        // comments. Cheap (one log per mount) and easy to grep for
-        // in devtools when something looks wrong.
         console.info(
           `[prmaster] listReviewComments ${ref.owner}/${ref.repo}#${ref.number}:`,
           cs.length,
@@ -170,11 +181,15 @@ export function PrFilesChangedView({ pr, viewMode }: Props) {
           cs,
         );
         setReviewComments(cs);
+        setCommentsStatus({ kind: "ok", count: cs.length });
       })
       .catch((err) => {
-        // Don't block the diff editor on a comments-load failure —
-        // the user can still review the code.
+        if (cancelled) return;
         console.warn("[prmaster] listReviewComments failed:", err);
+        setCommentsStatus({
+          kind: "error",
+          message: formatError(err),
+        });
       });
     return () => {
       cancelled = true;
@@ -349,6 +364,7 @@ export function PrFilesChangedView({ pr, viewMode }: Props) {
           </span>
           <span className="text-destructive">−{totals.del}</span>
           <SourceBadge source={diff.source} />
+          <CommentsStatus status={commentsStatus} />
         </span>
         <span className="flex items-center gap-1">
           <Button
@@ -444,6 +460,79 @@ export function PrFilesChangedView({ pr, viewMode }: Props) {
         </div>
       </div>
     </div>
+  );
+}
+
+/**
+ * Toolbar status indicator for the review-comment fetch. Three states:
+ *
+ *   - **loading** — small spinner, "Loading comments…". The fetch
+ *     is still in flight (or just kicked off after a refresh).
+ *   - **ok / N>0** — message-square icon + "N comments". Tells the
+ *     user the REST endpoint returned something so a missing
+ *     annotation in the diff is rendering, not fetching.
+ *   - **ok / N=0** — muted "No inline comments". Distinguishes
+ *     "fetched, none on this PR" from "still loading".
+ *   - **error** — destructive-tinted alert + truncated message.
+ *     Reveals "Command not found" (stale dev binary), "401" (gh
+ *     auth), etc., right in the UI without making the user open
+ *     devtools.
+ */
+function CommentsStatus({
+  status,
+}: {
+  status:
+    | { kind: "loading" }
+    | { kind: "ok"; count: number }
+    | { kind: "error"; message: string };
+}) {
+  if (status.kind === "loading") {
+    return (
+      <span
+        className="inline-flex items-center gap-1 text-muted-foreground"
+        title="Fetching inline review comments via gh CLI"
+      >
+        <Loader2 className="size-3 animate-spin" />
+        Loading comments…
+      </span>
+    );
+  }
+  if (status.kind === "error") {
+    const trimmed =
+      status.message.length > 80
+        ? `${status.message.slice(0, 77)}…`
+        : status.message;
+    return (
+      <span
+        className="inline-flex items-center gap-1 rounded border border-destructive/40 bg-destructive/10 px-1.5 py-px text-destructive"
+        title={status.message}
+      >
+        <AlertTriangle className="size-3" />
+        Comments failed: {trimmed}
+      </span>
+    );
+  }
+  if (status.count === 0) {
+    return (
+      <span
+        className="inline-flex items-center gap-1 text-muted-foreground/70"
+        title="GitHub returned no inline review comments for this PR"
+      >
+        <MessageSquare className="size-3" />
+        No inline comments
+      </span>
+    );
+  }
+  return (
+    <span
+      className="inline-flex items-center gap-1 text-muted-foreground"
+      title={`${status.count} inline review comment${
+        status.count === 1 ? "" : "s"
+      } loaded from GitHub`}
+    >
+      <MessageSquare className="size-3" />
+      {status.count} comment{status.count === 1 ? "" : "s"}
+    </span>
   );
 }
 

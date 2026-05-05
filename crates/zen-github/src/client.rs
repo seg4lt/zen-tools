@@ -955,29 +955,50 @@ impl GhClient {
             "pr review comments {}/{}#{}",
             pr.owner, pr.repo, pr.number
         );
+        // `gh api` defaults to GET; passing `-X GET` is redundant and
+        // some older gh versions warn / error on it. Drop it.
         let stdout = self
-            .gh_retry(&label, &["api", &path, "--paginate", "-X", "GET"])
+            .gh_retry(&label, &["api", &path, "--paginate"])
             .await?;
-        if stdout.trim().is_empty() {
+        let stdout_trim = stdout.trim();
+        if stdout_trim.is_empty() {
+            tracing::info!(
+                pr = %format!("{}/{}#{}", pr.owner, pr.repo, pr.number),
+                "list_pr_review_comments: gh returned empty body"
+            );
             return Ok(Vec::new());
         }
         // `--paginate` concatenates pages by stitching JSON arrays
         // (`][` between pages). Same trick `pr_diff_rest` uses.
         let normalised = stdout.replace("][", ",");
         let raw: Vec<RestReviewComment> = serde_json::from_str(&normalised)
-            .map_err(|e| GhError::decode(label.clone(), e))?;
+            .map_err(|e| {
+                tracing::warn!(
+                    pr = %format!("{}/{}#{}", pr.owner, pr.repo, pr.number),
+                    error = %e,
+                    body_preview = &stdout_trim[..stdout_trim.len().min(200)],
+                    "list_pr_review_comments: serde decode failed"
+                );
+                GhError::decode(label.clone(), e)
+            })?;
+        tracing::info!(
+            pr = %format!("{}/{}#{}", pr.owner, pr.repo, pr.number),
+            count = raw.len(),
+            "list_pr_review_comments: parsed REST entries"
+        );
         let mut out = Vec::with_capacity(raw.len());
+        let mut dropped_outdated = 0usize;
         for r in raw {
             // Skip outdated comments (their target line was removed
             // in a later push). The frontend would render them in
             // the wrong place if we passed `original_line` through
             // without an "outdated" affordance.
             let Some(line) = r.line else {
+                dropped_outdated += 1;
                 continue;
             };
-            // GitHub returns `side` lowercase OR uppercase depending
-            // on the endpoint version — normalise to uppercase before
-            // mapping to our enum.
+            // GitHub returns `side` uppercase on this endpoint; some
+            // tooling lower-cases it. Normalise.
             let side = match r.side.as_deref().unwrap_or("RIGHT").to_ascii_uppercase().as_str() {
                 "LEFT" => DiffSide::Left,
                 _ => DiffSide::Right,
@@ -987,11 +1008,22 @@ impl GhClient {
                 path: r.path,
                 line,
                 side,
-                body: r.body,
+                // Null / missing body → empty string. Rare but
+                // possible on tombstoned comments; keep them visible
+                // so the reviewer can see SOMETHING anchored at the
+                // line rather than a phantom slot.
+                body: r.body.unwrap_or_default(),
                 author_login: r.user.and_then(|u| u.login),
                 in_reply_to_id: r.in_reply_to_id.map(|n| n.to_string()),
-                created_at: r.created_at,
+                created_at: r.created_at.unwrap_or_default(),
             });
+        }
+        if dropped_outdated > 0 {
+            tracing::info!(
+                pr = %format!("{}/{}#{}", pr.owner, pr.repo, pr.number),
+                dropped = dropped_outdated,
+                "list_pr_review_comments: dropped outdated comments"
+            );
         }
         // Stable order by created_at so reply chains land in
         // chronological order under their parent line.
@@ -1336,9 +1368,15 @@ struct RestFileEntry {
 /// REST entry returned by `gh api .../pulls/{n}/comments`. Only the
 /// fields we surface to the frontend; everything else (commit_id,
 /// position, html_url, _links, …) is ignored at decode time.
+///
+/// Every field is defensive: GitHub occasionally returns null for
+/// `body` (tombstoned comments) and missing keys altogether on the
+/// older REST shape. We'd rather surface a comment with a quirk than
+/// fail the entire fetch on one malformed entry.
 #[derive(Debug, Deserialize)]
 struct RestReviewComment {
     id: i64,
+    #[serde(default)]
     path: String,
     /// Line in the LATEST diff. `null` for outdated comments — those
     /// are dropped at the parsing stage rather than rendered against
@@ -1349,12 +1387,14 @@ struct RestReviewComment {
     /// normalise downstream.
     #[serde(default)]
     side: Option<String>,
-    body: String,
+    #[serde(default)]
+    body: Option<String>,
     #[serde(default)]
     user: Option<RestReviewCommentUser>,
     #[serde(default, rename = "in_reply_to_id")]
     in_reply_to_id: Option<i64>,
-    created_at: String,
+    #[serde(default)]
+    created_at: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
