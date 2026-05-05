@@ -23,6 +23,7 @@ export function MineTab() {
   return (
     <EnrichedListView
       title="Mine"
+      variant="mine"
       rows={state.mine}
       loading={state.loading.mine}
       error={state.errors.mine}

@@ -56,6 +56,7 @@ export function ReviewedTab() {
   return (
     <EnrichedListView
       title="Done"
+      variant="done"
       rows={filteredRows}
       loading={state.loading.reviewed}
       error={state.errors.reviewed}

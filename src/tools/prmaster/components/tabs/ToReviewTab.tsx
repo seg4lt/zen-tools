@@ -57,6 +57,7 @@ export function ToReviewTab() {
   return (
     <EnrichedListView
       title="To Review"
+      variant="to-review"
       rows={filteredRows}
       loading={state.loading.toReview}
       error={state.errors.toReview}

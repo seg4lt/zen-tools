@@ -21,7 +21,7 @@ import {
 } from "../../store/prmaster-store";
 import type { EnrichedPullRequest } from "../../lib/tauri";
 import { Panel, PanelContent } from "./density";
-import { PrCard } from "./PrCard";
+import { PrCard, type PrCardVariant } from "./PrCard";
 import { PrDetailPanel } from "./PrDetailPanel";
 
 interface Props {
@@ -33,6 +33,15 @@ interface Props {
   onRefresh: () => void;
   /** Optional filter strip rendered as its own band beneath the header. */
   filterBar?: React.ReactNode;
+  /**
+   * Identifies which list this is so `PrCard` can tune its accent
+   * cues. Mine emphasises mergeability + CI ("can I land this?"),
+   * To Review emphasises the review-required state ("does it want
+   * me?"), Done emphasises the resolved decision ("what did I
+   * decide?"). Defaults to `to-review` since that's the busiest
+   * tab — keeps unchanged call sites looking right.
+   */
+  variant?: PrCardVariant;
 }
 
 export function EnrichedListView({
@@ -43,6 +52,7 @@ export function EnrichedListView({
   emptyText,
   onRefresh,
   filterBar,
+  variant = "to-review",
 }: Props) {
   const { state, dispatch } = usePrMasterStore();
 
@@ -157,7 +167,7 @@ export function EnrichedListView({
           </div>
         )}
 
-        <div className="flex flex-col gap-1.5">
+        <div className="flex flex-col gap-2">
           {rows.map((row) => {
             const id = enrichedId(row);
             return (
@@ -165,6 +175,7 @@ export function EnrichedListView({
                 key={id}
                 enriched={row}
                 selected={false}
+                variant={variant}
                 onSelect={() => dispatch({ type: "select", id })}
               />
             );
