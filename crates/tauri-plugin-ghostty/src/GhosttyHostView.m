@@ -27,6 +27,22 @@
 // defined after the slot itself further down the file.
 static void clear_host_view_if_matches(void *expected);
 
+@class GhosttyHostView;
+// Walk the NSView tree under `root` and append every GhosttyHostView
+// descendant to `out`. Used by the resize / fullscreen handler to
+// re-sync every live ghostty surface in the tree, not just self.
+// Defined further down (next to the other tab-tree helpers).
+static void collect_hosts(NSView *root, NSMutableArray<GhosttyHostView *> *out);
+
+// Reapply the cached chrome inset (snaps the tab container's frame
+// to the current contentView bounds) and push a fresh size + scale
+// to every live `GhosttyHostView` in the tree. The fallback view is
+// used when no tab container exists yet (very first surface).
+//
+// Defined alongside the static globals further down so it has
+// visibility into `g_tab_container` and `g_inset_*`.
+static void resync_chrome_and_surfaces(GhosttyHostView *fallback);
+
 @interface GhosttyHostView : NSView <NSTextInputClient> {
     ghostty_surface_t          _surface;
     NSTrackingArea            *_tracking;
@@ -41,6 +57,10 @@ static void clear_host_view_if_matches(void *expected);
     NSMutableArray<NSString *> *_imeAccumulator;
 }
 - (ghostty_surface_t)surface; // Accessor for C-side helpers.
+// Exposed so the resize / fullscreen notification handler can
+// re-sync every live host view in the tree (split panes etc.) in
+// one pass via `collect_hosts` — not just `self`.
+- (NSSize)ghosttySafeSize;
 @end
 
 @implementation GhosttyHostView
@@ -83,6 +103,10 @@ static void clear_host_view_if_matches(void *expected);
     // Remove any prior observers (we may move between windows).
     [nc removeObserver:self name:NSWindowDidChangeScreenNotification object:nil];
     [nc removeObserver:self name:NSWindowDidChangeBackingPropertiesNotification object:nil];
+    [nc removeObserver:self name:NSWindowDidResizeNotification object:nil];
+    [nc removeObserver:self name:NSWindowDidEndLiveResizeNotification object:nil];
+    [nc removeObserver:self name:NSWindowDidEnterFullScreenNotification object:nil];
+    [nc removeObserver:self name:NSWindowDidExitFullScreenNotification object:nil];
     if (self.window) {
         // Catch screen changes — viewDidChangeBackingProperties only
         // fires when the BACKING SCALE changes (e.g. retina↔non-retina),
@@ -96,6 +120,46 @@ static void clear_host_view_if_matches(void *expected);
         [nc addObserver:self
                selector:@selector(windowDidChangeScreen:)
                    name:NSWindowDidChangeBackingPropertiesNotification
+                 object:self.window];
+        // ── Resize / fullscreen plumbing ─────────────────────────────
+        // The tab container's autoresizingMask cascades window
+        // resizes down to this view's `setFrameSize:` automatically,
+        // so in the steady state ghostty sees every size change. The
+        // problem cases are:
+        //
+        //   * macOS fullscreen transitions — the animation pass
+        //     mutates `contentLayoutRect` in a different runloop
+        //     iteration than the frame change, so the
+        //     `[self ghosttySafeSize]` reading inside the cascaded
+        //     `setFrameSize:` is stale (top rows render under the
+        //     hidden menu bar / under the notch).
+        //   * External window managers (Magnet / Rectangle / system
+        //     fullscreen-tile) sometimes resize the window with the
+        //     WKWebView layout already settled, leaving ghostty
+        //     stuck on the pre-resize size when the React side's
+        //     ResizeObserver doesn't observe a meaningful enough
+        //     change to fire.
+        //
+        // Subscribing to these four notifications and re-syncing
+        // size + chrome-inset reframe in each handler covers both
+        // cases. The notifications fire AFTER macOS has settled the
+        // post-resize geometry, so `contentLayoutRect` is correct
+        // by the time our handler runs.
+        [nc addObserver:self
+               selector:@selector(windowDidResizeOrEndFullScreen:)
+                   name:NSWindowDidResizeNotification
+                 object:self.window];
+        [nc addObserver:self
+               selector:@selector(windowDidResizeOrEndFullScreen:)
+                   name:NSWindowDidEndLiveResizeNotification
+                 object:self.window];
+        [nc addObserver:self
+               selector:@selector(windowDidResizeOrEndFullScreen:)
+                   name:NSWindowDidEnterFullScreenNotification
+                 object:self.window];
+        [nc addObserver:self
+               selector:@selector(windowDidResizeOrEndFullScreen:)
+                   name:NSWindowDidExitFullScreenNotification
                  object:self.window];
         // Trigger the sync once to handle the initial placement.
         [self syncDisplayState];
@@ -114,6 +178,41 @@ static void clear_host_view_if_matches(void *expected);
 
 - (void)windowDidChangeScreen:(NSNotification *)note {
     [self syncDisplayState];
+}
+
+/// Handler for `NSWindowDidResizeNotification`,
+/// `NSWindowDidEndLiveResizeNotification`,
+/// `NSWindowDidEnterFullScreenNotification` and
+/// `NSWindowDidExitFullScreenNotification`.
+///
+/// Forces a re-application of the cached chrome inset (so the tab
+/// container is reframed against the now-current `contentView.bounds`)
+/// and a fresh `ghostty_surface_set_size` against the post-transition
+/// safe size. Both are needed because the autoresizing cascade alone
+/// uses whatever `contentLayoutRect` was at the time of the cascaded
+/// `setFrameSize:`, which during fullscreen transitions can lag the
+/// actual window geometry by one runloop tick.
+///
+/// Dispatched onto the next main-queue tick rather than running
+/// inline so the handler observes the FINAL post-notification state
+/// — AppKit posts these notifications mid-transaction in some cases
+/// and `contentLayoutRect` only converges after the current call
+/// stack unwinds.
+- (void)windowDidResizeOrEndFullScreen:(NSNotification *)note {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self resyncSizeFromWindow];
+    });
+}
+
+/// Re-apply the cached chrome inset (reframes the tab container
+/// against the current contentView bounds) and push a fresh size to
+/// every live ghostty surface in the tree. Called from the resize /
+/// fullscreen notification handlers above; thin wrapper around
+/// `resync_chrome_and_surfaces` which has visibility into the
+/// static globals.
+- (void)resyncSizeFromWindow {
+    if (!self.window) return;
+    resync_chrome_and_surfaces(self);
 }
 
 - (void)syncDisplayState {
@@ -970,6 +1069,65 @@ void GhosttyTabContainerSetChromeInset(double top, double right, double bottom, 
     NSView *parent = g_tab_container.superview;
     if (!parent) return;
     g_tab_container.frame = tab_container_frame_in(parent);
+}
+
+// Resize-handler back end. Implements the work for
+// `-[GhosttyHostView resyncSizeFromWindow]`; defined here because
+// it needs visibility into the file-scope `g_tab_container` and
+// `g_inset_*` statics. Called from the window-resize notification
+// path so a fullscreen entry/exit (or a Magnet-style snap) reflows
+// the tab container and re-pushes size+scale to every live
+// ghostty_surface in the tree — not just the host view that
+// happened to receive the AppKit notification.
+//
+// The autoresizing cascade alone is insufficient because macOS
+// fires `NSWindowDidEnterFullScreenNotification` AFTER it has
+// finished mutating the window geometry, but during the transition
+// the cascaded `setFrameSize:` reads `contentLayoutRect` which can
+// still be one runloop tick stale. This second pass guarantees a
+// final, correct size lands on ghostty.
+static void resync_chrome_and_surfaces(GhosttyHostView *fallback) {
+    NSWindow *window = fallback ? fallback.window : nil;
+    if (!window) return;
+
+    // Re-apply the cached chrome inset. With the contentView's new
+    // bounds, this snaps the tab container to the right rect even
+    // when the autoresizing cascade ran with stale geometry.
+    GhosttyTabContainerSetChromeInset((double)g_inset_top,
+                                      (double)g_inset_right,
+                                      (double)g_inset_bottom,
+                                      (double)g_inset_left);
+
+    CGFloat scale = window.backingScaleFactor;
+    if (scale <= 0) scale = 1.0;
+
+    // No tab container yet — happens for the very first surface
+    // before `terminal_new` has run end-to-end. Just sync the
+    // fallback host view in that case.
+    if (!g_tab_container) {
+        ghostty_surface_t s = [fallback surface];
+        if (!s) return;
+        NSSize safe = [fallback ghosttySafeSize];
+        ghostty_surface_set_content_scale(s, (double)scale, (double)scale);
+        ghostty_surface_set_size(s,
+                                 (uint32_t)(safe.width  * scale),
+                                 (uint32_t)(safe.height * scale));
+        return;
+    }
+
+    // Walk the tree and re-sync every live host view (includes
+    // split-spawned views the Rust side doesn't track).
+    NSMutableArray<GhosttyHostView *> *all = [NSMutableArray array];
+    collect_hosts(g_tab_container, all);
+    for (GhosttyHostView *host in all) {
+        ghostty_surface_t s = [host surface];
+        if (!s) continue;
+        NSSize safe = [host ghosttySafeSize];
+        ghostty_surface_set_content_scale(s, (double)scale, (double)scale);
+        ghostty_surface_set_size(s,
+                                 (uint32_t)(safe.width  * scale),
+                                 (uint32_t)(safe.height * scale));
+    }
 }
 
 // Add a new root view as a tab. Hides any previously active tab,
