@@ -159,12 +159,21 @@ export function PrFilesChangedView({ pr, viewMode }: Props) {
       .listReviewComments(ref)
       .then((cs) => {
         if (cancelled) return;
+        // Diagnostic — we want to know whether the REST endpoint is
+        // returning anything at all when reviewers report missing
+        // comments. Cheap (one log per mount) and easy to grep for
+        // in devtools when something looks wrong.
+        console.info(
+          `[prmaster] listReviewComments ${ref.owner}/${ref.repo}#${ref.number}:`,
+          cs.length,
+          "inline comments",
+          cs,
+        );
         setReviewComments(cs);
       })
       .catch((err) => {
         // Don't block the diff editor on a comments-load failure —
-        // the user can still review the code. Log so we can find it
-        // in devtools if it happens consistently.
+        // the user can still review the code.
         console.warn("[prmaster] listReviewComments failed:", err);
       });
     return () => {

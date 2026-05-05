@@ -214,11 +214,19 @@ export function DiffViewer({
       themeType: isDark ? "dark" : "light",
     };
     if (fullFileMode) {
-      // Click "..." between hunks to reveal more context. Without
-      // full file contents Pierre can't honour this option (the
-      // patch alone doesn't carry the unchanged lines), so we only
-      // turn it on when we're rendering MultiFileDiff.
-      opts.expandUnchanged = true;
+      // Pierre's default: unchanged regions are *collapsed* with
+      // "N unmodified lines" expand controls (chevron up / down /
+      // dot-dot-dot, matching GitHub's PR diff layout). The user
+      // clicks to reveal more context, all the way to the whole
+      // file. We deliberately leave `expandUnchanged` unset (false)
+      // — setting it to `true` expands EVERYTHING by default,
+      // which is the wrong UX for a code review (you want to see
+      // the changes, not skim the whole file).
+      //
+      // `expansionLineCount` is how many lines a single click
+      // reveals; default in Pierre is 100. Bumping it down to 20
+      // gives finer-grained expansion that matches GitHub's
+      // step-size and feels less jarring on long unchanged blocks.
       opts.expansionLineCount = 20;
     }
     if (onAddComment) {
