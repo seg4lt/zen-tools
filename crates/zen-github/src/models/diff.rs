@@ -8,8 +8,8 @@
 //!  * **gh REST** — fallback for unmapped repos, hits
 //!    `/repos/{owner}/{repo}/pulls/{n}/files` (paginated).
 //!
-//! The frontend renders the unified `patch` text via CodeMirror's
-//! `@codemirror/merge` so callers don't need to pre-split hunks.
+//! The frontend renders the unified `patch` text via `@pierre/diffs`'s
+//! `PatchDiff` component so callers don't need to pre-split hunks.
 
 use serde::{Deserialize, Serialize};
 

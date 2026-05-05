@@ -186,3 +186,101 @@ body,
   outline: 1px solid var(--primary);
   outline-offset: 1px;
 }
+
+/* Pierre Diffs review-comment annotation styling — matches the
+   surrounding Linear-style chrome (muted card, tight padding, monospace
+   author chip) so the diff feels like part of the app, not an iframe. */
+.diff-viewer-annotation {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 4px 0 4px 32px;
+  padding: 8px 10px;
+  background: color-mix(in oklch, var(--muted) 70%, transparent);
+  border-left: 2px solid var(--border);
+  border-radius: 4px;
+  font-size: 12px;
+  font-family: ui-sans-serif, system-ui, sans-serif;
+}
+.diff-viewer-annotation-comment {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+}
+.diff-viewer-annotation-author {
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted-foreground);
+}
+.diff-viewer-annotation-body {
+  flex: 1;
+  white-space: pre-wrap;
+  color: var(--foreground);
+}
+.diff-viewer-composer {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+}
+.diff-viewer-composer-hint {
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--muted-foreground);
+}
+.diff-viewer-composer-textarea {
+  width: 100%;
+  min-height: 60px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--background);
+  color: var(--foreground);
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.5;
+  resize: vertical;
+  box-sizing: border-box;
+}
+.diff-viewer-composer-textarea:focus {
+  outline: none;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 2px color-mix(in oklch, var(--primary) 20%, transparent);
+}
+.diff-viewer-composer-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+.diff-viewer-composer-cancel,
+.diff-viewer-composer-submit {
+  padding: 4px 12px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  border: 1px solid var(--border);
+}
+.diff-viewer-composer-cancel {
+  background: transparent;
+  color: var(--foreground);
+}
+.diff-viewer-composer-cancel:hover:not(:disabled) {
+  background: color-mix(in oklch, var(--muted) 60%, transparent);
+}
+.diff-viewer-composer-submit {
+  background: var(--primary);
+  color: var(--primary-foreground);
+  border-color: var(--primary);
+}
+.diff-viewer-composer-submit:hover:not(:disabled) {
+  filter: brightness(1.05);
+}
+.diff-viewer-composer-cancel:disabled,
+.diff-viewer-composer-submit:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
