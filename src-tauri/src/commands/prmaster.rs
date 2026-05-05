@@ -14,8 +14,7 @@ use tauri::{AppHandle, Manager, State};
 use tokio::sync::Mutex;
 
 use zen_github::{
-    AuthStatus, CheckContext, ConversationGroup, DiffSide, EnrichedPullRequest, GhCall, PrDiff,
-    PrRef, ReviewComment,
+    AuthStatus, CheckContext, DiffSide, EnrichedPullRequest, GhCall, PrDiff, PrRef, ReviewComment,
 };
 use zen_prmaster::{
     AiSummaryParams, NotificationFilter, PrMasterSettings, SummaryCard,
@@ -236,24 +235,10 @@ pub async fn prmaster_add_self_reviewer(
     Ok(())
 }
 
-/// Conversation groups — unresolved review threads and top-level @mentions
-/// on PRs the user is involved in.
-#[tauri::command]
-pub async fn prmaster_get_conversations(
-    state: State<'_, Mutex<AppState>>,
-) -> AppResult<Vec<ConversationGroup>> {
-    let engine = {
-        let s = state.lock().await;
-        engine(&s)
-    };
-    Ok(engine.list_conversations().await?)
-}
-
 /// Every inline review comment on `pr` — anchored to a file:line:side.
 /// Drives the diff editor's inline annotations on the dedicated review
-/// page. Outdated comments (whose line was removed in a later push)
-/// are filtered out at the engine level so they don't render in the
-/// wrong place.
+/// page. Resolved + outdated threads are filtered out at the engine
+/// level so the frontend only renders fresh, actionable comments.
 #[tauri::command]
 pub async fn prmaster_list_review_comments(
     state: State<'_, Mutex<AppState>>,
@@ -264,6 +249,23 @@ pub async fn prmaster_list_review_comments(
         engine(&s)
     };
     Ok(engine.list_review_comments(&pr).await?)
+}
+
+/// Mark a review thread as resolved. Drives the per-thread "Resolve"
+/// button + the global "Resolve all" toolbar button on the review
+/// page. `thread_id` is the GraphQL node id surfaced on every
+/// `ReviewComment.threadId` from the list endpoint.
+#[tauri::command]
+pub async fn prmaster_resolve_review_thread(
+    state: State<'_, Mutex<AppState>>,
+    thread_id: String,
+) -> AppResult<()> {
+    let engine = {
+        let s = state.lock().await;
+        engine(&s)
+    };
+    engine.resolve_review_thread(&thread_id).await?;
+    Ok(())
 }
 
 /// Snapshot of the rolling `gh` call log (drives the API Stats tab — P7

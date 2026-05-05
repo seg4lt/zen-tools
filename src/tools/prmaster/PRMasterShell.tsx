@@ -1,22 +1,19 @@
 /**
  * PRMaster — top-level shell.
  *
- * Mirrors the Swift `MainView` layout but composes shadcn `Tabs` instead of a
- * custom `MainTabBar`. Two tab inventories:
+ * Tab inventories:
  *
- *   - **Compact** (menu-bar popover): Review · Done · Mine · Conv —
- *     matches PRMaster's `MenuBarExtra` 4-tab layout.
+ *   - **Compact** (menu-bar popover): Review · Done · Mine.
  *   - **Full** (main window): adds Filters · AI · API · Settings.
  *
  * Window detection happens via `getCurrentWindow().label`; the popover
  * also dismisses on blur (mirrors macOS `NSPopover` behaviour).
  *
- * Keyboard nav (matches `MainView.swift:117–139`):
- *   - `1` / `2` / `3` / `4` jump to the first four tabs.
- *   - `←` / `→` cycle backwards / forwards through visible tabs.
+ * Keyboard nav: `1` / `2` / `3` jump to the first three tabs;
+ * `←` / `→` cycle through every visible tab.
  *
- * Tab pills carry numeric badge counts derived from the store
- * (`MainView.swift:191–199`).
+ * Tab pills carry numeric badge counts derived from the store; only
+ * the three list tabs (Review / Done / Mine) report counts.
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -27,7 +24,6 @@ import {
   GitPullRequest,
   Inbox,
   Loader2,
-  MessageSquare,
   Settings as SettingsIcon,
   Sparkles,
   User,
@@ -37,7 +33,6 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@zen-tools/ui";
 import { cn } from "@zen-tools/ui";
 import { AiSummaryTab } from "./components/tabs/AiSummaryTab";
 import { ApiStatsTab } from "./components/tabs/ApiStatsTab";
-import { ConversationsTab } from "./components/tabs/ConversationsTab";
 import { FiltersTab } from "./components/tabs/FiltersTab";
 import { MineTab } from "./components/tabs/MineTab";
 import { ReviewedTab } from "./components/tabs/ReviewedTab";
@@ -60,7 +55,6 @@ const TABS: TabDef[] = [
   { value: "to-review", icon: Inbox, label: "Review" },
   { value: "reviewed", icon: CheckCircle2, label: "Done" },
   { value: "mine", icon: User, label: "Mine" },
-  { value: "conversations", icon: MessageSquare, label: "Conv" },
   { value: "filters", icon: Bell, label: "Filters", fullOnly: true },
   { value: "ai", icon: Sparkles, label: "AI", fullOnly: true },
   { value: "api", icon: BarChart3, label: "API", fullOnly: true },
@@ -87,9 +81,9 @@ export function PRMasterShell() {
     [isCompact],
   );
 
-  // Tab badge counts — mirror Swift `badgeCount(for:)`. Only the four
-  // PR list tabs report a count; Filters / AI / API / Settings stay
-  // numberless. A count of zero hides the badge.
+  // Tab badge counts — only the three PR list tabs report a count;
+  // Filters / AI / API / Settings stay numberless. A count of zero
+  // hides the badge.
   const badgeFor = useCallback(
     (value: string): number => {
       switch (value) {
@@ -99,21 +93,11 @@ export function PRMasterShell() {
           return state.reviewed.length;
         case "mine":
           return state.mine.length;
-        case "conversations":
-          // The Swift app counts threads needing a reply rather than
-          // groups; we don't have that classification on the store yet
-          // so the group count is the best stand-in.
-          return state.conversations.length;
         default:
           return 0;
       }
     },
-    [
-      state.toReview.length,
-      state.reviewed.length,
-      state.mine.length,
-      state.conversations.length,
-    ],
+    [state.toReview.length, state.reviewed.length, state.mine.length],
   );
 
   // Popover lifecycle (compact mode only):
@@ -143,9 +127,10 @@ export function PRMasterShell() {
     };
   }, [isCompact, dispatch]);
 
-  // Keyboard navigation. `1`-`4` jump to the first four tabs, arrows
-  // cycle. We only act on bare keypresses (no modifiers) and ignore
-  // typing inside form fields so the list/filter inputs keep working.
+  // Keyboard navigation. `1`-`3` jump to the first three tabs (the
+  // list tabs); arrows cycle through every visible tab. We only act
+  // on bare keypresses (no modifiers) and ignore typing inside form
+  // fields so the list/filter inputs keep working.
   useEffect(() => {
     function isTypingTarget(target: EventTarget | null): boolean {
       if (!(target instanceof HTMLElement)) return false;
@@ -156,7 +141,7 @@ export function PRMasterShell() {
     function onKeyDown(e: KeyboardEvent) {
       if (e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;
       if (isTypingTarget(e.target)) return;
-      const numericIdx = ["1", "2", "3", "4"].indexOf(e.key);
+      const numericIdx = ["1", "2", "3"].indexOf(e.key);
       if (numericIdx >= 0) {
         const target = visible[numericIdx];
         if (target) {
@@ -230,9 +215,6 @@ export function PRMasterShell() {
         </TabsContent>
         <TabsContent value="mine" className="flex min-h-0 flex-1 flex-col">
           <MineTab />
-        </TabsContent>
-        <TabsContent value="conversations" className="flex min-h-0 flex-1 flex-col">
-          <ConversationsTab />
         </TabsContent>
         {!isCompact && (
           <>

@@ -17,6 +17,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
+  Check,
   ExternalLink,
   Eye,
   EyeOff,
@@ -223,6 +224,7 @@ export function PrFilesChangedView({ pr, viewMode }: Props) {
         filePath: c.path,
         createdAt: c.createdAt,
         inReplyToId: c.inReplyToId,
+        threadId: c.threadId,
       })),
     [reviewComments],
   );
@@ -342,6 +344,60 @@ export function PrFilesChangedView({ pr, viewMode }: Props) {
     [allComments, ref],
   );
 
+  // Resolve a single thread by its GraphQL node id. We don't
+  // optimistically remove the thread from the local list — the
+  // refresh tick after the mutation will fold the new server state
+  // in (resolved → filtered out by the engine), and rolling back a
+  // failed remove is more error-prone than just waiting one beat.
+  const handleResolve = useCallback(
+    async ({ threadId }: { threadId: string }) => {
+      try {
+        await prmasterTauri.resolveReviewThread(threadId);
+      } finally {
+        // Refresh comments (and the diff alongside, since it's keyed
+        // on the same tick) to reflect the new state.
+        setRefreshTick((n) => n + 1);
+      }
+    },
+    [],
+  );
+
+  // Resolve every unresolved thread on the PR. Sequential rather
+  // than `Promise.all` because GitHub rate-limits GraphQL mutations
+  // and we'd rather take a few extra seconds than burn the budget.
+  // After all calls finish we kick a single refresh.
+  //
+  // The set of "thread ids to resolve" is derived from
+  // `reviewComments` rather than `allComments` so we only target
+  // server-canonical threads (optimistic local entries don't have a
+  // `threadId` yet).
+  const [resolvingAll, setResolvingAll] = useState(false);
+  const [resolveAllError, setResolveAllError] = useState<string | null>(null);
+  const handleResolveAll = useCallback(async () => {
+    if (resolvingAll) return;
+    const ids = Array.from(
+      new Set(reviewComments.map((c) => c.threadId).filter(Boolean)),
+    );
+    if (ids.length === 0) return;
+    setResolvingAll(true);
+    setResolveAllError(null);
+    let firstError: string | null = null;
+    for (const id of ids) {
+      try {
+        await prmasterTauri.resolveReviewThread(id);
+      } catch (err) {
+        if (!firstError) firstError = formatError(err);
+        // Continue: one failure shouldn't block the rest. The user
+        // sees the first error in the toolbar; subsequent failures
+        // are logged.
+        console.warn(`[prmaster] resolveReviewThread ${id} failed:`, err);
+      }
+    }
+    setResolvingAll(false);
+    setResolveAllError(firstError);
+    setRefreshTick((n) => n + 1);
+  }, [reviewComments, resolvingAll]);
+
   if (loading) {
     return (
       <div className="flex items-center gap-2 rounded-md border bg-card/40 p-3 text-xs text-muted-foreground">
@@ -433,6 +489,33 @@ export function PrFilesChangedView({ pr, viewMode }: Props) {
             )}
             {showComments ? "Hide comments" : "Show comments"}
           </Button>
+          {reviewComments.length > 0 && (
+            <Button
+              size="xs"
+              variant="ghost"
+              onClick={handleResolveAll}
+              disabled={resolvingAll}
+              title={
+                resolveAllError
+                  ? `Last attempt failed: ${resolveAllError}`
+                  : `Resolve every unresolved conversation (${
+                      new Set(reviewComments.map((c) => c.threadId)).size
+                    } thread${
+                      new Set(reviewComments.map((c) => c.threadId)).size === 1
+                        ? ""
+                        : "s"
+                    }) on this PR`
+              }
+              className="h-5 gap-1 px-1.5"
+            >
+              {resolvingAll ? (
+                <Loader2 className="size-3 animate-spin" />
+              ) : (
+                <Check className="size-3" />
+              )}
+              {resolvingAll ? "Resolving all…" : "Resolve all"}
+            </Button>
+          )}
           <Button
             size="xs"
             variant="ghost"
@@ -499,6 +582,7 @@ export function PrFilesChangedView({ pr, viewMode }: Props) {
                   showComments && diff.headSha ? handleAddComment : undefined
                 }
                 onReply={showComments ? handleReply : undefined}
+                onResolve={showComments ? handleResolve : undefined}
               />
             )
           ) : (

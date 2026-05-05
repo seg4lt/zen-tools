@@ -125,18 +125,25 @@ export type DiffSide = "LEFT" | "RIGHT";
 
 /**
  * One inline review comment on a PR. Mirrors `zen_github::ReviewComment`.
- * Sourced from the REST `/repos/.../pulls/{n}/comments` endpoint —
- * outdated comments (whose target line was removed) are filtered at
- * the engine boundary so every entry the frontend sees has a valid
- * `(path, line, side)` anchor.
+ * Sourced from GraphQL `pullRequest.reviewThreads` — resolved + outdated
+ * threads are filtered at the engine boundary, so every entry the
+ * frontend sees has a valid `(path, line, side)` anchor and an
+ * unresolved thread parent.
  *
  * Replies inherit `path`/`line`/`side` from their parent comment, so
  * grouping a thread with N replies just means picking out every entry
- * with the same triple — no extra plumbing needed.
+ * with the same triple — no extra plumbing needed. The `threadId` is
+ * shared by every comment in the same thread, and is what the
+ * `resolveReviewThread` mutation needs.
  */
 export interface ReviewComment {
-  /** Stable id (REST numeric id stringified). */
+  /** Stable id (REST `databaseId` stringified). */
   id: string;
+  /** GraphQL node id of the thread this comment belongs to (e.g.
+   *  `"PRRT_kwDO..."`). All comments in a thread share the same
+   *  value; passed to the resolve mutation when the user clicks
+   *  "Resolve". */
+  threadId: string;
   path: string;
   /** 1-based line number on the side this comment is anchored to. */
   line: number;
@@ -191,41 +198,6 @@ export interface PrRef {
 export function prRefFor(pr: PullRequest): PrRef {
   const [owner, repo] = pr.repository.nameWithOwner.split("/", 2);
   return { owner: owner ?? "", repo: repo ?? pr.repository.name, number: pr.number };
-}
-
-export type ConversationKind = "review_thread" | "mention_comment";
-
-export interface ConversationMessage {
-  id: string;
-  authorLogin: string | null;
-  body: string;
-  createdAt: string;
-  url: string;
-}
-
-export interface ConversationItem {
-  id: string;
-  prId: string;
-  prTitle: string;
-  prNumber: number;
-  repoNameWithOwner: string;
-  prUrl: string;
-  kind: ConversationKind;
-  filePath: string | null;
-  lineNumber: number | null;
-  latestActivityAt: string;
-  exactUrl: string;
-  messages: ConversationMessage[];
-  currentUserLogin: string | null;
-}
-
-export interface ConversationGroup {
-  prId: string;
-  prTitle: string;
-  prNumber: number;
-  repoNameWithOwner: string;
-  prUrl: string;
-  conversations: ConversationItem[];
 }
 
 export interface GhStatus {
@@ -380,8 +352,6 @@ export const prmasterTauri = {
   getMine: () => invoke<EnrichedPullRequest[]>("prmaster_get_mine"),
   getToReview: () => invoke<EnrichedPullRequest[]>("prmaster_get_to_review"),
   getReviewed: () => invoke<EnrichedPullRequest[]>("prmaster_get_reviewed"),
-  getConversations: () =>
-    invoke<ConversationGroup[]>("prmaster_get_conversations"),
   /**
    * Every inline review comment on `pr` (sourced from the REST
    * endpoint, paginated). Drives the diff editor's inline annotations
@@ -416,6 +386,12 @@ export const prmasterTauri = {
     parentId: string;
     body: string;
   }) => invoke<void>("prmaster_reply_review_comment", params),
+  /**
+   * Mark a review thread as resolved. `threadId` is the GraphQL node
+   * id (matches `ReviewComment.threadId`). Idempotent.
+   */
+  resolveReviewThread: (threadId: string) =>
+    invoke<void>("prmaster_resolve_review_thread", { threadId }),
   getCallLog: () => invoke<GhCall[]>("prmaster_get_call_log"),
   getAiRuns: () => invoke<AiRunRecord[]>("prmaster_get_ai_runs"),
   refresh: () => invoke<void>("prmaster_refresh"),

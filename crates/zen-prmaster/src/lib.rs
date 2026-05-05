@@ -52,7 +52,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 use tracing::warn;
 use zen_github::{
-    ConversationGroup, DiffSide, EnrichedPullRequest, GhCall, GhClient, GhResult, PrDiff, PrRef, ReviewComment,
+    DiffSide, EnrichedPullRequest, GhCall, GhClient, GhResult, PrDiff, PrRef, ReviewComment,
     PullRequest, ReviewEvent, ReviewState,
 };
 
@@ -682,25 +682,25 @@ impl PrMasterEngine {
         Ok(self.refresh_lists_if_stale().await?.mine.clone())
     }
 
-    /// Conversation groups — unresolved review threads + @mentions on PRs
-    /// the user is involved in. Always re-fetches (no TTL) since
-    /// conversation activity is more bursty than the PR list itself.
-    pub async fn list_conversations(&self) -> GhResult<Vec<ConversationGroup>> {
-        let user = match self.inner.gh.whoami().await {
-            Ok(u) if !u.is_empty() => u,
-            _ => return Ok(Vec::new()),
-        };
-        self.inner.gh.fetch_conversations(&user).await
-    }
-
     /// Every inline review comment on `pr`, anchored to a file:line:side.
     /// Drives the diff editor's inline annotations on the dedicated
-    /// review page. Sourced from the REST endpoint (paginated).
+    /// review page. Sourced from GraphQL `pullRequest.reviewThreads`
+    /// so each comment carries its thread node id (needed for the
+    /// resolve mutation) and resolved threads are filtered out
+    /// server-side.
     pub async fn list_review_comments(
         &self,
         pr: &PrRef,
     ) -> GhResult<Vec<ReviewComment>> {
         self.inner.gh.list_pr_review_comments(pr).await
+    }
+
+    /// Resolve a single review thread by its GraphQL node id.
+    /// Mirrors the per-thread "Resolve conversation" button on
+    /// github.com. Idempotent — calling on an already-resolved
+    /// thread is a no-op success.
+    pub async fn resolve_review_thread(&self, thread_id: &str) -> GhResult<()> {
+        self.inner.gh.resolve_review_thread(thread_id).await
     }
 
     // ─── Actions ─────────────────────────────────────────────────────────

@@ -8,31 +8,20 @@
  *      surrounding `EnrichedListView`'s back-button bar; we don't
  *      duplicate it.
  *   2. **Status bar** — a polished row of status chips (CI, decision,
- *      reviewers count, files count, conversations count). One-line
- *      summary of "what's the state of this PR".
+ *      reviewers count, files count). One-line summary of "what's
+ *      the state of this PR".
  *   3. **Action bar** — Approve / Request Changes / Add me as
- *      reviewer + secondary Open / Copy. Primary actions on the
- *      left, secondary on the right.
- *   4. **Reviewers + Checks** — two side-by-side blocks (collapses
- *      to stacked on narrow widths) so the heaviest detail is
- *      visible without scrolling.
+ *      reviewer + secondary Open / Copy.
+ *   4. **Reviewers + Checks** — two side-by-side blocks.
  *   5. **Review Pull Request** — a single button that navigates to
  *      `/prmaster/review/$owner/$repo/$number` (the dedicated diff
- *      workspace). The previous in-place "Files changed" accordion
- *      cramped the diff editor; reviewing now happens on its own
- *      full-window page with a Unified / Split toggle.
- *   6. **Conversations** — review threads + @-mention comments on
- *      this PR, filtered out of the global conversations list. Same
- *      `ConversationThreadRow` component the firehose tab uses, so
- *      a thread looks identical in both places.
+ *      workspace where inline review comments + replies live).
  *
  * All blocks use the same `Section` wrapper so spacing and label
- * styling are consistent. The wrapper keeps spacing tight (Linear-
- * style) without adding heavyweight card chrome — the surrounding
- * routed view already owns the page-level chrome.
+ * styling are consistent.
  */
 
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import {
   AlertTriangle,
   ArrowDown,
@@ -56,7 +45,6 @@ import { Button } from "@zen-tools/ui";
 import { Label } from "@zen-tools/ui";
 import { Textarea } from "@zen-tools/ui";
 import { cn } from "@zen-tools/ui";
-import { usePrMasterStore } from "../../store/prmaster-store";
 import {
   prmasterTauri,
   prRefFor,
@@ -64,10 +52,6 @@ import {
 } from "../../lib/tauri";
 import { Avatar } from "./Avatar";
 import { CiChecks } from "./CiChecks";
-import {
-  ConversationSection,
-  conversationNeedsUserReply,
-} from "./ConversationThread";
 import { ReviewerAvatars } from "./ReviewerAvatars";
 
 interface Props {
@@ -86,7 +70,6 @@ export function PrDetailPanel({ pr, currentUser, onActionDone }: Props) {
   const [requestBody, setRequestBody] = useState("");
   const [error, setError] = useState<string | null>(null);
 
-  const { state } = usePrMasterStore();
   const navigate = useNavigate();
   const ref = prRefFor(pr.pr);
   const detail = pr.detail;
@@ -95,30 +78,6 @@ export function PrDetailPanel({ pr, currentUser, onActionDone }: Props) {
     !!currentUser &&
     (pr.requestedReviewers.includes(currentUser) ||
       pr.reviews.some((r) => r.author?.login === currentUser));
-
-  // Conversations belong to a flat global firehose; filter to just
-  // this PR by matching `repoNameWithOwner` + `prNumber` (the
-  // ConversationGroup's prId is GitHub's GraphQL node id which we
-  // don't have on the row, so we match on the human-readable pair).
-  const prConversations = useMemo(() => {
-    const group = state.conversations.find(
-      (g) =>
-        g.repoNameWithOwner === pr.pr.repository.nameWithOwner &&
-        g.prNumber === pr.pr.number,
-    );
-    if (!group) return { needsReply: [], others: [], total: 0 };
-    const needsReply = group.conversations.filter((c) =>
-      conversationNeedsUserReply(c, currentUser),
-    );
-    const others = group.conversations.filter(
-      (c) => !conversationNeedsUserReply(c, currentUser),
-    );
-    return {
-      needsReply,
-      others,
-      total: group.conversations.length,
-    };
-  }, [state.conversations, pr.pr.repository.nameWithOwner, pr.pr.number, currentUser]);
 
   const fileCount = detail?.files?.nodes?.length ?? 0;
 
@@ -210,19 +169,6 @@ export function PrDetailPanel({ pr, currentUser, onActionDone }: Props) {
         <StatChip tone="muted" icon={<FileDiff className="size-3" />}>
           {fileCount} {fileCount === 1 ? "file" : "files"}
         </StatChip>
-        {prConversations.total > 0 && (
-          <StatChip
-            tone={prConversations.needsReply.length > 0 ? "danger" : "muted"}
-            icon={<MessageSquare className="size-3" />}
-          >
-            {prConversations.total} thread
-            {prConversations.total === 1 ? "" : "s"}
-            {prConversations.needsReply.length > 0 &&
-              ` · ${prConversations.needsReply.length} need${
-                prConversations.needsReply.length === 1 ? "s" : ""
-              } reply`}
-          </StatChip>
-        )}
       </div>
 
       {/* ── 3. Action bar ───────────────────────────────────────── */}
@@ -392,20 +338,6 @@ export function PrDetailPanel({ pr, currentUser, onActionDone }: Props) {
         </Button>
       )}
 
-      {/* ── 6. Conversations on this PR ─────────────────────────── */}
-      {prConversations.total > 0 && (
-        <Section label="Conversations">
-          <ConversationSection
-            label="Needs your reply"
-            emphasis
-            items={prConversations.needsReply}
-          />
-          <ConversationSection
-            label="Other threads"
-            items={prConversations.others}
-          />
-        </Section>
-      )}
     </div>
   );
 }

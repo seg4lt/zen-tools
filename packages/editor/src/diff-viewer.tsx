@@ -56,6 +56,11 @@ export interface InlineComment {
   /** Parent comment id, when this entry is a reply. The thread root
    *  is identified by `inReplyToId == null`. */
   inReplyToId?: string;
+  /** Thread identifier shared by every comment in the same thread.
+   *  Opaque to the editor — passed verbatim to `onResolve` so the
+   *  host can turn it into whatever its forge needs (GitHub uses a
+   *  GraphQL node id; other forges may use something different). */
+  threadId?: string;
 }
 
 /** Which view to render. */
@@ -96,6 +101,12 @@ export interface DiffViewerProps {
     parentId: string;
     body: string;
   }) => Promise<void> | void;
+  /** Called when the user resolves a thread via the per-thread
+   *  "Resolve" button. `threadId` comes from the comment's
+   *  `threadId` field. Omit to hide the "Resolve" affordance — only
+   *  threads whose root comment carries a `threadId` AND whose
+   *  parent has `onResolve` get the button. */
+  onResolve?: (input: { threadId: string }) => Promise<void> | void;
 }
 
 // ── Side translation ─────────────────────────────────────────────
@@ -140,6 +151,7 @@ export function DiffViewer({
   viewMode = "unified",
   onAddComment,
   onReply,
+  onResolve,
 }: DiffViewerProps) {
   const [composer, setComposer] = useState<ComposerTarget | null>(null);
 
@@ -218,11 +230,18 @@ export function DiffViewer({
                 }
               : undefined
           }
+          onResolve={
+            onResolve
+              ? async (threadId) => {
+                  await onResolve({ threadId });
+                }
+              : undefined
+          }
           onCancel={closeComposer}
         />
       );
     },
-    [onAddComment, onReply, closeComposer],
+    [onAddComment, onReply, onResolve, closeComposer],
   );
 
   // Pierre's `FileDiffOptions` — diff style, theme pair (auto-flips
@@ -318,6 +337,9 @@ interface AnnotationBlockProps {
   /** Reply to an existing thread. The block resolves the parent id
    *  internally — the host just needs to know how to POST a reply. */
   onReply?: (parentId: string, body: string) => Promise<void> | void;
+  /** Resolve the entire thread. Only rendered when both this prop
+   *  and the thread root's `threadId` are present. */
+  onResolve?: (threadId: string) => Promise<void> | void;
   onCancel: () => void;
 }
 
@@ -340,9 +362,11 @@ function AnnotationBlock({
   composerOpen,
   onSubmit,
   onReply,
+  onResolve,
   onCancel,
 }: AnnotationBlockProps) {
   const [replyOpen, setReplyOpen] = useState(false);
+  const [resolving, setResolving] = useState(false);
   // Thread root = first comment chronologically. We pass its id to
   // GitHub's `replies` endpoint; GitHub attaches the reply to the
   // same thread regardless, so this is robust even if the user
@@ -389,11 +413,14 @@ function AnnotationBlock({
         ))}
       </div>
 
-      {/* Reply affordance + composer. Hidden when the host didn't
-          supply `onReply` (read-only viewer / unauth'd user). */}
-      {onReply && (
+      {/* Reply + Resolve affordances. Reply is hidden when the host
+          didn't supply `onReply` (read-only viewer / unauth'd user);
+          Resolve is hidden when `onResolve` isn't supplied OR when
+          the thread root has no `threadId` (e.g. an optimistic
+          local-only entry that hasn't been persisted yet). */}
+      {(onReply || (onResolve && threadRoot?.threadId)) && (
         <div style={{ marginTop: 12 }}>
-          {replyOpen ? (
+          {replyOpen && onReply ? (
             <Composer
               line={line}
               side={side}
@@ -408,29 +435,78 @@ function AnnotationBlock({
               onCancel={() => setReplyOpen(false)}
             />
           ) : (
-            <button
-              type="button"
-              onClick={() => setReplyOpen(true)}
+            <div
               style={{
-                background: "transparent",
-                border: 0,
-                color: "var(--primary, #3b82f6)",
-                cursor: "pointer",
-                padding: 0,
-                fontSize: 13,
-                fontWeight: 500,
-                fontFamily: "inherit",
-                display: "inline-flex",
+                display: "flex",
                 alignItems: "center",
-                gap: 6,
+                gap: 14,
               }}
-              title="Add a reply to this thread"
             >
-              <span aria-hidden style={{ opacity: 0.7 }}>
-                ↩
-              </span>
-              Add reply…
-            </button>
+              {onReply && (
+                <button
+                  type="button"
+                  onClick={() => setReplyOpen(true)}
+                  style={{
+                    background: "transparent",
+                    border: 0,
+                    color: "var(--primary, #3b82f6)",
+                    cursor: "pointer",
+                    padding: 0,
+                    fontSize: 13,
+                    fontWeight: 500,
+                    fontFamily: "inherit",
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 6,
+                  }}
+                  title="Add a reply to this thread"
+                >
+                  <span aria-hidden style={{ opacity: 0.7 }}>
+                    ↩
+                  </span>
+                  Add reply…
+                </button>
+              )}
+              {onResolve && threadRoot?.threadId && (
+                <button
+                  type="button"
+                  disabled={resolving}
+                  onClick={async () => {
+                    if (resolving || !threadRoot.threadId) return;
+                    setResolving(true);
+                    try {
+                      await onResolve(threadRoot.threadId);
+                    } finally {
+                      // Either the host's next refresh removes this
+                      // thread (resolved → filtered out) and the
+                      // component unmounts, or it fails and the user
+                      // can retry. Re-enable the button either way.
+                      setResolving(false);
+                    }
+                  }}
+                  style={{
+                    background: "transparent",
+                    border: 0,
+                    color: "var(--primary, #3b82f6)",
+                    cursor: resolving ? "wait" : "pointer",
+                    padding: 0,
+                    fontSize: 13,
+                    fontWeight: 500,
+                    fontFamily: "inherit",
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 6,
+                    opacity: resolving ? 0.6 : 1,
+                  }}
+                  title="Mark this conversation as resolved on GitHub"
+                >
+                  <span aria-hidden style={{ opacity: 0.7 }}>
+                    ✓
+                  </span>
+                  {resolving ? "Resolving…" : "Resolve"}
+                </button>
+              )}
+            </div>
           )}
         </div>
       )}

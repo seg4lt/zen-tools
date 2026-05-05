@@ -24,7 +24,6 @@ import {
 import {
   listenRefresh,
   prmasterTauri,
-  type ConversationGroup,
   type EnrichedPullRequest,
   type RefreshSnapshot,
 } from "../lib/tauri";
@@ -38,16 +37,13 @@ export interface PrMasterState {
   toReview: EnrichedPullRequest[];
   /** Open PRs the user has reviewed (enriched). */
   reviewed: EnrichedPullRequest[];
-  /** Conversation groups (unresolved review threads + @mentions). */
-  conversations: ConversationGroup[];
   /** Last-load status per tab. */
-  loading: { mine: boolean; toReview: boolean; reviewed: boolean; conversations: boolean };
+  loading: { mine: boolean; toReview: boolean; reviewed: boolean };
   /** Most recent error per tab (cleared on next successful load). */
   errors: {
     mine: string | null;
     toReview: string | null;
     reviewed: string | null;
-    conversations: string | null;
   };
   /** Currently-selected PR id (`"{owner}/{repo}#{n}"`) for the inline detail panel. */
   selectedPrId: string | null;
@@ -60,14 +56,13 @@ const initialState: PrMasterState = {
   mine: [],
   toReview: [],
   reviewed: [],
-  conversations: [],
-  loading: { mine: false, toReview: false, reviewed: false, conversations: false },
-  errors: { mine: null, toReview: null, reviewed: null, conversations: null },
+  loading: { mine: false, toReview: false, reviewed: false },
+  errors: { mine: null, toReview: null, reviewed: null },
   selectedPrId: null,
   bootstrapping: true,
 };
 
-type Tab = "mine" | "toReview" | "reviewed" | "conversations";
+type Tab = "mine" | "toReview" | "reviewed";
 
 export type PrMasterAction =
   | { type: "bootstrapped"; user: string | null }
@@ -75,7 +70,6 @@ export type PrMasterAction =
   | { type: "loadMineDone"; data: EnrichedPullRequest[] }
   | { type: "loadToReviewDone"; data: EnrichedPullRequest[] }
   | { type: "loadReviewedDone"; data: EnrichedPullRequest[] }
-  | { type: "loadConversationsDone"; data: ConversationGroup[] }
   | { type: "applyRefresh"; snapshot: RefreshSnapshot }
   | { type: "loadFail"; tab: Tab; message: string }
   | { type: "select"; id: string | null }
@@ -112,13 +106,6 @@ function reducer(state: PrMasterState, action: PrMasterAction): PrMasterState {
         ...state,
         reviewed: action.data,
         loading: { ...state.loading, reviewed: false },
-      };
-
-    case "loadConversationsDone":
-      return {
-        ...state,
-        conversations: action.data,
-        loading: { ...state.loading, conversations: false },
       };
 
     case "applyRefresh":
@@ -261,20 +248,6 @@ export async function loadReviewed(dispatch: Dispatch<PrMasterAction>) {
     dispatch({
       type: "loadFail",
       tab: "reviewed",
-      message: errorMessage(err),
-    });
-  }
-}
-
-export async function loadConversations(dispatch: Dispatch<PrMasterAction>) {
-  dispatch({ type: "loadStart", tab: "conversations" });
-  try {
-    const data = await prmasterTauri.getConversations();
-    dispatch({ type: "loadConversationsDone", data });
-  } catch (err) {
-    dispatch({
-      type: "loadFail",
-      tab: "conversations",
       message: errorMessage(err),
     });
   }

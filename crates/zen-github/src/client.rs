@@ -11,9 +11,6 @@ use zen_shell::{ShellError, ShellExecutor};
 use crate::call_log::{CallLog, GhCall};
 use crate::error::{GhError, GhResult};
 use crate::models::auth::AuthStatus;
-use crate::models::conversation::{
-    ConversationGroup, ConversationItem, ConversationKind, ConversationMessage,
-};
 use crate::models::diff::{
     split_git_diff, DiffSide, DiffSource, FileDiff, FileStatus, PrDiff,
 };
@@ -262,31 +259,6 @@ impl GhClient {
         .await
     }
 
-    /// Union of `--involves @me` and `--mentions @me` PRs (deduped). Drives
-    /// the Conversations tab.
-    pub async fn search_conversations_candidates(&self) -> GhResult<Vec<PullRequest>> {
-        let involved = self.search_prs(
-            "search prs --involves @me",
-            &[
-                "search", "prs", "--involves", "@me", "--state", "open", "--limit", "100",
-                "--json", SEARCH_JSON_FIELDS,
-            ],
-        );
-        let mentioned = self.search_prs(
-            "search prs --mentions @me",
-            &[
-                "search", "prs", "--mentions", "@me", "--state", "open", "--limit", "100",
-                "--json", SEARCH_JSON_FIELDS,
-            ],
-        );
-        let (a, b) = tokio::join!(involved, mentioned);
-        let mut combined = a?;
-        combined.extend(b?);
-        let mut seen = ahash::AHashSet::new();
-        combined.retain(|pr| seen.insert(pr.id()));
-        Ok(combined)
-    }
-
     async fn search_prs(&self, label: &str, args: &[&str]) -> GhResult<Vec<PullRequest>> {
         let json = self.gh_retry(label, args).await?;
         if json.trim().is_empty() {
@@ -496,163 +468,6 @@ impl GhClient {
         );
         self.gh_retry(&label, &arg_refs).await?;
         Ok(())
-    }
-
-    // ─── Conversations (review threads + @mentions) ──────────────────────
-
-    /// Fetch every unresolved review thread and @mention comment touching
-    /// the current user across the open PRs they're involved in.
-    /// Mirrors `Sources/PRMaster/Services/GitHubService.swift::fetchConversations`.
-    pub async fn fetch_conversations(
-        &self,
-        current_user: &str,
-    ) -> GhResult<Vec<ConversationGroup>> {
-        let candidates = self.search_conversations_candidates().await?;
-        let candidates: Vec<PullRequest> = candidates.into_iter().filter(|p| p.is_open()).collect();
-        if candidates.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let user_lower = current_user.to_ascii_lowercase();
-
-        // Issue all GraphQL fetches concurrently.
-        let mut handles = Vec::with_capacity(candidates.len());
-        for pr in &candidates {
-            let this = self.clone();
-            let pr_clone = pr.clone();
-            let user = user_lower.clone();
-            handles.push(tokio::spawn(async move {
-                match this.fetch_conversation_detail(&pr_clone).await {
-                    Ok(detail) => detail.into_items(&pr_clone, &user),
-                    Err(e) => {
-                        tracing::warn!(
-                            pr = %pr_clone.id(),
-                            error = %e,
-                            "fetch_conversation_detail failed; skipping"
-                        );
-                        Vec::new()
-                    }
-                }
-            }));
-        }
-
-        let mut all_items: Vec<ConversationItem> = Vec::new();
-        for handle in handles {
-            if let Ok(items) = handle.await {
-                all_items.extend(items);
-            }
-        }
-
-        // Dedup by id, keep the first occurrence (matches Swift's
-        // `uniquingKeysWith: { current, _ in current }`).
-        let mut seen = ahash::AHashSet::new();
-        all_items.retain(|item| seen.insert(item.id.clone()));
-        all_items.sort_by(|a, b| b.latest_activity_at.cmp(&a.latest_activity_at));
-
-        // Group by PR id.
-        let mut groups: ahash::AHashMap<String, Vec<ConversationItem>> = ahash::AHashMap::new();
-        for item in all_items {
-            groups.entry(item.pr_id.clone()).or_default().push(item);
-        }
-
-        let mut out: Vec<ConversationGroup> = groups
-            .into_iter()
-            .filter_map(|(_, mut items)| {
-                items.sort_by(|a, b| b.latest_activity_at.cmp(&a.latest_activity_at));
-                let head = items.first()?;
-                Some(ConversationGroup {
-                    pr_id: head.pr_id.clone(),
-                    pr_title: head.pr_title.clone(),
-                    pr_number: head.pr_number,
-                    repo_name_with_owner: head.repo_name_with_owner.clone(),
-                    pr_url: head.pr_url.clone(),
-                    conversations: items,
-                })
-            })
-            .collect();
-
-        out.sort_by(|a, b| {
-            b.latest_activity_at()
-                .unwrap_or(chrono::DateTime::<chrono::Utc>::MIN_UTC)
-                .cmp(
-                    &a.latest_activity_at()
-                        .unwrap_or(chrono::DateTime::<chrono::Utc>::MIN_UTC),
-                )
-        });
-        Ok(out)
-    }
-
-    async fn fetch_conversation_detail(
-        &self,
-        pr: &PullRequest,
-    ) -> GhResult<ConversationDetailGraphql> {
-        let (owner, repo) = pr.repository.split();
-        let query = format!(
-            r#"query {{
-  repository(owner: "{owner}", name: "{repo}") {{
-    pullRequest(number: {number}) {{
-      number
-      title
-      url
-      comments(first: 50) {{
-        nodes {{
-          id
-          body
-          createdAt
-          url
-          author {{ login }}
-        }}
-      }}
-      reviewThreads(first: 50) {{
-        nodes {{
-          id
-          isResolved
-          path
-          line
-          originalLine
-          comments(first: 50) {{
-            nodes {{
-              id
-              body
-              createdAt
-              url
-              author {{ login }}
-            }}
-          }}
-        }}
-      }}
-    }}
-  }}
-}}"#,
-            owner = owner,
-            repo = repo,
-            number = pr.number
-        );
-
-        let label = format!("graphql conversations {}#{}", pr.repository.short_name(), pr.number);
-        let stdout = self
-            .gh_retry(&label, &["api", "graphql", "-f", &format!("query={query}")])
-            .await?;
-
-        let parsed: Value = serde_json::from_str(&stdout)
-            .map_err(|e| GhError::decode(label.clone(), e))?;
-        if let Some(errors) = parsed.get("errors").and_then(|e| e.as_array()) {
-            if let Some(first) = errors.first() {
-                let msg = first
-                    .get("message")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown");
-                return Err(GhError::Graphql(msg.to_string()));
-            }
-        }
-        let value = parsed
-            .get("data")
-            .and_then(|d| d.get("repository"))
-            .and_then(|r| r.get("pullRequest"))
-            .ok_or_else(|| GhError::Unexpected("missing pullRequest in conversation response".into()))?
-            .clone();
-        serde_json::from_value::<ConversationDetailGraphql>(value)
-            .map_err(|e| GhError::decode(label, e))
     }
 
     // ─── Repos / orgs / commits / diffs ─────────────────────────────────
@@ -930,105 +745,185 @@ impl GhClient {
 
     // ─── Review comments (inline, anchored to file:line:side) ──────────
 
-    /// List every inline review comment on `pr` via the REST endpoint
-    /// `/repos/{owner}/{repo}/pulls/{n}/comments` (paginated). Each
-    /// entry already carries the `path`, `line`, and `side` we need to
-    /// anchor it in the diff viewer; replies inherit those three from
-    /// their parent so a thread's grouping happens for free in the
-    /// frontend.
+    /// List every **unresolved** inline review comment on `pr`. Sourced
+    /// via GraphQL (`pullRequest.reviewThreads`) rather than the REST
+    /// `/pulls/{n}/comments` endpoint because GraphQL is the only
+    /// place we can read the per-thread node id (needed to call
+    /// `resolveReviewThread`) and the per-thread `isResolved` flag
+    /// (so we can drop already-closed threads server-side).
     ///
-    /// Outdated comments — ones whose `line` came back null because
-    /// the line they targeted no longer exists in the latest commit
-    /// — are dropped here rather than surfaced and rendered against
-    /// the wrong row. Surfacing them is a future-feature (the
-    /// frontend would need a "outdated" affordance + a per-comment
-    /// `original_line` so it knows it's not anchoring fresh).
+    /// One GraphQL round-trip returns:
+    ///   * thread node id + `isResolved` (skip resolved)
+    ///   * thread `path` / `line` / `originalLine` / `diffSide`
+    ///   * every comment's `databaseId` (numeric REST id),
+    ///     `body`, `createdAt`, `url`, `author.login`,
+    ///     `replyTo.databaseId`
+    ///
+    /// Outdated threads (whose target line no longer exists in the
+    /// current diff — `line == null`) are dropped at the parsing
+    /// stage. Promoting them needs an "outdated" affordance the
+    /// frontend doesn't have yet.
     pub async fn list_pr_review_comments(
         &self,
         pr: &PrRef,
     ) -> GhResult<Vec<ReviewComment>> {
-        let path = format!(
-            "repos/{}/{}/pulls/{}/comments",
-            pr.owner, pr.repo, pr.number
-        );
         let label = format!(
-            "pr review comments {}/{}#{}",
+            "graphql review threads {}/{}#{}",
             pr.owner, pr.repo, pr.number
         );
-        // `gh api` defaults to GET; passing `-X GET` is redundant and
-        // some older gh versions warn / error on it. Drop it.
-        let stdout = self
-            .gh_retry(&label, &["api", &path, "--paginate"])
-            .await?;
-        let stdout_trim = stdout.trim();
-        if stdout_trim.is_empty() {
-            tracing::info!(
-                pr = %format!("{}/{}#{}", pr.owner, pr.repo, pr.number),
-                "list_pr_review_comments: gh returned empty body"
-            );
-            return Ok(Vec::new());
-        }
-        // `--paginate` concatenates pages by stitching JSON arrays
-        // (`][` between pages). Same trick `pr_diff_rest` uses.
-        let normalised = stdout.replace("][", ",");
-        let raw: Vec<RestReviewComment> = serde_json::from_str(&normalised)
-            .map_err(|e| {
-                tracing::warn!(
-                    pr = %format!("{}/{}#{}", pr.owner, pr.repo, pr.number),
-                    error = %e,
-                    body_preview = &stdout_trim[..stdout_trim.len().min(200)],
-                    "list_pr_review_comments: serde decode failed"
-                );
-                GhError::decode(label.clone(), e)
-            })?;
-        tracing::info!(
-            pr = %format!("{}/{}#{}", pr.owner, pr.repo, pr.number),
-            count = raw.len(),
-            "list_pr_review_comments: parsed REST entries"
+        // 100 threads × 50 comments per thread is the same cap as the
+        // old global Conversations fetch. PRs with more than that are
+        // rare; if we ever hit it we'll add cursor pagination.
+        let query = format!(
+            r#"query {{
+  repository(owner: "{owner}", name: "{repo}") {{
+    pullRequest(number: {number}) {{
+      reviewThreads(first: 100) {{
+        nodes {{
+          id
+          isResolved
+          isOutdated
+          path
+          line
+          originalLine
+          diffSide
+          comments(first: 50) {{
+            nodes {{
+              databaseId
+              body
+              createdAt
+              url
+              author {{ login }}
+              replyTo {{ databaseId }}
+            }}
+          }}
+        }}
+      }}
+    }}
+  }}
+}}"#,
+            owner = pr.owner,
+            repo = pr.repo,
+            number = pr.number
         );
-        let mut out = Vec::with_capacity(raw.len());
+        let stdout = self
+            .gh_retry(&label, &["api", "graphql", "-f", &format!("query={query}")])
+            .await?;
+        let parsed: Value = serde_json::from_str(&stdout)
+            .map_err(|e| GhError::decode(label.clone(), e))?;
+        if let Some(errors) = parsed.get("errors").and_then(|e| e.as_array()) {
+            if let Some(first) = errors.first() {
+                let msg = first
+                    .get("message")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                return Err(GhError::Graphql(msg.to_string()));
+            }
+        }
+        let threads_node = parsed
+            .get("data")
+            .and_then(|d| d.get("repository"))
+            .and_then(|r| r.get("pullRequest"))
+            .and_then(|p| p.get("reviewThreads"))
+            .cloned()
+            .ok_or_else(|| {
+                GhError::Unexpected("missing reviewThreads in GraphQL response".into())
+            })?;
+        let parsed_threads: ReviewThreadsGql = serde_json::from_value(threads_node)
+            .map_err(|e| GhError::decode(label.clone(), e))?;
+
+        let mut out: Vec<ReviewComment> = Vec::new();
+        let mut dropped_resolved = 0usize;
         let mut dropped_outdated = 0usize;
-        for r in raw {
-            // Skip outdated comments (their target line was removed
-            // in a later push). The frontend would render them in
-            // the wrong place if we passed `original_line` through
-            // without an "outdated" affordance.
-            let Some(line) = r.line else {
+        for thread in parsed_threads.nodes {
+            if thread.is_resolved {
+                dropped_resolved += 1;
+                continue;
+            }
+            // Use `line` when present; outdated threads with a null
+            // `line` are dropped (their target line is gone from the
+            // current diff and rendering them would land on the wrong
+            // row). `originalLine` is intentionally NOT used as a
+            // fallback — see the doc-comment for context.
+            let Some(line) = thread.line else {
                 dropped_outdated += 1;
                 continue;
             };
-            // GitHub returns `side` uppercase on this endpoint; some
-            // tooling lower-cases it. Normalise.
-            let side = match r.side.as_deref().unwrap_or("RIGHT").to_ascii_uppercase().as_str() {
-                "LEFT" => DiffSide::Left,
+            let path = match thread.path {
+                Some(p) => p,
+                None => continue,
+            };
+            let side = match thread.diff_side.as_deref() {
+                Some("LEFT") => DiffSide::Left,
                 _ => DiffSide::Right,
             };
-            out.push(ReviewComment {
-                id: r.id.to_string(),
-                path: r.path,
-                line,
-                side,
-                // Null / missing body → empty string. Rare but
-                // possible on tombstoned comments; keep them visible
-                // so the reviewer can see SOMETHING anchored at the
-                // line rather than a phantom slot.
-                body: r.body.unwrap_or_default(),
-                author_login: r.user.and_then(|u| u.login),
-                in_reply_to_id: r.in_reply_to_id.map(|n| n.to_string()),
-                created_at: r.created_at.unwrap_or_default(),
-            });
+            for comment in thread.comments.nodes {
+                let Some(database_id) = comment.database_id else {
+                    continue;
+                };
+                out.push(ReviewComment {
+                    id: database_id.to_string(),
+                    thread_id: thread.id.clone(),
+                    path: path.clone(),
+                    line,
+                    side,
+                    body: comment.body.unwrap_or_default(),
+                    author_login: comment.author.and_then(|a| a.login),
+                    in_reply_to_id: comment
+                        .reply_to
+                        .and_then(|r| r.database_id)
+                        .map(|id| id.to_string()),
+                    created_at: comment.created_at.unwrap_or_default(),
+                });
+            }
         }
-        if dropped_outdated > 0 {
-            tracing::info!(
-                pr = %format!("{}/{}#{}", pr.owner, pr.repo, pr.number),
-                dropped = dropped_outdated,
-                "list_pr_review_comments: dropped outdated comments"
-            );
-        }
+        tracing::info!(
+            pr = %format!("{}/{}#{}", pr.owner, pr.repo, pr.number),
+            kept = out.len(),
+            dropped_resolved,
+            dropped_outdated,
+            "list_pr_review_comments: parsed GraphQL threads"
+        );
         // Stable order by created_at so reply chains land in
         // chronological order under their parent line.
         out.sort_by(|a, b| a.created_at.cmp(&b.created_at));
         Ok(out)
+    }
+
+    /// Mark a review thread as resolved on GitHub. Mirrors the
+    /// "Resolve conversation" button on github.com.
+    ///
+    /// `thread_id` is the GraphQL node id (e.g. `"PRRT_kwDO..."`)
+    /// returned by [`Self::list_pr_review_comments`] on every
+    /// `ReviewComment.thread_id`. The mutation is idempotent: calling
+    /// it on an already-resolved thread returns success without
+    /// side-effects.
+    pub async fn resolve_review_thread(&self, thread_id: &str) -> GhResult<()> {
+        let label = format!("graphql resolveReviewThread {thread_id}");
+        // Pass the thread id via `-F` so gh splices it into the
+        // GraphQL variables — avoids manual escaping in the query
+        // string (thread ids are URL-safe base64 but the value is
+        // user-controlled here, treat it as untrusted).
+        let query = "mutation($id: ID!) { resolveReviewThread(input: { threadId: $id }) { thread { id isResolved } } }";
+        let id_arg = format!("id={thread_id}");
+        let stdout = self
+            .gh_retry(&label, &["api", "graphql", "-f", &format!("query={query}"), "-F", &id_arg])
+            .await?;
+        // gh prints the GraphQL response on stdout. Inspect for
+        // top-level errors (HTTP 200 with a GraphQL `errors` array
+        // is GitHub's preferred error mode).
+        if let Ok(parsed) = serde_json::from_str::<Value>(&stdout) {
+            if let Some(errors) = parsed.get("errors").and_then(|e| e.as_array()) {
+                if let Some(first) = errors.first() {
+                    let msg = first
+                        .get("message")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
+                    return Err(GhError::Graphql(msg.to_string()));
+                }
+            }
+        }
+        Ok(())
     }
 
     async fn pr_diff_rest(&self, pr: &PrRef) -> GhResult<PrDiff> {
@@ -1226,162 +1121,6 @@ impl Default for GhClient {
     }
 }
 
-// ─── Conversation GraphQL DTOs ───────────────────────────────────────────
-//
-// These mirror the private structs in
-// `Sources/PRMaster/Services/GitHubService.swift` (lines 933–1055). They're
-// kept private to this module — public callers see [`ConversationGroup`]
-// and [`ConversationItem`] from `models::conversation`.
-
-#[derive(Debug, Deserialize)]
-struct ConversationDetailGraphql {
-    #[serde(default)]
-    comments: Option<ConversationCommentNodes>,
-    #[serde(default, rename = "reviewThreads")]
-    review_threads: Option<ReviewThreadNodesGql>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ReviewThreadNodesGql {
-    nodes: Vec<ReviewThreadGql>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ReviewThreadGql {
-    id: String,
-    #[serde(rename = "isResolved")]
-    is_resolved: bool,
-    #[serde(default)]
-    path: Option<String>,
-    #[serde(default)]
-    line: Option<u64>,
-    #[serde(default, rename = "originalLine")]
-    original_line: Option<u64>,
-    comments: ConversationCommentNodes,
-}
-
-#[derive(Debug, Deserialize)]
-struct ConversationCommentNodes {
-    nodes: Vec<ConversationCommentGql>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ConversationCommentGql {
-    id: String,
-    body: String,
-    #[serde(rename = "createdAt")]
-    created_at: chrono::DateTime<chrono::Utc>,
-    url: String,
-    #[serde(default)]
-    author: Option<ConversationAuthorGql>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ConversationAuthorGql {
-    #[serde(default)]
-    login: Option<String>,
-}
-
-impl ConversationCommentGql {
-    fn into_message(self) -> ConversationMessage {
-        ConversationMessage {
-            id: self.id,
-            author_login: self.author.and_then(|a| a.login),
-            body: self.body,
-            created_at: self.created_at,
-            url: self.url,
-        }
-    }
-}
-
-impl ConversationDetailGraphql {
-    /// Mirrors `ConversationPRDetail.conversationItems(for:)` in Swift.
-    /// `current_user` is expected to be lower-cased already.
-    fn into_items(self, pr: &PullRequest, current_user: &str) -> Vec<ConversationItem> {
-        let pr_id = pr.id();
-        let mut out = Vec::new();
-
-        // Review threads: include if unresolved AND the user participated
-        // or was @-mentioned anywhere in the thread.
-        if let Some(threads) = self.review_threads {
-            for thread in threads.nodes {
-                if thread.is_resolved {
-                    continue;
-                }
-                let messages: Vec<ConversationMessage> = thread
-                    .comments
-                    .nodes
-                    .into_iter()
-                    .map(|c| c.into_message())
-                    .collect();
-                let user_participated = messages.iter().any(|m| {
-                    m.author_login
-                        .as_deref()
-                        .map(|s| s.eq_ignore_ascii_case(current_user))
-                        .unwrap_or(false)
-                });
-                let user_mentioned = messages.iter().any(|m| body_mentions(&m.body, current_user));
-                if !(user_participated || user_mentioned) {
-                    continue;
-                }
-                let Some(latest) = messages.iter().map(|m| m.created_at).max() else {
-                    continue;
-                };
-                let exact_url = messages
-                    .last()
-                    .map(|m| m.url.clone())
-                    .unwrap_or_else(|| pr.url.clone());
-
-                let mut sorted = messages;
-                sorted.sort_by(|a, b| a.created_at.cmp(&b.created_at));
-
-                out.push(ConversationItem {
-                    id: thread.id,
-                    pr_id: pr_id.clone(),
-                    pr_title: pr.title.clone(),
-                    pr_number: pr.number,
-                    repo_name_with_owner: pr.repository.name_with_owner.clone(),
-                    pr_url: pr.url.clone(),
-                    kind: ConversationKind::ReviewThread,
-                    file_path: thread.path,
-                    line_number: thread.line.or(thread.original_line),
-                    latest_activity_at: latest,
-                    exact_url,
-                    messages: sorted,
-                    current_user_login: Some(current_user.to_string()),
-                });
-            }
-        }
-
-        // Top-level comments that @-mention the user.
-        if let Some(comments) = self.comments {
-            for comment in comments.nodes {
-                if !body_mentions(&comment.body, current_user) {
-                    continue;
-                }
-                let msg = comment.into_message();
-                out.push(ConversationItem {
-                    id: msg.id.clone(),
-                    pr_id: pr_id.clone(),
-                    pr_title: pr.title.clone(),
-                    pr_number: pr.number,
-                    repo_name_with_owner: pr.repository.name_with_owner.clone(),
-                    pr_url: pr.url.clone(),
-                    kind: ConversationKind::MentionComment,
-                    file_path: None,
-                    line_number: None,
-                    latest_activity_at: msg.created_at,
-                    exact_url: msg.url.clone(),
-                    messages: vec![msg],
-                    current_user_login: Some(current_user.to_string()),
-                });
-            }
-        }
-
-        out
-    }
-}
-
 /// REST entry returned by `gh api .../pulls/{n}/files`.
 #[derive(Debug, Deserialize)]
 struct RestFileEntry {
@@ -1397,42 +1136,67 @@ struct RestFileEntry {
     previous_filename: Option<String>,
 }
 
-/// REST entry returned by `gh api .../pulls/{n}/comments`. Only the
-/// fields we surface to the frontend; everything else (commit_id,
-/// position, html_url, _links, …) is ignored at decode time.
-///
-/// Every field is defensive: GitHub occasionally returns null for
-/// `body` (tombstoned comments) and missing keys altogether on the
-/// older REST shape. We'd rather surface a comment with a quirk than
-/// fail the entire fetch on one malformed entry.
+/// GraphQL DTOs for `pullRequest.reviewThreads`. Mirror the shape we
+/// query in `list_pr_review_comments` — every text field is defensive
+/// (tombstoned comments occasionally return null `body`, etc.) so a
+/// single malformed entry doesn't fail the entire fetch.
 #[derive(Debug, Deserialize)]
-struct RestReviewComment {
-    id: i64,
-    #[serde(default)]
-    path: String,
-    /// Line in the LATEST diff. `null` for outdated comments — those
-    /// are dropped at the parsing stage rather than rendered against
-    /// the wrong row.
-    #[serde(default)]
-    line: Option<u32>,
-    /// "LEFT" or "RIGHT". Case can vary between API versions; we
-    /// normalise downstream.
-    #[serde(default)]
-    side: Option<String>,
-    #[serde(default)]
-    body: Option<String>,
-    #[serde(default)]
-    user: Option<RestReviewCommentUser>,
-    #[serde(default, rename = "in_reply_to_id")]
-    in_reply_to_id: Option<i64>,
-    #[serde(default)]
-    created_at: Option<String>,
+struct ReviewThreadsGql {
+    nodes: Vec<ReviewThreadNode>,
 }
 
 #[derive(Debug, Deserialize)]
-struct RestReviewCommentUser {
+struct ReviewThreadNode {
+    /// Thread node id (`PRRT_kwDO...`) — needed by the
+    /// `resolveReviewThread` mutation.
+    id: String,
+    #[serde(rename = "isResolved", default)]
+    is_resolved: bool,
+    #[serde(default)]
+    path: Option<String>,
+    /// Line in the LATEST diff. `null` for threads whose target line
+    /// no longer exists.
+    #[serde(default)]
+    line: Option<u32>,
+    /// `LEFT` (deletion side) or `RIGHT` (addition / context side).
+    /// Optional because older repos / replays sometimes omit it.
+    #[serde(rename = "diffSide", default)]
+    diff_side: Option<String>,
+    comments: ReviewThreadCommentsGql,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReviewThreadCommentsGql {
+    nodes: Vec<ReviewThreadCommentGql>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReviewThreadCommentGql {
+    /// REST numeric id. May be null on extremely-recent comments
+    /// before GitHub backfills it; we drop those (they re-appear on
+    /// the next refresh).
+    #[serde(rename = "databaseId", default)]
+    database_id: Option<i64>,
+    #[serde(default)]
+    body: Option<String>,
+    #[serde(rename = "createdAt", default)]
+    created_at: Option<String>,
+    #[serde(default)]
+    author: Option<ReviewThreadCommentAuthorGql>,
+    #[serde(rename = "replyTo", default)]
+    reply_to: Option<ReviewThreadReplyToGql>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReviewThreadCommentAuthorGql {
     #[serde(default)]
     login: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReviewThreadReplyToGql {
+    #[serde(rename = "databaseId", default)]
+    database_id: Option<i64>,
 }
 
 /// `git show {ref}:{path}` → file contents at that revision, or `None`
@@ -1457,50 +1221,6 @@ async fn git_show(
     }
 }
 
-/// Word-boundary `@username` matcher. Mirrors Swift's `String.containsMention(of:)`.
-fn body_mentions(body: &str, username_lower: &str) -> bool {
-    let body_lower = body.to_ascii_lowercase();
-    let target = format!("@{username_lower}");
-    let bytes = body_lower.as_bytes();
-    let target_bytes = target.as_bytes();
-    let mut idx = 0;
-    while let Some(pos) = body_lower[idx..].find(&target) {
-        let abs = idx + pos;
-        let before_ok = abs == 0
-            || !is_username_char(bytes[abs - 1] as char);
-        let after = abs + target_bytes.len();
-        let after_ok = after >= bytes.len()
-            || !is_username_char(bytes[after] as char);
-        if before_ok && after_ok {
-            return true;
-        }
-        idx = abs + target_bytes.len();
-    }
-    false
-}
-
-fn is_username_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || c == '-'
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn body_mentions_handles_word_boundary() {
-        assert!(body_mentions("hey @octocat please look", "octocat"));
-        assert!(body_mentions("@octocat", "octocat"));
-        assert!(body_mentions("(@octocat)", "octocat"));
-        assert!(!body_mentions("email me at notoctocat@example.com", "octocat"));
-        assert!(!body_mentions("hi @octocatlong", "octocat"));
-    }
-
-    #[test]
-    fn body_mentions_is_case_insensitive() {
-        assert!(body_mentions("Hi @OctoCat please review", "octocat"));
-    }
-}
 
 /// GraphQL fragment for one PR's detail, embedded in the batched query.
 const PR_FRAGMENT: &str = r#"      headRefName
