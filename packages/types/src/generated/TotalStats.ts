@@ -28,4 +28,10 @@ proc_count: number,
 /**
  * Number of root targets whose process is still alive.
  */
-root_count: number, };
+root_count: number, 
+/**
+ * Total thread count summed across every monitored target
+ * subtree. Useful for spotting cumulative thread sprawl across
+ * a multi-root selection.
+ */
+threads: number, };

@@ -52,4 +52,10 @@ vsize: number,
 /**
  * Phys footprint (Activity Monitor "Memory") in bytes.
  */
-phys_footprint: number, };
+phys_footprint: number, 
+/**
+ * Total thread count for the process at sample time. Lifted
+ * straight from `PidSample.threads` — this is a count, not a
+ * delta, so no per-interval computation is needed.
+ */
+threads: number, };

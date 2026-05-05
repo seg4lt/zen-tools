@@ -30,6 +30,12 @@ pub fn read(pid: i32) -> Option<PidSample> {
         rss: tai.ptinfo.pti_resident_size,
         vsize: tai.ptinfo.pti_virtual_size,
         phys_footprint,
+        // `pti_threadnum` is the total thread count (running + blocked).
+        // It's already returned as part of the `proc_taskallinfo` blob
+        // we just read, so capturing it costs nothing extra. The kernel
+        // returns this as `int32_t`; cast to u32 — thread counts go up
+        // by tens, never near i32::MAX.
+        threads: tai.ptinfo.pti_threadnum.max(0) as u32,
     })
 }
 

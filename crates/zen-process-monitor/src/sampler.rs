@@ -67,6 +67,10 @@ pub struct TotalStats {
     /// Number of root targets whose process is still alive.
     #[ts(type = "number")]
     pub root_count: usize,
+    /// Total thread count summed across every monitored target
+    /// subtree. Useful for spotting cumulative thread sprawl across
+    /// a multi-root selection.
+    pub threads: u32,
 }
 
 /// State shared between commands and the sampler thread.
@@ -326,6 +330,7 @@ fn collect_sample(roots: &[i32], state: &SharedState) -> Sample {
             rss: sample.rss,
             vsize: sample.vsize,
             phys_footprint: sample.phys_footprint,
+            threads: sample.threads,
         });
 
         if !entry.is_ancestor {
@@ -334,6 +339,7 @@ fn collect_sample(roots: &[i32], state: &SharedState) -> Sample {
             total.vsize = total.vsize.saturating_add(sample.vsize);
             total.phys_footprint = total.phys_footprint.saturating_add(sample.phys_footprint);
             total.proc_count += 1;
+            total.threads = total.threads.saturating_add(sample.threads);
         }
     }
 

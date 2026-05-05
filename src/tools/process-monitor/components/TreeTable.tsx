@@ -99,6 +99,12 @@ export function TreeTable({ latest, activeTarget }: TreeTableProps) {
             <th className="px-2 py-1.5 text-left">CPU</th>
             <th className="px-2 py-1.5 text-left">Memory</th>
             <th className="px-2 py-1.5 text-left">RSS</th>
+            <th
+              className="px-2 py-1.5 text-left"
+              title="Total threads (proc_taskinfo.pti_threadnum)"
+            >
+              Threads
+            </th>
           </tr>
         </thead>
         <tbody>
@@ -118,13 +124,22 @@ export function TreeTable({ latest, activeTarget }: TreeTableProps) {
             const selfCpu = targetRow?.cpu_pct ?? 0;
             const selfMem = targetRow?.phys_footprint ?? 0;
             const selfRss = targetRow?.rss ?? 0;
+            // Sum threads across the entire monitored subtree (target +
+            // every descendant) so the target row's "Threads" cell is
+            // an at-a-glance total for the whole tree, matching how the
+            // CPU/Memory/RSS columns also reflect the rolled-up cost.
+            // Ancestors are excluded (same rule as the rest of the
+            // totals — see `sampler.rs::collect_sample_macos`).
+            const treeThreads =
+              (targetRow?.threads ?? 0) +
+              g.descendants.reduce((acc, d) => acc + (d.threads ?? 0), 0);
 
             return [
               <tr
                 key={`${pid}-h`}
                 className="bg-muted/30 text-xs uppercase tracking-wide text-muted-foreground"
               >
-                <td colSpan={5} className="px-2 py-1">
+                <td colSpan={6} className="px-2 py-1">
                   <span className="text-primary">●</span>{" "}
                   Tree of <span className="font-semibold normal-case text-foreground">{groupLabel}</span>{" "}
                   <span className="text-muted-foreground"> #{pid}</span>
@@ -146,6 +161,7 @@ export function TreeTable({ latest, activeTarget }: TreeTableProps) {
                     <td className="px-2 py-1 tabular-nums">{fmtCpu(a.cpu_pct)}</td>
                     <td className="px-2 py-1 tabular-nums">{fmtBytes(a.phys_footprint)}</td>
                     <td className="px-2 py-1 tabular-nums">{fmtBytes(a.rss)}</td>
+                    <td className="px-2 py-1 tabular-nums">{a.threads}</td>
                   </tr>
                 );
               }),
@@ -174,6 +190,18 @@ export function TreeTable({ latest, activeTarget }: TreeTableProps) {
                 </td>
                 <td className="px-2 py-1 tabular-nums">{fmtBytes(selfMem)}</td>
                 <td className="px-2 py-1 tabular-nums text-muted-foreground">{fmtBytes(selfRss)}</td>
+                <td
+                  className="px-2 py-1 tabular-nums"
+                  title={
+                    g.descendants.length > 0
+                      ? `${targetRow?.threads ?? 0} on this process + ${
+                          treeThreads - (targetRow?.threads ?? 0)
+                        } across descendants`
+                      : `${treeThreads} threads`
+                  }
+                >
+                  {treeThreads}
+                </td>
               </tr>,
               ...(isOpen
                 ? g.descendants.map((d) => {
@@ -202,6 +230,7 @@ export function TreeTable({ latest, activeTarget }: TreeTableProps) {
                         </td>
                         <td className="px-2 py-1 tabular-nums">{fmtBytes(d.phys_footprint)}</td>
                         <td className="px-2 py-1 tabular-nums text-muted-foreground">{fmtBytes(d.rss)}</td>
+                        <td className="px-2 py-1 tabular-nums text-muted-foreground">{d.threads}</td>
                       </tr>
                     );
                   })

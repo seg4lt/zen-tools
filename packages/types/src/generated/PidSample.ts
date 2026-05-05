@@ -41,4 +41,10 @@ vsize: number,
  * Phys footprint in bytes (rusage_info_v6.ri_phys_footprint) — what
  * Activity Monitor calls "Memory".
  */
-phys_footprint: number, };
+phys_footprint: number, 
+/**
+ * Total thread count for the process (proc_taskinfo.pti_threadnum).
+ * Surfaced in the UI's process tree so users can spot thread
+ * explosions without dropping to `ps` / Activity Monitor.
+ */
+threads: number, };

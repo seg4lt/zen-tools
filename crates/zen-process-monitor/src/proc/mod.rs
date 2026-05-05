@@ -56,6 +56,10 @@ pub struct PidSample {
     /// Activity Monitor calls "Memory".
     #[ts(type = "number")]
     pub phys_footprint: u64,
+    /// Total thread count for the process (proc_taskinfo.pti_threadnum).
+    /// Surfaced in the UI's process tree so users can spot thread
+    /// explosions without dropping to `ps` / Activity Monitor.
+    pub threads: u32,
 }
 
 /// Computed delta values for one PID over a sampling interval.
@@ -92,4 +96,8 @@ pub struct PidStats {
     /// Phys footprint (Activity Monitor "Memory") in bytes.
     #[ts(type = "number")]
     pub phys_footprint: u64,
+    /// Total thread count for the process at sample time. Lifted
+    /// straight from `PidSample.threads` — this is a count, not a
+    /// delta, so no per-interval computation is needed.
+    pub threads: u32,
 }
