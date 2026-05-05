@@ -1,5 +1,6 @@
 //! `gh`-CLI-backed GitHub client. Every method shells out via [`zen_shell`].
 
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -12,6 +13,9 @@ use crate::error::{GhError, GhResult};
 use crate::models::auth::AuthStatus;
 use crate::models::conversation::{
     ConversationGroup, ConversationItem, ConversationKind, ConversationMessage,
+};
+use crate::models::diff::{
+    split_git_diff, DiffSide, DiffSource, FileDiff, FileStatus, PrDiff,
 };
 use crate::models::pull_request::{
     EnrichedPullRequest, PrDetail, PrRef, PullRequest, ReviewEvent,
@@ -768,6 +772,252 @@ impl GhClient {
         Ok(out)
     }
 
+    // ─── PR diff (Files Changed view) ────────────────────────────────────
+
+    /// Fetch the per-file diff for a PR.
+    ///
+    /// When `local_path` is supplied and points at a working git clone,
+    /// we **fetch** the base + head refs from `origin` and run
+    /// `git diff base...head` against the freshly fetched SHAs — same
+    /// approach VS Code's GitHub PR extension uses, so the diff
+    /// matches what the user would see on github.com even if their
+    /// local branch is out-of-date.
+    ///
+    /// When `local_path` is `None`, falls back to the GitHub REST
+    /// `/repos/{owner}/{repo}/pulls/{n}/files` endpoint (paginated).
+    /// REST returns per-file `patch` strings without the `diff --git`
+    /// header — we rebuild a synthetic header so the frontend can use
+    /// the same parser for both sources.
+    pub async fn pr_diff(
+        &self,
+        pr: &PrRef,
+        local_path: Option<&Path>,
+        base_ref: Option<&str>,
+        head_ref: Option<&str>,
+    ) -> GhResult<PrDiff> {
+        if let (Some(path), Some(base), Some(head)) = (local_path, base_ref, head_ref) {
+            if path.exists() {
+                match self.pr_diff_local(path, base, head).await {
+                    Ok(diff) => return Ok(diff),
+                    Err(e) => {
+                        tracing::warn!(
+                            local_path = ?path,
+                            error = %e,
+                            "local git diff failed; falling back to gh REST"
+                        );
+                    }
+                }
+            }
+        }
+        self.pr_diff_rest(pr).await
+    }
+
+    async fn pr_diff_local(
+        &self,
+        local_path: &Path,
+        base_ref: &str,
+        head_ref: &str,
+    ) -> GhResult<PrDiff> {
+        let started = Instant::now();
+        let label = format!("git fetch+diff {}..{}", base_ref, head_ref);
+
+        // 1. Fetch the base and head refs from origin so our diff is
+        //    against the latest server state, not a stale local clone.
+        //    `--no-tags --prune` keeps the fetch tight.
+        let fetch_args = [
+            "fetch",
+            "--no-tags",
+            "--no-write-fetch-head",
+            "origin",
+            base_ref,
+            head_ref,
+        ];
+        let fetch_res = self
+            .inner
+            .exec
+            .run_in_dir(local_path, "git", &fetch_args)
+            .await;
+        let fetch_ok = fetch_res.is_ok();
+        if let Err(e) = fetch_res {
+            tracing::warn!(error = %e, "git fetch origin base+head failed; trying diff anyway");
+        }
+
+        // 2. Resolve the head SHA so the frontend can attach review
+        //    comments at the right commit.
+        let head_sha = self
+            .inner
+            .exec
+            .run_in_dir(
+                local_path,
+                "git",
+                &["rev-parse", &format!("origin/{head_ref}")],
+            )
+            .await
+            .ok()
+            .map(|o| o.stdout.trim().to_string())
+            .filter(|s| !s.is_empty());
+
+        // 3. `git diff origin/base...origin/head` — three-dot for the
+        //    "merge base to head" diff (matches GitHub's PR view).
+        let range = format!("origin/{base_ref}...origin/{head_ref}");
+        let diff_args = [
+            "diff",
+            "--no-color",
+            "--no-ext-diff",
+            "--find-renames",
+            "--full-index",
+            &range,
+        ];
+        let out = self
+            .inner
+            .exec
+            .run_in_dir(local_path, "git", &diff_args)
+            .await
+            .map_err(GhError::Shell)?;
+        let files = split_git_diff(&out.stdout);
+
+        self.inner
+            .log
+            .record(GhCall::new(&label, started.elapsed(), fetch_ok));
+
+        Ok(PrDiff {
+            files,
+            head_sha,
+            source: DiffSource::LocalGit,
+        })
+    }
+
+    async fn pr_diff_rest(&self, pr: &PrRef) -> GhResult<PrDiff> {
+        // Per-file patches come from the REST endpoint; GraphQL doesn't
+        // expose `patch`. Up to 100 per page, paginated.
+        let path = format!(
+            "repos/{}/{}/pulls/{}/files",
+            pr.owner, pr.repo, pr.number
+        );
+        let label = format!("pr files {}/{}#{}", pr.owner, pr.repo, pr.number);
+        let stdout = self
+            .gh_retry(
+                &label,
+                &["api", &path, "--paginate", "-X", "GET"],
+            )
+            .await?;
+
+        let head_sha = self.fetch_pr_head_sha(pr).await.ok();
+
+        if stdout.trim().is_empty() {
+            return Ok(PrDiff {
+                files: Vec::new(),
+                head_sha,
+                source: DiffSource::GhRest,
+            });
+        }
+
+        // `--paginate` concatenates pages by stitching JSON arrays
+        // (`][` between pages). Normalise into a single array.
+        let normalised = stdout.replace("][", ",");
+        let raw: Vec<RestFileEntry> = serde_json::from_str(&normalised)
+            .map_err(|e| GhError::decode(label.clone(), e))?;
+
+        let mut files = Vec::with_capacity(raw.len());
+        for entry in raw {
+            let status = FileStatus::from_gh(&entry.status);
+            let old_path = entry.previous_filename.clone();
+            // REST `patch` strings are bare hunks — no `diff --git`
+            // header. Reconstruct a minimal header so the frontend can
+            // run the same parser as the local-git path.
+            let patch = if let Some(p) = entry.patch.as_deref() {
+                let prev = old_path.as_deref().unwrap_or(&entry.filename);
+                format!(
+                    "diff --git a/{prev} b/{new}\n--- a/{prev}\n+++ b/{new}\n{p}\n",
+                    prev = prev,
+                    new = entry.filename,
+                    p = p
+                )
+            } else {
+                String::new()
+            };
+            let binary = entry.patch.is_none() && status != FileStatus::Removed
+                && status != FileStatus::Added;
+            files.push(FileDiff {
+                path: entry.filename,
+                old_path,
+                status,
+                additions: entry.additions,
+                deletions: entry.deletions,
+                patch,
+                binary,
+            });
+        }
+
+        Ok(PrDiff {
+            files,
+            head_sha,
+            source: DiffSource::GhRest,
+        })
+    }
+
+    /// Resolve the PR's current head SHA via REST (cheap one-line call).
+    async fn fetch_pr_head_sha(&self, pr: &PrRef) -> GhResult<String> {
+        let path = format!("repos/{}/{}/pulls/{}", pr.owner, pr.repo, pr.number);
+        let label = format!("pr head_sha {}/{}#{}", pr.owner, pr.repo, pr.number);
+        let stdout = self
+            .gh_retry(&label, &["api", &path, "-q", ".head.sha"])
+            .await?;
+        Ok(stdout.trim().to_string())
+    }
+
+    // ─── PR review comments (inline) ─────────────────────────────────────
+
+    /// Post an inline review comment on a PR (a single-comment review).
+    ///
+    /// `commit_sha` should be the head commit's SHA (read from
+    /// [`pr_diff`]'s `head_sha`). `line` is the 1-based line number on
+    /// `side`. Mirrors `POST /repos/{owner}/{repo}/pulls/{n}/comments`.
+    pub async fn add_review_comment(
+        &self,
+        pr: &PrRef,
+        body: &str,
+        commit_sha: &str,
+        path: &str,
+        line: u32,
+        side: DiffSide,
+    ) -> GhResult<()> {
+        let api_path = format!(
+            "repos/{}/{}/pulls/{}/comments",
+            pr.owner, pr.repo, pr.number
+        );
+        let label = format!(
+            "comment {}/{}#{} {}",
+            pr.owner, pr.repo, pr.number, path
+        );
+        let line_arg = format!("line={line}");
+        let side_arg = format!("side={}", side.as_wire());
+        let commit_arg = format!("commit_id={commit_sha}");
+        let path_arg = format!("path={path}");
+        let body_arg = format!("body={body}");
+        self.gh_retry(
+            &label,
+            &[
+                "api",
+                &api_path,
+                "-X",
+                "POST",
+                "-f",
+                &commit_arg,
+                "-f",
+                &path_arg,
+                "-f",
+                &line_arg,
+                "-f",
+                &side_arg,
+                "-f",
+                &body_arg,
+            ],
+        )
+        .await?;
+        Ok(())
+    }
+
     /// Add `login` to the PR's requested-reviewers list.
     pub async fn add_reviewer(&self, pr: &PrRef, login: &str) -> GhResult<()> {
         let path = format!(
@@ -945,6 +1195,21 @@ impl ConversationDetailGraphql {
 
         out
     }
+}
+
+/// REST entry returned by `gh api .../pulls/{n}/files`.
+#[derive(Debug, Deserialize)]
+struct RestFileEntry {
+    filename: String,
+    status: String,
+    #[serde(default)]
+    additions: u32,
+    #[serde(default)]
+    deletions: u32,
+    #[serde(default)]
+    patch: Option<String>,
+    #[serde(default)]
+    previous_filename: Option<String>,
 }
 
 /// Word-boundary `@username` matcher. Mirrors Swift's `String.containsMention(of:)`.

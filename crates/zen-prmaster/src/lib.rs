@@ -52,8 +52,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 use tracing::warn;
 use zen_github::{
-    ConversationGroup, EnrichedPullRequest, GhCall, GhClient, GhResult, PrRef, PullRequest,
-    ReviewEvent, ReviewState,
+    ConversationGroup, DiffSide, EnrichedPullRequest, GhCall, GhClient, GhResult, PrDiff, PrRef,
+    PullRequest, ReviewEvent, ReviewState,
 };
 
 
@@ -720,6 +720,47 @@ impl PrMasterEngine {
     /// Add the current user (or any login) as a requested reviewer.
     pub async fn add_reviewer(&self, pr: &PrRef, login: &str) -> GhResult<()> {
         let res = self.inner.gh.add_reviewer(pr, login).await;
+        self.invalidate_cache();
+        res
+    }
+
+    /// Fetch the per-file diff for a PR. The engine resolves the
+    /// local clone path (if any) and the base/head ref names from
+    /// the supplied `settings`, then delegates to `GhClient::pr_diff`.
+    pub async fn pr_diff(
+        &self,
+        pr: &PrRef,
+        base_ref: Option<&str>,
+        head_ref: Option<&str>,
+        settings: &PrMasterSettings,
+    ) -> GhResult<PrDiff> {
+        let key = format!("{}/{}", pr.owner, pr.repo);
+        let local = settings
+            .repo_mappings
+            .iter()
+            .find(|m| m.repo.eq_ignore_ascii_case(&key))
+            .map(|m| std::path::PathBuf::from(&m.local_path));
+        self.inner
+            .gh
+            .pr_diff(pr, local.as_deref(), base_ref, head_ref)
+            .await
+    }
+
+    /// Post an inline review comment.
+    pub async fn add_review_comment(
+        &self,
+        pr: &PrRef,
+        body: &str,
+        commit_sha: &str,
+        path: &str,
+        line: u32,
+        side: DiffSide,
+    ) -> GhResult<()> {
+        let res = self
+            .inner
+            .gh
+            .add_review_comment(pr, body, commit_sha, path, line, side)
+            .await;
         self.invalidate_cache();
         res
     }

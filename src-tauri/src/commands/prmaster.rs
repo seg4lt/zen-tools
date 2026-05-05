@@ -14,7 +14,8 @@ use tauri::{AppHandle, Manager, State};
 use tokio::sync::Mutex;
 
 use zen_github::{
-    AuthStatus, CheckContext, ConversationGroup, EnrichedPullRequest, GhCall, PrRef,
+    AuthStatus, CheckContext, ConversationGroup, DiffSide, EnrichedPullRequest, GhCall, PrDiff,
+    PrRef,
 };
 use zen_prmaster::{
     AiSummaryParams, NotificationFilter, PrMasterSettings, SummaryCard,
@@ -146,6 +147,52 @@ pub async fn prmaster_request_changes(
         engine(&s)
     };
     engine.request_changes(&pr, &body).await?;
+    Ok(())
+}
+
+/// Fetch the per-file diff for `pr`. Uses a local clone (when the
+/// repo is mapped in settings) for an instant, offline-friendly diff
+/// that's always up-to-date against `origin`; otherwise falls back to
+/// the GitHub REST `/pulls/{n}/files` endpoint.
+#[tauri::command]
+pub async fn prmaster_get_pr_diff(
+    state: State<'_, Mutex<AppState>>,
+    config: State<'_, UserConfig>,
+    pr: PrRef,
+    base_ref: Option<String>,
+    head_ref: Option<String>,
+) -> AppResult<PrDiff> {
+    let engine = {
+        let s = state.lock().await;
+        engine(&s)
+    };
+    let settings = config
+        .get::<PrMasterSettings>(PRMASTER_SETTINGS_KEY)?
+        .unwrap_or_default();
+    Ok(engine
+        .pr_diff(&pr, base_ref.as_deref(), head_ref.as_deref(), &settings)
+        .await?)
+}
+
+/// Post a single inline review comment on `pr` at `path`:`line`,
+/// anchored at `commit_sha` on `side` (LEFT = old, RIGHT = new).
+#[tauri::command]
+pub async fn prmaster_add_review_comment(
+    state: State<'_, Mutex<AppState>>,
+    pr: PrRef,
+    body: String,
+    commit_sha: String,
+    path: String,
+    line: u32,
+    side: DiffSide,
+) -> AppResult<()> {
+    let engine = {
+        let s = state.lock().await;
+        engine(&s)
+    };
+    engine
+        .add_review_comment(&pr, &body, &commit_sha, &path, line, side)
+        .await?;
     Ok(())
 }
 

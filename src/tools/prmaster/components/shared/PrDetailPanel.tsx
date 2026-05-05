@@ -60,11 +60,13 @@ import {
   prRefFor,
   type EnrichedPullRequest,
 } from "../../lib/tauri";
+import { Avatar } from "./Avatar";
 import { CiChecks } from "./CiChecks";
 import {
   ConversationSection,
   conversationNeedsUserReply,
 } from "./ConversationThread";
+import { PrFilesChangedView } from "./PrFilesChangedView";
 import { ReviewerAvatars } from "./ReviewerAvatars";
 
 interface Props {
@@ -118,7 +120,6 @@ export function PrDetailPanel({ pr, currentUser, onActionDone }: Props) {
   }, [state.conversations, pr.pr.repository.nameWithOwner, pr.pr.number, currentUser]);
 
   const fileCount = detail?.files?.nodes?.length ?? 0;
-  const filePaths = detail?.files?.nodes?.map((f) => f.path) ?? [];
 
   async function withPending<T>(kind: Pending, fn: () => Promise<T>) {
     setError(null);
@@ -351,17 +352,17 @@ export function PrDetailPanel({ pr, currentUser, onActionDone }: Props) {
         </div>
       )}
 
-      {/* ── 4. Reviewers + Checks (two-column on wider widths) ──── */}
-      <div className="grid gap-3 md:grid-cols-2">
-        <Section label="Reviewers">
-          <ReviewerAvatars pr={pr} />
-        </Section>
-        <Section label="Checks">
-          <CiChecks rollup={rollup} />
-        </Section>
-      </div>
+      {/* ── 4. Reviewers ────────────────────────────────────────── */}
+      <Section label="Reviewers">
+        <ReviewerAvatars pr={pr} />
+      </Section>
 
-      {/* ── 5. Files changed ────────────────────────────────────── */}
+      {/* ── 5. Checks ───────────────────────────────────────────── */}
+      <Section label="Checks">
+        <CiChecks rollup={rollup} />
+      </Section>
+
+      {/* ── 6. Files changed ────────────────────────────────────── */}
       {fileCount > 0 && (
         <Section
           label={`Files changed (${fileCount})`}
@@ -369,21 +370,7 @@ export function PrDetailPanel({ pr, currentUser, onActionDone }: Props) {
           open={filesOpen}
           onToggle={() => setFilesOpen((o) => !o)}
         >
-          {filesOpen && (
-            <ul className="grid gap-0.5 rounded-md border bg-card/40 p-1.5">
-              {filePaths.map((path) => (
-                <li
-                  key={path}
-                  className="flex items-center gap-1.5 rounded px-1.5 py-0.5 font-mono text-[11px] text-foreground/90 hover:bg-accent/40"
-                >
-                  <FileDiff className="size-3 shrink-0 text-muted-foreground" />
-                  <span className="truncate" title={path}>
-                    {path}
-                  </span>
-                </li>
-              ))}
-            </ul>
-          )}
+          {filesOpen && <PrFilesChangedView pr={pr} />}
         </Section>
       )}
 
@@ -482,51 +469,6 @@ function StatChip({
       {children}
     </span>
   );
-}
-
-// ── Avatar (lifted from PrCard) ──────────────────────────────────
-
-function Avatar({ login, size }: { login: string; size: number }) {
-  const initial = (login || "?").charAt(0).toUpperCase();
-  const hue = stringHue(login);
-  const showImage = !!login;
-  if (showImage) {
-    const src = `https://avatars.githubusercontent.com/${encodeURIComponent(
-      login,
-    )}?size=${size * 2}`;
-    return (
-      <img
-        src={src}
-        alt=""
-        title={login ? `@${login}` : undefined}
-        loading="lazy"
-        decoding="async"
-        width={size}
-        height={size}
-        className="inline-flex shrink-0 select-none overflow-hidden rounded-full bg-muted ring-1 ring-border/50"
-        style={{ width: size, height: size }}
-      />
-    );
-  }
-  return (
-    <span
-      className="inline-flex shrink-0 select-none items-center justify-center rounded-full text-[9px] font-semibold uppercase text-foreground/80"
-      style={{
-        width: size,
-        height: size,
-        backgroundColor: `oklch(0.85 0.06 ${hue})`,
-        color: `oklch(0.25 0.05 ${hue})`,
-      }}
-    >
-      {initial}
-    </span>
-  );
-}
-
-function stringHue(s: string): number {
-  let h = 0;
-  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
-  return h % 360;
 }
 
 // ── Helpers ──────────────────────────────────────────────────────
