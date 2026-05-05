@@ -104,6 +104,21 @@ export interface SqlEditorProps {
   /** Active database for the connection (Postgres: bound DB; MSSQL:
    * `USE` target). Required for cache lookups. */
   database?: string | null;
+  /**
+   * Whether the user has EXPLICITLY picked a database via the
+   * context-picker dropdown (vs the value being inherited from the
+   * connection's default). Only meaningful for MSSQL — Postgres
+   * connections are bound to one DB so callers should pass `true`.
+   *
+   * Drives the eager describe-table prefetch gate: on MSSQL we
+   * refuse to introspect schemas of the DEFAULT database (which is
+   * often `master` / similar boilerplate the user doesn't care about),
+   * waiting until the user has deliberately switched to the database
+   * they're working in. The cheap catalog query (`db_list_all_tables`)
+   * still fires unconditionally so qualified-name autocomplete works
+   * the moment the editor opens.
+   */
+  databasePicked?: boolean;
   /** Active schema (Postgres `search_path` head). MSSQL: the schema the
    * user expects to type unqualified table names against. */
   schema?: string | null;
@@ -126,6 +141,7 @@ export function SqlEditor({
   driver,
   connectionId,
   database,
+  databasePicked = false,
   schema,
   onChange,
   onSave,
@@ -410,48 +426,50 @@ export function SqlEditor({
     // typing-debounce path needs the catalog to know events is in
     // `app`, but it only fires on type — chicken-and-egg). Pre-warming
     // every schema in the catalog breaks that cycle.
-    // Eager column prefetch is gated on the user having EXPLICITLY
-    // picked a schema from the context-picker dropdown (the `schema`
-    // prop, NOT the `effectiveSchema` fallback). Two reasons:
-    //
-    //   1. On a multi-schema cluster the prior "fan out across the
-    //      first 100 tables sorted by default schema" approach still
-    //      lights up the progress chip with dozens of describe jobs
-    //      the user didn't ask for. Picking nothing → indexing
-    //      nothing matches the principle of least surprise.
-    //   2. The `effectiveSchema` fallback (`public` / `dbo`) is a
-    //      completion-time convenience for typing bare table names.
-    //      It should NOT trigger background work — when the user
-    //      hits Run on a query referencing real tables,
-    //      `ensureTablesForSql` will fetch precisely those tables,
-    //      bucketed by their actual schema (resolved through the
-    //      catalog).
-    //
-    // The catalog itself (lightweight name listing) still loads
-    // unconditionally so qualified-table autocomplete works the
-    // moment the editor opens.
+    // ── Eager catalog (cheap, always) ─────────────────────────────
+    // The catalog query is one round-trip listing relation NAMES
+    // grouped by schema — no columns / indexes / FKs. We fire it
+    // whenever a database is in scope so qualified-name autocomplete
+    // (`zen_db.met<tab>` → `zen_db.metrics`) works the instant the
+    // editor mounts. On MSSQL this targets whichever DB is currently
+    // active (which is the connection's default until the user
+    // picks one) — the user pick narrows it later via the gate
+    // below.
     void ensureCatalog(connectionId, database).catch(() => {
       // Soft-fail; the editor still works with whatever the cache
       // has, just without cold-completion catalog names.
     });
 
-    if (schema) {
+    // ── Eager describe (expensive, gated) ─────────────────────────
+    // The describe path actually pulls columns + keys + indexes +
+    // FKs + checks + triggers for every table in scope — orders of
+    // magnitude more work than the catalog listing. We only fire
+    // this when the user has DELIBERATELY pointed at a single
+    // namespace, so the progress chip never indexes a database the
+    // user never asked about.
+    //
+    // Postgres has 2 levels (database — bound to the connection —
+    // and schema). Picking a schema is enough; the database is
+    // implicit, so callers pass `databasePicked=true`.
+    //
+    // MSSQL / Azure SQL has 3 levels (server, database, schema).
+    // The connection's default database is often `master` or a
+    // boilerplate landing DB the user doesn't care about — we
+    // require the user to ALSO explicitly pick a database from the
+    // dropdown before we fire the describe loop. Otherwise the
+    // "select dbo and watch a hundred tables get indexed across
+    // the wrong DB" footgun is wide open.
+    //
+    // Either way the loop is further filtered through the in-
+    // memory mirror so already-described tables don't re-hit the
+    // backend; the backend in turn applies TTL-based staleness on
+    // its own cache, so most calls are zero-RPC steady state.
+    if (schema && databasePicked) {
       void ensureCatalog(connectionId, database)
         .then((catalog) => {
           const inSchema = catalog.filter((t) => t.schema === schema);
           if (inSchema.length === 0) return;
 
-          // Skip the round-trip entirely when every catalog entry
-          // for this schema is already in the in-memory mirror
-          // (i.e. fresh enough that we've seen its description in
-          // this session). The backend's TTL-based stale check is
-          // still authoritative — when the mirror is missing rows,
-          // we delegate to `ensureTables` which sends them to the
-          // backend as `force=false`; rows older than
-          // `DEFAULT_TTL_MS` come back cached now and queue a
-          // silent background refresh, missing rows fetch
-          // synchronously. Either way we avoid the "indexing N
-          // tables" chip storm on every editor focus.
           const cachedNow = readCachedForDatabase(connectionId, database)
             .filter((d) => d.schema === schema)
             .map((d) => d.name);
@@ -494,8 +512,10 @@ export function SqlEditor({
     // Note: depend on `schema` (the user-picked dropdown value) rather
     // than `effectiveSchema` (which has the public/dbo fallback) — the
     // eager-prefetch branch above is gated on `schema`, so re-running
-    // on a fallback change would just no-op.
-  }, [connectionId, database, schema, effectiveSchema, dialect, sqlCompartment]);
+    // on a fallback change would just no-op. `databasePicked` is in
+    // here too so flipping the picker (MSSQL: choose Sales) re-runs
+    // the eager describe path against the new DB.
+  }, [connectionId, database, databasePicked, schema, effectiveSchema, dialect, sqlCompartment]);
 
   // ── Opt+Enter actions popup ─────────────────────────────────────────
   //

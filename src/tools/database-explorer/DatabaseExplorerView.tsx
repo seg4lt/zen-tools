@@ -250,6 +250,17 @@ export function DatabaseExplorerView() {
   const activeSchema = activeId
     ? state.activeSchemaByConnection[activeId] ?? null
     : null;
+  // Has the user EXPLICITLY picked a database via the context-picker?
+  // Postgres connections are pinned to one DB so there's no "pick" to
+  // make — treat as always-picked. MSSQL gates eager describe on this
+  // being true; until the user has deliberately switched off the
+  // connection's default DB (often `master`), we don't want to fan
+  // out describe-table calls against schemas in the wrong namespace.
+  const databasePicked = activeId
+    ? active?.driver === "postgres"
+      ? true
+      : !!state.activeDbByConnection[activeId]
+    : false;
 
   // Load file content for *every* leaf path that hasn't been
   // hydrated yet — covers the "leaf B has its own path P that
@@ -1072,6 +1083,7 @@ export function DatabaseExplorerView() {
                           driver={active?.driver ?? "postgres"}
                           connectionId={isConnected ? activeId : null}
                           database={isConnected ? activeDatabase : null}
+                          databasePicked={isConnected ? databasePicked : false}
                           schema={isConnected ? activeSchema : null}
                           openPaths={state.openFilePaths}
                           dirtyByPath={state.dirtyByPath}
@@ -1296,6 +1308,10 @@ interface SqlLeafShellProps {
   driver: DbDriverId;
   connectionId: string | null;
   database: string | null;
+  /** Did the user explicitly pick this database via the context
+   * picker (vs inheriting the connection's default)? Threaded
+   * through to the editor's eager-describe gate. */
+  databasePicked: boolean;
   schema: string | null;
   openPaths: string[];
   dirtyByPath: Record<string, boolean>;
@@ -1321,6 +1337,7 @@ function SqlLeafShell({
   driver,
   connectionId,
   database,
+  databasePicked,
   schema,
   openPaths,
   dirtyByPath,
@@ -1398,6 +1415,7 @@ function SqlLeafShell({
           driver={driver}
           connectionId={connectionId}
           database={database}
+          databasePicked={databasePicked}
           schema={schema}
           value={initialValue}
           onChange={handleEditorChange}
