@@ -71,20 +71,25 @@ interface Props {
 }
 
 /**
- * The dominant signal we colour the left accent bar with. Order of
+ * The dominant signal we tint the title icon with. Order of
  * precedence (top of the list wins):
  *
- *   1. CI failure                  — red
- *   2. Mergeable conflict          — red
- *   3. Changes requested           — red
- *   4. Draft                       — slate / muted
+ *   1. CI failure                  — destructive
+ *   2. Mergeable conflict          — destructive
+ *   3. Changes requested           — destructive
+ *   4. Draft                       — muted
  *   5. CI pending                  — amber
  *   6. Approved + clean to merge   — emerald (a "go" cue)
  *   7. Needs your review           — primary (indigo)
- *   8. Idle / nothing notable      — transparent
+ *   8. Idle / nothing notable      — foreground (default)
  *
- * Idle still gets a thin track so the layout doesn't shift between
- * states; only the colour changes.
+ * Earlier revisions of this component used a 2-px coloured rail
+ * down the left edge of every card. The rail bisected the row
+ * visually and felt heavier than the data warranted. We now route
+ * the same signal through (a) the title icon's colour and (b) the
+ * existing right-side chip cluster (CI / Conflicts / Decision),
+ * which is how GitHub itself surfaces this state — no foreign
+ * visual element on the row.
  */
 type AccentTone =
   | "danger"
@@ -113,13 +118,14 @@ function deriveAccent(
   return "idle";
 }
 
-const ACCENT_BAR: Record<AccentTone, string> = {
-  danger: "bg-destructive",
-  draft: "bg-muted-foreground/40",
-  warning: "bg-amber-500",
-  success: "bg-emerald-500",
-  primary: "bg-primary",
-  idle: "bg-transparent",
+/// Tailwind colour tokens for the title icon, keyed by accent tone.
+const ICON_TINT: Record<AccentTone, string> = {
+  danger: "text-destructive",
+  draft: "text-muted-foreground",
+  warning: "text-amber-600 dark:text-amber-400",
+  success: "text-emerald-600 dark:text-emerald-400",
+  primary: "text-primary",
+  idle: "text-foreground",
 };
 
 /**
@@ -190,18 +196,7 @@ export function PrCard({
         selected && "border-primary/50 bg-accent ring-1 ring-primary/20",
       )}
     >
-      {/* Left accent rail. Always rendered (so the row's geometry
-          is identical across tones); only the colour changes. The
-          1.5px width was chosen to match Linear's issue rows. */}
-      <span
-        aria-hidden
-        className={cn(
-          "absolute inset-y-0 left-0 w-[2px] transition-colors",
-          ACCENT_BAR[accent],
-        )}
-      />
-
-      <div className="flex min-w-0 flex-1 flex-col gap-1 px-3 py-2 pl-3.5">
+      <div className="flex min-w-0 flex-1 flex-col gap-1 px-3 py-2">
         {/* ── Row 1: avatar + title + right-side status cluster ── */}
         <div className="flex items-start gap-2">
           <Avatar
@@ -211,13 +206,10 @@ export function PrCard({
           />
           <TitleIcon
             className={cn(
-              "mt-0.5 size-3.5 shrink-0",
-              pr.isDraft
-                ? "text-muted-foreground"
-                : accent === "danger"
-                  ? "text-destructive"
-                  : "text-foreground",
+              "mt-0.5 size-3.5 shrink-0 transition-colors",
+              ICON_TINT[accent],
             )}
+            aria-label={`Pull request: ${accent}`}
           />
           <span
             className={cn(
