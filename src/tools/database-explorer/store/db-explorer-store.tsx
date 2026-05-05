@@ -63,6 +63,15 @@ export interface ResultTabBase {
   status: ResultTabStatus;
   /** Truncated SQL preview shown on the tab + tooltip. */
   sqlPreview: string;
+  /**
+   * User-supplied label that overrides the auto-generated tab
+   * title (e.g. "SELECT #2"). Cleared by the right-click "Rename"
+   * action when the user submits an empty string. Survives the
+   * running → resolved transition because the reducer's
+   * `replace-result` action carries the previous tab's
+   * `customLabel` forward by default.
+   */
+  customLabel?: string;
 }
 
 export type ResultTab =
@@ -298,6 +307,24 @@ type Action =
     }
   | { type: "set-active-result-index"; id: string; index: number }
   | { type: "close-result-tab"; id: string; index: number }
+  | {
+      /** Drop every result tab for the connection EXCEPT the one
+       * whose strip index is `keepIndex`. Drives the right-click
+       * "Close others" action. The kept tab becomes active. */
+      type: "close-other-result-tabs";
+      id: string;
+      keepIndex: number;
+    }
+  | {
+      /** Set (or clear, when `label` is empty) the user's custom
+       * display label for a tab. Looked up by `tabId` rather than
+       * index so an in-flight rename can't race with a tab being
+       * closed underneath it. */
+      type: "rename-result-tab";
+      id: string;
+      tabId: string;
+      label: string;
+    }
   | { type: "set-error"; id: string; error: string | null }
   | { type: "set-databases"; id: string; databases: string[] }
   | { type: "set-schemas"; id: string; database: string; schemas: string[] }
@@ -410,8 +437,16 @@ function reducer(state: DbExplorerState, action: Action): DbExplorerState {
       if (!cur) return state;
       const idx = cur.findIndex((t) => t.id === action.tabId);
       if (idx < 0) return state;
+      const prev = cur[idx];
+      // Carry the user's custom label across the running →
+      // resolved swap. Without this, hitting Run, renaming the
+      // running tab to "users-debug", and waiting for it to land
+      // would silently snap the title back to "SELECT #1".
       const next = cur.slice();
-      next[idx] = action.tab;
+      next[idx] =
+        prev.customLabel && !action.tab.customLabel
+          ? { ...action.tab, customLabel: prev.customLabel }
+          : action.tab;
       return {
         ...state,
         resultsByConnection: {
@@ -525,6 +560,50 @@ function reducer(state: DbExplorerState, action: Action): DbExplorerState {
         activeResultIndexByConnection: {
           ...state.activeResultIndexByConnection,
           [action.id]: nextActive,
+        },
+      };
+    }
+
+    case "close-other-result-tabs": {
+      const current = state.resultsByConnection[action.id] ?? null;
+      if (!current || current.length <= 1) return state;
+      const keep = current[action.keepIndex];
+      if (!keep) return state;
+      return {
+        ...state,
+        resultsByConnection: {
+          ...state.resultsByConnection,
+          [action.id]: [keep],
+        },
+        // Only one tab left, so it is the active one.
+        activeResultIndexByConnection: {
+          ...state.activeResultIndexByConnection,
+          [action.id]: 0,
+        },
+      };
+    }
+
+    case "rename-result-tab": {
+      const current = state.resultsByConnection[action.id] ?? null;
+      if (!current) return state;
+      const idx = current.findIndex((t) => t.id === action.tabId);
+      if (idx < 0) return state;
+      const trimmed = action.label.trim();
+      const tab = current[idx];
+      // Empty input = clear the override and revert to the
+      // auto-generated label. Non-empty = store as-is (we don't
+      // truncate; the tab body's max-width clip handles overflow).
+      const nextTab: ResultTab = {
+        ...tab,
+        customLabel: trimmed.length === 0 ? undefined : trimmed,
+      };
+      const nextList = current.slice();
+      nextList[idx] = nextTab;
+      return {
+        ...state,
+        resultsByConnection: {
+          ...state.resultsByConnection,
+          [action.id]: nextList,
         },
       };
     }

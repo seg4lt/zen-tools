@@ -10,7 +10,7 @@
  * full-text monospaced, scrollable, never clipped.
  */
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   AlertCircle,
   Copy,
@@ -24,6 +24,13 @@ import {
 } from "lucide-react";
 import { Button } from "@zen-tools/ui";
 import { cn } from "@zen-tools/ui";
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuTrigger,
+} from "@zen-tools/ui";
 import { ResultsGrid } from "./results-grid";
 import { ExplainViews } from "./explain-views";
 import { LocksView } from "./locks-view";
@@ -58,6 +65,11 @@ export function ResultsPane({
 }: ResultsPaneProps) {
   const { state, dispatch } = useDbExplorerStore();
   const { stopQuery } = useDbQuery();
+  // Tab id currently being renamed (right-click → Rename). `null`
+  // means no rename is active. Lifted into the pane so submitting /
+  // cancelling the inline editor leaves the rest of the strip
+  // untouched.
+  const [renamingTabId, setRenamingTabId] = useState<string | null>(null);
 
   // Error card takes precedence over an empty-state ONLY when there
   // are no per-tab results — per-tab errors live on their own tab now,
@@ -87,6 +99,7 @@ export function ResultsPane({
         activeIdx={activeIdx}
         maximized={maximized}
         onToggleMaximize={onToggleMaximize}
+        renamingTabId={renamingTabId}
         onSelect={(idx) =>
           dispatch({
             type: "set-active-result-index",
@@ -97,7 +110,25 @@ export function ResultsPane({
         onClose={(idx) =>
           dispatch({ type: "close-result-tab", id: connectionId, index: idx })
         }
+        onCloseOthers={(idx) =>
+          dispatch({
+            type: "close-other-result-tabs",
+            id: connectionId,
+            keepIndex: idx,
+          })
+        }
         onStop={(tabId) => void stopQuery(tabId)}
+        onStartRename={(tabId) => setRenamingTabId(tabId)}
+        onSubmitRename={(tabId, label) => {
+          dispatch({
+            type: "rename-result-tab",
+            id: connectionId,
+            tabId,
+            label,
+          });
+          setRenamingTabId(null);
+        }}
+        onCancelRename={() => setRenamingTabId(null)}
       />
       {/* `relative + min-w-0 + overflow-hidden` clips the grid to the
           parent's width even when its inner header/body are wider. The
@@ -260,11 +291,25 @@ interface TabStripProps {
   activeIdx: number;
   maximized: boolean;
   onToggleMaximize: () => void;
+  /** Tab id currently being renamed (right-click → Rename), or
+   * `null` when no rename is active. The matching tab swaps its
+   * label for an inline `<input>`. */
+  renamingTabId: string | null;
   onSelect: (idx: number) => void;
   onClose: (idx: number) => void;
+  /** Right-click "Close others" — drops every tab except the one
+   * at `idx`. */
+  onCloseOthers: (idx: number) => void;
   /** Cancel the in-flight query backing the tab with this id.
    * Only fires when the tab's status is `running`. */
   onStop: (tabId: string) => void;
+  /** Right-click "Rename" — flips the tab into edit mode. */
+  onStartRename: (tabId: string) => void;
+  /** Inline input committed (Enter / blur). Empty string clears
+   * the override. */
+  onSubmitRename: (tabId: string, label: string) => void;
+  /** Inline input cancelled (Esc). */
+  onCancelRename: () => void;
 }
 
 function TabStrip({
@@ -272,9 +317,14 @@ function TabStrip({
   activeIdx,
   maximized,
   onToggleMaximize,
+  renamingTabId,
   onSelect,
   onClose,
+  onCloseOthers,
   onStop,
+  onStartRename,
+  onSubmitRename,
+  onCancelRename,
 }: TabStripProps) {
   return (
     // `bg-muted/60` matches the connection-tab + editor-tab strip
@@ -290,66 +340,121 @@ function TabStrip({
           const isRunning = r.kind === "running";
           const isError = r.kind === "error";
           const isCancelled = r.kind === "cancelled";
+          const renaming = renamingTabId === r.id;
+          // Disable "Close others" when this is the only tab
+          // (would be a no-op).
+          const canCloseOthers = results.length > 1;
           return (
-            <div
-              key={r.id}
-              className={cn(
-                "group flex shrink-0 items-center gap-1 rounded-t px-2 py-1 text-[11px] transition",
-                isActive
-                  ? "bg-background shadow-sm"
-                  : "text-muted-foreground hover:bg-muted/50",
-                isError && "text-destructive",
-                isCancelled && "opacity-70",
-              )}
-            >
-              <button
-                type="button"
-                className="flex items-center gap-1"
-                onClick={() => onSelect(idx)}
-                title={r.sqlPreview || labelForTab(idx, r)}
-              >
-                {isRunning && (
-                  <Loader2 className="size-3 shrink-0 animate-spin text-primary/70" />
-                )}
-                <span className="max-w-[14ch] truncate font-mono">
-                  {labelForTab(idx, r)}
-                </span>
-                <span className="text-[10px] text-muted-foreground/70">
-                  {summaryFor(r)}
-                </span>
-              </button>
-              {isRunning ? (
-                // Stop button replaces Close while running. Clicking
-                // X on a running tab would just abandon the row,
-                // leaving the backend query running silently — Stop
-                // is what the user actually wants.
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="h-4 w-4 p-0 text-destructive opacity-100 hover:bg-destructive/10"
-                  onClick={(e) => {
+            <ContextMenu key={r.id}>
+              <ContextMenuTrigger asChild>
+                <div
+                  className={cn(
+                    "group flex shrink-0 items-center gap-1 rounded-t px-2 py-1 text-[11px] transition",
+                    isActive
+                      ? "bg-background shadow-sm"
+                      : "text-muted-foreground hover:bg-muted/50",
+                    isError && "text-destructive",
+                    isCancelled && "opacity-70",
+                  )}
+                  // Double-click anywhere on the tab body opens
+                  // rename — same affordance as VS Code / browser
+                  // tabs and means power users don't have to
+                  // right-click for the common case.
+                  onDoubleClick={(e) => {
                     e.stopPropagation();
-                    onStop(r.id);
+                    onStartRename(r.id);
                   }}
-                  title="Stop query"
                 >
-                  <Square className="size-3 fill-current" />
-                </Button>
-              ) : (
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="h-4 w-4 p-0 opacity-0 transition group-hover:opacity-100"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onClose(idx);
-                  }}
-                  title="Close result"
+                  {renaming ? (
+                    <RenameInput
+                      initial={r.customLabel ?? labelForTab(idx, r)}
+                      onSubmit={(label) => onSubmitRename(r.id, label)}
+                      onCancel={onCancelRename}
+                    />
+                  ) : (
+                    <button
+                      type="button"
+                      className="flex items-center gap-1"
+                      onClick={() => onSelect(idx)}
+                      title={r.sqlPreview || labelForTab(idx, r)}
+                    >
+                      {isRunning && (
+                        <Loader2 className="size-3 shrink-0 animate-spin text-primary/70" />
+                      )}
+                      <span className="max-w-[18ch] truncate font-mono">
+                        {r.customLabel ?? labelForTab(idx, r)}
+                      </span>
+                      <span className="text-[10px] text-muted-foreground/70">
+                        {summaryFor(r)}
+                      </span>
+                    </button>
+                  )}
+                  {isRunning ? (
+                    // Stop button replaces Close while running. Clicking
+                    // X on a running tab would just abandon the row,
+                    // leaving the backend query running silently — Stop
+                    // is what the user actually wants.
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-4 w-4 p-0 text-destructive opacity-100 hover:bg-destructive/10"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onStop(r.id);
+                      }}
+                      title="Stop query"
+                    >
+                      <Square className="size-3 fill-current" />
+                    </Button>
+                  ) : (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-4 w-4 p-0 opacity-0 transition group-hover:opacity-100"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onClose(idx);
+                      }}
+                      title="Close result"
+                    >
+                      <X className="size-3" />
+                    </Button>
+                  )}
+                </div>
+              </ContextMenuTrigger>
+              <ContextMenuContent className="w-48">
+                <ContextMenuItem
+                  onSelect={() => onStartRename(r.id)}
+                  // The inline editor mounts after the menu's
+                  // dismiss animation; nothing to await here.
                 >
-                  <X className="size-3" />
-                </Button>
-              )}
-            </div>
+                  Rename…
+                </ContextMenuItem>
+                {r.customLabel ? (
+                  <ContextMenuItem
+                    onSelect={() => onSubmitRename(r.id, "")}
+                  >
+                    Reset name
+                  </ContextMenuItem>
+                ) : null}
+                <ContextMenuSeparator />
+                <ContextMenuItem
+                  // Keep "Close" available on running tabs too —
+                  // the user might want to drop the tab without
+                  // explicitly stopping. (Stop lives on the tab
+                  // body for the common case.)
+                  onSelect={() => onClose(idx)}
+                >
+                  Close
+                </ContextMenuItem>
+                <ContextMenuItem
+                  disabled={!canCloseOthers}
+                  onSelect={() => onCloseOthers(idx)}
+                >
+                  Close others
+                </ContextMenuItem>
+              </ContextMenuContent>
+            </ContextMenu>
           );
         })}
       </div>
@@ -446,6 +551,62 @@ function ErrorCard({
         {message}
       </pre>
     </div>
+  );
+}
+
+/**
+ * Inline rename input for a result tab. Auto-focuses + selects on
+ * mount so the user can just start typing. Enter commits, Esc /
+ * blur cancels. Width matches the truncate-clip on the static
+ * label so swapping in/out doesn't reflow the strip.
+ */
+function RenameInput({
+  initial,
+  onSubmit,
+  onCancel,
+}: {
+  initial: string;
+  onSubmit: (label: string) => void;
+  onCancel: () => void;
+}) {
+  const [value, setValue] = useState(initial);
+  const ref = useRef<HTMLInputElement | null>(null);
+  // Focus + select-all on mount so the typical "rename then type"
+  // flow works without extra clicks. The microtask defers past
+  // ContextMenu's dismiss-focus handoff (Radix steals focus back to
+  // the trigger as it closes; without the defer our focus call
+  // races and loses).
+  useEffect(() => {
+    queueMicrotask(() => {
+      ref.current?.focus();
+      ref.current?.select();
+    });
+  }, []);
+
+  return (
+    <input
+      ref={ref}
+      value={value}
+      onChange={(e) => setValue(e.target.value)}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          onSubmit(value);
+        } else if (e.key === "Escape") {
+          e.preventDefault();
+          onCancel();
+        }
+      }}
+      onBlur={() => onSubmit(value)}
+      // Stop the parent tab's onClick / onDoubleClick from
+      // re-firing inside the input.
+      onClick={(e) => e.stopPropagation()}
+      onDoubleClick={(e) => e.stopPropagation()}
+      className="h-4 w-[14ch] rounded-sm border border-border/60 bg-background px-1 font-mono text-[11px] text-foreground outline-none focus:border-primary/60"
+      // Don't pass placeholder; the initial value already shows
+      // what's there. Plain text-style input — no special role.
+      spellCheck={false}
+    />
   );
 }
 
