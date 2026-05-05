@@ -4,6 +4,7 @@ pub mod auth;
 pub mod author;
 pub mod check;
 pub mod diff;
+pub mod issue_comment;
 pub mod pull_request;
 pub mod repository;
 pub mod review;
@@ -13,6 +14,7 @@ pub use auth::AuthStatus;
 pub use author::Author;
 pub use check::{CheckContext, CheckRollupState, CheckState, StatusCheckRollup};
 pub use diff::{split_git_diff, DiffSide, DiffSource, FileDiff, FileStatus, PrDiff};
+pub use issue_comment::IssueComment;
 pub use review_comment::ReviewComment;
 pub use pull_request::{
     ChangedFile, ChangedFileNodes, CommentInfo, CommitInfo, CommitNode, CommitNodes,

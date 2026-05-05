@@ -52,7 +52,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 use tracing::warn;
 use zen_github::{
-    DiffSide, EnrichedPullRequest, GhCall, GhClient, GhResult, PrDiff, PrRef, ReviewComment,
+    DiffSide, EnrichedPullRequest, GhCall, GhClient, GhResult, IssueComment, PrDiff, PrRef,
+    ReviewComment,
     PullRequest, ReviewEvent, ReviewState,
 };
 
@@ -693,6 +694,17 @@ impl PrMasterEngine {
         pr: &PrRef,
     ) -> GhResult<Vec<ReviewComment>> {
         self.inner.gh.list_pr_review_comments(pr).await
+    }
+
+    /// Every general (non-code-anchored) PR comment — the
+    /// timeline conversation that lives on github.com's
+    /// "Conversation" tab. Drives the Comments tab on the
+    /// dedicated review page.
+    pub async fn list_issue_comments(
+        &self,
+        pr: &PrRef,
+    ) -> GhResult<Vec<IssueComment>> {
+        self.inner.gh.list_pr_issue_comments(pr).await
     }
 
     /// Resolve a single review thread by its GraphQL node id.

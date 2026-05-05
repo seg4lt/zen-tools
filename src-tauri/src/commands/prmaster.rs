@@ -14,7 +14,8 @@ use tauri::{AppHandle, Manager, State};
 use tokio::sync::Mutex;
 
 use zen_github::{
-    AuthStatus, CheckContext, DiffSide, EnrichedPullRequest, GhCall, PrDiff, PrRef, ReviewComment,
+    AuthStatus, CheckContext, DiffSide, EnrichedPullRequest, GhCall, IssueComment, PrDiff, PrRef,
+    ReviewComment,
 };
 use zen_prmaster::{
     AiSummaryParams, NotificationFilter, PrMasterSettings, SummaryCard,
@@ -249,6 +250,22 @@ pub async fn prmaster_list_review_comments(
         engine(&s)
     };
     Ok(engine.list_review_comments(&pr).await?)
+}
+
+/// Every general (non-code-anchored) PR comment — the timeline
+/// conversation. Drives the Comments tab on the dedicated review
+/// page. Sourced from `/repos/.../issues/{n}/comments` since PRs
+/// are issues for this endpoint.
+#[tauri::command]
+pub async fn prmaster_list_issue_comments(
+    state: State<'_, Mutex<AppState>>,
+    pr: PrRef,
+) -> AppResult<Vec<IssueComment>> {
+    let engine = {
+        let s = state.lock().await;
+        engine(&s)
+    };
+    Ok(engine.list_issue_comments(&pr).await?)
 }
 
 /// Mark a review thread as resolved. Drives the per-thread "Resolve"

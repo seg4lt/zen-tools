@@ -540,6 +540,7 @@ pub fn run() {
             commands::prmaster::prmaster_get_to_review,
             commands::prmaster::prmaster_get_reviewed,
             commands::prmaster::prmaster_list_review_comments,
+            commands::prmaster::prmaster_list_issue_comments,
             commands::prmaster::prmaster_resolve_review_thread,
             commands::prmaster::prmaster_approve_pr,
             commands::prmaster::prmaster_request_changes,

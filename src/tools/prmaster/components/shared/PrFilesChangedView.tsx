@@ -15,6 +15,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import {
   AlertTriangle,
   Check,
@@ -38,8 +39,12 @@ import {
   type EnrichedPullRequest,
   type FileDiff,
   type PrDiff,
-  type ReviewComment,
 } from "../../lib/tauri";
+import {
+  prDiffQueryOptions,
+  prReviewCommentsQueryOptions,
+} from "../../lib/queries";
+import { usePrMasterStore } from "../../store/prmaster-store";
 import { PrFileTree } from "./PrFileTree";
 
 interface Props {
@@ -62,34 +67,94 @@ export function PrFilesChangedView({ pr, viewMode }: Props) {
   const { theme } = useTheme();
   const isDark = theme === "dark";
 
-  const [diff, setDiff] = useState<PrDiff | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
+  // Current user login (resolved on app boot via `prmaster_whoami`).
+  // Used to stamp optimistic inline comments + replies with the
+  // right author so the UI doesn't render "Unknown" while the
+  // server-canonical version is still in flight.
+  const { state } = usePrMasterStore();
+  const currentUser = state.currentUser;
+
+  // Diff + inline review comments are loaded via React Query so the
+  // hover prefetch on `PrDetailPanel`'s "Review Pull Request" button
+  // primes the same cache the page reads from. `staleTime: 0` (set in
+  // the shared queryOptions) guarantees a fresh fetch on every mount
+  // — the cached data paints instantly while the refetch runs in the
+  // background.
+  const diffQuery = useQuery<PrDiff>(prDiffQueryOptions(ref, baseRef, headRef));
+  const commentsQuery = useQuery(prReviewCommentsQueryOptions(ref));
+  const diff = diffQuery.data ?? null;
+  const reviewComments = commentsQuery.data ?? [];
+
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [comments, setComments] = useState<LocalComment[]>([]);
-  // Server-canonical inline review comments fetched from the REST
-  // endpoint. Re-loaded every time the PR or refresh tick changes.
-  // Merged with the optimistic local set (deduped by id) before being
-  // handed to the diff viewer.
-  const [reviewComments, setReviewComments] = useState<ReviewComment[]>([]);
-  // Visible status of the most recent comment-fetch attempt. Drives
-  // the "Comments: …" indicator in the toolbar so the user can see
-  // at a glance whether comments loaded, are still loading, or
-  // failed — without having to crack open devtools.
-  const [commentsStatus, setCommentsStatus] = useState<
-    | { kind: "loading" }
-    | { kind: "ok"; count: number }
-    | { kind: "error"; message: string }
-  >({ kind: "loading" });
-  // Mirror of `selectedPath` so the diff-load effect can read the
-  // latest user selection inside its async `.then()` without re-keying
-  // on every click (which would re-fire the diff fetch).
-  const selectedPathRef = useRef(selectedPath);
-  useEffect(() => {
-    selectedPathRef.current = selectedPath;
-  }, [selectedPath]);
   // UI: tree visibility.
   const [treeOpen, setTreeOpen] = useState(true);
+  // Resizable file-tree width. Persisted in localStorage so the
+  // user's preferred split survives navigation. Clamped on read so a
+  // bad stored value (or a screen that shrank since last session)
+  // can't lock the diff out of view.
+  const [treeWidth, setTreeWidth] = useState<number>(() => {
+    try {
+      const stored = Number.parseInt(
+        localStorage.getItem("prmaster.reviewTreeWidth") ?? "",
+        10,
+      );
+      if (Number.isFinite(stored)) {
+        return Math.min(640, Math.max(140, stored));
+      }
+    } catch {
+      // private browsing / quota — fall through to default.
+    }
+    return 240;
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem("prmaster.reviewTreeWidth", String(treeWidth));
+    } catch {
+      // non-fatal
+    }
+  }, [treeWidth]);
+  // Live drag state for the splitter. Set on mousedown; cleared on
+  // mouseup. While true the document gets a `col-resize` cursor so
+  // the user keeps the resize affordance even when the pointer
+  // strays off the 4px handle.
+  const [dragging, setDragging] = useState(false);
+  // Anchor for the body-cell layout so we can convert pointer X to
+  // a tree-width (subtracting the cell's left edge from the pointer
+  // position).
+  const bodyRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!dragging) return;
+    function onMove(e: MouseEvent) {
+      const rect = bodyRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      // Clamp: a hard floor of 140px keeps the file tree readable;
+      // a ceiling of 70% of the row stops the user from accidentally
+      // pushing the diff editor off-screen.
+      const proposed = e.clientX - rect.left;
+      const max = Math.max(200, rect.width * 0.7);
+      const clamped = Math.min(max, Math.max(140, proposed));
+      setTreeWidth(clamped);
+    }
+    function onUp() {
+      setDragging(false);
+    }
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    // While dragging, force the resize cursor and disable text
+    // selection on the whole document. Otherwise the user's drag
+    // would highlight whatever code is under the pointer.
+    const prevCursor = document.body.style.cursor;
+    const prevSelect = document.body.style.userSelect;
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      document.body.style.cursor = prevCursor;
+      document.body.style.userSelect = prevSelect;
+    };
+  }, [dragging]);
   // Hide-comments toggle. When false, the diff editor receives an
   // empty comments array (and `onAddComment` undefined to also hide
   // the gutter "+") so the reviewer can read the code without any
@@ -112,95 +177,53 @@ export function PrFilesChangedView({ pr, viewMode }: Props) {
       // private browsing / quota — non-fatal.
     }
   }, [showComments]);
-  // Bumped by the refresh button to force the load effect to re-run.
-  // The local-git path will re-`git fetch` origin and the REST path
-  // re-hits the API, so refresh always gets the freshest state.
-  const [refreshTick, setRefreshTick] = useState(0);
-  // Lit only while the user explicitly clicked Refresh — toggles the
-  // button's spinner so they get clear feedback distinct from the
-  // initial mount-load state.
-  const [refreshing, setRefreshing] = useState(false);
-
-  // Load diff on mount / when the PR changes / when the user clicks
-  // refresh. The local-git fetch inside the engine is the
-  // authoritative way to pull new commits the user pushed since
-  // opening the panel.
+  // Auto-pick the first non-binary file when the diff resolves. We
+  // run this in an effect so it re-fires when the diff payload
+  // changes (e.g., after a refetch reveals a new file added in a
+  // recent push). Preserves the user's selection across refreshes
+  // when the path still exists.
   useEffect(() => {
-    let cancelled = false;
-    // First load shows the full-pane skeleton; subsequent refreshes
-    // just spin the toolbar button so the diff stays on screen.
-    if (refreshTick === 0) setLoading(true);
-    setError(null);
-    prmasterTauri
-      .getPrDiff(ref, baseRef, headRef)
-      .then((d) => {
-        if (cancelled) return;
-        setDiff(d);
-        // Preserve the user's selected file across refreshes when
-        // the path still exists; otherwise auto-pick the first
-        // non-binary file (mirror initial-load behaviour). The
-        // selection lives in the parent so we read it via a ref
-        // to avoid re-keying this effect on every click.
-        const cur = selectedPathRef.current;
-        if (cur && d.files.some((f) => f.path === cur)) {
-          return;
-        }
-        const first = d.files.find((f) => !f.binary && f.patch);
-        setSelectedPath(first?.path ?? d.files[0]?.path ?? null);
-      })
-      .catch((err) => {
-        if (!cancelled) setError(formatError(err));
-      })
-      .finally(() => {
-        if (!cancelled) {
-          setLoading(false);
-          setRefreshing(false);
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [ref.owner, ref.repo, ref.number, baseRef, headRef, refreshTick]);
+    if (!diff) return;
+    setSelectedPath((cur) => {
+      if (cur && diff.files.some((f) => f.path === cur)) return cur;
+      const first = diff.files.find((f) => !f.binary && f.patch);
+      return first?.path ?? diff.files[0]?.path ?? null;
+    });
+  }, [diff]);
 
-  // Load inline review comments for this PR via the REST endpoint.
-  // Re-runs on the same triggers as the diff load so the two stay in
-  // sync (refresh ticks both). The status is mirrored into a piece
-  // of state so the toolbar can render a visible indicator (count /
-  // loading / error) — devtools console isn't always reachable for
-  // the user, especially on a shipped build.
-  useEffect(() => {
-    let cancelled = false;
-    setCommentsStatus({ kind: "loading" });
-    prmasterTauri
-      .listReviewComments(ref)
-      .then((cs) => {
-        if (cancelled) return;
-        console.info(
-          `[prmaster] listReviewComments ${ref.owner}/${ref.repo}#${ref.number}:`,
-          cs.length,
-          "inline comments",
-          cs,
-        );
-        setReviewComments(cs);
-        setCommentsStatus({ kind: "ok", count: cs.length });
-      })
-      .catch((err) => {
-        if (cancelled) return;
-        console.warn("[prmaster] listReviewComments failed:", err);
-        setCommentsStatus({
-          kind: "error",
-          message: formatError(err),
-        });
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [ref.owner, ref.repo, ref.number, refreshTick]);
-
+  // Refresh button — fire both refetches in parallel. Each query's
+  // own `isFetching` powers the toolbar status; we don't need a
+  // separate "refreshing" state any more.
   const handleRefresh = useCallback(() => {
-    setRefreshing(true);
-    setRefreshTick((n) => n + 1);
-  }, []);
+    void diffQuery.refetch();
+    void commentsQuery.refetch();
+  }, [diffQuery, commentsQuery]);
+
+  // Toolbar comment-status chip is derived from the comments query
+  // state. Nothing to wire up — `useQuery` exposes everything.
+  const commentsStatus = useMemo<
+    | { kind: "loading" }
+    | { kind: "ok"; count: number }
+    | { kind: "error"; message: string }
+  >(() => {
+    if (commentsQuery.isError) {
+      return { kind: "error", message: formatError(commentsQuery.error) };
+    }
+    if (commentsQuery.isPending) {
+      return { kind: "loading" };
+    }
+    return { kind: "ok", count: reviewComments.length };
+  }, [
+    commentsQuery.isError,
+    commentsQuery.isPending,
+    commentsQuery.error,
+    reviewComments.length,
+  ]);
+  // Refreshing indicator — true while EITHER query has a fetch in
+  // flight. Drives the spinner on the Refresh toolbar button.
+  const refreshing = diffQuery.isFetching || commentsQuery.isFetching;
+  const loading = diffQuery.isPending;
+  const error = diffQuery.isError ? formatError(diffQuery.error) : null;
 
   const selected = useMemo<FileDiff | null>(() => {
     if (!diff || !selectedPath) return null;
@@ -271,6 +294,9 @@ export function PrFilesChangedView({ pr, viewMode }: Props) {
       }
       const path = selected.path;
       // Optimistic insert so the user sees their comment immediately.
+      // Stamp with the current user's login (resolved on app boot)
+      // so the avatar + author chip render correctly until the
+      // server-canonical version overwrites it on the next refresh.
       const optimisticId = `local-${Date.now()}`;
       setComments((prev) => [
         ...prev,
@@ -278,9 +304,10 @@ export function PrFilesChangedView({ pr, viewMode }: Props) {
           id: optimisticId,
           line,
           side,
-          authorLogin: null,
+          authorLogin: currentUser,
           body,
           filePath: path,
+          createdAt: new Date().toISOString(),
         },
       ]);
       try {
@@ -298,7 +325,7 @@ export function PrFilesChangedView({ pr, viewMode }: Props) {
         throw err;
       }
     },
-    [selected, diff, ref],
+    [selected, diff, ref, currentUser],
   );
 
   // Post a reply to an existing inline thread. We resolve the
@@ -323,7 +350,7 @@ export function PrFilesChangedView({ pr, viewMode }: Props) {
           id: optimisticId,
           line: parent.line,
           side: parent.side,
-          authorLogin: null,
+          authorLogin: currentUser,
           body,
           filePath: parent.filePath,
           inReplyToId: parentId,
@@ -341,7 +368,7 @@ export function PrFilesChangedView({ pr, viewMode }: Props) {
         throw err;
       }
     },
-    [allComments, ref],
+    [allComments, ref, currentUser],
   );
 
   // Resolve a single thread by its GraphQL node id. We don't
@@ -354,12 +381,13 @@ export function PrFilesChangedView({ pr, viewMode }: Props) {
       try {
         await prmasterTauri.resolveReviewThread(threadId);
       } finally {
-        // Refresh comments (and the diff alongside, since it's keyed
-        // on the same tick) to reflect the new state.
-        setRefreshTick((n) => n + 1);
+        // Refetch comments to reflect the new server state — the
+        // resolved thread will be filtered out by the engine, so
+        // the inline annotation disappears on the next paint.
+        void commentsQuery.refetch();
       }
     },
-    [],
+    [commentsQuery],
   );
 
   // Resolve every unresolved thread on the PR. Sequential rather
@@ -395,12 +423,12 @@ export function PrFilesChangedView({ pr, viewMode }: Props) {
     }
     setResolvingAll(false);
     setResolveAllError(firstError);
-    setRefreshTick((n) => n + 1);
-  }, [reviewComments, resolvingAll]);
+    void commentsQuery.refetch();
+  }, [reviewComments, resolvingAll, commentsQuery]);
 
   if (loading) {
     return (
-      <div className="flex items-center gap-2 rounded-md border bg-card/40 p-3 text-xs text-muted-foreground">
+      <div className="flex items-center gap-2 p-3 text-xs text-muted-foreground">
         <Loader2 className="size-3 animate-spin" />
         Loading diff…
       </div>
@@ -408,14 +436,14 @@ export function PrFilesChangedView({ pr, viewMode }: Props) {
   }
   if (error) {
     return (
-      <pre className="whitespace-pre-wrap rounded-md border border-destructive/40 bg-destructive/5 p-2 text-xs text-destructive">
+      <pre className="whitespace-pre-wrap p-2 text-xs text-destructive">
         {error}
       </pre>
     );
   }
   if (!diff || diff.files.length === 0) {
     return (
-      <div className="rounded-md border bg-card/40 p-3 text-xs italic text-muted-foreground">
+      <div className="p-3 text-xs italic text-muted-foreground">
         No files changed.
       </div>
     );
@@ -430,22 +458,12 @@ export function PrFilesChangedView({ pr, viewMode }: Props) {
     { add: 0, del: 0 },
   );
 
-  // Two-column layout — file tree (collapsible) on the left, the
-  // CodeMirror diff editor on the right. The component fills its
-  // container; the parent review page owns viewport sizing.
-  const gridColumns = treeOpen
-    ? "minmax(180px, 260px) minmax(0, 1fr)"
-    : // Collapsed tree → only the diff column. minmax(0, 1fr) prevents
-      // the inner CodeMirror's intrinsic min-content from blowing the
-      // grid past its container.
-      "minmax(0, 1fr)";
-
   return (
     <div className="grid h-full min-h-0 grid-rows-[auto_1fr] gap-1.5">
       {/* Toolbar — counts + actions. The thin underline replaces the
           old card lid so the diff editor underneath is the only
           surface that owns its own border + background. */}
-      <div className="flex items-center justify-between gap-2 border-b border-border/40 px-1 pb-1.5 text-[11px] text-muted-foreground">
+      <div className="flex items-center justify-between gap-2 px-1 pb-1 text-[11px] text-muted-foreground">
         <span className="flex items-center gap-2">
           <Button
             size="xs"
@@ -544,22 +562,49 @@ export function PrFilesChangedView({ pr, viewMode }: Props) {
         </span>
       </div>
       <div
-        className="grid min-h-0 gap-1.5 rounded-md"
-        style={{
-          gridTemplateColumns: gridColumns,
-        }}
+        ref={bodyRef}
+        className="flex min-h-0 min-w-0"
       >
         {treeOpen && (
-          <div className="min-h-0 overflow-hidden rounded border bg-background">
-            <PrFileTree
-              files={diff.files}
-              selectedPath={selectedPath}
-              onSelect={setSelectedPath}
-              commentsByPath={commentsByPath}
-            />
-          </div>
+          <>
+            <div
+              className="min-h-0 shrink-0 overflow-hidden"
+              style={{ width: treeWidth }}
+            >
+              <PrFileTree
+                files={diff.files}
+                selectedPath={selectedPath}
+                onSelect={setSelectedPath}
+                commentsByPath={commentsByPath}
+              />
+            </div>
+            {/* Drag handle. 1px visible line; 9px hit area via the
+                outer div's width + transparent surround so the user
+                gets a forgiving pointer target. Cursor switches to
+                `col-resize` on hover. Double-click resets to the
+                240px default — matches GitHub's split-resize
+                affordance. */}
+            <div
+              role="separator"
+              aria-orientation="vertical"
+              aria-label="Resize file tree"
+              onMouseDown={(e) => {
+                e.preventDefault();
+                setDragging(true);
+              }}
+              onDoubleClick={() => setTreeWidth(240)}
+              className="group relative flex w-2 shrink-0 cursor-col-resize select-none items-stretch"
+              title="Drag to resize · double-click to reset"
+            >
+              <div
+                className={`mx-auto w-px bg-border/60 transition-colors group-hover:bg-border ${
+                  dragging ? "bg-primary" : ""
+                }`}
+              />
+            </div>
+          </>
         )}
-        <div className="min-h-0 min-w-0 overflow-hidden rounded border bg-background">
+        <div className="min-h-0 min-w-0 flex-1 overflow-hidden">
           {selected ? (
             selected.binary ? (
               <div className="p-3 text-xs italic text-muted-foreground">

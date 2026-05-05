@@ -124,6 +124,24 @@ export interface PrDiff {
 export type DiffSide = "LEFT" | "RIGHT";
 
 /**
+ * One general (non-code-anchored) PR comment — the timeline
+ * conversation. Mirrors `zen_github::IssueComment`. PRs are issues
+ * for this REST endpoint, so the same DTO covers both.
+ */
+export interface IssueComment {
+  /** Stable id (REST numeric id stringified). */
+  id: string;
+  body: string;
+  authorLogin?: string;
+  /** ISO-8601 created timestamp. */
+  createdAt: string;
+  /** ISO-8601 updated timestamp. Equal to `createdAt` when unedited. */
+  updatedAt?: string;
+  /** Direct URL to the comment on github.com. */
+  htmlUrl?: string;
+}
+
+/**
  * One inline review comment on a PR. Mirrors `zen_github::ReviewComment`.
  * Sourced from GraphQL `pullRequest.reviewThreads` — resolved + outdated
  * threads are filtered at the engine boundary, so every entry the
@@ -360,6 +378,13 @@ export const prmasterTauri = {
    */
   listReviewComments: (pr: PrRef) =>
     invoke<ReviewComment[]>("prmaster_list_review_comments", { pr }),
+  /**
+   * Every general (non-code-anchored) PR comment — the timeline
+   * conversation that lives on github.com's "Conversation" tab.
+   * Drives the Comments tab on the dedicated review page.
+   */
+  listIssueComments: (pr: PrRef) =>
+    invoke<IssueComment[]>("prmaster_list_issue_comments", { pr }),
   approve: (pr: PrRef) => invoke<void>("prmaster_approve_pr", { pr }),
   requestChanges: (pr: PrRef, body: string) =>
     invoke<void>("prmaster_request_changes", { pr, body }),

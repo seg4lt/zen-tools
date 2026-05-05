@@ -14,6 +14,7 @@ use crate::models::auth::AuthStatus;
 use crate::models::diff::{
     split_git_diff, DiffSide, DiffSource, FileDiff, FileStatus, PrDiff,
 };
+use crate::models::issue_comment::IssueComment;
 use crate::models::pull_request::{
     EnrichedPullRequest, PrDetail, PrRef, PullRequest, ReviewEvent,
 };
@@ -890,6 +891,63 @@ impl GhClient {
         Ok(out)
     }
 
+    /// List every general (non-code-anchored) PR comment — the
+    /// timeline conversation that lives on github.com's
+    /// "Conversation" tab. Sourced from `/repos/.../issues/{n}/comments`
+    /// since PRs are issues for this endpoint. Paginated.
+    ///
+    /// Empty body / created_at fall back to defaults so a single
+    /// malformed entry (rare, but possible on tombstoned comments)
+    /// can't fail the whole fetch.
+    pub async fn list_pr_issue_comments(
+        &self,
+        pr: &PrRef,
+    ) -> GhResult<Vec<IssueComment>> {
+        let path = format!(
+            "repos/{}/{}/issues/{}/comments",
+            pr.owner, pr.repo, pr.number
+        );
+        let label = format!(
+            "issue comments {}/{}#{}",
+            pr.owner, pr.repo, pr.number
+        );
+        let stdout = self
+            .gh_retry(&label, &["api", &path, "--paginate"])
+            .await?;
+        let stdout_trim = stdout.trim();
+        if stdout_trim.is_empty() {
+            return Ok(Vec::new());
+        }
+        // `--paginate` stitches pages with `][`. Same trick the diff
+        // path uses.
+        let normalised = stdout.replace("][", ",");
+        let raw: Vec<RestIssueComment> = serde_json::from_str(&normalised)
+            .map_err(|e| {
+                tracing::warn!(
+                    pr = %format!("{}/{}#{}", pr.owner, pr.repo, pr.number),
+                    error = %e,
+                    body_preview = &stdout_trim[..stdout_trim.len().min(200)],
+                    "list_pr_issue_comments: serde decode failed"
+                );
+                GhError::decode(label.clone(), e)
+            })?;
+        let mut out = Vec::with_capacity(raw.len());
+        for r in raw {
+            out.push(IssueComment {
+                id: r.id.to_string(),
+                body: r.body.unwrap_or_default(),
+                author_login: r.user.and_then(|u| u.login),
+                created_at: r.created_at.unwrap_or_default(),
+                updated_at: r.updated_at,
+                html_url: r.html_url,
+            });
+        }
+        // Chronological order — oldest first matches what the user
+        // sees on github.com's Conversation tab.
+        out.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        Ok(out)
+    }
+
     /// Mark a review thread as resolved on GitHub. Mirrors the
     /// "Resolve conversation" button on github.com.
     ///
@@ -1205,6 +1263,30 @@ struct ReviewThreadCommentAuthorGql {
 struct ReviewThreadReplyToGql {
     #[serde(rename = "databaseId", default)]
     database_id: Option<i64>,
+}
+
+/// REST entry returned by `gh api .../issues/{n}/comments`. Defensive
+/// — every text field is optional so a tombstoned / partial entry
+/// doesn't fail the whole list parse.
+#[derive(Debug, Deserialize)]
+struct RestIssueComment {
+    id: i64,
+    #[serde(default)]
+    body: Option<String>,
+    #[serde(default)]
+    user: Option<RestIssueCommentUser>,
+    #[serde(default)]
+    created_at: Option<String>,
+    #[serde(default)]
+    updated_at: Option<String>,
+    #[serde(default)]
+    html_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RestIssueCommentUser {
+    #[serde(default)]
+    login: Option<String>,
 }
 
 /// `git show {ref}:{path}` → file contents at that revision, or `None`

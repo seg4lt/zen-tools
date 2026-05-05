@@ -23,18 +23,28 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ArrowLeft, Columns2, Rows2 } from "lucide-react";
+import {
+  ArrowLeft,
+  Columns2,
+  FileDiff,
+  MessageSquare,
+  Rows2,
+} from "lucide-react";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import { Button, Tabs, TabsList, TabsTrigger, cn } from "@zen-tools/ui";
 import type { DiffViewMode } from "@zen-tools/editor";
 import { PrFilesChangedView } from "./components/shared/PrFilesChangedView";
+import { PrIssueCommentsView } from "./components/shared/PrIssueCommentsView";
 import {
   enrichedId,
   usePrMasterStore,
 } from "./store/prmaster-store";
-import type { EnrichedPullRequest } from "./lib/tauri";
+import { prRefFor, type EnrichedPullRequest } from "./lib/tauri";
 
 const VIEW_MODE_KEY = "prmaster.reviewViewMode";
+
+/** Top-level tab on the review page. */
+type ReviewTab = "files" | "comments";
 
 /** Read the user's last selected view mode from localStorage. Falls
  *  back to `"unified"` when never set / storage unavailable / value
@@ -86,6 +96,12 @@ export function PRMasterReviewPage() {
     readStoredViewMode(),
   );
 
+  // Top-level tab: Files (the diff workspace) vs Comments (the
+  // general PR-level conversation). Defaults to Files since that's
+  // the primary review surface; not persisted because each PR visit
+  // should start on the diff.
+  const [tab, setTab] = useState<ReviewTab>("files");
+
   const onChangeMode = useCallback((next: DiffViewMode) => {
     setViewMode(next);
     try {
@@ -114,7 +130,9 @@ export function PRMasterReviewPage() {
 
   return (
     <div className="flex h-full min-h-0 w-full flex-col">
-      {/* Header rail — back left, title centred, view toggle right. */}
+      {/* Header rail — back left, title + Files/Comments tabs in
+          the middle, Unified/Split toggle on the right (only when
+          on the Files tab; the Comments tab has nothing to toggle). */}
       <header className="relative flex h-9 shrink-0 items-center border-b bg-card/40 px-2">
         <div className="absolute inset-y-0 left-2 flex items-center">
           <Button
@@ -127,44 +145,68 @@ export function PRMasterReviewPage() {
             Back
           </Button>
         </div>
-        <div className="mx-auto flex min-w-0 max-w-[60%] items-baseline gap-2">
-          <span className="truncate font-mono text-[11px] text-muted-foreground">
-            {owner}/{repo}#{number}
-          </span>
-          {pr?.pr.title && (
-            <span
-              className="truncate text-sm font-medium"
-              title={pr.pr.title}
-            >
-              {pr.pr.title}
+        <div className="mx-auto flex min-w-0 items-center gap-3">
+          <div className="flex min-w-0 items-baseline gap-2">
+            <span className="truncate font-mono text-[11px] text-muted-foreground">
+              {owner}/{repo}#{number}
             </span>
-          )}
-        </div>
-        <div className="absolute inset-y-0 right-2 flex items-center">
-          <Tabs
-            value={viewMode}
-            onValueChange={(v) => onChangeMode(v as DiffViewMode)}
-          >
+            {pr?.pr.title && (
+              <span
+                className="truncate text-sm font-medium"
+                title={pr.pr.title}
+              >
+                {pr.pr.title}
+              </span>
+            )}
+          </div>
+          <Tabs value={tab} onValueChange={(v) => setTab(v as ReviewTab)}>
             <TabsList className="h-6 gap-0.5 bg-transparent p-0">
-              <ViewToggleTrigger
-                value="unified"
-                icon={<Rows2 className="size-3" />}
-                label="Unified"
+              <SectionTabTrigger
+                value="files"
+                icon={<FileDiff className="size-3" />}
+                label="Files"
               />
-              <ViewToggleTrigger
-                value="split"
-                icon={<Columns2 className="size-3" />}
-                label="Split"
+              <SectionTabTrigger
+                value="comments"
+                icon={<MessageSquare className="size-3" />}
+                label="Comments"
               />
             </TabsList>
           </Tabs>
         </div>
+        {tab === "files" && (
+          <div className="absolute inset-y-0 right-2 flex items-center">
+            <Tabs
+              value={viewMode}
+              onValueChange={(v) => onChangeMode(v as DiffViewMode)}
+            >
+              <TabsList className="h-6 gap-0.5 bg-transparent p-0">
+                <ViewToggleTrigger
+                  value="unified"
+                  icon={<Rows2 className="size-3" />}
+                  label="Unified"
+                />
+                <ViewToggleTrigger
+                  value="split"
+                  icon={<Columns2 className="size-3" />}
+                  label="Split"
+                />
+              </TabsList>
+            </Tabs>
+          </div>
+        )}
       </header>
 
-      {/* Body — diff workspace fills the entire remaining height. */}
+      {/* Body — Files tab renders the diff workspace; Comments tab
+          renders the general PR-conversation list. Both fill the
+          remaining vertical space. */}
       <div className="flex min-h-0 flex-1 flex-col p-2">
         {pr ? (
-          <PrFilesChangedView pr={pr} viewMode={viewMode} />
+          tab === "files" ? (
+            <PrFilesChangedView pr={pr} viewMode={viewMode} />
+          ) : (
+            <PrIssueCommentsView pr={prRefFor(pr.pr)} />
+          )
         ) : (
           <NotLoaded
             owner={owner}
@@ -176,6 +218,29 @@ export function PRMasterReviewPage() {
         )}
       </div>
     </div>
+  );
+}
+
+function SectionTabTrigger({
+  value,
+  icon,
+  label,
+}: {
+  value: string;
+  icon: React.ReactNode;
+  label: string;
+}) {
+  return (
+    <TabsTrigger
+      value={value}
+      className={cn(
+        "h-6 gap-1 rounded px-2 text-[11px] data-[state=active]:bg-accent",
+      )}
+      title={`Show ${label.toLowerCase()}`}
+    >
+      {icon}
+      {label}
+    </TabsTrigger>
   );
 }
 

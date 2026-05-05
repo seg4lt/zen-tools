@@ -40,6 +40,7 @@ import {
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { open as openUrl } from "@tauri-apps/plugin-shell";
 import { useNavigate } from "@tanstack/react-router";
+import { useQueryClient } from "@tanstack/react-query";
 import { Badge } from "@zen-tools/ui";
 import { Button } from "@zen-tools/ui";
 import { Label } from "@zen-tools/ui";
@@ -50,6 +51,7 @@ import {
   prRefFor,
   type EnrichedPullRequest,
 } from "../../lib/tauri";
+import { prefetchReviewPageData } from "../../lib/queries";
 import { Avatar } from "./Avatar";
 import { CiChecks } from "./CiChecks";
 import { ReviewerAvatars } from "./ReviewerAvatars";
@@ -71,6 +73,7 @@ export function PrDetailPanel({ pr, currentUser, onActionDone }: Props) {
   const [error, setError] = useState<string | null>(null);
 
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const ref = prRefFor(pr.pr);
   const detail = pr.detail;
   const rollup = detail?.commits?.nodes[0]?.commit.statusCheckRollup ?? null;
@@ -327,6 +330,27 @@ export function PrDetailPanel({ pr, currentUser, onActionDone }: Props) {
                 number: String(ref.number),
               },
             })
+          }
+          // Prefetch on hover/focus so the click feels instant.
+          // The review page's `useQuery` reads from the same cache,
+          // so the cached payload paints immediately while the
+          // mount-time refetch (staleTime: 0) folds in the latest
+          // server state in the background.
+          onMouseEnter={() =>
+            prefetchReviewPageData(
+              queryClient,
+              ref,
+              detail?.baseRefName ?? null,
+              detail?.headRefName ?? null,
+            )
+          }
+          onFocus={() =>
+            prefetchReviewPageData(
+              queryClient,
+              ref,
+              detail?.baseRefName ?? null,
+              detail?.headRefName ?? null,
+            )
           }
           title="Open the dedicated review workspace for this PR"
         >
