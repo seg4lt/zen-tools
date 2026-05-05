@@ -410,43 +410,66 @@ export function SqlEditor({
     // typing-debounce path needs the catalog to know events is in
     // `app`, but it only fires on type — chicken-and-egg). Pre-warming
     // every schema in the catalog breaks that cycle.
-    void ensureCatalog(connectionId, database)
-      .then((catalog) => {
-        // Scope the eager describe-fan-out to the user's CURRENTLY
-        // SELECTED schema only. Earlier we'd prefetch the first
-        // PREFETCH_LIMIT tables across every schema in the catalog,
-        // which is exactly the fleet of "indexing X tables" jobs
-        // that bogs down a connection on a multi-schema cluster
-        // — `dbo` users don't need to wait for `[every other
-        // schema]` to land before column completions work.
-        //
-        // Concretely: the user picks `foo` → `dbo` from the
-        // context picker; we only describe `foo.dbo.*`. Switching
-        // the picker re-fires this effect (it depends on
-        // `effectiveSchema`) and indexes the new schema. The work
-        // is fire-and-forget — the registry's pool-backed
-        // concurrent execute path means user queries can run side
-        // by side with this without waiting on a mutex.
-        //
-        // Tables in *other* schemas still resolve on demand: the
-        // typing-debounce path (`ensureTablesForSql`) consults
-        // the catalog and fires per-schema `ensureTables` calls
-        // for whatever the user actually references.
-        const inSchema = catalog.filter((t) => t.schema === effectiveSchema);
-        const limited = inSchema.slice(0, PREFETCH_LIMIT);
-        if (limited.length > 0) {
-          void ensureTables(
-            connectionId,
-            database,
-            effectiveSchema,
-            limited.map((t) => t.name),
-          ).catch(() => {});
-        }
-      })
-      .catch(() => {
-        // Soft-fail; the editor still works with whatever the cache
-        // has, just without cold-completion catalog names.
-      });
+    // Eager column prefetch is gated on the user having EXPLICITLY
+    // picked a schema from the context-picker dropdown (the `schema`
+    // prop, NOT the `effectiveSchema` fallback). Two reasons:
+    //
+    //   1. On a multi-schema cluster the prior "fan out across the
+    //      first 100 tables sorted by default schema" approach still
+    //      lights up the progress chip with dozens of describe jobs
+    //      the user didn't ask for. Picking nothing → indexing
+    //      nothing matches the principle of least surprise.
+    //   2. The `effectiveSchema` fallback (`public` / `dbo`) is a
+    //      completion-time convenience for typing bare table names.
+    //      It should NOT trigger background work — when the user
+    //      hits Run on a query referencing real tables,
+    //      `ensureTablesForSql` will fetch precisely those tables,
+    //      bucketed by their actual schema (resolved through the
+    //      catalog).
+    //
+    // The catalog itself (lightweight name listing) still loads
+    // unconditionally so qualified-table autocomplete works the
+    // moment the editor opens.
+    void ensureCatalog(connectionId, database).catch(() => {
+      // Soft-fail; the editor still works with whatever the cache
+      // has, just without cold-completion catalog names.
+    });
+
+    if (schema) {
+      void ensureCatalog(connectionId, database)
+        .then((catalog) => {
+          const inSchema = catalog.filter((t) => t.schema === schema);
+          if (inSchema.length === 0) return;
+
+          // Skip the round-trip entirely when every catalog entry
+          // for this schema is already in the in-memory mirror
+          // (i.e. fresh enough that we've seen its description in
+          // this session). The backend's TTL-based stale check is
+          // still authoritative — when the mirror is missing rows,
+          // we delegate to `ensureTables` which sends them to the
+          // backend as `force=false`; rows older than
+          // `DEFAULT_TTL_MS` come back cached now and queue a
+          // silent background refresh, missing rows fetch
+          // synchronously. Either way we avoid the "indexing N
+          // tables" chip storm on every editor focus.
+          const cachedNow = readCachedForDatabase(connectionId, database)
+            .filter((d) => d.schema === schema)
+            .map((d) => d.name);
+          const cachedSet = new Set(cachedNow);
+          const stale = inSchema
+            .filter((t) => !cachedSet.has(t.name))
+            .slice(0, PREFETCH_LIMIT)
+            .map((t) => t.name);
+          if (stale.length === 0) return;
+
+          void ensureTables(connectionId, database, schema, stale).catch(
+            () => {},
+          );
+        })
+        .catch(() => {
+          // Soft-fail; surfaces above will retry on next mount.
+        });
+    }
 
     const unsubCache = subscribeSchemaCache((event) => {
       if (event.connectionId === connectionId && event.database === database) {
@@ -468,7 +491,11 @@ export function SqlEditor({
       unsubCache();
       unsubCatalog();
     };
-  }, [connectionId, database, effectiveSchema, dialect, sqlCompartment]);
+    // Note: depend on `schema` (the user-picked dropdown value) rather
+    // than `effectiveSchema` (which has the public/dbo fallback) — the
+    // eager-prefetch branch above is gated on `schema`, so re-running
+    // on a fallback change would just no-op.
+  }, [connectionId, database, schema, effectiveSchema, dialect, sqlCompartment]);
 
   // ── Opt+Enter actions popup ─────────────────────────────────────────
   //
