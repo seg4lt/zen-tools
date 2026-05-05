@@ -152,6 +152,74 @@ pub fn open_privacy_pane(_pane: &str) -> Result<(), String> {
     Err("System Settings deep-link is macOS-only".to_string())
 }
 
+// ── Bundle context detection ──────────────────────────────────────
+//
+// macOS's TCC enforcement reads the requesting process's Info.plist
+// to find the user-visible explanation strings (e.g.
+// `NSMicrophoneUsageDescription`). For class-method requests like
+// `[AVCaptureDevice requestAccessForMediaType:AVMediaTypeAudio
+// completionHandler:]`, that key is **mandatory** — if it's missing,
+// macOS doesn't gently return "denied"; it terminates the process via
+// `__abort_with_payload(TCC_VIOLATION)`. No NSException, no Rust
+// panic, just clean exit.
+//
+// During `cargo tauri dev` the binary runs at
+// `target/debug/zen-tools` — there is no `.app/Contents/Info.plist`
+// in scope, so the runtime sees no usage descriptions and aborts.
+// In a `tauri build` artifact the binary is at
+// `Zen Tools.app/Contents/MacOS/zen-tools` and Info.plist is read
+// correctly, so the prompt fires normally.
+//
+// We detect bundled-vs-dev by walking the running executable's path
+// up two levels and looking for `*.app/Contents/MacOS/`. Cheap (one
+// `current_exe` + four `Path::file_name` calls); cached after first
+// hit since the answer can't change for a running process.
+
+/// Returns true when the running binary lives inside a real macOS
+/// `.app` bundle — i.e. when TCC will read the bundle's
+/// `Info.plist` and APIs that depend on usage-description strings
+/// (`AVCaptureDevice.requestAccess`, `AVCaptureDevice.authorizationStatus`
+/// is fine because it doesn't prompt) can be called safely.
+///
+/// In a Tauri **dev** build the answer is `false` — call sites must
+/// gate any prompting FFI behind this check or the process will be
+/// killed by `__abort_with_payload`.
+#[cfg(target_os = "macos")]
+pub fn is_running_inside_app_bundle() -> bool {
+    use std::sync::OnceLock;
+    static CACHED: OnceLock<bool> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        let Ok(exe) = std::env::current_exe() else {
+            return false;
+        };
+        let Some(macos_dir) = exe.parent() else {
+            return false;
+        };
+        if macos_dir.file_name().and_then(|n| n.to_str()) != Some("MacOS") {
+            return false;
+        }
+        let Some(contents_dir) = macos_dir.parent() else {
+            return false;
+        };
+        if contents_dir.file_name().and_then(|n| n.to_str()) != Some("Contents") {
+            return false;
+        }
+        let Some(app_dir) = contents_dir.parent() else {
+            return false;
+        };
+        app_dir
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.eq_ignore_ascii_case("app"))
+            .unwrap_or(false)
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn is_running_inside_app_bundle() -> bool {
+    false
+}
+
 // ── Microphone permission probing & re-prompting ──────────────────
 //
 // Apple keeps the rich state for mic permission in

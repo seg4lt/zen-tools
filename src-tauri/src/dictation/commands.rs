@@ -258,35 +258,30 @@ pub async fn dictation_get_permissions(app: AppHandle) -> AppResult<PermissionsD
 /// the system prompt afresh, so the user can grant without having to
 /// know about `tccutil` or hunt through System Settings.
 ///
-/// Workflow: the user opens dictation Settings, sees "Accessibility:
-/// not granted" with a "Reset & re-prompt" button. Click → we run
-/// `tccutil reset Accessibility com.seg4lt.zen-tools` (which
-/// invalidates any stale entry — common after an unsigned-build
-/// reinstall, where the cdhash no longer matches the TCC row) and
-/// then call `prompt_accessibility()` to fire the system dialog.
-/// User clicks Allow → next `lifecycle::start` finds Accessibility
-/// trusted and installs the CGEventTap.
-///
-/// Sequencing matters: prompting BEFORE the reset is a no-op when an
-/// entry exists. Resetting BEFORE the prompt is what makes the dialog
-/// appear.
+/// In a dev build (raw `target/debug/zen-tools`, no `.app` bundle)
+/// the TCC entry is keyed off a different cdhash than any installed
+/// release, so `tccutil reset` is a no-op against the dev binary.
+/// We still run it (cheap, harmless) but skip
+/// `prompt_accessibility()` — the prompting variant of
+/// `AXIsProcessTrustedWithOptions` is safe to call without a bundle,
+/// but it would key the resulting grant against the dev binary's
+/// cdhash and that grant evaporates on next rebuild. Bundled builds
+/// follow the full reset+prompt path.
 #[tauri::command]
 pub async fn dictation_reset_accessibility(app: AppHandle) -> AppResult<()> {
-    let bundle_id = app
-        .config()
-        .identifier
-        .clone();
+    let bundle_id = app.config().identifier.clone();
     crate::dictation::permissions::reset_tcc_entry("Accessibility", &bundle_id)
         .map_err(AppError::Other)?;
-    // Fire the prompt straight after reset — tccutil's effect is
-    // synchronous so by the time the next call lands, the entry is
-    // gone and macOS will prompt fresh.
-    let _ = crate::dictation::permissions::prompt_accessibility();
-    // Re-attempt the lifecycle start so the CGEventTap installs as
-    // soon as the user clicks Allow (without waiting for an app
-    // relaunch). `lifecycle::start` is idempotent and itself
-    // re-checks `is_accessibility_trusted()` before touching the tap.
-    crate::dictation::lifecycle::start(&app);
+    if crate::dictation::permissions::is_running_inside_app_bundle() {
+        let _ = crate::dictation::permissions::prompt_accessibility();
+        crate::dictation::lifecycle::start(&app);
+    } else {
+        tracing::info!(
+            "dictation: reset_accessibility — TCC entry wiped, but running \
+             outside an .app bundle so skipping the in-process re-prompt. \
+             Grant via the bundled build to make it stick across rebuilds."
+        );
+    }
     Ok(())
 }
 
@@ -294,8 +289,10 @@ pub async fn dictation_reset_accessibility(app: AppHandle) -> AppResult<()> {
 /// triggers the actual prompt themselves by starting a recording —
 /// AVCaptureDevice's first capture-attempt is what shows the system
 /// "Zen Tools would like to access the microphone" dialog. We can't
-/// fire that dialog standalone (no public API), so the UX is:
-/// click Reset → next dictation gesture re-prompts.
+/// fire that dialog standalone safely (calling
+/// `requestAccessForMediaType:` without an Info.plist usage-description
+/// terminates the process), so the UX is: click Reset → next dictation
+/// gesture re-prompts via cpal/CoreAudio's separate enforcement path.
 #[tauri::command]
 pub async fn dictation_reset_microphone(app: AppHandle) -> AppResult<()> {
     let bundle_id = app.config().identifier.clone();

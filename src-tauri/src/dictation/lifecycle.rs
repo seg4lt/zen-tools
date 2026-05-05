@@ -46,8 +46,9 @@ use super::install_id::{
     self, decide_autofix, AutoFixDecision,
 };
 use super::permissions::{
-    is_accessibility_trusted, microphone_authorization_status, prompt_accessibility,
-    request_microphone_access, reset_tcc_entry, MicAuthStatus,
+    is_accessibility_trusted, is_running_inside_app_bundle,
+    microphone_authorization_status, prompt_accessibility, request_microphone_access,
+    reset_tcc_entry, MicAuthStatus,
 };
 use super::state::DictationTauriState;
 use super::{ensure_model_present, hud, install_hotkey};
@@ -154,6 +155,19 @@ fn install_tap_now(app: &AppHandle) {
 
 /// Implements the accessibility decision matrix. See module docs for
 /// the matrix; this fn is just the side-effect dispatcher.
+///
+/// **Dev-build guard.** Any branch that fires `prompt_accessibility()`
+/// or `tccutil reset` is gated on `is_running_inside_app_bundle()`.
+/// In `cargo tauri dev` the running executable lives at
+/// `target/debug/zen-tools` with no surrounding `.app` bundle, so
+/// macOS reads no `Info.plist` and any TCC-prompting call would be
+/// terminated by `__abort_with_payload(TCC_VIOLATION)` — the process
+/// just exits, no panic, no log. We surface the same
+/// `accessibility-required` event so the React UI's manual buttons
+/// still let the user trigger the prompt explicitly (the prompt
+/// itself works via cpal/CoreAudio's separate enforcement path,
+/// it's only the direct `AVCaptureDevice` / `AXIsProcessTrustedWithOptions`
+/// FFI that's lethal in the unbundled case).
 fn handle_accessibility_precheck(app: &AppHandle) {
     let granted = is_accessibility_trusted();
     let cfg_handle = app.state::<UserConfig>();
@@ -165,36 +179,51 @@ fn handle_accessibility_precheck(app: &AppHandle) {
         .flatten()
         .and_then(|p| p.accessibility);
     let decision = decide_autofix(granted, &current, prior.as_ref());
+    let bundled = is_running_inside_app_bundle();
 
     tracing::info!(
         ?decision,
+        bundled,
         version = %current.version,
         "dictation: accessibility precheck"
     );
 
     match decision {
         AutoFixDecision::AlreadyGranted => {
-            // Persist the observation so future revocations on this
-            // same install are recognised as deliberate.
             if let Err(e) = install_id::record_accessibility_grant(cfg, current.clone()) {
                 tracing::warn!(?e, "dictation: failed to persist AX grant record");
             }
         }
         AutoFixDecision::PromptFresh => {
-            let _ = prompt_accessibility();
-            spawn_accessibility_poll(app);
+            if bundled {
+                let _ = prompt_accessibility();
+                spawn_accessibility_poll(app);
+            } else {
+                tracing::info!(
+                    "dictation: skipping auto-prompt for Accessibility — \
+                     running outside an .app bundle (cargo tauri dev). \
+                     Use the manual button in Settings to trigger the prompt."
+                );
+            }
         }
         AutoFixDecision::ResetThenPrompt => {
-            let bundle_id = app.config().identifier.clone();
-            tracing::info!(
-                %bundle_id,
-                "dictation: stale Accessibility TCC entry detected (install id changed); resetting and re-prompting"
-            );
-            if let Err(e) = reset_tcc_entry("Accessibility", &bundle_id) {
-                tracing::warn!(?e, "dictation: tccutil reset Accessibility failed; falling back to manual UI");
+            if bundled {
+                let bundle_id = app.config().identifier.clone();
+                tracing::info!(
+                    %bundle_id,
+                    "dictation: stale Accessibility TCC entry detected; resetting and re-prompting"
+                );
+                if let Err(e) = reset_tcc_entry("Accessibility", &bundle_id) {
+                    tracing::warn!(?e, "dictation: tccutil reset Accessibility failed; falling back to manual UI");
+                }
+                let _ = prompt_accessibility();
+                spawn_accessibility_poll(app);
+            } else {
+                tracing::info!(
+                    "dictation: skipping auto-reset for Accessibility — \
+                     running outside an .app bundle (cargo tauri dev)."
+                );
             }
-            let _ = prompt_accessibility();
-            spawn_accessibility_poll(app);
         }
         AutoFixDecision::DeliberateDenial => {
             tracing::info!(
@@ -260,13 +289,25 @@ fn spawn_accessibility_poll(app: &AppHandle) {
 /// (richer state) so we don't need the install-id heuristic to
 /// distinguish "no prior entry" from "denied" — `notDetermined` and
 /// `denied` are separate enum values.
+///
+/// **Dev-build guard, critical here.** `AVCaptureDevice.requestAccess
+/// ForMediaType:` requires `NSMicrophoneUsageDescription` in the
+/// running process's `Info.plist`. When `cargo tauri dev` runs the
+/// raw binary at `target/debug/zen-tools` there is no Info.plist in
+/// scope, and macOS terminates the process with
+/// `__abort_with_payload(TCC_VIOLATION)` — no exception, no panic,
+/// no log line. The first build of this auto-fix flow shipped
+/// without the guard and the dev binary died silently right after
+/// the precheck log line. The bundled `.app` build has Info.plist
+/// in the right place and the prompt fires normally.
 fn handle_microphone_precheck(app: &AppHandle) {
     let status = microphone_authorization_status();
     let cfg_handle = app.state::<UserConfig>();
     let cfg = cfg_handle.inner();
     let current = install_id::current(app);
+    let bundled = is_running_inside_app_bundle();
 
-    tracing::info!(?status, "dictation: microphone precheck");
+    tracing::info!(?status, bundled, "dictation: microphone precheck");
 
     match status {
         MicAuthStatus::Authorized => {
@@ -275,9 +316,19 @@ fn handle_microphone_precheck(app: &AppHandle) {
             }
         }
         MicAuthStatus::NotDetermined => {
-            // No entry exists yet; `requestAccess` will prompt
-            // directly, no `tccutil reset` needed.
-            spawn_microphone_request(app, false);
+            if bundled {
+                // No entry exists yet; `requestAccess` will prompt
+                // directly, no `tccutil reset` needed.
+                spawn_microphone_request(app, false);
+            } else {
+                tracing::info!(
+                    "dictation: skipping auto-prompt for Microphone — \
+                     running outside an .app bundle (cargo tauri dev) where \
+                     AVCaptureDevice.requestAccess would terminate the process. \
+                     The system mic prompt will fire on first recording attempt \
+                     via cpal/CoreAudio, which uses a different enforcement path."
+                );
+            }
         }
         MicAuthStatus::Denied => {
             let prior = install_id::read(cfg)
@@ -287,18 +338,25 @@ fn handle_microphone_precheck(app: &AppHandle) {
             let decision = decide_autofix(false, &current, prior.as_ref());
             match decision {
                 AutoFixDecision::ResetThenPrompt => {
-                    let bundle_id = app.config().identifier.clone();
-                    tracing::info!(
-                        %bundle_id,
-                        "dictation: stale Microphone TCC entry detected; resetting and re-prompting"
-                    );
-                    if let Err(e) = reset_tcc_entry("Microphone", &bundle_id) {
-                        tracing::warn!(
-                            ?e,
-                            "dictation: tccutil reset Microphone failed; falling back to manual UI"
+                    if bundled {
+                        let bundle_id = app.config().identifier.clone();
+                        tracing::info!(
+                            %bundle_id,
+                            "dictation: stale Microphone TCC entry detected; resetting and re-prompting"
+                        );
+                        if let Err(e) = reset_tcc_entry("Microphone", &bundle_id) {
+                            tracing::warn!(
+                                ?e,
+                                "dictation: tccutil reset Microphone failed; falling back to manual UI"
+                            );
+                        }
+                        spawn_microphone_request(app, true);
+                    } else {
+                        tracing::info!(
+                            "dictation: skipping auto-reset for Microphone — \
+                             running outside an .app bundle (cargo tauri dev)."
                         );
                     }
-                    spawn_microphone_request(app, true);
                 }
                 AutoFixDecision::DeliberateDenial => {
                     tracing::info!(
