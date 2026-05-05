@@ -14,7 +14,7 @@
  * window-chrome of its own.
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ExternalLink,
   Loader2,
@@ -29,6 +29,7 @@ import { useTheme } from "@/hooks/use-theme";
 import {
   prmasterTauri,
   prRefFor,
+  type ConversationItem,
   type DiffSide,
   type EnrichedPullRequest,
   type FileDiff,
@@ -38,9 +39,20 @@ import { PrFileTree } from "./PrFileTree";
 
 interface Props {
   pr: EnrichedPullRequest;
-  /** Which CodeMirror view mode to use for the diff editor. Owned by
-   *  the parent (review page) so the toggle can persist user choice. */
+  /** Diff view mode — owned by the parent (review page) so the toggle
+   *  can persist user choice. */
   viewMode: DiffViewMode;
+  /** Outstanding review threads + @-mention comments on this PR.
+   *  Review-thread items are seeded into the diff viewer's inline
+   *  comments so reviewers see existing discussion right next to the
+   *  code, not just under a separate "Conversations" section. */
+  conversations: ConversationItem[];
+  /** Selected file path — lifted to the parent so an external panel
+   *  (the Conversations footer) can drive selection by clicking a
+   *  thread row. */
+  selectedPath: string | null;
+  /** Updates the selected file path. */
+  onSelectPath: (path: string | null) => void;
 }
 
 interface LocalComment extends InlineComment {
@@ -48,7 +60,13 @@ interface LocalComment extends InlineComment {
   filePath: string;
 }
 
-export function PrFilesChangedView({ pr, viewMode }: Props) {
+export function PrFilesChangedView({
+  pr,
+  viewMode,
+  conversations,
+  selectedPath,
+  onSelectPath,
+}: Props) {
   const ref = prRefFor(pr.pr);
   const baseRef = pr.detail?.baseRefName ?? null;
   const headRef = pr.detail?.headRefName ?? null;
@@ -59,8 +77,19 @@ export function PrFilesChangedView({ pr, viewMode }: Props) {
   const [diff, setDiff] = useState<PrDiff | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [comments, setComments] = useState<LocalComment[]>([]);
+  // Mirrors of the lifted state + setter so the diff-load effect can
+  // read/write them inside its async `.then()` without re-keying on
+  // every click (which would re-fire the diff fetch and stutter the
+  // editor mount).
+  const selectedPathRef = useRef(selectedPath);
+  const onSelectPathRef = useRef(onSelectPath);
+  useEffect(() => {
+    selectedPathRef.current = selectedPath;
+  }, [selectedPath]);
+  useEffect(() => {
+    onSelectPathRef.current = onSelectPath;
+  }, [onSelectPath]);
   // UI: tree visibility.
   const [treeOpen, setTreeOpen] = useState(true);
   // Bumped by the refresh button to force the load effect to re-run.
@@ -89,12 +118,15 @@ export function PrFilesChangedView({ pr, viewMode }: Props) {
         setDiff(d);
         // Preserve the user's selected file across refreshes when
         // the path still exists; otherwise auto-pick the first
-        // non-binary file (mirror initial-load behaviour).
-        setSelectedPath((cur) => {
-          if (cur && d.files.some((f) => f.path === cur)) return cur;
-          const first = d.files.find((f) => !f.binary && f.patch);
-          return first?.path ?? d.files[0]?.path ?? null;
-        });
+        // non-binary file (mirror initial-load behaviour). The
+        // selection lives in the parent so we read it via a ref
+        // to avoid re-keying this effect on every click.
+        const cur = selectedPathRef.current;
+        if (cur && d.files.some((f) => f.path === cur)) {
+          return;
+        }
+        const first = d.files.find((f) => !f.binary && f.patch);
+        onSelectPathRef.current(first?.path ?? d.files[0]?.path ?? null);
       })
       .catch((err) => {
         if (!cancelled) setError(formatError(err));
@@ -120,18 +152,64 @@ export function PrFilesChangedView({ pr, viewMode }: Props) {
     return diff.files.find((f) => f.path === selectedPath) ?? null;
   }, [diff, selectedPath]);
 
+  // Seed comments derived from the unfiltered conversations fetch.
+  // Each message in a `review_thread` becomes one `LocalComment`;
+  // Pierre groups multiple comments at the same `(side, line)` cell so
+  // the thread renders stacked under the line, mirroring GitHub's
+  // inline-thread layout.
+  //
+  // TODO: GitHub GraphQL exposes `originalLine` + a per-thread `side`
+  // for threads anchored to deleted lines (LEFT). The current
+  // ConversationItem model only carries `lineNumber`, so we hardcode
+  // RIGHT here; threads on `-` lines render at the wrong row until
+  // the model adds a `side` field. Tracked alongside the LEFT-side
+  // composer work.
+  const seedComments = useMemo<LocalComment[]>(() => {
+    const out: LocalComment[] = [];
+    for (const c of conversations) {
+      if (c.kind !== "review_thread") continue;
+      if (!c.filePath || c.lineNumber == null) continue;
+      for (const m of c.messages) {
+        out.push({
+          id: m.id,
+          line: c.lineNumber,
+          side: "RIGHT",
+          authorLogin: m.authorLogin,
+          body: m.body,
+          filePath: c.filePath,
+        });
+      }
+    }
+    return out;
+  }, [conversations]);
+
+  // Server-canonical seed ∪ optimistic local inserts, deduped by id.
+  // The local set wins (so a freshly-posted comment keeps its
+  // optimistic id until the next conversations refresh folds in the
+  // server version).
+  const allComments = useMemo<LocalComment[]>(() => {
+    const seen = new Set<string>();
+    const merged: LocalComment[] = [];
+    for (const c of [...comments, ...seedComments]) {
+      if (seen.has(c.id)) continue;
+      seen.add(c.id);
+      merged.push(c);
+    }
+    return merged;
+  }, [comments, seedComments]);
+
   const commentsForSelected = useMemo<InlineComment[]>(() => {
     if (!selected) return [];
-    return comments.filter((c) => c.filePath === selected.path);
-  }, [comments, selected]);
+    return allComments.filter((c) => c.filePath === selected.path);
+  }, [allComments, selected]);
 
   const commentsByPath = useMemo(() => {
     const m = new Map<string, number>();
-    for (const c of comments) {
+    for (const c of allComments) {
       m.set(c.filePath, (m.get(c.filePath) ?? 0) + 1);
     }
     return m;
-  }, [comments]);
+  }, [allComments]);
 
   const handleAddComment = useCallback(
     async ({
@@ -221,9 +299,11 @@ export function PrFilesChangedView({ pr, viewMode }: Props) {
       "minmax(0, 1fr)";
 
   return (
-    <div className="grid h-full min-h-0 grid-rows-[auto_1fr] gap-1.5 rounded-md border bg-card/40 p-1.5">
-      {/* Toolbar — counts + actions. */}
-      <div className="flex items-center justify-between gap-2 px-1 text-[11px] text-muted-foreground">
+    <div className="grid h-full min-h-0 grid-rows-[auto_1fr] gap-1.5">
+      {/* Toolbar — counts + actions. The thin underline replaces the
+          old card lid so the diff editor underneath is the only
+          surface that owns its own border + background. */}
+      <div className="flex items-center justify-between gap-2 border-b border-border/40 px-1 pb-1.5 text-[11px] text-muted-foreground">
         <span className="flex items-center gap-2">
           <Button
             size="xs"
@@ -286,7 +366,7 @@ export function PrFilesChangedView({ pr, viewMode }: Props) {
             <PrFileTree
               files={diff.files}
               selectedPath={selectedPath}
-              onSelect={setSelectedPath}
+              onSelect={onSelectPath}
               commentsByPath={commentsByPath}
             />
           </div>

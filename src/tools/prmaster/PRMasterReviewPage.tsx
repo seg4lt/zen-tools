@@ -28,11 +28,16 @@ import { useNavigate, useParams } from "@tanstack/react-router";
 import { Button, Tabs, TabsList, TabsTrigger, cn } from "@zen-tools/ui";
 import type { DiffViewMode } from "@zen-tools/editor";
 import { PrFilesChangedView } from "./components/shared/PrFilesChangedView";
+import { PrConversationsFooter } from "./components/shared/PrConversationsFooter";
 import {
   enrichedId,
   usePrMasterStore,
 } from "./store/prmaster-store";
-import type { EnrichedPullRequest } from "./lib/tauri";
+import {
+  prmasterTauri,
+  type ConversationItem,
+  type EnrichedPullRequest,
+} from "./lib/tauri";
 
 const VIEW_MODE_KEY = "prmaster.reviewViewMode";
 
@@ -85,6 +90,40 @@ export function PRMasterReviewPage() {
   const [viewMode, setViewMode] = useState<DiffViewMode>(() =>
     readStoredViewMode(),
   );
+
+  // Selected file in the diff editor, lifted here so the conversations
+  // footer can drive selection by clicking a thread row.
+  const [selectedPath, setSelectedPath] = useState<string | null>(null);
+
+  // Outstanding conversations on this PR — fetched unfiltered (every
+  // unresolved thread + top-level comment) so the reviewer sees the
+  // full discussion, not just the threads naming them.
+  const [conversations, setConversations] = useState<ConversationItem[]>([]);
+  const [convoLoading, setConvoLoading] = useState(true);
+  const [convoError, setConvoError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!Number.isFinite(number)) return;
+    let cancelled = false;
+    setConvoLoading(true);
+    setConvoError(null);
+    prmasterTauri
+      .getPrConversations({ owner, repo, number })
+      .then((items) => {
+        if (cancelled) return;
+        setConversations(items);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setConvoError(formatError(err));
+      })
+      .finally(() => {
+        if (!cancelled) setConvoLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [owner, repo, number]);
 
   const onChangeMode = useCallback((next: DiffViewMode) => {
     setViewMode(next);
@@ -161,11 +200,26 @@ export function PRMasterReviewPage() {
         </div>
       </header>
 
-      {/* Body — fills the remaining height; Files Changed view is the
-          full-page workspace from now on. */}
-      <div className="flex min-h-0 flex-1 flex-col p-2">
+      {/* Body — diff workspace fills the remaining vertical space; the
+          conversations footer takes its natural height beneath. */}
+      <div className="grid min-h-0 flex-1 grid-rows-[1fr_auto] gap-2 p-2">
         {pr ? (
-          <PrFilesChangedView pr={pr} viewMode={viewMode} />
+          <>
+            <PrFilesChangedView
+              pr={pr}
+              viewMode={viewMode}
+              conversations={conversations}
+              selectedPath={selectedPath}
+              onSelectPath={setSelectedPath}
+            />
+            <PrConversationsFooter
+              conversations={conversations}
+              currentUser={state.currentUser}
+              loading={convoLoading}
+              error={convoError}
+              onSelectPath={setSelectedPath}
+            />
+          </>
         ) : (
           <NotLoaded
             owner={owner}
@@ -178,6 +232,13 @@ export function PRMasterReviewPage() {
       </div>
     </div>
   );
+}
+
+function formatError(err: unknown): string {
+  if (err && typeof err === "object" && "message" in err) {
+    return String((err as { message: unknown }).message);
+  }
+  return String(err);
 }
 
 function ViewToggleTrigger({

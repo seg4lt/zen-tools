@@ -349,6 +349,14 @@ export const prmasterTauri = {
   getReviewed: () => invoke<EnrichedPullRequest[]>("prmaster_get_reviewed"),
   getConversations: () =>
     invoke<ConversationGroup[]>("prmaster_get_conversations"),
+  /**
+   * Every unresolved review thread + top-level comment on a single PR.
+   * Unfiltered — returns the full set even on PRs the current user
+   * has never touched. Drives the Conversations footer on the
+   * dedicated review page.
+   */
+  getPrConversations: (pr: PrRef) =>
+    invoke<ConversationItem[]>("prmaster_get_pr_conversations", { pr }),
   approve: (pr: PrRef) => invoke<void>("prmaster_approve_pr", { pr }),
   requestChanges: (pr: PrRef, body: string) =>
     invoke<void>("prmaster_request_changes", { pr, body }),

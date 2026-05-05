@@ -52,7 +52,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 use tracing::warn;
 use zen_github::{
-    ConversationGroup, DiffSide, EnrichedPullRequest, GhCall, GhClient, GhResult, PrDiff, PrRef,
+    ConversationGroup, ConversationItem, DiffSide, EnrichedPullRequest, GhCall, GhClient, GhResult, PrDiff, PrRef,
     PullRequest, ReviewEvent, ReviewState,
 };
 
@@ -691,6 +691,23 @@ impl PrMasterEngine {
             _ => return Ok(Vec::new()),
         };
         self.inner.gh.fetch_conversations(&user).await
+    }
+
+    /// Every unresolved review thread + top-level comment for a single
+    /// PR. Unlike [`list_conversations`], this returns the full set
+    /// regardless of whether the current user is involved — a reviewer
+    /// needs to see every open discussion on the PR they're reviewing.
+    /// Drives the Conversations footer on the dedicated review page.
+    pub async fn list_pr_conversations(
+        &self,
+        pr: &PrRef,
+    ) -> GhResult<Vec<ConversationItem>> {
+        // `current_user` is still threaded through so each item carries
+        // the right `current_user_login` for the frontend's
+        // `conversationNeedsUserReply` check; it no longer filters the
+        // result set when the unfiltered fetch is requested.
+        let user = self.inner.gh.whoami().await.unwrap_or_default();
+        self.inner.gh.fetch_pr_review_threads(pr, &user).await
     }
 
     // ─── Actions ─────────────────────────────────────────────────────────

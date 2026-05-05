@@ -522,7 +522,7 @@ impl GhClient {
             let user = user_lower.clone();
             handles.push(tokio::spawn(async move {
                 match this.fetch_conversation_detail(&pr_clone).await {
-                    Ok(detail) => detail.into_items(&pr_clone, &user),
+                    Ok(detail) => detail.into_items(&pr_clone, &user, true),
                     Err(e) => {
                         tracing::warn!(
                             pr = %pr_clone.id(),
@@ -579,6 +579,101 @@ impl GhClient {
                 )
         });
         Ok(out)
+    }
+
+    /// Fetch every unresolved review thread + top-level comment for a
+    /// single PR, **without** the user-involvement filter that
+    /// [`fetch_conversations`] applies. Powers the dedicated PR review
+    /// page where the reviewer needs to see every outstanding thread,
+    /// not just the ones they've already touched.
+    pub async fn fetch_pr_review_threads(
+        &self,
+        pr_ref: &PrRef,
+        current_user: &str,
+    ) -> GhResult<Vec<ConversationItem>> {
+        let detail = self.fetch_conversation_detail_for_ref(pr_ref).await?;
+        // Build a synthetic PR record for `into_items` to stamp on every
+        // produced ConversationItem. We carry over the title + url from
+        // the GraphQL response (so jump-back links land on the right PR
+        // page); state/dates/author aren't read by `into_items` so they
+        // can stay as defaults.
+        let synthetic = synthetic_pull_request(pr_ref, &detail);
+        Ok(detail.into_items(&synthetic, &current_user.to_ascii_lowercase(), false))
+    }
+
+    async fn fetch_conversation_detail_for_ref(
+        &self,
+        pr_ref: &PrRef,
+    ) -> GhResult<ConversationDetailGraphql> {
+        let query = format!(
+            r#"query {{
+  repository(owner: "{owner}", name: "{repo}") {{
+    pullRequest(number: {number}) {{
+      number
+      title
+      url
+      comments(first: 50) {{
+        nodes {{
+          id
+          body
+          createdAt
+          url
+          author {{ login }}
+        }}
+      }}
+      reviewThreads(first: 50) {{
+        nodes {{
+          id
+          isResolved
+          path
+          line
+          originalLine
+          comments(first: 50) {{
+            nodes {{
+              id
+              body
+              createdAt
+              url
+              author {{ login }}
+            }}
+          }}
+        }}
+      }}
+    }}
+  }}
+}}"#,
+            owner = pr_ref.owner,
+            repo = pr_ref.repo,
+            number = pr_ref.number
+        );
+
+        let label = format!(
+            "graphql conversations {}/{}#{}",
+            pr_ref.owner, pr_ref.repo, pr_ref.number
+        );
+        let stdout = self
+            .gh_retry(&label, &["api", "graphql", "-f", &format!("query={query}")])
+            .await?;
+
+        let parsed: Value = serde_json::from_str(&stdout)
+            .map_err(|e| GhError::decode(label.clone(), e))?;
+        if let Some(errors) = parsed.get("errors").and_then(|e| e.as_array()) {
+            if let Some(first) = errors.first() {
+                let msg = first
+                    .get("message")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                return Err(GhError::Graphql(msg.to_string()));
+            }
+        }
+        let value = parsed
+            .get("data")
+            .and_then(|d| d.get("repository"))
+            .and_then(|r| r.get("pullRequest"))
+            .ok_or_else(|| GhError::Unexpected("missing pullRequest in conversation response".into()))?
+            .clone();
+        serde_json::from_value::<ConversationDetailGraphql>(value)
+            .map_err(|e| GhError::decode(label, e))
     }
 
     async fn fetch_conversation_detail(
@@ -1050,6 +1145,14 @@ impl Default for GhClient {
 
 #[derive(Debug, Deserialize)]
 struct ConversationDetailGraphql {
+    /// PR title, surfaced by the GraphQL query. Populated for the
+    /// per-ref fetch; unused (and `None`) for the original by-PullRequest
+    /// fetch where the caller already has the full PR record.
+    #[serde(default)]
+    title: Option<String>,
+    /// PR canonical URL — same provenance as `title`.
+    #[serde(default)]
+    url: Option<String>,
     #[serde(default)]
     comments: Option<ConversationCommentNodes>,
     #[serde(default, rename = "reviewThreads")]
@@ -1111,13 +1214,28 @@ impl ConversationCommentGql {
 
 impl ConversationDetailGraphql {
     /// Mirrors `ConversationPRDetail.conversationItems(for:)` in Swift.
+    ///
     /// `current_user` is expected to be lower-cased already.
-    fn into_items(self, pr: &PullRequest, current_user: &str) -> Vec<ConversationItem> {
+    ///
+    /// `require_user_involvement = true` (the original behaviour, used by
+    /// the global Conversations tab) keeps only review threads where the
+    /// user has participated or was @-mentioned, and only top-level PR
+    /// comments that @-mention the user. Set to `false` (used by the per-
+    /// PR review page) to surface every unresolved review thread + every
+    /// top-level comment so a reviewer can see the entire outstanding
+    /// discussion, not just the slice that names them.
+    fn into_items(
+        self,
+        pr: &PullRequest,
+        current_user: &str,
+        require_user_involvement: bool,
+    ) -> Vec<ConversationItem> {
         let pr_id = pr.id();
         let mut out = Vec::new();
 
-        // Review threads: include if unresolved AND the user participated
-        // or was @-mentioned anywhere in the thread.
+        // Review threads: always drop resolved threads (they're closed
+        // discussions). Drop unresolved threads only when the caller
+        // wants the user-involvement filter.
         if let Some(threads) = self.review_threads {
             for thread in threads.nodes {
                 if thread.is_resolved {
@@ -1129,15 +1247,18 @@ impl ConversationDetailGraphql {
                     .into_iter()
                     .map(|c| c.into_message())
                     .collect();
-                let user_participated = messages.iter().any(|m| {
-                    m.author_login
-                        .as_deref()
-                        .map(|s| s.eq_ignore_ascii_case(current_user))
-                        .unwrap_or(false)
-                });
-                let user_mentioned = messages.iter().any(|m| body_mentions(&m.body, current_user));
-                if !(user_participated || user_mentioned) {
-                    continue;
+                if require_user_involvement {
+                    let user_participated = messages.iter().any(|m| {
+                        m.author_login
+                            .as_deref()
+                            .map(|s| s.eq_ignore_ascii_case(current_user))
+                            .unwrap_or(false)
+                    });
+                    let user_mentioned =
+                        messages.iter().any(|m| body_mentions(&m.body, current_user));
+                    if !(user_participated || user_mentioned) {
+                        continue;
+                    }
                 }
                 let Some(latest) = messages.iter().map(|m| m.created_at).max() else {
                     continue;
@@ -1168,10 +1289,13 @@ impl ConversationDetailGraphql {
             }
         }
 
-        // Top-level comments that @-mention the user.
+        // Top-level PR comments. The user-filter mode keeps only the
+        // ones that @-mention the user (matches the global Conversations
+        // tab); unfiltered mode keeps every top-level comment so the
+        // reviewer sees the full outstanding discussion.
         if let Some(comments) = self.comments {
             for comment in comments.nodes {
-                if !body_mentions(&comment.body, current_user) {
+                if require_user_involvement && !body_mentions(&comment.body, current_user) {
                     continue;
                 }
                 let msg = comment.into_message();
@@ -1194,6 +1318,35 @@ impl ConversationDetailGraphql {
         }
 
         out
+    }
+}
+
+/// Build a minimal `PullRequest` record from a `PrRef` plus the per-ref
+/// GraphQL fetch. Only the fields read by [`ConversationDetailGraphql::into_items`]
+/// (number, title, url, repository) need real values; the rest stay at
+/// type-default placeholders since the conversation surface never reads
+/// them.
+fn synthetic_pull_request(
+    pr_ref: &PrRef,
+    detail: &ConversationDetailGraphql,
+) -> PullRequest {
+    let name_with_owner = format!("{}/{}", pr_ref.owner, pr_ref.repo);
+    PullRequest {
+        number: pr_ref.number,
+        title: detail.title.clone().unwrap_or_default(),
+        url: detail
+            .url
+            .clone()
+            .unwrap_or_else(|| format!("https://github.com/{name_with_owner}/pull/{}", pr_ref.number)),
+        state: "OPEN".to_string(),
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+        is_draft: false,
+        author: None,
+        repository: crate::models::Repository {
+            name: pr_ref.repo.clone(),
+            name_with_owner,
+        },
     }
 }
 
