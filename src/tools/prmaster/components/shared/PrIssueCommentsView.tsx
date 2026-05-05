@@ -18,6 +18,7 @@ import { useQuery } from "@tanstack/react-query";
 import { ExternalLink, Loader2, MessageSquare, RefreshCw } from "lucide-react";
 import { open as openUrl } from "@tauri-apps/plugin-shell";
 import { Button } from "@zen-tools/ui";
+import { MarkdownView } from "@zen-tools/editor";
 import { prIssueCommentsQueryOptions } from "../../lib/queries";
 import type { IssueComment, PrRef } from "../../lib/tauri";
 
@@ -135,8 +136,10 @@ function CommentCard({ comment }: { comment: IssueComment }) {
             </button>
           )}
         </div>
-        <div className="mt-1 whitespace-pre-wrap break-words text-sm">
-          {comment.body || (
+        <div className="mt-1 text-sm">
+          {comment.body ? (
+            <MarkdownView body={comment.body} />
+          ) : (
             <span className="italic text-muted-foreground">(no content)</span>
           )}
         </div>

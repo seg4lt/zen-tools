@@ -37,6 +37,7 @@ import type {
   FileDiffOptions,
   SelectedLineRange,
 } from "@pierre/diffs";
+import { MarkdownView } from "./markdown";
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -679,9 +680,7 @@ function CommentRow({ comment }: { comment: InlineComment }) {
             </span>
           )}
         </div>
-        <div style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
-          {comment.body}
-        </div>
+        <MarkdownView body={comment.body} />
       </div>
     </div>
   );

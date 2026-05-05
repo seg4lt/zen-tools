@@ -21,6 +21,8 @@
     "@codemirror/view": "^6.41.1",
     "@lezer/highlight": "^1.2.3",
     "@pierre/diffs": "^1.1.20",
-    "@replit/codemirror-vim": "^6.3.0"
+    "@replit/codemirror-vim": "^6.3.0",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1"
   }
 }

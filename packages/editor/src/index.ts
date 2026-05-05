@@ -18,6 +18,7 @@ export {
   type DiffViewMode,
   type InlineComment,
 } from "./diff-viewer";
+export { MarkdownView, type MarkdownViewProps } from "./markdown";
 export { makeEditorTheme } from "./cm-theme";
 export {
   type MoveDirection,
