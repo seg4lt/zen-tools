@@ -10,9 +10,18 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ExternalLink, Loader2 } from "lucide-react";
+import {
+  ExternalLink,
+  Loader2,
+  Maximize2,
+  Minimize2,
+  PanelLeftClose,
+  PanelLeftOpen,
+  RefreshCw,
+} from "lucide-react";
 import { open as openUrl } from "@tauri-apps/plugin-shell";
 import { Button } from "@zen-tools/ui";
+import { cn } from "@zen-tools/ui";
 import { DiffViewer, type InlineComment } from "@zen-tools/editor";
 import { useTheme } from "@/hooks/use-theme";
 import {
@@ -47,31 +56,70 @@ export function PrFilesChangedView({ pr }: Props) {
   const [loading, setLoading] = useState(true);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [comments, setComments] = useState<LocalComment[]>([]);
+  // UI: tree visibility + viewport-fill toggle.
+  const [treeOpen, setTreeOpen] = useState(true);
+  const [maximized, setMaximized] = useState(false);
+  // Bumped by the refresh button to force the load effect to re-run.
+  // The local-git path will re-`git fetch` origin and the REST path
+  // re-hits the API, so refresh always gets the freshest state.
+  const [refreshTick, setRefreshTick] = useState(0);
+  // Lit only while the user explicitly clicked Refresh — toggles the
+  // button's spinner so they get clear feedback distinct from the
+  // initial mount-load state.
+  const [refreshing, setRefreshing] = useState(false);
 
-  // Load diff on mount / when the PR changes.
+  // Load diff on mount / when the PR changes / when the user clicks
+  // refresh. The local-git fetch inside the engine is the
+  // authoritative way to pull new commits the user pushed since
+  // opening the panel.
   useEffect(() => {
     let cancelled = false;
-    setLoading(true);
+    // First load shows the full-pane skeleton; subsequent refreshes
+    // just spin the toolbar button so the diff stays on screen.
+    if (refreshTick === 0) setLoading(true);
     setError(null);
     prmasterTauri
       .getPrDiff(ref, baseRef, headRef)
       .then((d) => {
         if (cancelled) return;
         setDiff(d);
-        // Auto-select the first non-binary file.
-        const first = d.files.find((f) => !f.binary && f.patch);
-        setSelectedPath(first?.path ?? d.files[0]?.path ?? null);
+        // Preserve the user's selected file across refreshes when
+        // the path still exists; otherwise auto-pick the first
+        // non-binary file (mirror initial-load behaviour).
+        setSelectedPath((cur) => {
+          if (cur && d.files.some((f) => f.path === cur)) return cur;
+          const first = d.files.find((f) => !f.binary && f.patch);
+          return first?.path ?? d.files[0]?.path ?? null;
+        });
       })
       .catch((err) => {
         if (!cancelled) setError(formatError(err));
       })
       .finally(() => {
-        if (!cancelled) setLoading(false);
+        if (!cancelled) {
+          setLoading(false);
+          setRefreshing(false);
+        }
       });
     return () => {
       cancelled = true;
     };
-  }, [ref.owner, ref.repo, ref.number, baseRef, headRef]);
+  }, [ref.owner, ref.repo, ref.number, baseRef, headRef, refreshTick]);
+
+  const handleRefresh = useCallback(() => {
+    setRefreshing(true);
+    setRefreshTick((n) => n + 1);
+  }, []);
+
+  // Esc exits maximized mode — matches the rest of the app.
+  useEffect(() => {
+    if (!maximized) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMaximized(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [maximized]);
 
   const selected = useMemo<FileDiff | null>(() => {
     if (!diff || !selectedPath) return null;
@@ -168,10 +216,46 @@ export function PrFilesChangedView({ pr }: Props) {
     { add: 0, del: 0 },
   );
 
+  // Layout numbers vary with the maximized toggle:
+  //   - maximized=false: lives inside the detail-panel section, capped
+  //     at 70vh so the rest of the panel can still scroll alongside.
+  //   - maximized=true: fixed-positioned over the viewport with only a
+  //     padding gutter so the diff actually has room to breathe. Esc
+  //     or the Restore button drops back to the inline form.
+  const gridColumns = treeOpen
+    ? "minmax(180px, 260px) minmax(0, 1fr)"
+    : // Collapsed tree → only the diff column. minmax(0, 1fr) prevents
+      // the inner CodeMirror's intrinsic min-content from blowing the
+      // grid past its container.
+      "minmax(0, 1fr)";
+
   return (
-    <div className="grid gap-1.5 rounded-md border bg-card/40 p-1.5">
+    <div
+      className={cn(
+        "grid gap-1.5 rounded-md border bg-card/40 p-1.5",
+        maximized
+          ? "fixed inset-2 z-50 grid-rows-[auto_1fr] shadow-2xl"
+          : "",
+      )}
+    >
+      {/* Toolbar — counts + actions. Sticky to the top of the
+          maximized overlay so it stays reachable while the diff
+          scrolls. */}
       <div className="flex items-center justify-between gap-2 px-1 text-[11px] text-muted-foreground">
         <span className="flex items-center gap-2">
+          <Button
+            size="xs"
+            variant="ghost"
+            onClick={() => setTreeOpen((v) => !v)}
+            title={treeOpen ? "Hide file tree" : "Show file tree"}
+            className="h-5 w-5 p-0"
+          >
+            {treeOpen ? (
+              <PanelLeftClose className="size-3" />
+            ) : (
+              <PanelLeftOpen className="size-3" />
+            )}
+          </Button>
           <span>
             {diff.files.length} file{diff.files.length === 1 ? "" : "s"}
           </span>
@@ -181,31 +265,77 @@ export function PrFilesChangedView({ pr }: Props) {
           <span className="text-destructive">−{totals.del}</span>
           <SourceBadge source={diff.source} />
         </span>
-        <Button
-          size="xs"
-          variant="ghost"
-          onClick={() => void openUrl(`${pr.pr.url}/files`)}
-        >
-          <ExternalLink className="size-3" />
-          GitHub
-        </Button>
+        <span className="flex items-center gap-1">
+          <Button
+            size="xs"
+            variant="ghost"
+            onClick={handleRefresh}
+            disabled={refreshing}
+            title={
+              diff.source === "local_git"
+                ? "Re-run `git fetch` + diff against origin"
+                : "Re-fetch from GitHub REST API"
+            }
+          >
+            <RefreshCw
+              className={cn("size-3", refreshing && "animate-spin")}
+            />
+            {refreshing ? "Refreshing…" : "Refresh"}
+          </Button>
+          <Button
+            size="xs"
+            variant="ghost"
+            onClick={() => setMaximized((v) => !v)}
+            title={
+              maximized
+                ? "Exit full-screen (Esc)"
+                : "Expand to full screen — gives the diff the whole viewport"
+            }
+          >
+            {maximized ? (
+              <>
+                <Minimize2 className="size-3" />
+                Restore
+              </>
+            ) : (
+              <>
+                <Maximize2 className="size-3" />
+                Maximize
+              </>
+            )}
+          </Button>
+          <Button
+            size="xs"
+            variant="ghost"
+            onClick={() => void openUrl(`${pr.pr.url}/files`)}
+            title="Open this PR's Files Changed page on GitHub"
+          >
+            <ExternalLink className="size-3" />
+            GitHub
+          </Button>
+        </span>
       </div>
       <div
         className="grid min-h-0 gap-1.5 rounded-md"
         style={{
-          gridTemplateColumns: "minmax(180px, 260px) minmax(0, 1fr)",
-          height: "min(70vh, 640px)",
+          gridTemplateColumns: gridColumns,
+          // In-panel: cap height so the rest of the detail panel
+          // remains scrollable. Maximized: fill the remaining
+          // overlay row (`auto 1fr` parent grid).
+          height: maximized ? "100%" : "min(70vh, 640px)",
         }}
       >
-        <div className="min-h-0 overflow-hidden rounded border bg-background">
-          <PrFileTree
-            files={diff.files}
-            selectedPath={selectedPath}
-            onSelect={setSelectedPath}
-            commentsByPath={commentsByPath}
-          />
-        </div>
-        <div className="min-h-0 overflow-hidden rounded border bg-background">
+        {treeOpen && (
+          <div className="min-h-0 overflow-hidden rounded border bg-background">
+            <PrFileTree
+              files={diff.files}
+              selectedPath={selectedPath}
+              onSelect={setSelectedPath}
+              commentsByPath={commentsByPath}
+            />
+          </div>
+        )}
+        <div className="min-h-0 min-w-0 overflow-hidden rounded border bg-background">
           {selected ? (
             selected.binary ? (
               <div className="p-3 text-xs italic text-muted-foreground">
