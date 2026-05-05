@@ -1171,6 +1171,38 @@ impl GhClient {
         Ok(())
     }
 
+    /// Reply to an existing inline review comment. Hits the dedicated
+    /// `POST /repos/{owner}/{repo}/pulls/{n}/comments/{comment_id}/replies`
+    /// endpoint, which inherits `path` / `line` / `side` / `commit_id`
+    /// from the parent comment automatically — so the caller doesn't
+    /// have to pass them again (and we can't get them wrong).
+    ///
+    /// `parent_id` is the REST id of the comment being replied to (or
+    /// of any comment in the thread; GitHub attaches the reply to the
+    /// thread regardless).
+    pub async fn reply_review_comment(
+        &self,
+        pr: &PrRef,
+        parent_id: u64,
+        body: &str,
+    ) -> GhResult<()> {
+        let api_path = format!(
+            "repos/{}/{}/pulls/{}/comments/{}/replies",
+            pr.owner, pr.repo, pr.number, parent_id
+        );
+        let label = format!(
+            "reply {}/{}#{} parent={}",
+            pr.owner, pr.repo, pr.number, parent_id
+        );
+        let body_arg = format!("body={body}");
+        self.gh_retry(
+            &label,
+            &["api", &api_path, "-X", "POST", "-f", &body_arg],
+        )
+        .await?;
+        Ok(())
+    }
+
     /// Add `login` to the PR's requested-reviewers list.
     pub async fn add_reviewer(&self, pr: &PrRef, login: &str) -> GhResult<()> {
         let path = format!(

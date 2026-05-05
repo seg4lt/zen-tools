@@ -405,6 +405,17 @@ export const prmasterTauri = {
     line: number;
     side: DiffSide;
   }) => invoke<void>("prmaster_add_review_comment", params),
+  /**
+   * Reply to an existing inline review comment. The reply inherits
+   * path/line/side/commit from the parent on GitHub's side, so the
+   * caller only needs the parent id and the body. `parentId` is the
+   * stringified REST numeric id (matches `ReviewComment.id`).
+   */
+  replyReviewComment: (params: {
+    pr: PrRef;
+    parentId: string;
+    body: string;
+  }) => invoke<void>("prmaster_reply_review_comment", params),
   getCallLog: () => invoke<GhCall[]>("prmaster_get_call_log"),
   getAiRuns: () => invoke<AiRunRecord[]>("prmaster_get_ai_runs"),
   refresh: () => invoke<void>("prmaster_refresh"),

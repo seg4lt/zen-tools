@@ -50,6 +50,12 @@ export interface InlineComment {
   side: "LEFT" | "RIGHT";
   authorLogin: string | null;
   body: string;
+  /** ISO-8601 timestamp the comment was created. Drives the relative
+   *  "3h" / "2d" timestamp next to the author name. */
+  createdAt?: string;
+  /** Parent comment id, when this entry is a reply. The thread root
+   *  is identified by `inReplyToId == null`. */
+  inReplyToId?: string;
 }
 
 /** Which view to render. */
@@ -80,6 +86,14 @@ export interface DiffViewerProps {
   onAddComment?: (input: {
     line: number;
     side: "LEFT" | "RIGHT";
+    body: string;
+  }) => Promise<void> | void;
+  /** Called when the user replies to an existing comment thread.
+   *  `parentId` is the id of the thread root (or any comment in the
+   *  thread — GitHub attaches the reply to the same thread either
+   *  way). Omit to hide the "Add reply" affordance. */
+  onReply?: (input: {
+    parentId: string;
     body: string;
   }) => Promise<void> | void;
 }
@@ -125,6 +139,7 @@ export function DiffViewer({
   comments = [],
   viewMode = "unified",
   onAddComment,
+  onReply,
 }: DiffViewerProps) {
   const [composer, setComposer] = useState<ComposerTarget | null>(null);
 
@@ -196,11 +211,18 @@ export function DiffViewer({
                 }
               : undefined
           }
+          onReply={
+            onReply
+              ? async (parentId, body) => {
+                  await onReply({ parentId, body });
+                }
+              : undefined
+          }
           onCancel={closeComposer}
         />
       );
     },
-    [onAddComment, closeComposer],
+    [onAddComment, onReply, closeComposer],
   );
 
   // Pierre's `FileDiffOptions` — diff style, theme pair (auto-flips
@@ -284,87 +306,242 @@ export function DiffViewer({
   );
 }
 
-// ── Annotation block (existing comments + optional composer) ────
+// ── Annotation block (threaded card matching diffs.com pattern) ─
 
 interface AnnotationBlockProps {
   line: number;
   side: "LEFT" | "RIGHT";
   comments: InlineComment[];
   composerOpen: boolean;
+  /** New top-level comment (when no comments exist yet at this line). */
   onSubmit?: (body: string) => Promise<void> | void;
+  /** Reply to an existing thread. The block resolves the parent id
+   *  internally — the host just needs to know how to POST a reply. */
+  onReply?: (parentId: string, body: string) => Promise<void> | void;
   onCancel: () => void;
 }
 
+/**
+ * Renders one inline thread, matching diffs.com's annotation
+ * pattern: avatar + author + relative time at the top of each
+ * comment, followed by the body, replies stacked below, and an
+ * "Add reply" affordance at the bottom.
+ *
+ * Inline styles instead of className for the same reason as before:
+ * Pierre projects this into a Shadow DOM via `<slot>` and the
+ * `:host` sheet on the inner element sets font/line-height/color
+ * variables that override Tailwind utilities in some browsers.
+ * Inline styles bypass the cascade reliably.
+ */
 function AnnotationBlock({
   line,
   side,
   comments,
   composerOpen,
   onSubmit,
+  onReply,
   onCancel,
 }: AnnotationBlockProps) {
-  // Inline styles, not className: Pierre slots annotations into a Shadow
-  // DOM via `<slot>` projection. Slotted content technically inherits
-  // document CSS, but Pierre's `:host` sheet sets a number of variables
-  // (font, line-height, color-scheme) that win over our utility classes
-  // in some browsers. Inline styles bypass that entirely so the comment
-  // block is always visible regardless of host theme drift.
+  const [replyOpen, setReplyOpen] = useState(false);
+  // Thread root = first comment chronologically. We pass its id to
+  // GitHub's `replies` endpoint; GitHub attaches the reply to the
+  // same thread regardless, so this is robust even if the user
+  // tries to reply to a mid-thread comment.
+  const threadRoot = comments[0];
+
+  const cardStyle: React.CSSProperties = {
+    margin: "8px 0 8px 32px",
+    padding: "12px 14px",
+    background:
+      "color-mix(in oklch, var(--muted, rgba(120,120,130,0.12)) 60%, transparent)",
+    border: "1px solid rgba(120,120,130,0.25)",
+    borderRadius: 8,
+    fontSize: 13,
+    fontFamily: "ui-sans-serif, system-ui, sans-serif",
+    lineHeight: 1.5,
+    color: "inherit",
+  };
+
+  // No existing comments yet: this only renders when the composer is
+  // open for a brand-new thread (otherwise Pierre wouldn't have
+  // requested an annotation slot at this position). The composer is
+  // the only child.
+  if (comments.length === 0) {
+    return (
+      <div style={cardStyle}>
+        {composerOpen && onSubmit && (
+          <Composer
+            line={line}
+            side={side}
+            onSubmit={onSubmit}
+            onCancel={onCancel}
+          />
+        )}
+      </div>
+    );
+  }
+
   return (
-    <div
-      style={{
-        display: "flex",
-        flexDirection: "column",
-        gap: 4,
-        margin: "4px 0 4px 32px",
-        padding: "8px 10px",
-        background: "color-mix(in oklch, var(--muted, rgba(120,120,130,0.12)) 70%, transparent)",
-        borderLeft: "3px solid var(--primary, #3b82f6)",
-        borderRadius: 4,
-        fontSize: 12,
-        fontFamily: "ui-sans-serif, system-ui, sans-serif",
-        lineHeight: 1.5,
-      }}
-    >
-      {comments.map((c) => (
-        <div
-          key={c.id}
-          style={{
-            display: "flex",
-            gap: 6,
-            alignItems: "baseline",
-          }}
-        >
-          <span
-            style={{
-              fontFamily: "ui-monospace, SFMono-Regular, monospace",
-              fontSize: 11,
-              fontWeight: 600,
-              opacity: 0.85,
-              flexShrink: 0,
-            }}
-          >
-            {c.authorLogin ? `@${c.authorLogin}` : "(unknown)"}
-          </span>
-          <span
-            style={{
-              flex: 1,
-              whiteSpace: "pre-wrap",
-            }}
-          >
-            {c.body}
-          </span>
+    <div style={cardStyle}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        {comments.map((c) => (
+          <CommentRow key={c.id} comment={c} />
+        ))}
+      </div>
+
+      {/* Reply affordance + composer. Hidden when the host didn't
+          supply `onReply` (read-only viewer / unauth'd user). */}
+      {onReply && (
+        <div style={{ marginTop: 12 }}>
+          {replyOpen ? (
+            <Composer
+              line={line}
+              side={side}
+              hideHint
+              placeholder="Write a reply…  (⌘+Enter to submit, Esc to cancel)"
+              submitLabel="Reply"
+              onSubmit={async (body) => {
+                if (!threadRoot) return;
+                await onReply(threadRoot.id, body);
+                setReplyOpen(false);
+              }}
+              onCancel={() => setReplyOpen(false)}
+            />
+          ) : (
+            <button
+              type="button"
+              onClick={() => setReplyOpen(true)}
+              style={{
+                background: "transparent",
+                border: 0,
+                color: "var(--primary, #3b82f6)",
+                cursor: "pointer",
+                padding: 0,
+                fontSize: 13,
+                fontWeight: 500,
+                fontFamily: "inherit",
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 6,
+              }}
+              title="Add a reply to this thread"
+            >
+              <span aria-hidden style={{ opacity: 0.7 }}>
+                ↩
+              </span>
+              Add reply…
+            </button>
+          )}
         </div>
-      ))}
+      )}
+
+      {/* Brand-new top-level composer can also stack here when the
+          user hits the gutter "+" on a line that already has a
+          thread. Rare but possible. */}
       {composerOpen && onSubmit && (
-        <Composer
-          line={line}
-          side={side}
-          onSubmit={onSubmit}
-          onCancel={onCancel}
-        />
+        <div style={{ marginTop: 12 }}>
+          <Composer
+            line={line}
+            side={side}
+            onSubmit={onSubmit}
+            onCancel={onCancel}
+          />
+        </div>
       )}
     </div>
   );
+}
+
+/** One comment row inside an annotation card — avatar + author +
+ *  relative timestamp on the header line, body underneath. Matches
+ *  GitHub / diffs.com layout. */
+function CommentRow({ comment }: { comment: InlineComment }) {
+  const avatarUrl = comment.authorLogin
+    ? `https://avatars.githubusercontent.com/${comment.authorLogin}?size=40`
+    : null;
+  const initials = (comment.authorLogin ?? "??")
+    .slice(0, 2)
+    .toUpperCase();
+  return (
+    <div style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
+      {avatarUrl ? (
+        <img
+          src={avatarUrl}
+          alt={comment.authorLogin ?? "avatar"}
+          width={28}
+          height={28}
+          style={{
+            width: 28,
+            height: 28,
+            borderRadius: "50%",
+            flexShrink: 0,
+            background: "rgba(120,120,130,0.2)",
+          }}
+        />
+      ) : (
+        <div
+          aria-hidden
+          style={{
+            width: 28,
+            height: 28,
+            borderRadius: "50%",
+            flexShrink: 0,
+            background: "rgba(120,120,130,0.25)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            fontSize: 11,
+            fontWeight: 600,
+            opacity: 0.8,
+          }}
+        >
+          {initials}
+        </div>
+      )}
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "baseline",
+            gap: 8,
+            marginBottom: 2,
+          }}
+        >
+          <span style={{ fontWeight: 600 }}>
+            {comment.authorLogin ?? "Unknown"}
+          </span>
+          {comment.createdAt && (
+            <span style={{ opacity: 0.6, fontSize: 12 }}>
+              {formatRelativeTime(comment.createdAt)}
+            </span>
+          )}
+        </div>
+        <div style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+          {comment.body}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Compact GitHub-style relative time: "just now", "5m", "3h",
+ *  "2d", "3mo", "1y". Falls back to the locale date for anything
+ *  malformed so we never crash on a bad timestamp. */
+function formatRelativeTime(iso: string): string {
+  const t = new Date(iso).getTime();
+  if (!Number.isFinite(t)) return iso;
+  const seconds = Math.max(0, Math.floor((Date.now() - t) / 1000));
+  if (seconds < 60) return "just now";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h`;
+  const days = Math.floor(hours / 24);
+  if (days < 30) return `${days}d`;
+  const months = Math.floor(days / 30);
+  if (months < 12) return `${months}mo`;
+  const years = Math.floor(days / 365);
+  return `${years}y`;
 }
 
 // ── Composer ─────────────────────────────────────────────────────
@@ -374,9 +551,22 @@ interface ComposerProps {
   side: "LEFT" | "RIGHT";
   onSubmit: (body: string) => Promise<void> | void;
   onCancel: () => void;
+  /** Suppress the "Commenting on line X (SIDE)" hint — used by the
+   *  reply variant where the parent context is already obvious. */
+  hideHint?: boolean;
+  placeholder?: string;
+  submitLabel?: string;
 }
 
-function Composer({ line, side, onSubmit, onCancel }: ComposerProps) {
+function Composer({
+  line,
+  side,
+  onSubmit,
+  onCancel,
+  hideHint = false,
+  placeholder = "Leave a review comment…  (⌘+Enter to submit, Esc to cancel)",
+  submitLabel = "Comment",
+}: ComposerProps) {
   const [body, setBody] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
@@ -408,24 +598,26 @@ function Composer({ line, side, onSubmit, onCancel }: ComposerProps) {
         marginTop: 6,
       }}
     >
-      <div
-        style={{
-          fontSize: 10,
-          fontWeight: 500,
-          letterSpacing: "0.05em",
-          textTransform: "uppercase",
-          opacity: 0.7,
-        }}
-      >
-        {side === "LEFT"
-          ? `Commenting on deleted line ${line} (LEFT)`
-          : `Commenting on line ${line} (RIGHT)`}
-      </div>
+      {!hideHint && (
+        <div
+          style={{
+            fontSize: 10,
+            fontWeight: 500,
+            letterSpacing: "0.05em",
+            textTransform: "uppercase",
+            opacity: 0.7,
+          }}
+        >
+          {side === "LEFT"
+            ? `Commenting on deleted line ${line} (LEFT)`
+            : `Commenting on line ${line} (RIGHT)`}
+        </div>
+      )}
       <textarea
         ref={taRef}
         rows={3}
         value={body}
-        placeholder="Leave a review comment…  (⌘+Enter to submit, Esc to cancel)"
+        placeholder={placeholder}
         onChange={(e) => setBody(e.target.value)}
         onKeyDown={(e) => {
           if (e.key === "Escape") {
@@ -493,7 +685,7 @@ function Composer({ line, side, onSubmit, onCancel }: ComposerProps) {
             opacity: submitting || body.trim().length === 0 ? 0.5 : 1,
           }}
         >
-          {submitting ? "Posting…" : "Comment"}
+          {submitting ? "Posting…" : submitLabel}
         </button>
       </div>
     </div>

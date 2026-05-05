@@ -756,6 +756,21 @@ impl PrMasterEngine {
             .await
     }
 
+    /// Post a reply to an existing inline review comment. The reply
+    /// inherits path/line/side/commit from the parent comment, so the
+    /// caller only needs the parent id and the body. Drives the
+    /// "Add reply" affordance under each thread on the review page.
+    pub async fn reply_review_comment(
+        &self,
+        pr: &PrRef,
+        parent_id: u64,
+        body: &str,
+    ) -> GhResult<()> {
+        let res = self.inner.gh.reply_review_comment(pr, parent_id, body).await;
+        self.invalidate_cache();
+        res
+    }
+
     /// Post an inline review comment.
     pub async fn add_review_comment(
         &self,

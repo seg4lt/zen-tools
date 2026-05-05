@@ -208,7 +208,10 @@ export function PrFilesChangedView({ pr, viewMode }: Props) {
 
   // Seed comments derived from the REST review-comments fetch. Pierre
   // groups multiple comments at the same `(side, line)` cell so a
-  // thread with replies stacks naturally under the line.
+  // thread with replies stacks naturally under the line. We carry
+  // `createdAt` and `inReplyToId` through so the renderer can
+  // (a) show a relative timestamp next to each author and (b) know
+  // which entry is the thread root for the reply target.
   const seedComments = useMemo<LocalComment[]>(
     () =>
       reviewComments.map((c) => ({
@@ -218,6 +221,8 @@ export function PrFilesChangedView({ pr, viewMode }: Props) {
         authorLogin: c.authorLogin ?? null,
         body: c.body,
         filePath: c.path,
+        createdAt: c.createdAt,
+        inReplyToId: c.inReplyToId,
       })),
     [reviewComments],
   );
@@ -292,6 +297,49 @@ export function PrFilesChangedView({ pr, viewMode }: Props) {
       }
     },
     [selected, diff, ref],
+  );
+
+  // Post a reply to an existing inline thread. We resolve the
+  // `parent.line` / `parent.side` / `parent.filePath` from the
+  // current `allComments` set so the optimistic insert lands at the
+  // same line as its parent (Pierre groups by `(side, line)` so the
+  // reply stacks under the thread root automatically).
+  //
+  // GitHub's `replies` endpoint inherits path/line/side/commit from
+  // the parent on the server side, so we don't need to pass them
+  // there — only the parent id and the body.
+  const handleReply = useCallback(
+    async ({ parentId, body }: { parentId: string; body: string }) => {
+      const parent = allComments.find((c) => c.id === parentId);
+      if (!parent) {
+        throw new Error(`Reply target ${parentId} not found in current set`);
+      }
+      const optimisticId = `local-reply-${Date.now()}`;
+      setComments((prev) => [
+        ...prev,
+        {
+          id: optimisticId,
+          line: parent.line,
+          side: parent.side,
+          authorLogin: null,
+          body,
+          filePath: parent.filePath,
+          inReplyToId: parentId,
+          createdAt: new Date().toISOString(),
+        },
+      ]);
+      try {
+        await prmasterTauri.replyReviewComment({
+          pr: ref,
+          parentId,
+          body,
+        });
+      } catch (err) {
+        setComments((prev) => prev.filter((c) => c.id !== optimisticId));
+        throw err;
+      }
+    },
+    [allComments, ref],
   );
 
   if (loading) {
@@ -450,6 +498,7 @@ export function PrFilesChangedView({ pr, viewMode }: Props) {
                 onAddComment={
                   showComments && diff.headSha ? handleAddComment : undefined
                 }
+                onReply={showComments ? handleReply : undefined}
               />
             )
           ) : (

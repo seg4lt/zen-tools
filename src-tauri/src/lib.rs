@@ -546,6 +546,7 @@ pub fn run() {
             commands::prmaster::prmaster_add_self_reviewer,
             commands::prmaster::prmaster_get_pr_diff,
             commands::prmaster::prmaster_add_review_comment,
+            commands::prmaster::prmaster_reply_review_comment,
             commands::prmaster::prmaster_get_call_log,
             commands::prmaster::prmaster_hide_popover,
             commands::prmaster::prmaster_set_badge,

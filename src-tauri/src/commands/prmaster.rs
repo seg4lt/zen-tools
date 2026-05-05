@@ -196,6 +196,30 @@ pub async fn prmaster_add_review_comment(
     Ok(())
 }
 
+/// Post a reply to an existing inline review comment. `parent_id` is
+/// the REST numeric id of any comment in the target thread (we surface
+/// it as a string to the frontend to avoid JS Number precision loss
+/// on very large repos; we parse it back here).
+#[tauri::command]
+pub async fn prmaster_reply_review_comment(
+    state: State<'_, Mutex<AppState>>,
+    pr: PrRef,
+    parent_id: String,
+    body: String,
+) -> AppResult<()> {
+    let parent: u64 = parent_id.parse().map_err(|e| {
+        crate::error::AppError::Other(format!(
+            "parent_id is not a valid u64 ({parent_id:?}): {e}"
+        ))
+    })?;
+    let engine = {
+        let s = state.lock().await;
+        engine(&s)
+    };
+    engine.reply_review_comment(&pr, parent, &body).await?;
+    Ok(())
+}
+
 /// Add `login` as a requested reviewer on `pr`. The frontend supplies the
 /// login (typically the result of [`prmaster_whoami`]).
 #[tauri::command]
