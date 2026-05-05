@@ -570,11 +570,13 @@ pub fn run() {
             commands::prmaster::prmaster_get_ai_runs,
             commands::prmaster::prmaster_list_repos,
             commands::prmaster::prmaster_fetch_repos,
-            // dictation (local Whisper)
+            // dictation (Apple Speech + Whisper)
             dictation::commands::dictation_is_supported,
             dictation::commands::dictation_list_models,
             dictation::commands::dictation_get_state,
             dictation::commands::dictation_select_model,
+            dictation::commands::dictation_set_provider,
+            dictation::commands::dictation_install_apple_locale,
             dictation::commands::dictation_download_model,
             dictation::commands::dictation_open_app_data_dir,
             dictation::commands::dictation_open_logs_dir,

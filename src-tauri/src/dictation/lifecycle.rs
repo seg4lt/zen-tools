@@ -51,10 +51,9 @@ use super::permissions::{
     reset_tcc_entry, MicAuthStatus,
 };
 use super::state::DictationTauriState;
-use super::{ensure_model_present, hud, install_hotkey};
+use super::{ensure_provider_ready, hud, install_hotkey};
 use crate::tray;
 use crate::user_config::UserConfig;
-use zen_dictation::ModelId;
 
 /// Maximum window we poll `AXIsProcessTrusted()` for after firing the
 /// system Accessibility prompt. macOS caches the trust state in the
@@ -77,16 +76,16 @@ pub fn start(app: &AppHandle) {
         }
     };
 
-    // Background base-model precheck — same flow `bootstrap` used to
-    // run inline. Cheap when the file already exists.
+    // Background provider readiness precheck — same flow `bootstrap`
+    // used to run inline. Whisper: prefetches the Base model if it's
+    // missing. Apple Speech: no-op (locale install is user-initiated
+    // per product decision).
     {
-        let app_for_download = app.clone();
-        let state_for_download = dictation_state.clone();
+        let app_for_ready = app.clone();
+        let state_for_ready = dictation_state.clone();
         tauri::async_runtime::spawn(async move {
-            if let Err(e) =
-                ensure_model_present(&app_for_download, &state_for_download, ModelId::Base).await
-            {
-                tracing::warn!(?e, "dictation: base model precheck failed");
+            if let Err(e) = ensure_provider_ready(&app_for_ready, &state_for_ready).await {
+                tracing::warn!(?e, "dictation: provider readiness precheck failed");
             }
         });
     }

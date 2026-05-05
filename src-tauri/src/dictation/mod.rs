@@ -52,11 +52,16 @@ use tauri::{AppHandle, Emitter, Manager};
 use crate::commands::preferences;
 use crate::user_config::UserConfig;
 use state::DictationTauriState;
-use zen_dictation::{HotkeyEvent, ModelId};
+use zen_dictation::{HotkeyEvent, ModelId, Provider};
 
 /// Storage key for the persisted selected-model id (kebab-case wire
-/// form, e.g. `"base"`, `"large-v3-turbo"`).
-const SELECTED_MODEL_KEY: &str = "dictation.selected_model";
+/// form, e.g. `"base"`, `"large-v3-turbo"`). Only consulted when the
+/// active provider is Whisper.
+pub(crate) const SELECTED_MODEL_KEY: &str = "dictation.selected_model";
+
+/// Storage key for the persisted transcription provider id
+/// (`"apple-speech"` | `"whisper"`).
+pub(crate) const PROVIDER_KEY: &str = "dictation.provider";
 
 /// Tool id used in `Preferences::disabled_tools`. Must match the
 /// string the front-end passes to `set_tool_disabled`.
@@ -96,19 +101,59 @@ pub fn logs_dir(app: &AppHandle) -> std::io::Result<std::path::PathBuf> {
 }
 
 /// Bootstrap the dictation subsystem from `setup()`. Hydrates the
-/// persisted selected model and, if the tool is enabled, hands off to
-/// [`lifecycle::start`] to install the hotkey watcher and download
-/// the base model. Safe to call regardless of the disabled state —
-/// the lifecycle module is a no-op when the tool is off.
+/// persisted provider + selected model and, if the tool is enabled,
+/// hands off to [`lifecycle::start`] to install the hotkey watcher
+/// and download the base model. Safe to call regardless of the
+/// disabled state — the lifecycle module is a no-op when the tool is
+/// off.
+///
+/// **Provider default rule:**
+/// * If `dictation.provider` is already persisted → use it verbatim.
+/// * Else if `dictation.selected_model` is persisted (existing
+///   install upgrading from a Whisper-only build) → default to
+///   Whisper, preserving their previous choice without surprise
+///   migration.
+/// * Else (fresh install) on macOS 26+ with the Swift bridge → Apple
+///   Speech.
+/// * Else → Whisper.
 pub fn bootstrap(app: &AppHandle) {
-    // Hydrate the persisted selection (if any).
-    if let Some(id_str) = app
-        .try_state::<UserConfig>()
-        .and_then(|cfg| cfg.get::<String>(SELECTED_MODEL_KEY).ok().flatten())
-    {
-        if let Ok(id) = ModelId::parse(&id_str) {
-            if let Some(state) = app.try_state::<DictationTauriState>() {
-                state.manager.set_selected_model(id);
+    let cfg = app.try_state::<UserConfig>();
+    let state = app.try_state::<DictationTauriState>();
+
+    // Hydrate the persisted Whisper-model selection (if any).
+    let has_persisted_model =
+        if let (Some(cfg), Some(state)) = (cfg.as_ref(), state.as_ref()) {
+            let stored: Option<String> = cfg.get::<String>(SELECTED_MODEL_KEY).ok().flatten();
+            if let Some(id_str) = stored.as_ref() {
+                if let Ok(id) = ModelId::parse(id_str) {
+                    state.manager.set_selected_model(id);
+                }
+            }
+            stored.is_some()
+        } else {
+            false
+        };
+
+    // Resolve the provider per the rule documented above.
+    if let (Some(cfg), Some(state)) = (cfg.as_ref(), state.as_ref()) {
+        let stored_provider: Option<String> = cfg.get::<String>(PROVIDER_KEY).ok().flatten();
+        let provider = if let Some(p) = stored_provider.as_ref().and_then(|s| Provider::parse(s).ok()) {
+            p
+        } else if has_persisted_model {
+            // Existing install upgrading: don't migrate behind their
+            // back. They can opt in via Settings.
+            Provider::Whisper
+        } else if zen_apple_speech::is_supported() {
+            Provider::AppleSpeech
+        } else {
+            Provider::Whisper
+        };
+        state.manager.set_provider(provider);
+
+        // Persist the resolved choice so the rule above only runs once.
+        if stored_provider.is_none() {
+            if let Err(e) = cfg.set(PROVIDER_KEY, &provider.as_wire().to_string()) {
+                tracing::warn!(?e, "dictation: persist initial provider failed");
             }
         }
     }
@@ -219,9 +264,16 @@ fn on_hotkey(app: &AppHandle, state: &DictationTauriState, _event: HotkeyEvent) 
     }
 }
 
-/// Make sure the model file is on disk. If it isn't, download it,
-/// emitting `dictation:download-progress` events to the frontend so
-/// the settings UI can render its progress bar.
+/// Make sure the Whisper model file is on disk. If it isn't,
+/// download it, emitting `dictation:download-progress` events to the
+/// frontend so the settings UI can render its progress bar.
+///
+/// Whisper-specific by design — Apple Speech doesn't have an
+/// app-bundle download (its locale model lives in the system-wide
+/// `AssetInventory` and is installed via the explicit
+/// `dictation_install_apple_locale` command). Callers driven by the
+/// lifecycle precheck call [`ensure_provider_ready`] instead so the
+/// dispatch happens in one place.
 pub async fn ensure_model_present(
     app: &AppHandle,
     state: &DictationTauriState,
@@ -245,4 +297,22 @@ pub async fn ensure_model_present(
     })
     .await?;
     Ok(())
+}
+
+/// Provider-aware readiness check. Whisper: ensure the selected
+/// model file is on disk (kicks off a download if not). Apple
+/// Speech: no-op — locale install is user-initiated via the explicit
+/// "Install language model" button to honour the "never auto-install"
+/// decision.
+pub async fn ensure_provider_ready(
+    app: &AppHandle,
+    state: &DictationTauriState,
+) -> Result<(), zen_dictation::DictationError> {
+    match state.manager.provider() {
+        Provider::Whisper => {
+            let id = state.manager.selected_model().unwrap_or(ModelId::Base);
+            ensure_model_present(app, state, id).await
+        }
+        Provider::AppleSpeech => Ok(()),
+    }
 }

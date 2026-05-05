@@ -9050,6 +9050,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "zen-apple-speech"
+version = "0.1.16"
+dependencies = [
+ "thiserror 1.0.69",
+ "tracing",
+]
+
+[[package]]
 name = "zen-cleaner"
 version = "0.1.16"
 dependencies = [
@@ -9105,6 +9113,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tracing",
+ "zen-apple-speech",
  "zen-whisper",
 ]
 
@@ -9305,6 +9314,7 @@ dependencies = [
  "tracing-subscriber",
  "trash",
  "ts-rs",
+ "zen-apple-speech",
  "zen-cleaner",
  "zen-db",
  "zen-dictation",

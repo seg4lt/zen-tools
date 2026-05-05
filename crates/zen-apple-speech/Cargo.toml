@@ -1,0 +1,30 @@
+[package]
+name = "zen-apple-speech"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Rust wrapper around Apple's macOS 26 SpeechAnalyzer + DictationTranscriber, exposed as a thin Swift bridge."
+build = "build.rs"
+
+# The bridge compiles a small Swift source file into a dynamic library
+# (`libzen_apple_speech_bridge.dylib`) and links the Rust crate against
+# it. `build.rs` autodetects the macOS SDK version via `xcrun`; if the
+# detected SDK is < 26 (or the host isn't macOS at all) the build skips
+# the Swift step and the Rust API returns
+# `AppleSpeechError::Unavailable` from every entry point. That keeps
+# the workspace building on Linux and on macOS hosts that haven't
+# upgraded to Xcode 26 yet — the user just sees Apple Speech as
+# "unavailable" in the UI and Whisper continues to work as before.
+
+[lib]
+name = "zen_apple_speech"
+path = "src/lib.rs"
+
+[dependencies]
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[build-dependencies]
+# We don't compile any Rust C/C++ here; build.rs only shells out to
+# `swiftc`. No extra crates needed.

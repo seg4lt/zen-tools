@@ -16,6 +16,7 @@ members = [
     "crates/zen-ai-cli",
     "crates/zen-prmaster",
     "crates/zen-whisper",
+    "crates/zen-apple-speech",
     "crates/zen-dictation",
     # Native terminal stack (macOS-only at link time, but the manifests
     # build on every platform — the macOS-only deps are gated inside
@@ -109,6 +110,7 @@ zen-github = { path = "crates/zen-github" }
 zen-ai-cli = { path = "crates/zen-ai-cli" }
 zen-prmaster = { path = "crates/zen-prmaster" }
 zen-whisper = { path = "crates/zen-whisper" }
+zen-apple-speech = { path = "crates/zen-apple-speech" }
 zen-dictation = { path = "crates/zen-dictation" }
 
 # zen-prmaster / zen-github
