@@ -367,6 +367,11 @@ function AnnotationBlock({
 }: AnnotationBlockProps) {
   const [replyOpen, setReplyOpen] = useState(false);
   const [resolving, setResolving] = useState(false);
+  // Last error string from a failed top-level submit (the new-comment
+  // composer). The reply composer surfaces its own errors via the
+  // same path — both share `submitError`. Cleared when the user
+  // edits the composer body or cancels it.
+  const [submitError, setSubmitError] = useState<string | null>(null);
   // Thread root = first comment chronologically. We pass its id to
   // GitHub's `replies` endpoint; GitHub attaches the reply to the
   // same thread regardless, so this is robust even if the user
@@ -386,53 +391,75 @@ function AnnotationBlock({
     color: "inherit",
   };
 
-  // No existing comments yet: this only renders when the composer is
-  // open for a brand-new thread (otherwise Pierre wouldn't have
-  // requested an annotation slot at this position). The composer is
-  // the only child.
-  if (comments.length === 0) {
-    return (
-      <div style={cardStyle}>
-        {composerOpen && onSubmit && (
-          <Composer
-            line={line}
-            side={side}
-            onSubmit={onSubmit}
-            onCancel={onCancel}
-          />
-        )}
-      </div>
-    );
-  }
+  // Wrap the parent's submit so we can catch errors and surface them
+  // inline without losing the composer's typed body. Re-throws so the
+  // Composer's own catch path resets `submitting` state (re-enables
+  // the buttons) and keeps `body` populated for retry.
+  const wrappedSubmit = onSubmit
+    ? async (body: string) => {
+        setSubmitError(null);
+        try {
+          await onSubmit(body);
+        } catch (err) {
+          setSubmitError(formatSubmitError(err));
+          throw err;
+        }
+      }
+    : undefined;
+
+  const wrappedReply = onReply
+    ? async (parentId: string, body: string) => {
+        setSubmitError(null);
+        try {
+          await onReply(parentId, body);
+          setReplyOpen(false);
+        } catch (err) {
+          setSubmitError(formatSubmitError(err));
+          throw err;
+        }
+      }
+    : undefined;
+
+  // Stable keys on every conditional child so the Composer's React
+  // identity survives the `comments.length` 0→1→0 transition that
+  // happens during an optimistic insert + rollback. Without keys,
+  // React reconciles by index — when an earlier child appears the
+  // Composer at a later index gets remounted, wiping the user's
+  // typed body mid-submit. With keys, Composer at key="composer"
+  // matches across renders → its `useState body` is preserved →
+  // the user keeps their text on a failed POST and can retry.
+  const hasComments = comments.length > 0;
+  const showActions =
+    hasComments && (!!wrappedReply || (!!onResolve && !!threadRoot?.threadId));
 
   return (
     <div style={cardStyle}>
-      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-        {comments.map((c) => (
-          <CommentRow key={c.id} comment={c} />
-        ))}
-      </div>
+      {hasComments && (
+        <div
+          key="comments-list"
+          style={{ display: "flex", flexDirection: "column", gap: 12 }}
+        >
+          {comments.map((c) => (
+            <CommentRow key={c.id} comment={c} />
+          ))}
+        </div>
+      )}
 
-      {/* Reply + Resolve affordances. Reply is hidden when the host
-          didn't supply `onReply` (read-only viewer / unauth'd user);
-          Resolve is hidden when `onResolve` isn't supplied OR when
-          the thread root has no `threadId` (e.g. an optimistic
-          local-only entry that hasn't been persisted yet). */}
-      {(onReply || (onResolve && threadRoot?.threadId)) && (
-        <div style={{ marginTop: 12 }}>
-          {replyOpen && onReply ? (
+      {showActions && (
+        <div key="actions-row" style={{ marginTop: 12 }}>
+          {replyOpen && wrappedReply && threadRoot ? (
             <Composer
+              key="reply-composer"
               line={line}
               side={side}
               hideHint
               placeholder="Write a reply…  (⌘+Enter to submit, Esc to cancel)"
               submitLabel="Reply"
-              onSubmit={async (body) => {
-                if (!threadRoot) return;
-                await onReply(threadRoot.id, body);
+              onSubmit={(body) => wrappedReply(threadRoot.id, body)}
+              onCancel={() => {
                 setReplyOpen(false);
+                setSubmitError(null);
               }}
-              onCancel={() => setReplyOpen(false)}
             />
           ) : (
             <div
@@ -442,10 +469,13 @@ function AnnotationBlock({
                 gap: 14,
               }}
             >
-              {onReply && (
+              {wrappedReply && (
                 <button
                   type="button"
-                  onClick={() => setReplyOpen(true)}
+                  onClick={() => {
+                    setSubmitError(null);
+                    setReplyOpen(true);
+                  }}
                   style={{
                     background: "transparent",
                     border: 0,
@@ -477,10 +507,6 @@ function AnnotationBlock({
                     try {
                       await onResolve(threadRoot.threadId);
                     } finally {
-                      // Either the host's next refresh removes this
-                      // thread (resolved → filtered out) and the
-                      // component unmounts, or it fails and the user
-                      // can retry. Re-enable the button either way.
                       setResolving(false);
                     }
                   }}
@@ -511,21 +537,82 @@ function AnnotationBlock({
         </div>
       )}
 
-      {/* Brand-new top-level composer can also stack here when the
-          user hits the gutter "+" on a line that already has a
-          thread. Rare but possible. */}
-      {composerOpen && onSubmit && (
-        <div style={{ marginTop: 12 }}>
+      {composerOpen && wrappedSubmit && (
+        <div
+          key="new-composer-wrap"
+          style={{ marginTop: hasComments ? 12 : 0 }}
+        >
           <Composer
+            key="new-composer"
             line={line}
             side={side}
-            onSubmit={onSubmit}
-            onCancel={onCancel}
+            onSubmit={wrappedSubmit}
+            onCancel={() => {
+              setSubmitError(null);
+              onCancel();
+            }}
           />
+        </div>
+      )}
+
+      {submitError && (
+        <div
+          key="submit-error"
+          style={{
+            marginTop: 8,
+            padding: "6px 10px",
+            background: "rgba(239, 68, 68, 0.12)",
+            border: "1px solid rgba(239, 68, 68, 0.4)",
+            borderRadius: 4,
+            color: "rgb(239, 68, 68)",
+            fontSize: 12,
+            display: "flex",
+            alignItems: "flex-start",
+            gap: 8,
+          }}
+          title={submitError}
+        >
+          <span aria-hidden>⚠</span>
+          <span style={{ flex: 1, wordBreak: "break-word" }}>
+            Failed to post: {submitError}
+          </span>
+          <button
+            type="button"
+            onClick={() => setSubmitError(null)}
+            style={{
+              background: "transparent",
+              border: 0,
+              color: "inherit",
+              cursor: "pointer",
+              padding: 0,
+              fontSize: 14,
+              opacity: 0.7,
+            }}
+            aria-label="Dismiss error"
+            title="Dismiss"
+          >
+            ×
+          </button>
         </div>
       )}
     </div>
   );
+}
+
+/** Best-effort message extraction from whatever the host's onSubmit
+ *  callback rejected with. Tauri commands surface as Error subclasses
+ *  with a `message`; engine errors come through as strings. */
+function formatSubmitError(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  if (typeof err === "string") return err;
+  if (err && typeof err === "object" && "message" in err) {
+    return String((err as { message: unknown }).message);
+  }
+  try {
+    return JSON.stringify(err);
+  } catch {
+    return String(err);
+  }
 }
 
 /** One comment row inside an annotation card — avatar + author +

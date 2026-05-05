@@ -1043,6 +1043,14 @@ impl GhClient {
         let commit_arg = format!("commit_id={commit_sha}");
         let path_arg = format!("path={path}");
         let body_arg = format!("body={body}");
+        // `gh api -f` sends every value as a JSON string. GitHub's
+        // POST /pulls/{n}/comments schema strict-types `line` as
+        // **integer** — sending `"42"` gets rejected with a 422
+        // and a confusing error like "Invalid request" with no
+        // mention of the field. Use `-F` (typed) for line so it
+        // serialises as a JSON number. The other fields stay
+        // string-typed (path, commit_id, side, body all match
+        // GitHub's schema as strings).
         self.gh_retry(
             &label,
             &[
@@ -1054,7 +1062,7 @@ impl GhClient {
                 &commit_arg,
                 "-f",
                 &path_arg,
-                "-f",
+                "-F",
                 &line_arg,
                 "-f",
                 &side_arg,
