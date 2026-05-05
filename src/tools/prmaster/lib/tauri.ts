@@ -79,6 +79,43 @@ export interface ChangedFile {
   path: string;
 }
 
+/** Status of a file in a PR diff. Mirrors `zen_github::FileStatus`. */
+export type FileStatus =
+  | "added"
+  | "modified"
+  | "removed"
+  | "renamed"
+  | "changed"
+  | "copied"
+  | "unchanged";
+
+/** Per-file diff entry. Mirrors `zen_github::FileDiff`. */
+export interface FileDiff {
+  path: string;
+  /** Pre-rename path, if applicable. */
+  oldPath?: string;
+  status: FileStatus;
+  additions: number;
+  deletions: number;
+  /** Unified-diff body for this file, including the `diff --git` header. */
+  patch: string;
+  binary: boolean;
+}
+
+/** Where the diff payload came from. */
+export type DiffSource = "local_git" | "gh_rest";
+
+/** Bundle returned by `prmaster_get_pr_diff`. */
+export interface PrDiff {
+  files: FileDiff[];
+  /** Head commit SHA — needed when posting an inline review comment. */
+  headSha: string | null;
+  source: DiffSource;
+}
+
+/** Side a comment is attached to (LEFT = old, RIGHT = new). */
+export type DiffSide = "LEFT" | "RIGHT";
+
 export interface PrDetail {
   headRefName: string | null;
   baseRefName: string | null;
@@ -317,6 +354,16 @@ export const prmasterTauri = {
     invoke<void>("prmaster_request_changes", { pr, body }),
   addSelfReviewer: (pr: PrRef, login: string) =>
     invoke<void>("prmaster_add_self_reviewer", { pr, login }),
+  getPrDiff: (pr: PrRef, baseRef: string | null, headRef: string | null) =>
+    invoke<PrDiff>("prmaster_get_pr_diff", { pr, baseRef, headRef }),
+  addReviewComment: (params: {
+    pr: PrRef;
+    body: string;
+    commitSha: string;
+    path: string;
+    line: number;
+    side: DiffSide;
+  }) => invoke<void>("prmaster_add_review_comment", params),
   getCallLog: () => invoke<GhCall[]>("prmaster_get_call_log"),
   getAiRuns: () => invoke<AiRunRecord[]>("prmaster_get_ai_runs"),
   refresh: () => invoke<void>("prmaster_refresh"),

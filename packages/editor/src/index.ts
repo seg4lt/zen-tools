@@ -12,6 +12,11 @@ export {
   type CodeEditorHandle,
   type CodeEditorProps,
 } from "./code-editor";
+export {
+  DiffViewer,
+  type DiffViewerProps,
+  type InlineComment,
+} from "./diff-viewer";
 export { makeEditorTheme } from "./cm-theme";
 export {
   type MoveDirection,
