@@ -135,7 +135,7 @@ index 9d48f376d..6709cab08 100644
 +    // compiler sees the functions as "used" and emits them.
 +    if (@hasDecl(apprt.runtime, "CAPI")) {
 +        const CAPI = apprt.runtime.CAPI;
-+        inline for (comptime std.meta.declarations(CAPI)) |decl| {
++        for (std.meta.declarations(CAPI)) |decl| {
 +            _ = @field(CAPI, decl.name);
 +        }
 +    }
