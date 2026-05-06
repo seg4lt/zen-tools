@@ -97,6 +97,34 @@ index c573c3910..bdeda6a2b 100644
              .allocator = b.allocator,
              .target = &step.rootModuleTarget(),
              .verbose = false,
+diff --git a/src/main_c.zig b/src/main_c.zig
+index 9d48f376d..96ba2da0b 100644
+--- a/src/main_c.zig
++++ b/src/main_c.zig
+@@ -38,7 +38,21 @@ comptime {
+     _ = @import("config.zig").CApi;
+
+     // Any apprt-specific C API, mainly libghostty for apprt.embedded.
+-    if (@hasDecl(apprt.runtime, "CAPI")) _ = apprt.runtime.CAPI;
++    // PATCH (tauri-terminal): In Zig 0.15.x static-library builds, lazy
++    // analysis means `export fn` inside a struct are NOT code-generated
++    // unless explicitly forced. `_ = CAPI` only forces type analysis of
++    // the struct, not code-generation of each function. `@export` is the
++    // correct primitive: it both forces code-gen AND registers the symbol
++    // in the object file's export table, so the linker can resolve the
++    // ghostty_surface_* / ghostty_app_* calls from tauri-plugin-ghostty.
++    if (@hasDecl(apprt.runtime, "CAPI")) {
++        const CAPI = apprt.runtime.CAPI;
++        for (std.meta.declarations(CAPI)) |decl| {
++            const field = @field(CAPI, decl.name);
++            if (@typeInfo(@TypeOf(field)) == .@"fn") {
++                @export(field, .{ .name = decl.name });
++            }
++        }
++    }
+
+     // Our benchmark API. We probably want to gate this on a build
+     // config in the future but for now we always just export it.
 diff --git a/src/build/MetallibStep.zig b/src/build/MetallibStep.zig
 index fcf3055f8..a221b9137 100644
 --- a/src/build/MetallibStep.zig

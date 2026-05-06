@@ -191,8 +191,25 @@ jobs:
           LIB=$(find target -name libghostty.a -type f 2>/dev/null | head -1)
           if [ -n "$LIB" ]; then
             echo "Library: $LIB ($(ls -lh "$LIB" | awk '{print $5}'))"
-            nm -gU "$LIB" 2>/dev/null | grep " T .*_ghostty_" | head -120
-            echo "Total ghostty_ symbols: $(nm -gU "$LIB" 2>/dev/null | grep -c "_ghostty_" || echo 0)"
+            echo "--- External (nm -gU) ghostty_ symbols ---"
+            nm -gU "$LIB" 2>/dev/null | grep "_ghostty_" | head -120
+            echo "Total external ghostty_ symbols: $(nm -gU "$LIB" 2>/dev/null | grep -c "_ghostty_" || echo 0)"
+            echo "--- ALL (nm -a) ghostty_ symbols including internal ---"
+            nm -a "$LIB" 2>/dev/null | grep "_ghostty_" | grep -v "^$LIB:" | head -120
+            echo "Total all ghostty_ symbols: $(nm -a "$LIB" 2>/dev/null | grep -c "_ghostty_" || echo 0)"
+            echo "--- Extracting libghostty_zcu.o for direct inspection ---"
+            TMPDIR_ZCU=$(mktemp -d)
+            (cd "$TMPDIR_ZCU" && ar -x "$OLDPWD/$LIB" libghostty_zcu.o 2>/dev/null)
+            if [ -f "$TMPDIR_ZCU/libghostty_zcu.o" ]; then
+              echo "libghostty_zcu.o size: $(ls -lh "$TMPDIR_ZCU/libghostty_zcu.o" | awk '{print $5}')"
+              echo "ghostty_ symbols in libghostty_zcu.o (all):"
+              nm -a "$TMPDIR_ZCU/libghostty_zcu.o" 2>/dev/null | grep "_ghostty_" | head -60
+              echo "External ghostty_ in zcu.o: $(nm -gU "$TMPDIR_ZCU/libghostty_zcu.o" 2>/dev/null | grep -c "_ghostty_" || echo 0)"
+            else
+              echo "WARNING: libghostty_zcu.o not extractable (may use extended name)"
+              ar -t "$LIB" 2>/dev/null | grep zcu
+            fi
+            rm -rf "$TMPDIR_ZCU"
             echo "Objects in archive:"
             ar t "$LIB" 2>/dev/null | head -20
           else
