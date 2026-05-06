@@ -670,22 +670,27 @@ index fcf3055f8..a221b9137 100644
      run_lib.addFileArg(output_ir);
      run_lib.step.dependOn(&run_ir.step);
 diff --git a/src/main_c.zig b/src/main_c.zig
-index 9d48f376d..0260ca9ad 100644
+index 9d48f376d..326044879 100644
 --- a/src/main_c.zig
 +++ b/src/main_c.zig
-@@ -38,7 +38,15 @@ comptime {
+@@ -38,7 +38,20 @@ comptime {
      _ = @import("config.zig").CApi;
  
      // Any apprt-specific C API, mainly libghostty for apprt.embedded.
 -    if (@hasDecl(apprt.runtime, "CAPI")) _ = apprt.runtime.CAPI;
-+    // PATCH (tauri-terminal): Reference CAPI so Zig's lazy analysis
-+    // code-generates all `pub export fn` declarations inside the struct.
-+    // The `pub export fn` keyword already exports each symbol; we must NOT
-+    // call @export again (that causes "exported symbol collision" in
-+    // Zig 0.15.x). A bare `_ = struct` reference is sufficient to force
-+    // analysis, exactly like the config.zig pattern above.
++    // PATCH (tauri-terminal): In Zig 0.15.x lazy-analysis builds, `pub
++    // export fn` inside a struct is only code-generated when the specific
++    // function is referenced — referencing the struct type alone (`_ =
++    // CAPI`) is not enough. The fix: iterate all pub declarations and touch
++    // each one with `_ = @field(...)`. That forces Zig to analyse the
++    // function and emit the symbol via its `pub export fn` declaration.
++    // We must NOT also call @export — doing so on an already-exported
++    // function causes "exported symbol collision" in Zig 0.15.x.
 +    if (@hasDecl(apprt.runtime, "CAPI")) {
-+        _ = apprt.runtime.CAPI;
++        const CAPI = apprt.runtime.CAPI;
++        for (std.meta.declarations(CAPI)) |decl| {
++            _ = @field(CAPI, decl.name);
++        }
 +    }
  
      // Our benchmark API. We probably want to gate this on a build
