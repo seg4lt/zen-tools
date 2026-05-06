@@ -142,24 +142,31 @@ fn build_libghostty(ghostty_root: &std::path::Path) -> PathBuf {
 
     // SDK + DEVELOPER_DIR resolution. Three branches:
     //
-    //   1. `GHOSTTY_SDK_PATH` set explicitly → use it (and set
-    //      DEVELOPER_DIR to CLT so `xcrun --show-sdk-path` doesn't
-    //      surprise us with a different default).
-    //   2. CLT MacOSX15.sdk exists locally → use it (this is the
-    //      normal local-dev path on macOS-26+ hosts where Zig 0.15.2
-    //      can't parse the host SDK's libSystem.tbd).
+    //   1. `GHOSTTY_SDK_PATH` set explicitly → use it.
+    //   2. Search the CLT SDKs directory for a Zig-compatible SDK
+    //      (MacOSX14.x or MacOSX15.x). Zig 0.15.2 cannot parse the
+    //      libSystem.tbd format shipped in macOS 26 SDKs, which causes the
+    //      ghostty library to be compiled without its full C/ObjC-backed
+    //      surface API (~4 symbols instead of ~97). We search for the
+    //      highest MacOSX15.x available, falling back to MacOSX14.x.
+    //      We search rather than hardcode because the generic `MacOSX15.sdk`
+    //      symlink may not exist on all CLT installations — only the
+    //      versioned `MacOSX15.4.sdk` may be present.
     //   3. Neither → leave DEVELOPER_DIR / SDKROOT inherited from the
-    //      environment (typical CI runner with full Xcode 14/15.x —
-    //      Zig + the metal compiler resolve via `xcrun` against the
-    //      runner's pre-selected Xcode without overrides).
+    //      environment (old runners with Xcode 14/15.x already selected,
+    //      where Zig can parse the SDK natively).
     let env_sdk = std::env::var("GHOSTTY_SDK_PATH").ok();
-    let clt_sdk = "/Library/Developer/CommandLineTools/SDKs/MacOSX15.sdk";
-    let clt_sdk_exists = std::path::Path::new(clt_sdk).exists();
     let (sdk_path, override_developer_dir) = if let Some(ref s) = env_sdk {
         (Some(s.clone()), true)
-    } else if clt_sdk_exists {
-        (Some(clt_sdk.to_string()), true)
+    } else if let Some(s) = find_zig_compatible_sdk() {
+        println!("cargo:warning=ghostty-sys: using Zig-compatible SDK at {s}");
+        (Some(s), true)
     } else {
+        println!(
+            "cargo:warning=ghostty-sys: no MacOSX14/15 SDK found in CLT — \
+             Zig will pick the default SDK (may produce an incomplete \
+             libghostty.a on macOS 26+ hosts)"
+        );
         (None, false)
     };
 
@@ -199,6 +206,45 @@ fn build_libghostty(ghostty_root: &std::path::Path) -> PathBuf {
     }
 
     install_dir.join("lib")
+}
+
+/// Find the best Zig-compatible macOS SDK in the CLT SDKs directory.
+///
+/// Zig 0.15.2 cannot parse the libSystem.tbd format shipped with macOS 26
+/// SDKs. Building ghostty against that SDK produces a truncated archive with
+/// only ~4 `ghostty_*` symbols instead of ~97. We therefore look for any
+/// MacOSX15.x or MacOSX14.x SDK and return the highest-versioned one found.
+///
+/// We search by directory listing rather than probing the hardcoded
+/// `MacOSX15.sdk` path because the generic symlink may not exist on all
+/// CLT installations — only the versioned variant (e.g. `MacOSX15.4.sdk`)
+/// may be present.
+fn find_zig_compatible_sdk() -> Option<String> {
+    let clt_dir = std::path::Path::new("/Library/Developer/CommandLineTools/SDKs");
+    if !clt_dir.exists() {
+        return None;
+    }
+    let mut candidates: Vec<String> = std::fs::read_dir(clt_dir)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            // Accept MacOSX14.x.sdk and MacOSX15.x.sdk.
+            // Skip the generic "MacOSX.sdk" symlink (points to the newest SDK,
+            // which on macOS 26 hosts is the incompatible 26.x SDK).
+            if (name.starts_with("MacOSX14") || name.starts_with("MacOSX15"))
+                && name.ends_with(".sdk")
+                && e.path().exists()
+            {
+                Some(e.path().to_string_lossy().into_owned())
+            } else {
+                None
+            }
+        })
+        .collect();
+    // Descending sort: "MacOSX15.4.sdk" > "MacOSX15.sdk" > "MacOSX14.5.sdk"
+    candidates.sort_by(|a, b| b.cmp(a));
+    candidates.into_iter().next()
 }
 
 /// Apply every `<workspace>/patches/ghostty/*.patch` to the

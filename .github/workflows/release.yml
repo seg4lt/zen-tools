@@ -169,32 +169,29 @@ jobs:
         shell: bash
         run: env -u CI pnpm tauri build ${{ matrix.tauri-args }}
 
-      # Diagnostic dump for the v0.1.20+ macos-26 → libghostty FFI
-      # symbol mismatch. Local libghostty.a (built on a macos-26 host
-      # with CLT MacOSX15.sdk) exports `_ghostty_surface_free_text`
-      # etc.; the same code path on macos-26 runner produces a .a
-      # missing those symbols. We need to know:
-      #   * which CLT SDKs the runner has
-      #   * which Xcode is selected
-      #   * whether the produced libghostty.a actually exports the
-      #     surface FFI we link against
-      # Runs always() so it fires whether the build step passed
-      # or failed. Remove this step once the diagnosis is in hand.
+      # Diagnostic dump: always runs so we can confirm the SDK fix is
+      # working and catch regressions.  The key checks are:
+      #   * CLT SDKs available on this runner
+      #   * which SDK ghostty-sys/build.rs selected (cargo:warning lines)
+      #   * ghostty_* export count in the produced libghostty.a (want ~97)
       - name: Diagnose libghostty.a + CLT SDKs + zig build log
         if: always() && runner.os == 'macOS'
         shell: bash
         run: |
           set +e
+          echo "=== CLT SDKs available on this runner ==="
+          ls /Library/Developer/CommandLineTools/SDKs/ 2>/dev/null || echo "(CLT SDKs dir not found)"
+          echo
+          echo "=== Xcode / xcode-select ==="
+          sw_vers
+          xcode-select -p
+          xcrun --show-sdk-path 2>/dev/null
+          echo
           echo "=== count of _ghostty_* exports in libghostty.a ==="
           LIB=$(find target -name libghostty.a -type f 2>/dev/null | head -1)
           if [ -n "$LIB" ]; then nm -gU "$LIB" 2>&1 | grep -c "_ghostty_"; fi
           echo
           echo "=== ghostty-sys build script stderr (where zig logs land) ==="
-          # Cargo stashes per-package build script stdout/stderr at
-          # target/.../build/<crate>-<hash>/{stdout,stderr}. The stderr
-          # file contains everything zig-build printed during its install
-          # step — including any silent module skips that would explain
-          # the truncated archive.
           for f in $(find target -path "*/build/ghostty-sys-*/stderr" -type f 2>/dev/null); do
             echo "--- $f ---"
             cat "$f"
@@ -205,7 +202,7 @@ jobs:
             head -200 "$f"
             echo
           done
-          echo "=== ghostty-sys output file (cargo:* directives) ==="
+          echo "=== ghostty-sys output file (cargo:* directives + warnings) ==="
           for f in $(find target -path "*/build/ghostty-sys-*/output" -type f 2>/dev/null); do
             echo "--- $f ---"
             cat "$f"
