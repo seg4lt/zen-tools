@@ -98,39 +98,20 @@ fn main() {
 
     println!("cargo:rustc-cfg=screen_vocab_compiled");
 
-    // Copy the dylib to two places — same scheme as zen-apple-speech:
-    //
-    //   1. Next to the eventual binary (resolved from OUT_DIR^3) so
-    //      `cargo run` finds it via `@executable_path/.`.
-    //   2. `<workspace>/target/<profile>/` (always, no triple) so
-    //      `tauri.conf.json`'s static `../target/release/lib*.dylib`
-    //      resolves regardless of `--target` flag. CI builds with
-    //      `--target aarch64-apple-darwin` and the bundler errors
-    //      with `Library not found` if this stable copy is missing.
-    if let Ok(profile) = env::var("PROFILE") {
+    // Copy next-to-binary so `cargo run` resolves the dylib via
+    // `@executable_path/.`. The static workspace-relative copy that
+    // Tauri's `bundle.macOS.frameworks` resolution needs is owned by
+    // `src-tauri/build.rs`, not us — see the matching note in
+    // `crates/zen-apple-speech/build.rs` for why (Cargo build-script
+    // ordering races).
+    if env::var("PROFILE").is_ok() {
         let dylib_filename = "libzen_screen_vocab_bridge.dylib";
-
-        // (1) Next to binary.
         if let Some(exec_dir) = next_to_binary_dir(&out_dir) {
             let dest = exec_dir.join(dylib_filename);
             if let Err(e) = std::fs::copy(&dylib_path, &dest) {
                 eprintln!(
                     "zen-screen-vocab: warning — failed to copy dylib to {}: {e}",
                     dest.display()
-                );
-            }
-        }
-
-        // (2) Stable workspace path for tauri.conf.json.
-        if let Some(workspace_target) = locate_workspace_target_dir(&out_dir) {
-            let stable_dest = workspace_target.join(&profile).join(dylib_filename);
-            if let Some(parent) = stable_dest.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            if let Err(e) = std::fs::copy(&dylib_path, &stable_dest) {
-                eprintln!(
-                    "zen-screen-vocab: warning — failed to copy dylib to stable workspace path {}: {e}",
-                    stable_dest.display()
                 );
             }
         }
@@ -163,18 +144,3 @@ fn next_to_binary_dir(out_dir: &PathBuf) -> Option<PathBuf> {
         .map(|p| p.to_path_buf())
 }
 
-/// Walks up from OUT_DIR until it finds an ancestor named `target/`.
-/// Handles both no-`--target` (4 levels) and `--target <triple>`
-/// (5 levels) layouts. Returns the workspace's `target/` so callers
-/// can land at the stable bundle path the Tauri config expects.
-fn locate_workspace_target_dir(out_dir: &PathBuf) -> Option<PathBuf> {
-    let mut p = out_dir.as_path();
-    for _ in 0..8 {
-        let parent = p.parent()?;
-        if parent.file_name().map(|n| n == "target").unwrap_or(false) {
-            return Some(parent.to_path_buf());
-        }
-        p = parent;
-    }
-    None
-}
