@@ -98,10 +98,10 @@ index c573c3910..bdeda6a2b 100644
              .target = &step.rootModuleTarget(),
              .verbose = false,
 diff --git a/src/main_c.zig b/src/main_c.zig
-index 9d48f376d..96ba2da0b 100644
+index 9d48f376d..d4dd3f2c1 100644
 --- a/src/main_c.zig
 +++ b/src/main_c.zig
-@@ -38,7 +38,21 @@ comptime {
+@@ -38,7 +38,22 @@ comptime {
      _ = @import("config.zig").CApi;
 
      // Any apprt-specific C API, mainly libghostty for apprt.embedded.
