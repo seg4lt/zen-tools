@@ -178,7 +178,7 @@ fn build_libghostty(ghostty_root: &std::path::Path) -> PathBuf {
     cmd.current_dir(ghostty_root)
         .args([
             "build", "install",
-            "-Dapp-runtime=embedded",
+            "-Dapp-runtime=none",
             "-Drenderer=metal",
             "-Dfont-backend=coretext",
             "-Demit-xcframework=false",
@@ -249,20 +249,28 @@ fn find_zig_compatible_sdk() -> Option<String> {
         .filter_map(|e| e.ok())
         .filter_map(|e| {
             let name = e.file_name().to_string_lossy().into_owned();
-            // Accept MacOSX14.x.sdk and MacOSX15.x.sdk.
-            // Skip the generic "MacOSX.sdk" symlink (points to the newest SDK,
-            // which on macOS 26 hosts is the incompatible 26.x SDK).
-            if (name.starts_with("MacOSX14") || name.starts_with("MacOSX15"))
-                && name.ends_with(".sdk")
-                && e.path().exists()
-            {
+            // Accept only VERSIONED MacOSX14.N.sdk and MacOSX15.N.sdk forms.
+            // Reject the generic "MacOSX15.sdk" symlink: on macOS 26 runners it
+            // sorts HIGHER than "MacOSX15.4.sdk" (ASCII 's' > '4') but may
+            // point at the incompatible macOS 26.x SDK.  Requiring a digit after
+            // the "MacOSX1x." prefix (e.g. ".4") ensures we only accept fully-
+            // versioned names like "MacOSX15.4.sdk".
+            let prefix_len = if name.starts_with("MacOSX14") || name.starts_with("MacOSX15") {
+                8 // len("MacOSX14") == len("MacOSX15")
+            } else {
+                return None;
+            };
+            let rest = &name[prefix_len..]; // e.g. ".4.sdk" or ".sdk"
+            let is_versioned = rest.starts_with('.')
+                && rest[1..].starts_with(|c: char| c.is_ascii_digit());
+            if is_versioned && name.ends_with(".sdk") && e.path().exists() {
                 Some(e.path().to_string_lossy().into_owned())
             } else {
                 None
             }
         })
         .collect();
-    // Descending sort: "MacOSX15.4.sdk" > "MacOSX15.sdk" > "MacOSX14.5.sdk"
+    // Descending sort: "MacOSX15.4.sdk" > "MacOSX14.5.sdk"
     candidates.sort_by(|a, b| b.cmp(a));
     candidates.into_iter().next()
 }
