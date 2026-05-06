@@ -670,10 +670,10 @@ index fcf3055f8..a221b9137 100644
      run_lib.addFileArg(output_ir);
      run_lib.step.dependOn(&run_ir.step);
 diff --git a/src/main_c.zig b/src/main_c.zig
-index 9d48f376d..2d856cbf1 100644
+index 9d48f376d..f1cd16c6e 100644
 --- a/src/main_c.zig
 +++ b/src/main_c.zig
-@@ -38,7 +38,26 @@ comptime {
+@@ -38,7 +38,29 @@ comptime {
      _ = @import("config.zig").CApi;
  
      // Any apprt-specific C API, mainly libghostty for apprt.embedded.
@@ -693,7 +693,10 @@ index 9d48f376d..2d856cbf1 100644
 +        for (std.meta.declarations(CAPI)) |decl| {
 +            const field = @field(CAPI, decl.name);
 +            switch (@typeInfo(@TypeOf(field))) {
-+                .@"fn" => @export(field, .{ .name = decl.name }),
++                // Zig 0.15.x: @export requires a *pointer* to the function,
++                // not the bare function value. Use &@field(...) to get a
++                // comptime-known function pointer.
++                .@"fn" => @export(&@field(CAPI, decl.name), .{ .name = decl.name }),
 +                else => {},
 +            }
 +        }
