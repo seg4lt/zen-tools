@@ -1,47 +1,37 @@
-From 36f913b6a5b17b1f9e7ea322990c431384e1895c Mon Sep 17 00:00:00 2001
-From: seg4lt <12027886+seg4lt@users.noreply.github.com>
-Date: Sun, 3 May 2026 15:30:01 -0500
-Subject: [PATCH] build: macOS-26 + CLT-15-SDK + Rust-FFI consumer patches
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-Three patches required to build libghostty.a as a static lib that a
-Rust FFI consumer can link against on a macOS 26 host using Zig
-0.15.2 + the Command Line Tools' MacOSX15.sdk:
-
-* build.zig: drop the `isDarwin()` guard around `libghostty_static.install("libghostty.a")` so the static lib actually installs on macOS (upstream comment on the same lines acknowledges the guard is wrong). Also gate the macOS xcframework / app init on emit_xcframework or emit_macos_app being requested — otherwise `GhosttyXCFramework.init` runs unconditionally and tries to build the iOS lib, which needs an iOS SDK we don't have under DEVELOPER_DIR=CLT.
-
-* pkg/apple-sdk/build.zig: honor GHOSTTY_SDK_PATH env var as an override that bypasses `std.zig.LibCInstallation.findNative` (which calls xcrun and ignores SDKROOT for `--sdk macosx`). Necessary because Zig 0.15.2 cannot parse the libSystem.tbd format in MacOSX26.x.sdk; we point it at MacOSX15.sdk explicitly.
-
-* src/build/MetallibStep.zig: use `xcrun` from PATH instead of the hard-coded `/usr/bin/xcrun`. With our wrapper xcrun shim early in PATH (handles the `--sdk macosx --show-sdk-path` override AND forwards the `metal` tool to Xcode's Metal toolchain when DEVELOPER_DIR=CLT), the Metal shader compile step works.
-
-These three patches are NOT specific to libghostty's terminal logic — they're purely build/SDK plumbing for unusual host environments. PageList.zig and page.zig modifications already in the worktree are deliberately not included; those are separate work.
----
- build.zig                  | 28 ++++++++++++++++++++--------
- pkg/apple-sdk/build.zig    | 20 ++++++++++++++++----
- src/build/MetallibStep.zig |  4 ++--
- 3 files changed, 38 insertions(+), 14 deletions(-)
-
 diff --git a/build.zig b/build.zig
-index f9d861b19..754546f9a 100644
+index f9d861b19..893058f8d 100644
 --- a/build.zig
 +++ b/build.zig
-@@ -136,18 +136,28 @@ pub fn build(b: *std.Build) !void {
-         // As such, these build steps are lacking. For example, the Darwin
-         // build only produces an xcframework.
+@@ -121,6 +121,15 @@ pub fn build(b: *std.Build) !void {
+     // Helpgen
+     if (config.emit_helpgen) deps.help_strings.install();
  
++    // PATCH (tauri-terminal): Install the static lib and header regardless of
++    // app_runtime so that both app-runtime=none and app-runtime=embedded
++    // produce an installed libghostty.a. With app-runtime=embedded, main_c.zig
++    // includes the embedded CAPI comptime block which exports all
++    // ghostty_surface_* symbols. With app-runtime=none it only exports the 4
++    // basic ghostty_init/info/translate/string_free functions.
++    libghostty_shared.installHeader(); // Only need one header
++    libghostty_static.install("libghostty.a");
++
+     // Runtime "none" is libghostty, anything else is an executable.
+     if (config.app_runtime != .none) {
+         if (config.emit_exe) {
+@@ -129,25 +138,20 @@ pub fn build(b: *std.Build) !void {
+             if (i18n) |v| v.install();
+         }
+     } else {
+-        // Libghostty
+-        //
+-        // Note: libghostty is not stable for general purpose use. It is used
+-        // heavily by Ghostty on macOS but it isn't built to be reusable yet.
+-        // As such, these build steps are lacking. For example, the Darwin
+-        // build only produces an xcframework.
+-
 -        // We shouldn't have this guard but we don't currently
 -        // build on macOS this way ironically so we need to fix that.
-+        // PATCH (tauri-terminal): the upstream isDarwin guard skipped
-+        // libghostty.{a,so} install on macOS because upstream only ships
-+        // an xcframework there. We embed via FFI, so we always need the
-+        // static lib. Drop the guard so install() runs unconditionally.
-+        // Upstream comment: "We shouldn't have this guard but we don't
-+        // currently build on macOS this way ironically so we need to fix
-+        // that." -- this patch is the fix for our use.
-+        libghostty_shared.installHeader(); // Only need one header
-+        libghostty_static.install("libghostty.a");
++        // Libghostty (non-macOS: also install the shared lib)
          if (!config.target.result.os.tag.isDarwin()) {
 -            libghostty_shared.installHeader(); // Only need one header
              libghostty_shared.install("libghostty.so");
@@ -61,7 +51,7 @@ index f9d861b19..754546f9a 100644
          // Ghostty xcframework
          const xcframework = try buildpkg.GhosttyXCFramework.init(
              b,
-@@ -200,9 +210,11 @@ pub fn build(b: *std.Build) !void {
+@@ -200,9 +204,11 @@ pub fn build(b: *std.Build) !void {
  
          assert(config.app_runtime == .none);
  
@@ -129,6 +119,3 @@ index fcf3055f8..a221b9137 100644
      const output_lib = run_lib.addOutputFileArg(b.fmt("{s}.metallib", .{opts.name}));
      run_lib.addFileArg(output_ir);
      run_lib.step.dependOn(&run_ir.step);
--- 
-2.50.1 (Apple Git-155)
-

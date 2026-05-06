@@ -178,7 +178,7 @@ fn build_libghostty(ghostty_root: &std::path::Path) -> PathBuf {
     cmd.current_dir(ghostty_root)
         .args([
             "build", "install",
-            "-Dapp-runtime=none",
+            "-Dapp-runtime=embedded",
             "-Drenderer=metal",
             "-Dfont-backend=coretext",
             "-Demit-xcframework=false",
