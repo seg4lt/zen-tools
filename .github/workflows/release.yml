@@ -187,9 +187,17 @@ jobs:
           xcode-select -p
           xcrun --show-sdk-path 2>/dev/null
           echo
-          echo "=== count of _ghostty_* exports in libghostty.a ==="
+          echo "=== _ghostty_* exports in libghostty.a (names + count) ==="
           LIB=$(find target -name libghostty.a -type f 2>/dev/null | head -1)
-          if [ -n "$LIB" ]; then nm -gU "$LIB" 2>&1 | grep -c "_ghostty_"; fi
+          if [ -n "$LIB" ]; then
+            echo "Library: $LIB ($(ls -lh "$LIB" | awk '{print $5}'))"
+            nm -gU "$LIB" 2>/dev/null | grep " T .*_ghostty_" | head -120
+            echo "Total ghostty_ symbols: $(nm -gU "$LIB" 2>/dev/null | grep -c "_ghostty_" || echo 0)"
+            echo "Objects in archive:"
+            ar t "$LIB" 2>/dev/null | head -20
+          else
+            echo "libghostty.a not found"
+          fi
           echo
           echo "=== ghostty-sys build script stderr (where zig logs land) ==="
           for f in $(find target -path "*/build/ghostty-sys-*/stderr" -type f 2>/dev/null); do

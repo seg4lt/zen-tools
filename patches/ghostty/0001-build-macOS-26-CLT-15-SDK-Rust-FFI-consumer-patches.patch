@@ -119,3 +119,26 @@ index fcf3055f8..a221b9137 100644
      const output_lib = run_lib.addOutputFileArg(b.fmt("{s}.metallib", .{opts.name}));
      run_lib.addFileArg(output_ir);
      run_lib.step.dependOn(&run_ir.step);
+diff --git a/src/main_c.zig b/src/main_c.zig
+index 9d48f376d..6709cab08 100644
+--- a/src/main_c.zig
++++ b/src/main_c.zig
+@@ -38,7 +38,17 @@ comptime {
+     _ = @import("config.zig").CApi;
+ 
+     // Any apprt-specific C API, mainly libghostty for apprt.embedded.
+-    if (@hasDecl(apprt.runtime, "CAPI")) _ = apprt.runtime.CAPI;
++    // PATCH (tauri-terminal): `_ = CAPI;` alone only forces TYPE analysis,
++    // which is insufficient to emit export fn declarations from a Zig
++    // static-library build (unlike a shared lib where all exports are
++    // always included). We must reference each member by value so the
++    // compiler sees the functions as "used" and emits them.
++    if (@hasDecl(apprt.runtime, "CAPI")) {
++        const CAPI = apprt.runtime.CAPI;
++        inline for (comptime std.meta.declarations(CAPI)) |decl| {
++            _ = @field(CAPI, decl.name);
++        }
++    }
+ 
+     // Our benchmark API. We probably want to gate this on a build
+     // config in the future but for now we always just export it.
