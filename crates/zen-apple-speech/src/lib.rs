@@ -75,6 +75,8 @@ mod ffi {
             handle: *mut std::ffi::c_void,
             samples: *const f32,
             n_samples: usize,
+            vocab: *const *const c_char,
+            n_vocab: usize,
             out_text: *mut *mut c_char,
         ) -> i32;
         pub fn apple_speech_string_free(p: *mut c_char);
@@ -213,30 +215,69 @@ impl AppleSpeechContext {
 
     /// Transcribe a 16 kHz f32 mono PCM buffer. Returns the
     /// recognised text, trimmed of leading/trailing whitespace.
+    ///
+    /// Convenience wrapper around [`Self::transcribe_with_vocab`]
+    /// that passes an empty vocabulary list — preserves the v1 call
+    /// site shape while letting newer code opt into contextual hints.
     pub fn transcribe(&mut self, samples: &[f32]) -> Result<String, AppleSpeechError> {
+        self.transcribe_with_vocab(samples, &[])
+    }
+
+    /// Transcribe with an optional list of contextual vocabulary
+    /// strings. Each entry biases the recogniser toward terms it
+    /// might otherwise miss (proper nouns, code identifiers OCR'd
+    /// off the user's screen).
+    ///
+    /// Pass an empty slice for "no vocabulary hint" — equivalent to
+    /// calling [`Self::transcribe`].
+    pub fn transcribe_with_vocab(
+        &mut self,
+        samples: &[f32],
+        vocab: &[String],
+    ) -> Result<String, AppleSpeechError> {
         if samples.is_empty() {
             return Err(AppleSpeechError::Other("no samples".into()));
         }
 
         #[cfg(all(target_os = "macos", apple_speech_compiled))]
         {
+            // Stage the vocab as `Vec<CString>` so the C strings stay
+            // alive across the call, plus a parallel `Vec<*const
+            // c_char>` of pointers we hand to Swift.
+            let cstrings: Vec<CString> = vocab
+                .iter()
+                .filter_map(|s| CString::new(s.as_str()).ok())
+                .collect();
+            let ptrs: Vec<*const c_char> = cstrings.iter().map(|c| c.as_ptr()).collect();
+
             let mut out_ptr: *mut c_char = std::ptr::null_mut();
             // SAFETY: `samples.as_ptr()` and `samples.len()` describe
             // the buffer the Swift side memcpys before returning. The
-            // handle was created in `new()` and is non-null.
+            // handle was created in `new()` and is non-null. `ptrs`
+            // (and the `cstrings` it borrows from) outlive the call
+            // — we don't drop either until after Swift returns.
             let rc = unsafe {
                 ffi::apple_speech_transcribe(
                     self.handle,
                     samples.as_ptr(),
                     samples.len(),
+                    if ptrs.is_empty() {
+                        std::ptr::null()
+                    } else {
+                        ptrs.as_ptr()
+                    },
+                    ptrs.len(),
                     &mut out_ptr,
                 )
             };
             let text = take_string(out_ptr);
+            // Drop in explicit order so `cstrings` outlives `ptrs`,
+            // both outlive the FFI call. The compiler would do this
+            // anyway via reverse-declaration drop order — explicit
+            // drops just defend against future code shuffling.
+            drop(ptrs);
+            drop(cstrings);
             if rc < 0 {
-                // Map the "locale not installed" string back to the
-                // typed variant so the caller can surface a specific
-                // banner instead of a generic error.
                 if text.contains("not installed") {
                     return Err(AppleSpeechError::LocaleMissing(self.locale.clone()));
                 }
@@ -246,7 +287,7 @@ impl AppleSpeechContext {
         }
         #[cfg(not(all(target_os = "macos", apple_speech_compiled)))]
         {
-            let _ = samples;
+            let _ = (samples, vocab);
             Err(AppleSpeechError::Unavailable)
         }
     }

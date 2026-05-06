@@ -70,11 +70,35 @@ impl WhisperContext {
     /// language / sampling configurability can be added later as
     /// optional builder-style methods.
     pub fn transcribe(&mut self, samples: &[f32]) -> Result<String, WhisperError> {
-        use std::ffi::CStr;
+        self.transcribe_with_prompt(samples, "")
+    }
+
+    /// Transcribe with an optional `initial_prompt` string. whisper.cpp
+    /// uses the prompt as decoder context — a sentence fragment
+    /// containing words you'd like the recogniser to be more likely to
+    /// surface. Capped at ~224 tokens internally; longer prompts are
+    /// silently truncated by whisper.cpp.
+    ///
+    /// Pass an empty string for "no prompt" — equivalent to calling
+    /// [`Self::transcribe`].
+    pub fn transcribe_with_prompt(
+        &mut self,
+        samples: &[f32],
+        initial_prompt: &str,
+    ) -> Result<String, WhisperError> {
+        use std::ffi::{CStr, CString};
 
         if samples.is_empty() {
             return Err(WhisperError::NoSpeech);
         }
+
+        // Stash the prompt as a CString so the pointer we hand to
+        // whisper.cpp lives across the inference call.
+        let prompt_cstr: Option<CString> = if initial_prompt.is_empty() {
+            None
+        } else {
+            CString::new(initial_prompt).ok()
+        };
 
         // Greedy sampling is fast and adequate for short dictation
         // utterances; beam search (~2x slower) only marginally improves
@@ -100,6 +124,9 @@ impl WhisperContext {
             .map(|n| n.get() as i32)
             .unwrap_or(4)
             .min(8);
+        if let Some(ref p) = prompt_cstr {
+            params.initial_prompt = p.as_ptr();
+        }
 
         let rc = unsafe {
             crate::sys::whisper_full(
@@ -109,6 +136,8 @@ impl WhisperContext {
                 samples.len() as i32,
             )
         };
+        // Keep `prompt_cstr` alive at least until whisper_full returns.
+        drop(prompt_cstr);
         if rc != 0 {
             return Err(WhisperError::Inference(rc));
         }
@@ -156,6 +185,15 @@ impl WhisperContext {
 
     /// Stub — non-mac builds report `NotSupported`.
     pub fn transcribe(&mut self, _samples: &[f32]) -> Result<String, WhisperError> {
+        Err(WhisperError::NotSupported)
+    }
+
+    /// Stub — non-mac builds report `NotSupported`.
+    pub fn transcribe_with_prompt(
+        &mut self,
+        _samples: &[f32],
+        _initial_prompt: &str,
+    ) -> Result<String, WhisperError> {
         Err(WhisperError::NotSupported)
     }
 }

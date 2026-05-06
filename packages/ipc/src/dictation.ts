@@ -15,6 +15,8 @@ import type {
   DictationStateDto,
   DownloadProgressDto,
   PathsDto,
+  ScreenVocabStateDto,
+  ScreenVocabPreviewDto,
 } from "@zen-tools/types/generated";
 
 /**
@@ -80,6 +82,23 @@ export const dictationIpc = {
   setProvider: (provider: DictationProvider): Promise<void> =>
     invoke<void>("dictation_set_provider", { provider }),
   /**
+   * Toggle the screen-vocabulary feature. When enabled, the recogniser
+   * is biased using OCR'd text from the current screen. The first
+   * `true` flip will cause the macOS Screen Recording TCC prompt to
+   * appear the next time dictation starts a recording.
+   */
+  setScreenVocab: (enabled: boolean): Promise<void> =>
+    invoke<void>("dictation_set_screen_vocab", { enabled }),
+  /**
+   * One-shot diagnostic: capture the current screen, run OCR + the
+   * vocab extraction heuristic, and return the resulting term list
+   * (or an error string from the Swift bridge — usually a TCC
+   * permission complaint). Lets the user see exactly what's being
+   * fed into the recogniser without recording.
+   */
+  testScreenVocab: (): Promise<ScreenVocabPreviewDto> =>
+    invoke<ScreenVocabPreviewDto>("dictation_test_screen_vocab"),
+  /**
    * Install an Apple Speech locale model into the system-wide
    * `AssetInventory`. Pass `undefined` to install the default
    * (`en-US`) locale. Reuses the `dictation:download-progress` event
@@ -106,10 +125,19 @@ export const dictationIpc = {
     invoke<void>("dictation_reset_microphone"),
   /**
    * Deep-link into a System Settings privacy pane.
-   * `pane` is one of `"Privacy_Accessibility"`, `"Privacy_Microphone"`.
+   * `pane` is one of `"Privacy_Accessibility"`, `"Privacy_Microphone"`,
+   * `"Privacy_ScreenCapture"`.
    */
-  openPrivacyPane: (pane: "Privacy_Accessibility" | "Privacy_Microphone"): Promise<void> =>
-    invoke<void>("dictation_open_privacy_pane", { pane }),
+  openPrivacyPane: (
+    pane: "Privacy_Accessibility" | "Privacy_Microphone" | "Privacy_ScreenCapture",
+  ): Promise<void> => invoke<void>("dictation_open_privacy_pane", { pane }),
+  /**
+   * Wipe the Screen Recording TCC entry and trigger a fresh OCR
+   * snapshot so the system prompt re-fires. Mirror of
+   * `resetAccessibility` for the screen-vocab feature.
+   */
+  resetScreenRecording: (): Promise<void> =>
+    invoke<void>("dictation_reset_screen_recording"),
 };
 
 /**
@@ -138,4 +166,12 @@ export function listenDictationStatus(
   return listen<DictationStatus>("dictation:status", (e) => cb(e.payload));
 }
 
-export type { AppleSpeechStateDto, ModelDto, DictationStateDto, DownloadProgressDto, PathsDto };
+export type {
+  AppleSpeechStateDto,
+  ModelDto,
+  DictationStateDto,
+  DownloadProgressDto,
+  PathsDto,
+  ScreenVocabStateDto,
+  ScreenVocabPreviewDto,
+};

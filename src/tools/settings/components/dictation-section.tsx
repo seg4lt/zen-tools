@@ -112,6 +112,27 @@ export function DictationSection() {
     onSuccess: () => qc.invalidateQueries({ queryKey: DICTATION_STATE_KEY }),
   });
 
+  const setScreenVocab = useMutation({
+    mutationFn: (enabled: boolean) => dictationIpc.setScreenVocab(enabled),
+    onSuccess: () => qc.invalidateQueries({ queryKey: DICTATION_STATE_KEY }),
+  });
+
+  const testScreenVocab = useMutation({
+    mutationFn: () => dictationIpc.testScreenVocab(),
+  });
+
+  const resetScreenRecording = useMutation({
+    mutationFn: () => dictationIpc.resetScreenRecording(),
+    // After reset we automatically re-run the test — the snapshot
+    // call inside the reset command triggers the system prompt; once
+    // the user clicks Allow, this re-test surfaces the fresh result
+    // without them having to find the button again.
+    onSuccess: () => testScreenVocab.mutate(),
+  });
+  const openScreenRecordingPane = useMutation({
+    mutationFn: () => dictationIpc.openPrivacyPane("Privacy_ScreenCapture"),
+  });
+
   const toggleEnabled = useMutation({
     mutationFn: async (next: boolean) => {
       // `setDisabled` is the user-facing word; the IPC argument is
@@ -322,6 +343,161 @@ export function DictationSection() {
               </div>
             </div>
           )}
+
+          {/* ── Screen vocabulary toggle ────────────────────────────────
+              Available on macOS only (where ScreenCaptureKit + Vision
+              ship). Off by default — flipping it on triggers the
+              Screen Recording TCC prompt the next time dictation
+              records. Applies to both Apple Speech and Whisper: the
+              backend formats the OCR'd vocabulary appropriately for
+              each provider's contextual-hint API.                       */}
+          {state.screen_vocab.supported && (
+            <div className="flex items-start justify-between rounded-md border border-border/60 bg-card/40 px-3 py-2">
+              <div className="flex flex-1 flex-col gap-0.5 pr-3">
+                <span className="text-sm font-medium">Improve accuracy from screen</span>
+                <span className="text-[10px] text-muted-foreground">
+                  Read words visible on your screen (proper nouns, code
+                  identifiers, jargon) right before each transcription
+                  to bias the recogniser. Nothing is recorded or sent
+                  off-device — only the extracted vocabulary list
+                  reaches the speech model, and only for that one
+                  utterance.
+                </span>
+                <span className="text-[10px] text-muted-foreground">
+                  First-time use will prompt for Screen Recording
+                  permission in System Settings.
+                </span>
+              </div>
+              <div className="flex flex-col items-end gap-2">
+                <Switch
+                  checked={state.screen_vocab.enabled}
+                  disabled={setScreenVocab.isPending}
+                  onCheckedChange={(v) => setScreenVocab.mutate(v)}
+                  aria-label="Improve accuracy from screen"
+                />
+                {state.screen_vocab.enabled && (
+                  <button
+                    type="button"
+                    onClick={() => testScreenVocab.mutate()}
+                    disabled={testScreenVocab.isPending}
+                    className="rounded-md border border-border/60 bg-card px-2 py-0.5 text-[10px] hover:bg-accent disabled:opacity-50"
+                  >
+                    {testScreenVocab.isPending ? "Reading…" : "Show what I see"}
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Test-snapshot result panel — only shown after the user
+              clicks "Show what I see". Renders the OCR output so the
+              user can verify the pipeline end-to-end without having
+              to dictate something first.
+
+              Three render branches:
+                1. TCC denial → self-heal banner (Reset & re-prompt /
+                   Open Settings / Re-check), mirrors the existing
+                   accessibility / microphone banner pattern.
+                2. Empty terms, no error → amber "heuristic kept
+                   nothing" hint.
+                3. Non-empty terms → comma-separated preview list.       */}
+          {state.screen_vocab.supported && testScreenVocab.data && (() => {
+            const data = testScreenVocab.data;
+            // Heuristic detection of the TCC denial: ScreenCaptureKit
+            // surfaces its decline message as `screen vocab snapshot
+            // failed: The user declined TCCs for application, window,
+            // display capture`. We look for "TCC" or "declined" so
+            // the banner triggers regardless of minor phrasing
+            // changes across macOS versions.
+            const isTccError =
+              !!data.error &&
+              (data.error.includes("TCC") ||
+                data.error.toLowerCase().includes("declined") ||
+                data.error.toLowerCase().includes("not authorized"));
+
+            if (isTccError) {
+              return (
+                <div className="rounded-md border border-amber-500/40 bg-amber-500/5 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
+                  <div className="font-medium">
+                    Screen Recording permission denied
+                  </div>
+                  <p className="mt-1 text-[11px] text-amber-700/80 dark:text-amber-300/80">
+                    macOS blocked the OCR snapshot because Zen Tools
+                    isn't allowed to record the screen. If you turned
+                    this off on purpose, leave it; the screen-vocab
+                    feature stays disabled. If the toggle in System
+                    Settings is unresponsive (typical after an
+                    unsigned-build reinstall), use{" "}
+                    <em>Reset &amp; re-prompt</em>.
+                  </p>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      onClick={() => resetScreenRecording.mutate()}
+                      disabled={resetScreenRecording.isPending}
+                      className="rounded-md border border-border/60 bg-card px-2.5 py-1 text-[11px] hover:bg-accent disabled:opacity-50"
+                    >
+                      {resetScreenRecording.isPending
+                        ? "Resetting…"
+                        : "Reset & re-prompt"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => openScreenRecordingPane.mutate()}
+                      className="rounded-md border border-border/60 bg-card px-2.5 py-1 text-[11px] hover:bg-accent"
+                    >
+                      Open System Settings
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => testScreenVocab.mutate()}
+                      disabled={testScreenVocab.isPending}
+                      className="rounded-md border border-border/60 bg-card px-2.5 py-1 text-[11px] hover:bg-accent disabled:opacity-50"
+                    >
+                      {testScreenVocab.isPending ? "Re-checking…" : "Re-check"}
+                    </button>
+                  </div>
+                  {resetScreenRecording.error instanceof Error && (
+                    <p className="mt-1 text-[10px] text-red-500">
+                      {resetScreenRecording.error.message}
+                    </p>
+                  )}
+                  <p className="mt-2 text-[10px] text-amber-700/60 dark:text-amber-300/60">
+                    Raw error: {data.error}
+                  </p>
+                </div>
+              );
+            }
+
+            return (
+              <div className="rounded-md border border-border/60 bg-card/40 px-3 py-2 text-xs">
+                <div className="flex items-center justify-between">
+                  <span className="font-medium">Screen vocab preview</span>
+                  <span className="text-[10px] text-muted-foreground">
+                    {data.terms.length} terms
+                  </span>
+                </div>
+                {data.error && (
+                  <p className="mt-1 text-[11px] text-red-500">
+                    Error: {data.error}
+                  </p>
+                )}
+                {data.terms.length === 0 && !data.error && (
+                  <p className="mt-1 text-[11px] text-amber-600 dark:text-amber-400">
+                    OCR ran but the heuristic kept nothing. Either the
+                    screen has no jargon visible right now, or only
+                    common UI chrome / English words were on screen.
+                  </p>
+                )}
+                {data.terms.length > 0 && (
+                  <p className="mt-1 break-words font-mono text-[11px] text-muted-foreground">
+                    {data.terms.slice(0, 60).join(", ")}
+                    {data.terms.length > 60 && " …"}
+                  </p>
+                )}
+              </div>
+            );
+          })()}
 
           {/* ── Apple Speech: locale install banner ─────────────────── */}
           {state.provider === "apple-speech" && state.apple_speech.supported && (

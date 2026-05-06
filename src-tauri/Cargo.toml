@@ -42,6 +42,12 @@ zen-dictation = { workspace = true }
 # going through `zen-dictation`. Always-on; the crate's own build.rs
 # emits stubs on non-macOS and on Xcode < 26.
 zen-apple-speech = { workspace = true }
+# Screen-vocabulary OCR bridge (ScreenCaptureKit + Vision). Direct
+# dep so commands.rs can call `is_supported()` for the Settings DTO
+# without bouncing through zen-dictation. Same compiles-everywhere
+# story as zen-apple-speech: the crate's build.rs emits stubs when
+# the bridge can't be built.
+zen-screen-vocab = { workspace = true }
 # Note: zen-ai-cli + zen-shell are reached transitively through
 # zen-prmaster / zen-github (no direct `use` in src-tauri/src/).
 

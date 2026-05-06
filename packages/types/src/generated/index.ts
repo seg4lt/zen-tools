@@ -18,3 +18,5 @@ export type { DictationStateDto } from "./DictationStateDto";
 export type { DownloadProgressDto } from "./DownloadProgressDto";
 export type { PathsDto } from "./PathsDto";
 export type { AppleSpeechStateDto } from "./AppleSpeechStateDto";
+export type { ScreenVocabStateDto } from "./ScreenVocabStateDto";
+export type { ScreenVocabPreviewDto } from "./ScreenVocabPreviewDto";

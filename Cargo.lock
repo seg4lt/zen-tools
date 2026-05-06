@@ -9114,6 +9114,7 @@ dependencies = [
  "tokio",
  "tracing",
  "zen-apple-speech",
+ "zen-screen-vocab",
  "zen-whisper",
 ]
 
@@ -9255,6 +9256,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "zen-screen-vocab"
+version = "0.1.16"
+dependencies = [
+ "once_cell",
+ "parking_lot",
+ "thiserror 1.0.69",
+ "tracing",
+]
+
+[[package]]
 name = "zen-shell"
 version = "0.1.16"
 dependencies = [
@@ -9326,6 +9337,7 @@ dependencies = [
  "zen-prmaster",
  "zen-process-monitor",
  "zen-runs",
+ "zen-screen-vocab",
  "zen-storage",
  "zen-types",
 ]

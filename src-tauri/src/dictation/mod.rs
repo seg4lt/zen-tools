@@ -63,6 +63,11 @@ pub(crate) const SELECTED_MODEL_KEY: &str = "dictation.selected_model";
 /// (`"apple-speech"` | `"whisper"`).
 pub(crate) const PROVIDER_KEY: &str = "dictation.provider";
 
+/// Storage key for the persisted screen-vocabulary toggle
+/// (`true` / `false`). Defaults to `false` for privacy — see
+/// `dictation_set_screen_vocab` for the full UX rationale.
+pub(crate) const SCREEN_VOCAB_KEY: &str = "dictation.screen_vocab_enabled";
+
 /// Tool id used in `Preferences::disabled_tools`. Must match the
 /// string the front-end passes to `set_tool_disabled`.
 pub const TOOL_ID: &str = "dictation";
@@ -156,6 +161,15 @@ pub fn bootstrap(app: &AppHandle) {
                 tracing::warn!(?e, "dictation: persist initial provider failed");
             }
         }
+
+        // Hydrate the screen-vocab toggle. Default is OFF — the user
+        // has to opt in; the first opt-in is what triggers the
+        // Screen Recording TCC prompt.
+        let stored_screen_vocab: Option<bool> =
+            cfg.get::<bool>(SCREEN_VOCAB_KEY).ok().flatten();
+        state
+            .manager
+            .set_screen_vocab_enabled(stored_screen_vocab.unwrap_or(false));
     }
 
     if !is_app_enabled(app) {

@@ -12,6 +12,10 @@
   - NSAppleEventsUsageDescription is the prompt shown when our
     CGEventTap and synthetic ⌘V calls request Accessibility access.
     Apple shows it under "TCC" in the dialog title.
+  - NSScreenCaptureUsageDescription / NSScreenCaptureDescription is
+    the prompt shown when ScreenCaptureKit first asks for Screen
+    Recording access (used by the screen-vocabulary feature to OCR
+    the current screen and bias the dictation recogniser).
 -->
 <plist version="1.0">
 <dict>
@@ -19,5 +23,7 @@
   <string>Zen Tools needs microphone access to transcribe your voice with the local Whisper model. Audio never leaves your device.</string>
   <key>NSAppleEventsUsageDescription</key>
   <string>Zen Tools uses Accessibility APIs to detect the right ⌘ long-press hotkey and to type the transcribed text into the active app.</string>
+  <key>NSScreenCaptureUsageDescription</key>
+  <string>Zen Tools optionally reads words visible on your screen to improve dictation accuracy on names, code identifiers, and jargon. Off by default; you can disable it any time in Settings.</string>
 </dict>
 </plist>

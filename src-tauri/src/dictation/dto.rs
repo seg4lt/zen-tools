@@ -44,6 +44,12 @@ pub struct DictationStateDto {
     /// decide whether to render the provider radio at all (when
     /// `apple_speech.supported == false` we hide it entirely).
     pub apple_speech: AppleSpeechStateDto,
+    /// Screen-vocabulary feature: bias the recogniser using OCR'd
+    /// text from the current screen. The frontend renders this as a
+    /// single Switch under the provider picker; defaults to OFF for
+    /// privacy. Same `supported` / `enabled` shape as the Apple
+    /// Speech panel so the UI gating mirrors the existing pattern.
+    pub screen_vocab: ScreenVocabStateDto,
 }
 
 /// Apple Speech availability snapshot.
@@ -62,6 +68,20 @@ pub struct AppleSpeechStateDto {
     /// model for `locale` is installed. Frontend shows the
     /// "Install language model" button when `false`.
     pub installed: bool,
+}
+
+/// Screen-vocabulary availability + opt-in state.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ScreenVocabStateDto {
+    /// `true` when the Swift bridge for screen capture + OCR was
+    /// compiled into this build AND the running OS supports it.
+    /// Frontend hides the toggle entirely when `false`.
+    pub supported: bool,
+    /// User-facing on/off. Defaults to `false`; flipping it to `true`
+    /// triggers the macOS Screen Recording TCC prompt the next time
+    /// dictation starts a recording.
+    pub enabled: bool,
 }
 
 /// Progress tick fired during a model download.

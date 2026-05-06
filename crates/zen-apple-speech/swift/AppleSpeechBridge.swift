@@ -231,6 +231,13 @@ public func apple_speech_destroy(_ handle: OpaquePointer?) {
 
 /// Synchronous transcribe of a 16 kHz f32 mono PCM buffer.
 ///
+/// `vocab` / `n_vocab` carry an optional list of contextual
+/// vocabulary strings (e.g. proper nouns, code identifiers OCR'd off
+/// the user's screen). Pass `nil` / `0` for "no vocabulary hint" —
+/// the original v1 behaviour. When present, each entry is fed into
+/// the analyzer's `AnalysisContext.contextualStrings` so the
+/// transcriber biases recognition toward those terms.
+///
 /// On success: returns 0, `out_text` set to a malloc'd UTF-8 string
 /// (caller frees with `apple_speech_string_free`).
 /// On error: returns -1, `out_text` set to a malloc'd UTF-8 error
@@ -240,6 +247,8 @@ public func apple_speech_transcribe(
     _ handle: OpaquePointer?,
     _ samples: UnsafePointer<Float>?,
     _ n_samples: UInt,
+    _ vocab: UnsafePointer<UnsafePointer<CChar>?>?,
+    _ n_vocab: UInt,
     _ out_text: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>?
 ) -> Int32 {
     guard #available(macOS 26.0, *) else {
@@ -254,6 +263,19 @@ public func apple_speech_transcribe(
     let raw = UnsafeMutableRawPointer(handle)
     let box = Unmanaged<TranscriberBox>.fromOpaque(raw).takeUnretainedValue()
     let locale = box.locale
+
+    // Materialise the vocab list into a Swift `[String]` while the
+    // C pointers are still valid. We don't keep the raw pointers
+    // past this scope.
+    var contextualStrings: [String] = []
+    if let vocab = vocab, n_vocab > 0 {
+        contextualStrings.reserveCapacity(Int(n_vocab))
+        for i in 0..<Int(n_vocab) {
+            if let cstr = vocab[i] {
+                contextualStrings.append(String(cString: cstr))
+            }
+        }
+    }
 
     // Build an AVAudioPCMBuffer at 16 kHz f32 mono from the supplied
     // samples. SpeechAnalyzer will internally convert this to whatever
@@ -315,6 +337,43 @@ public func apple_speech_transcribe(
             }
 
             let analyzer = SpeechAnalyzer(modules: [transcriber])
+
+            // Feed the contextual vocabulary into the analyzer's
+            // analysis context. macOS 26 changed the shape of
+            // `contextualStrings` from a flat `[String]` (the legacy
+            // `SFSpeechRecognitionRequest` form) to a dictionary
+            // keyed by `AnalysisContext.ContextualStringsTag` so
+            // callers can group hints by category (general
+            // vocabulary vs user-identified phrases vs domain
+            // jargon). We dump everything into `.general` because
+            // the OCR'd vocab is by definition undifferentiated.
+            //
+            // CONTEXT-API-SHAPE: if `.general` isn't a valid case in
+            // your installed Xcode 26 SDK (Apple has renamed it
+            // mid-beta before), pick whichever tag the
+            // `ContextualStringsTag` enum exposes by default — the
+            // exact tag is cosmetic, the recogniser doesn't gate
+            // anything on it for our use case.
+            if !contextualStrings.isEmpty {
+                // os_log shows up in Console.app under our subsystem
+                // and also in the Tauri stderr capture, so the user
+                // can grep for "ZenAppleSpeech" to confirm vocab is
+                // actually arriving on the Swift side.
+                NSLog("ZenAppleSpeech: applying %d contextualStrings (first: %@)",
+                      contextualStrings.count,
+                      contextualStrings.first ?? "")
+                var ctx = AnalysisContext()
+                ctx.contextualStrings = [.general: contextualStrings]
+                do {
+                    try await analyzer.setContext(ctx)
+                } catch {
+                    // Don't fail transcription if context-setting
+                    // failed — the bias is a nice-to-have, the
+                    // transcript itself is the contract.
+                    NSLog("ZenAppleSpeech: setContext failed: %@",
+                          error.localizedDescription)
+                }
+            }
 
             // Convert to the model's preferred format if it differs
             // from our 16 kHz f32 mono input.

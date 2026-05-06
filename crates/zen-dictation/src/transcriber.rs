@@ -39,6 +39,24 @@ pub trait Transcriber: Send {
     /// wrapped via `From`) when the buffer is empty or contains no
     /// recognisable speech.
     fn transcribe(&mut self, samples: &[f32]) -> Result<String, DictationError>;
+
+    /// Transcribe with an optional list of contextual vocabulary
+    /// strings to bias the recogniser. Empty `vocab` is equivalent to
+    /// [`Self::transcribe`].
+    ///
+    /// The default implementation forwards to `transcribe` and
+    /// ignores the vocab — so impls that don't (or can't) consume
+    /// hints don't have to override anything. Apple Speech and
+    /// Whisper both override to plumb the vocab into their
+    /// respective contextualisation knobs (`contextualStrings` /
+    /// `initial_prompt`).
+    fn transcribe_with_vocab(
+        &mut self,
+        samples: &[f32],
+        _vocab: &[String],
+    ) -> Result<String, DictationError> {
+        self.transcribe(samples)
+    }
 }
 
 /// Blanket impl so `Box<dyn Transcriber>` itself satisfies `Transcriber`.
@@ -47,6 +65,14 @@ pub trait Transcriber: Send {
 impl Transcriber for Box<dyn Transcriber> {
     fn transcribe(&mut self, samples: &[f32]) -> Result<String, DictationError> {
         (**self).transcribe(samples)
+    }
+
+    fn transcribe_with_vocab(
+        &mut self,
+        samples: &[f32],
+        vocab: &[String],
+    ) -> Result<String, DictationError> {
+        (**self).transcribe_with_vocab(samples, vocab)
     }
 }
 
@@ -60,6 +86,32 @@ impl Transcriber for zen_whisper::WhisperContext {
     fn transcribe(&mut self, samples: &[f32]) -> Result<String, DictationError> {
         zen_whisper::WhisperContext::transcribe(self, samples).map_err(DictationError::from)
     }
+
+    fn transcribe_with_vocab(
+        &mut self,
+        samples: &[f32],
+        vocab: &[String],
+    ) -> Result<String, DictationError> {
+        // whisper.cpp's `initial_prompt` is a single sentence
+        // fragment, capped at ~224 tokens internally. Format the
+        // vocab as a comma-separated list with a brief prefix so the
+        // decoder treats it as conversational context (a "topic of
+        // conversation" hint) rather than text it must reproduce.
+        let prompt = if vocab.is_empty() {
+            String::new()
+        } else {
+            // Truncate at ~30 terms — keeps us comfortably under the
+            // 224-token cap even with multi-syllable terms, and
+            // longer prompts measurably hurt latency.
+            let limit = vocab.len().min(30);
+            let mut s = String::from("Context: ");
+            s.push_str(&vocab[..limit].join(", "));
+            s.push('.');
+            s
+        };
+        zen_whisper::WhisperContext::transcribe_with_prompt(self, samples, &prompt)
+            .map_err(DictationError::from)
+    }
 }
 
 // ── Apple Speech provider impl ──────────────────────────────────────────
@@ -69,6 +121,15 @@ impl Transcriber for zen_whisper::WhisperContext {
 impl Transcriber for zen_apple_speech::AppleSpeechContext {
     fn transcribe(&mut self, samples: &[f32]) -> Result<String, DictationError> {
         zen_apple_speech::AppleSpeechContext::transcribe(self, samples)
+            .map_err(DictationError::from)
+    }
+
+    fn transcribe_with_vocab(
+        &mut self,
+        samples: &[f32],
+        vocab: &[String],
+    ) -> Result<String, DictationError> {
+        zen_apple_speech::AppleSpeechContext::transcribe_with_vocab(self, samples, vocab)
             .map_err(DictationError::from)
     }
 }

@@ -1,0 +1,27 @@
+[package]
+name = "zen-screen-vocab"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Capture the current screen, OCR it via Vision, and extract a contextual vocabulary list to bias dictation recognizers (Apple Speech contextualStrings, Whisper initial_prompt)."
+build = "build.rs"
+
+# Same Swift-bridge pattern as `zen-apple-speech`: build.rs probes for
+# Xcode 26+, compiles `swift/ScreenVocabBridge.swift` into a dylib, and
+# emits a cfg flag the Rust side reads. Non-macOS / pre-Xcode-26 builds
+# skip the swiftc step entirely and the Rust API returns an empty
+# vocabulary so callers can keep their dispatch logic uniform.
+
+[lib]
+name = "zen_screen_vocab"
+path = "src/lib.rs"
+
+[dependencies]
+thiserror = { workspace = true }
+tracing = { workspace = true }
+parking_lot = { workspace = true }
+once_cell = { workspace = true }
+
+[build-dependencies]
+# build.rs only shells out to xcrun swiftc; no extra crates needed.

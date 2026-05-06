@@ -5,9 +5,11 @@ use std::path::Path;
 use tauri::{AppHandle, Emitter, Manager, State};
 use zen_dictation::{ModelId, Provider};
 
-use crate::dictation::dto::{AppleSpeechStateDto, DictationStateDto, ModelDto, PathsDto};
+use crate::dictation::dto::{
+    AppleSpeechStateDto, DictationStateDto, ModelDto, PathsDto, ScreenVocabStateDto,
+};
 use crate::dictation::state::DictationTauriState;
-use crate::dictation::{PROVIDER_KEY, SELECTED_MODEL_KEY};
+use crate::dictation::{PROVIDER_KEY, SCREEN_VOCAB_KEY, SELECTED_MODEL_KEY};
 use crate::error::{AppError, AppResult};
 use crate::user_config::UserConfig;
 
@@ -60,6 +62,10 @@ pub async fn dictation_get_state(
         models,
         is_recording: state.manager.is_recording(),
         apple_speech: build_apple_speech_dto(),
+        screen_vocab: ScreenVocabStateDto {
+            supported: zen_screen_vocab::is_supported(),
+            enabled: state.manager.screen_vocab_enabled(),
+        },
     })
 }
 
@@ -169,6 +175,101 @@ pub async fn dictation_set_provider(
     Ok(())
 }
 
+/// One-shot diagnostic: run the same OCR pipeline a real dictation
+/// utterance would, return the resulting vocabulary list to the
+/// frontend so the user can see exactly what the recogniser is being
+/// biased toward (or, if the list is empty, get a clear "TCC denied
+/// vs OCR found nothing" signal). Synchronous because the bridge
+/// itself blocks; we run it on a `spawn_blocking` worker so the
+/// Tauri runtime stays responsive.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ts_rs::TS)]
+#[ts(export)]
+pub struct ScreenVocabPreviewDto {
+    /// `true` when the bridge is in the binary AND the OS supports
+    /// the underlying APIs. `false` means the toggle would be hidden
+    /// in Settings; calling this command returns an empty `terms`
+    /// list and `error: "unavailable"`.
+    pub supported: bool,
+    /// Up to `DEFAULT_MAX_TERMS` extracted vocabulary terms. Empty
+    /// list with `error: null` means OCR ran but found nothing
+    /// useful (likely Screen Recording permission is granted but the
+    /// screen contains no text our heuristic recognises). Empty list
+    /// with `error != null` means OCR failed (most often because
+    /// Screen Recording permission is denied).
+    pub terms: Vec<String>,
+    /// Optional error string surfaced from the Swift bridge —
+    /// usually a TCC-permission-missing message.
+    pub error: Option<String>,
+}
+
+/// Diagnostic command bound to the "Show what I see" button in
+/// Settings. Captures + OCRs the current screen and returns the
+/// extracted vocabulary so the user can self-diagnose whether
+/// permission / heuristic / OCR is the failure point. Bypasses the
+/// crate-level cache so each click is a fresh look.
+#[tauri::command]
+pub async fn dictation_test_screen_vocab() -> AppResult<ScreenVocabPreviewDto> {
+    let supported = zen_screen_vocab::is_supported();
+    if !supported {
+        return Ok(ScreenVocabPreviewDto {
+            supported: false,
+            terms: Vec::new(),
+            error: Some("unavailable".to_string()),
+        });
+    }
+
+    // Run OCR + extraction on a worker. We deliberately bypass the
+    // cache here — the user clicked Test, they expect a fresh look.
+    let result = tokio::task::spawn_blocking(|| match zen_screen_vocab::raw_snapshot() {
+        Ok(text) => Ok(zen_screen_vocab::extract::extract_vocab(
+            &text,
+            zen_screen_vocab::DEFAULT_MAX_TERMS,
+        )),
+        Err(e) => Err(e.to_string()),
+    })
+    .await
+    .map_err(|e| AppError::Other(format!("spawn_blocking: {e}")))?;
+
+    Ok(match result {
+        Ok(terms) => ScreenVocabPreviewDto {
+            supported: true,
+            terms,
+            error: None,
+        },
+        Err(msg) => ScreenVocabPreviewDto {
+            supported: true,
+            terms: Vec::new(),
+            error: Some(msg),
+        },
+    })
+}
+
+/// Toggle the screen-vocabulary feature. When enabled, each
+/// dictation recording is paired with a background OCR pass over
+/// the current screen; the recognised vocabulary is fed to the
+/// active backend as a contextual hint (Apple Speech
+/// `contextualStrings` / Whisper `initial_prompt`).
+///
+/// Persisted via `SCREEN_VOCAB_KEY`. The first opt-in is what
+/// triggers the macOS Screen Recording TCC prompt — we don't
+/// pre-prompt because (1) prompting before the user opts in is
+/// confusing, and (2) ScreenCaptureKit issues the prompt itself the
+/// first time it tries to capture.
+#[tauri::command]
+pub async fn dictation_set_screen_vocab(
+    enabled: bool,
+    app: AppHandle,
+    state: State<'_, DictationTauriState>,
+) -> AppResult<()> {
+    state.manager.set_screen_vocab_enabled(enabled);
+    if let Some(cfg) = app.try_state::<UserConfig>() {
+        if let Err(e) = cfg.set(SCREEN_VOCAB_KEY, &enabled) {
+            tracing::warn!(?e, "dictation: persist screen_vocab_enabled failed");
+        }
+    }
+    Ok(())
+}
+
 /// Synchronously download + install the Apple Speech model for
 /// `locale` (e.g. `"en-US"`) into the system-wide `AssetInventory`.
 /// Blocks the calling task until done — the Swift bridge wraps an
@@ -238,6 +339,49 @@ pub async fn dictation_install_apple_locale(
         }
         Err(e) => Err(AppError::Other(format!("spawn_blocking: {e}"))),
     }
+}
+
+/// Wipe the Screen Recording TCC entry for our bundle id and trigger
+/// a fresh OCR snapshot so the system prompt fires again.
+///
+/// Mirrors `dictation_reset_accessibility` but for the
+/// `kTCCServiceScreenCapture` service. There's no Apple-provided
+/// "ask politely for screen recording" API equivalent to
+/// `AXIsProcessTrustedWithOptions(prompt: true)` — the only way to
+/// surface the system dialog is to actually attempt a capture, which
+/// macOS intercepts via the TCC trampoline. So we shell out to
+/// `tccutil reset ScreenCapture <bundle>` and then immediately kick
+/// off a snapshot in the background; the user will see the system
+/// dialog appear within a fraction of a second.
+///
+/// Same dev-vs-bundled caveat applies as accessibility: in a
+/// `cargo tauri dev` build the cdhash differs from any release build
+/// the user previously granted, so the tccutil reset will succeed
+/// but a brand-new entry will be created against the dev binary's
+/// cdhash — that grant evaporates on next rebuild. Bundled builds
+/// follow the full reset+prompt path normally.
+#[tauri::command]
+pub async fn dictation_reset_screen_recording(app: AppHandle) -> AppResult<()> {
+    let bundle_id = app.config().identifier.clone();
+    crate::dictation::permissions::reset_tcc_entry("ScreenCapture", &bundle_id)
+        .map_err(AppError::Other)?;
+
+    if crate::dictation::permissions::is_running_inside_app_bundle() {
+        // Run a one-shot snapshot on a worker so the TCC trampoline
+        // gets invoked and the system prompt appears. We don't care
+        // about the result — the side effect of triggering the
+        // prompt is the whole point.
+        tauri::async_runtime::spawn_blocking(|| {
+            let _ = zen_screen_vocab::raw_snapshot();
+        });
+    } else {
+        tracing::info!(
+            "dictation: reset_screen_recording — TCC entry wiped, but running \
+             outside an .app bundle so skipping the in-process re-prompt. Grant \
+             via the bundled build to make it stick across rebuilds."
+        );
+    }
+    Ok(())
 }
 
 /// Reveal `<app_data_dir>/` in Finder.
