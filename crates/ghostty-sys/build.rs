@@ -205,6 +205,26 @@ fn build_libghostty(ghostty_root: &std::path::Path) -> PathBuf {
         );
     }
 
+    // macOS's `libtool -static` (used by Zig's LibtoolStep internally)
+    // sometimes produces archives where the Zig compilation unit object
+    // (`libghostty_zcu.o`) is not 8-byte aligned. When this happens the
+    // `__.SYMDEF` symbol table index is incomplete — the Zig-exported
+    // symbols (ghostty_app_*, ghostty_surface_*, …) are physically present
+    // in the archive but invisible to `nm` and to the linker.
+    //
+    // `ranlib` rebuilds the index unconditionally, making all members'
+    // symbols accessible again regardless of alignment padding.
+    let lib_path = install_dir.join("lib").join("libghostty.a");
+    if lib_path.exists() {
+        let ranlib_status = Command::new("ranlib")
+            .arg(&lib_path)
+            .status()
+            .expect("invoke ranlib");
+        if !ranlib_status.success() {
+            eprintln!("warning: ranlib exited with {:?}; proceeding anyway", ranlib_status.code());
+        }
+    }
+
     install_dir.join("lib")
 }
 
