@@ -15,7 +15,118 @@ on:
 # the artifacts and publishes a GitHub Release.
 
 jobs:
+  # Build libghostty.a on macos-15 where the CLT ships MacOSX15.x SDKs
+  # with TBD v4 format that Zig 0.15.2 can parse correctly. On macos-26
+  # even the MacOSX15.4.sdk in the CLT uses TBD v5+ format, causing Zig
+  # to silently emit only ~4 symbols instead of ~97.
+  build-ghostty:
+    name: build libghostty.a (macos-15)
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install mise toolchain (zig 0.15.2)
+        uses: jdx/mise-action@v2
+        with:
+          experimental: true
+
+      - name: Cache zig packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/zig
+          key: zig-pkg-macos15-${{ hashFiles('vendor/ghostty/build.zig.zon') }}
+          restore-keys: zig-pkg-macos15-
+
+      - name: Cache libghostty.a (macos-15)
+        id: ghostty-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/ghostty-prebuilt
+          key: libghostty-macos15-${{ hashFiles('vendor/ghostty/**', 'patches/ghostty/**', 'crates/ghostty-sys/build.rs', 'tools/ghostty-xcrun-shim/**') }}
+
+      - name: Build libghostty.a (zig on macos-15)
+        if: steps.ghostty-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Apply patches to vendor/ghostty (idempotent)
+          cd vendor/ghostty
+          for patch in ../../patches/ghostty/*.patch; do
+            [ -f "$patch" ] || continue
+            if git apply -R --check "$patch" 2>/dev/null; then
+              echo "Patch already applied: $patch"
+            else
+              git apply "$patch"
+              echo "Applied: $patch"
+            fi
+          done
+          cd ../..
+
+          # Find best Zig-compatible SDK: versioned MacOSX15.x > MacOSX14.x.
+          # The generic MacOSX15.sdk symlink is excluded (no digit after the dot).
+          SDK_PATH=$(find /Library/Developer/CommandLineTools/SDKs -maxdepth 1 \
+            \( -name 'MacOSX15.[0-9]*.sdk' -o -name 'MacOSX14.[0-9]*.sdk' \) \
+            -type d 2>/dev/null | sort -r | head -1 || true)
+          echo "Selected SDK: ${SDK_PATH:-none}"
+
+          # Verify TBD format of selected SDK
+          if [ -n "$SDK_PATH" ]; then
+            head -3 "$SDK_PATH/usr/lib/libSystem.tbd" 2>/dev/null || echo "(no libSystem.tbd)"
+          fi
+
+          chmod +x tools/ghostty-xcrun-shim/xcrun
+          export PATH="$(pwd)/tools/ghostty-xcrun-shim:$PATH"
+
+          ZIG=$(mise which zig)
+          INSTALL_DIR="$HOME/ghostty-build"
+          mkdir -p "$INSTALL_DIR"
+
+          ZIG_ARGS=(
+            build install
+            -Dapp-runtime=none
+            -Drenderer=metal
+            -Dfont-backend=coretext
+            -Demit-xcframework=false
+            -Doptimize=ReleaseFast
+            --prefix "$INSTALL_DIR"
+          )
+
+          (
+            cd vendor/ghostty
+            if [ -n "$SDK_PATH" ]; then
+              GHOSTTY_SDK_PATH="$SDK_PATH" SDKROOT="$SDK_PATH" \
+              DEVELOPER_DIR="/Library/Developer/CommandLineTools" \
+              "$ZIG" "${ZIG_ARGS[@]}"
+            else
+              "$ZIG" "${ZIG_ARGS[@]}"
+            fi
+          )
+
+          ranlib "$INSTALL_DIR/lib/libghostty.a"
+
+          mkdir -p "$HOME/ghostty-prebuilt"
+          cp "$INSTALL_DIR/lib/libghostty.a" "$HOME/ghostty-prebuilt/libghostty.a"
+          ls -lh "$HOME/ghostty-prebuilt/"
+
+          echo "=== ghostty_ symbol count (want ~97) ==="
+          nm -gU "$HOME/ghostty-prebuilt/libghostty.a" | grep -c "_ghostty_" || true
+          echo "=== first 10 ghostty_ symbols ==="
+          nm -gU "$HOME/ghostty-prebuilt/libghostty.a" | grep "_ghostty_" | head -10 || true
+
+      - name: Upload libghostty.a
+        uses: actions/upload-artifact@v4
+        with:
+          name: libghostty-arm64
+          path: ~/ghostty-prebuilt/libghostty.a
+          if-no-files-found: error
+          retention-days: 7
+
   build:
+    needs: build-ghostty
     strategy:
       fail-fast: false
       matrix:
@@ -53,8 +164,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           # Pulls `vendor/ghostty` (submodule pinned in `.gitmodules`).
-          # Required for `crates/ghostty-sys/build.rs` to find the
-          # ghostty source to apply patches over and Zig-build.
+          # Required for bindgen to find `vendor/ghostty/include/ghostty.h`.
           submodules: recursive
 
       # `packageManager: pnpm@<version>` in package.json is what
@@ -79,43 +189,24 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      # Install zig (and any other tools) from `mise.toml`. Pinned at
-      # 0.15.2 because that's the only Zig release we've validated
-      # against `vendor/ghostty/`. Required only for the cold-build
-      # path of `crates/ghostty-sys`; cache hits below skip it.
-      # macOS-only today (Tauri matrix is mac-only); add a `runner.os`
-      # gate here when Linux/Windows rows are reinstated, since the
-      # ghostty stack is `cfg(target_os = "macos")`.
-      - name: Install mise toolchain (zig 0.15.2)
-        if: runner.os == 'macOS'
-        uses: jdx/mise-action@v2
-        with:
-          experimental: true
-
       - name: Cache Rust target
         uses: Swatinem/rust-cache@v2
         with:
           # Single workspace at the repo root — `target/` lives here.
           workspaces: . -> target
 
-      # libghostty.a is a 135 MB static archive produced by a 2-8 minute
-      # `zig build` over `vendor/ghostty/`. Cache it keyed on the
-      # vendored sources + the build script + the CLT shim so the .a is
-      # only rebuilt when one of those genuinely changes. See pr.yml for
-      # the full reasoning. macOS-only today.
-      - name: Cache libghostty.a
+      # Download the libghostty.a built on macos-15 by the build-ghostty job.
+      # Setting GHOSTTY_LIB_DIR tells crates/ghostty-sys/build.rs to skip
+      # the zig build entirely and link against this prebuilt archive.
+      - name: Download libghostty.a (built on macos-15)
         if: runner.os == 'macOS'
-        id: ghostty-cache
-        uses: actions/cache@v4
+        uses: actions/download-artifact@v4
         with:
+          name: libghostty-arm64
           path: ~/ghostty-prebuilt
-          # See pr.yml for the full reasoning behind these key inputs:
-          # `vendor/ghostty/**` (pinned submodule SHA), `patches/ghostty/**`
-          # (local delta), `build.rs` + `xcrun-shim` (build logic).
-          key: libghostty-${{ runner.os }}-${{ hashFiles('vendor/ghostty/**', 'patches/ghostty/**', 'crates/ghostty-sys/build.rs', 'tools/ghostty-xcrun-shim/**') }}
 
-      - name: Use cached libghostty.a
-        if: runner.os == 'macOS' && steps.ghostty-cache.outputs.cache-hit == 'true'
+      - name: Set GHOSTTY_LIB_DIR
+        if: runner.os == 'macOS'
         run: |
           echo "GHOSTTY_LIB_DIR=$HOME/ghostty-prebuilt" >> "$GITHUB_ENV"
           ls -lh "$HOME/ghostty-prebuilt"
@@ -169,98 +260,27 @@ jobs:
         shell: bash
         run: env -u CI pnpm tauri build ${{ matrix.tauri-args }}
 
-      # Diagnostic dump: always runs so we can confirm the SDK fix is
-      # working and catch regressions.  The key checks are:
-      #   * CLT SDKs available on this runner
-      #   * which SDK ghostty-sys/build.rs selected (cargo:warning lines)
-      #   * ghostty_* export count in the produced libghostty.a (want ~97)
-      - name: Diagnose libghostty.a + CLT SDKs + zig build log
+      # Diagnostic dump: always runs so we can confirm the symbol count
+      # from the macos-15-built libghostty.a made it into the final binary.
+      - name: Diagnose libghostty.a symbols
         if: always() && runner.os == 'macOS'
         shell: bash
         run: |
           set +e
-          echo "=== CLT SDKs available on this runner ==="
-          ls /Library/Developer/CommandLineTools/SDKs/ 2>/dev/null || echo "(CLT SDKs dir not found)"
-          echo
-          echo "=== Xcode / xcode-select ==="
-          sw_vers
-          xcode-select -p
-          xcrun --show-sdk-path 2>/dev/null
-          echo
-          echo "=== _ghostty_* exports in libghostty.a (names + count) ==="
-          LIB=$(find target -name libghostty.a -type f 2>/dev/null | head -1)
-          if [ -n "$LIB" ]; then
-            echo "Library: $LIB ($(ls -lh "$LIB" | awk '{print $5}'))"
-            echo "--- External (nm -gU) ghostty_ symbols ---"
-            nm -gU "$LIB" 2>/dev/null | grep "_ghostty_" | head -120
+          echo "=== Downloaded libghostty.a ==="
+          LIB="$HOME/ghostty-prebuilt/libghostty.a"
+          if [ -f "$LIB" ]; then
+            echo "Size: $(ls -lh "$LIB" | awk '{print $5}')"
             echo "Total external ghostty_ symbols: $(nm -gU "$LIB" 2>/dev/null | grep -c "_ghostty_" || echo 0)"
-            echo "--- ALL (nm -a) ghostty_ symbols including internal ---"
-            nm -a "$LIB" 2>/dev/null | grep "_ghostty_" | grep -v "^$LIB:" | head -120
-            echo "Total all ghostty_ symbols: $(nm -a "$LIB" 2>/dev/null | grep -c "_ghostty_" || echo 0)"
-            echo "--- Extracting libghostty_zcu.o for direct inspection ---"
-            TMPDIR_ZCU=$(mktemp -d)
-            (cd "$TMPDIR_ZCU" && ar -x "$OLDPWD/$LIB" libghostty_zcu.o 2>/dev/null)
-            if [ -f "$TMPDIR_ZCU/libghostty_zcu.o" ]; then
-              echo "libghostty_zcu.o size: $(ls -lh "$TMPDIR_ZCU/libghostty_zcu.o" | awk '{print $5}')"
-              echo "ghostty_ symbols in libghostty_zcu.o (all):"
-              nm -a "$TMPDIR_ZCU/libghostty_zcu.o" 2>/dev/null | grep "_ghostty_" | head -60
-              echo "External ghostty_ in zcu.o: $(nm -gU "$TMPDIR_ZCU/libghostty_zcu.o" 2>/dev/null | grep -c "_ghostty_" || echo 0)"
-            else
-              echo "WARNING: libghostty_zcu.o not extractable (may use extended name)"
-              ar -t "$LIB" 2>/dev/null | grep zcu
-            fi
-            rm -rf "$TMPDIR_ZCU"
-            echo "Objects in archive:"
-            ar t "$LIB" 2>/dev/null | head -20
           else
-            echo "libghostty.a not found"
+            echo "libghostty.a not found at $HOME/ghostty-prebuilt"
           fi
           echo
-          echo "=== ghostty-sys build script stderr (where zig logs land) ==="
-          for f in $(find target -path "*/build/ghostty-sys-*/stderr" -type f 2>/dev/null); do
-            echo "--- $f ---"
-            cat "$f"
-            echo
-          done
-          for f in $(find target -path "*/build/ghostty-sys-*/stdout" -type f 2>/dev/null); do
-            echo "--- $f ---"
-            head -200 "$f"
-            echo
-          done
-          echo "=== ghostty-sys output file (cargo:* directives + warnings) ==="
+          echo "=== ghostty-sys build script output (cargo:* directives) ==="
           for f in $(find target -path "*/build/ghostty-sys-*/output" -type f 2>/dev/null); do
             echo "--- $f ---"
             cat "$f"
-            echo
           done
-          echo "=== xcrun shim execute bit ==="
-          ls -la tools/ghostty-xcrun-shim/xcrun
-          echo
-          echo "=== ghostty-install/ tree ==="
-          for d in $(find target -path "*/ghostty-sys-*/out/ghostty-install" -type d 2>/dev/null); do
-            echo "--- $d ---"
-            find "$d" -type f -exec ls -la {} \;
-          done
-
-      # Cold-build path only: stash the freshly built libghostty.a so
-      # the cache action's post-step saves it under the new key. See
-      # the matching step in pr.yml for the full reasoning.
-      - name: Save libghostty.a to cache path
-        if: runner.os == 'macOS' && steps.ghostty-cache.outputs.cache-hit != 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p "$HOME/ghostty-prebuilt"
-          # Tauri's release build lives under `target/<arch>/release`,
-          # but `ghostty-sys`'s `OUT_DIR` is still keyed off the
-          # workspace `target/`. Glob both layouts.
-          SRC=$(find target -path "*/ghostty-sys-*/out/ghostty-install/lib/libghostty.a" | head -1)
-          if [ -z "$SRC" ]; then
-            echo "::error::libghostty.a not found under target/ — Zig build must have failed silently"
-            exit 1
-          fi
-          cp "$SRC" "$HOME/ghostty-prebuilt/libghostty.a"
-          ls -lh "$HOME/ghostty-prebuilt"
 
       - name: Stage release assets
         shell: bash

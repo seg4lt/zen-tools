@@ -31,17 +31,128 @@ env:
   RUSTFLAGS: -D warnings
 
 jobs:
+  # Build libghostty.a on macos-15 where the CLT ships MacOSX15.x SDKs
+  # with TBD v4 format that Zig 0.15.2 can parse correctly. On macos-26
+  # even the MacOSX15.4.sdk in the CLT uses TBD v5+ format, causing Zig
+  # to silently emit only ~4 symbols instead of ~97.
+  build-ghostty:
+    name: build libghostty.a (macos-15)
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install mise toolchain (zig 0.15.2)
+        uses: jdx/mise-action@v2
+        with:
+          experimental: true
+
+      - name: Cache zig packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/zig
+          key: zig-pkg-macos15-${{ hashFiles('vendor/ghostty/build.zig.zon') }}
+          restore-keys: zig-pkg-macos15-
+
+      - name: Cache libghostty.a (macos-15)
+        id: ghostty-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/ghostty-prebuilt
+          key: libghostty-macos15-${{ hashFiles('vendor/ghostty/**', 'patches/ghostty/**', 'crates/ghostty-sys/build.rs', 'tools/ghostty-xcrun-shim/**') }}
+
+      - name: Build libghostty.a (zig on macos-15)
+        if: steps.ghostty-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Apply patches to vendor/ghostty (idempotent)
+          cd vendor/ghostty
+          for patch in ../../patches/ghostty/*.patch; do
+            [ -f "$patch" ] || continue
+            if git apply -R --check "$patch" 2>/dev/null; then
+              echo "Patch already applied: $patch"
+            else
+              git apply "$patch"
+              echo "Applied: $patch"
+            fi
+          done
+          cd ../..
+
+          # Find best Zig-compatible SDK: versioned MacOSX15.x > MacOSX14.x.
+          # The generic MacOSX15.sdk symlink is excluded (no digit after the dot).
+          SDK_PATH=$(find /Library/Developer/CommandLineTools/SDKs -maxdepth 1 \
+            \( -name 'MacOSX15.[0-9]*.sdk' -o -name 'MacOSX14.[0-9]*.sdk' \) \
+            -type d 2>/dev/null | sort -r | head -1 || true)
+          echo "Selected SDK: ${SDK_PATH:-none}"
+
+          # Verify TBD format of selected SDK
+          if [ -n "$SDK_PATH" ]; then
+            head -3 "$SDK_PATH/usr/lib/libSystem.tbd" 2>/dev/null || echo "(no libSystem.tbd)"
+          fi
+
+          chmod +x tools/ghostty-xcrun-shim/xcrun
+          export PATH="$(pwd)/tools/ghostty-xcrun-shim:$PATH"
+
+          ZIG=$(mise which zig)
+          INSTALL_DIR="$HOME/ghostty-build"
+          mkdir -p "$INSTALL_DIR"
+
+          ZIG_ARGS=(
+            build install
+            -Dapp-runtime=none
+            -Drenderer=metal
+            -Dfont-backend=coretext
+            -Demit-xcframework=false
+            -Doptimize=ReleaseFast
+            --prefix "$INSTALL_DIR"
+          )
+
+          (
+            cd vendor/ghostty
+            if [ -n "$SDK_PATH" ]; then
+              GHOSTTY_SDK_PATH="$SDK_PATH" SDKROOT="$SDK_PATH" \
+              DEVELOPER_DIR="/Library/Developer/CommandLineTools" \
+              "$ZIG" "${ZIG_ARGS[@]}"
+            else
+              "$ZIG" "${ZIG_ARGS[@]}"
+            fi
+          )
+
+          ranlib "$INSTALL_DIR/lib/libghostty.a"
+
+          mkdir -p "$HOME/ghostty-prebuilt"
+          cp "$INSTALL_DIR/lib/libghostty.a" "$HOME/ghostty-prebuilt/libghostty.a"
+          ls -lh "$HOME/ghostty-prebuilt/"
+
+          echo "=== ghostty_ symbol count (want ~97) ==="
+          nm -gU "$HOME/ghostty-prebuilt/libghostty.a" | grep -c "_ghostty_" || true
+          echo "=== first 10 ghostty_ symbols ==="
+          nm -gU "$HOME/ghostty-prebuilt/libghostty.a" | grep "_ghostty_" | head -10 || true
+
+      - name: Upload libghostty.a
+        uses: actions/upload-artifact@v4
+        with:
+          name: libghostty-arm64-pr
+          path: ~/ghostty-prebuilt/libghostty.a
+          if-no-files-found: error
+          retention-days: 3
+
   rust:
     name: Rust workspace
+    needs: build-ghostty
     # macos-26 ships Xcode 26 + macOS 26 SDK so the Apple Speech and
     # screen-vocab Swift bridges compile their real implementations
     # (rather than falling back to runtime-stub mode on older SDKs).
     runs-on: macos-26
     steps:
       # `submodules: recursive` fetches `vendor/ghostty` (pinned to a
-      # clean upstream tag in `.gitmodules`). Required — the
-      # `ghostty-sys` build.rs reads from `vendor/ghostty/`, applies
-      # `patches/ghostty/*.patch` over it, then runs `zig build`.
+      # clean upstream tag in `.gitmodules`). Required — bindgen needs
+      # `vendor/ghostty/include/ghostty.h` even when GHOSTTY_LIB_DIR
+      # skips the Zig build.
       - uses: actions/checkout@v4
         with:
           submodules: recursive
@@ -50,15 +161,6 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-
-      # Install zig (and any other tools) from `mise.toml`. Pinned at
-      # 0.15.2 because that's the only Zig release we've validated
-      # against `vendor/ghostty/`. Required only for the cold-build
-      # path of `crates/ghostty-sys`; cache hits below skip it.
-      - name: Install mise toolchain (zig 0.15.2)
-        uses: jdx/mise-action@v2
-        with:
-          experimental: true
 
       # Restore cargo registry + git index + target dir between runs.
       # Key on Cargo.lock so a dependency bump invalidates correctly.
@@ -73,63 +175,22 @@ jobs:
           restore-keys: |
             cargo-${{ runner.os }}-
 
-      # libghostty.a is a 135 MB static archive produced by a 2-8 minute
-      # `zig build` over `vendor/ghostty/`. We cache the install dir
-      # keyed on the inputs the Zig build actually consumes:
-      #
-      #   * the entire `vendor/ghostty/` tree
-      #   * `crates/ghostty-sys/build.rs` (controls the build invocation)
-      #   * `tools/ghostty-xcrun-shim/` (the CLT-only Zig wrapper)
-      #
-      # On cache hit we set `GHOSTTY_LIB_DIR` to the cache dir; the
-      # build script's early-return branch then skips the Zig step
-      # entirely (`crates/ghostty-sys/build.rs` line 39).
-      #
-      # On cache miss we don't set `GHOSTTY_LIB_DIR`, the Zig build
-      # runs as normal, and the post-build step below copies the
-      # produced .a into the cache path so the action's post-step
-      # saves it under the new key.
-      - name: Cache libghostty.a
-        id: ghostty-cache
-        uses: actions/cache@v4
+      # Download the libghostty.a built on macos-15 by the build-ghostty job.
+      # Setting GHOSTTY_LIB_DIR tells crates/ghostty-sys/build.rs to skip
+      # the zig build entirely and link against this prebuilt archive.
+      - name: Download libghostty.a (built on macos-15)
+        uses: actions/download-artifact@v4
         with:
+          name: libghostty-arm64-pr
           path: ~/ghostty-prebuilt
-          # Cache key inputs:
-          #   - `vendor/ghostty/**`: the upstream submodule tree (its
-          #     contents are deterministic for a given pinned SHA, so
-          #     this captures "ghostty version was bumped").
-          #   - `patches/ghostty/**`: our local delta. A patch edit
-          #     invalidates the cache even if the submodule SHA didn't
-          #     move.
-          #   - `crates/ghostty-sys/build.rs` + `tools/ghostty-xcrun-shim/**`:
-          #     the build/wrapper logic itself.
-          key: libghostty-${{ runner.os }}-${{ hashFiles('vendor/ghostty/**', 'patches/ghostty/**', 'crates/ghostty-sys/build.rs', 'tools/ghostty-xcrun-shim/**') }}
 
-      - name: Use cached libghostty.a
-        if: steps.ghostty-cache.outputs.cache-hit == 'true'
+      - name: Set GHOSTTY_LIB_DIR
         run: |
           echo "GHOSTTY_LIB_DIR=$HOME/ghostty-prebuilt" >> "$GITHUB_ENV"
           ls -lh "$HOME/ghostty-prebuilt"
 
       - name: cargo build --workspace
         run: cargo build --workspace --locked
-
-      # Cold-build path only: stash the freshly built libghostty.a so
-      # the cache action's post-step saves it under the new key.
-      - name: Save libghostty.a to cache path
-        if: steps.ghostty-cache.outputs.cache-hit != 'true'
-        run: |
-          set -euo pipefail
-          mkdir -p "$HOME/ghostty-prebuilt"
-          # The OUT_DIR layout is `target/<profile>/build/ghostty-sys-<hash>/out/ghostty-install/lib/libghostty.a`.
-          # The hash component is non-deterministic, so glob it.
-          SRC=$(find target -path "*/ghostty-sys-*/out/ghostty-install/lib/libghostty.a" | head -1)
-          if [ -z "$SRC" ]; then
-            echo "::error::libghostty.a not found under target/ — Zig build must have failed silently"
-            exit 1
-          fi
-          cp "$SRC" "$HOME/ghostty-prebuilt/libghostty.a"
-          ls -lh "$HOME/ghostty-prebuilt"
 
       - name: cargo test --workspace
         run: cargo test --workspace --locked --lib
