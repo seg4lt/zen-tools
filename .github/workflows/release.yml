@@ -169,6 +169,56 @@ jobs:
         shell: bash
         run: env -u CI pnpm tauri build ${{ matrix.tauri-args }}
 
+      # Diagnostic dump for the v0.1.20+ macos-26 → libghostty FFI
+      # symbol mismatch. Local libghostty.a (built on a macos-26 host
+      # with CLT MacOSX15.sdk) exports `_ghostty_surface_free_text`
+      # etc.; the same code path on macos-26 runner produces a .a
+      # missing those symbols. We need to know:
+      #   * which CLT SDKs the runner has
+      #   * which Xcode is selected
+      #   * whether the produced libghostty.a actually exports the
+      #     surface FFI we link against
+      # Runs always() so it fires whether the build step passed
+      # or failed. Remove this step once the diagnosis is in hand.
+      - name: Diagnose libghostty.a + CLT SDKs
+        if: always() && runner.os == 'macOS'
+        shell: bash
+        run: |
+          set +e
+          echo "=== sw_vers ==="
+          sw_vers
+          echo
+          echo "=== Selected Xcode (xcode-select -p) ==="
+          xcode-select -p
+          echo
+          echo "=== xcrun --show-sdk-path / --show-sdk-version ==="
+          xcrun --sdk macosx --show-sdk-path
+          xcrun --sdk macosx --show-sdk-version
+          echo
+          echo "=== /Library/Developer/CommandLineTools/SDKs/ ==="
+          ls -la /Library/Developer/CommandLineTools/SDKs/ 2>&1 || echo "(not present)"
+          echo
+          echo "=== /Applications/Xcode*.app ==="
+          ls -d /Applications/Xcode*.app 2>&1 || echo "(none)"
+          echo
+          LIB=$(find target -name libghostty.a -type f 2>/dev/null | head -1)
+          echo "=== libghostty.a path ==="
+          echo "$LIB"
+          if [ -n "$LIB" ]; then
+            echo
+            echo "=== file libghostty.a ==="
+            file "$LIB"
+            echo
+            echo "=== ghostty_surface_* symbols (T = exported text segment) ==="
+            nm -gU "$LIB" 2>&1 | grep -E "_ghostty_surface_" | head -30 || echo "MISSING — no _ghostty_surface_* exports at all"
+            echo
+            echo "=== count of all _ghostty_* exports ==="
+            nm -gU "$LIB" 2>&1 | grep -c "_ghostty_" || true
+            echo
+            echo "=== linker-visible architectures ==="
+            lipo -info "$LIB" 2>&1 || true
+          fi
+
       # Cold-build path only: stash the freshly built libghostty.a so
       # the cache action's post-step saves it under the new key. See
       # the matching step in pr.yml for the full reasoning.
