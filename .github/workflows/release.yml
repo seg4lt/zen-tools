@@ -21,7 +21,14 @@ jobs:
       matrix:
         include:
           - name: macos-arm
-            runner: macos-14
+            # macos-26 (Tahoe) image ships Xcode 26 + the macOS 26 SDK,
+            # which the Apple Speech (`SpeechAnalyzer`) and screen-vocab
+            # (`ScreenCaptureKit` + Vision) Swift bridges require to
+            # compile. The previous macos-14 runner only had SDK 14, so
+            # the bridges' build.rs's fell back to stubs and Tauri's
+            # `bundle.macOS.frameworks` validation aborted with
+            # `Library not found: ../target/release/lib*_bridge.dylib`.
+            runner: macos-26
             target: aarch64-apple-darwin
             tauri-args: --target aarch64-apple-darwin
             bundle-subpath: aarch64-apple-darwin/release/bundle

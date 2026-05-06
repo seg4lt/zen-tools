@@ -33,7 +33,10 @@ env:
 jobs:
   rust:
     name: Rust workspace
-    runs-on: macos-14
+    # macos-26 ships Xcode 26 + macOS 26 SDK so the Apple Speech and
+    # screen-vocab Swift bridges compile their real implementations
+    # (rather than falling back to runtime-stub mode on older SDKs).
+    runs-on: macos-26
     steps:
       # `submodules: recursive` fetches `vendor/ghostty` (pinned to a
       # clean upstream tag in `.gitmodules`). Required — the
