@@ -670,36 +670,22 @@ index fcf3055f8..a221b9137 100644
      run_lib.addFileArg(output_ir);
      run_lib.step.dependOn(&run_ir.step);
 diff --git a/src/main_c.zig b/src/main_c.zig
-index 9d48f376d..f1cd16c6e 100644
+index 9d48f376d..0260ca9ad 100644
 --- a/src/main_c.zig
 +++ b/src/main_c.zig
-@@ -38,7 +38,29 @@ comptime {
+@@ -38,7 +38,15 @@ comptime {
      _ = @import("config.zig").CApi;
  
      // Any apprt-specific C API, mainly libghostty for apprt.embedded.
 -    if (@hasDecl(apprt.runtime, "CAPI")) _ = apprt.runtime.CAPI;
-+    // PATCH (tauri-terminal): In Zig 0.15.x static-library builds, lazy
-+    // analysis means `export fn` inside a struct are NOT code-generated
-+    // unless explicitly forced.
-+    //
-+    // Root cause: std.meta.declarations() only returns `pub` declarations.
-+    // The CAPI struct in apprt/embedded.zig uses `export fn` (not `pub
-+    // export fn`), so the iteration returned 0 items and @export was never
-+    // called. The fix in embedded.zig adds `pub` to every CAPI `export fn`,
-+    // making them visible here. We then use a switch (not ==) to check for
-+    // function type — this is more robust in Zig 0.15.x.
++    // PATCH (tauri-terminal): Reference CAPI so Zig's lazy analysis
++    // code-generates all `pub export fn` declarations inside the struct.
++    // The `pub export fn` keyword already exports each symbol; we must NOT
++    // call @export again (that causes "exported symbol collision" in
++    // Zig 0.15.x). A bare `_ = struct` reference is sufficient to force
++    // analysis, exactly like the config.zig pattern above.
 +    if (@hasDecl(apprt.runtime, "CAPI")) {
-+        const CAPI = apprt.runtime.CAPI;
-+        for (std.meta.declarations(CAPI)) |decl| {
-+            const field = @field(CAPI, decl.name);
-+            switch (@typeInfo(@TypeOf(field))) {
-+                // Zig 0.15.x: @export requires a *pointer* to the function,
-+                // not the bare function value. Use &@field(...) to get a
-+                // comptime-known function pointer.
-+                .@"fn" => @export(&@field(CAPI, decl.name), .{ .name = decl.name }),
-+                else => {},
-+            }
-+        }
++        _ = apprt.runtime.CAPI;
 +    }
  
      // Our benchmark API. We probably want to gate this on a build
