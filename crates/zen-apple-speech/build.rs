@@ -149,19 +149,52 @@ fn main() {
     // the stub. This is the single source of truth.
     println!("cargo:rustc-cfg=apple_speech_compiled");
 
-    // Copy the dylib next to the eventual binary so plain `cargo run`
-    // works without a bundle. `target/<profile>/` is up three parents
-    // from `OUT_DIR`. Be defensive: if the layout shifts (workspace
-    // override, custom target dir, etc.) we just skip the copy and
-    // rely on rpath above.
+    // Copy the dylib to two places:
+    //
+    //   1. **Next to the eventual binary** (`<workspace>/target[/<triple>]/<profile>/`)
+    //      so plain `cargo run` finds it via the `@executable_path/.`
+    //      rpath. This is `OUT_DIR.parent^3`.
+    //
+    //   2. **`<workspace>/target/<profile>/`** (always, no triple
+    //      segment) so `src-tauri/tauri.conf.json`'s static
+    //      `../target/release/lib*.dylib` reference resolves
+    //      regardless of whether the build was invoked with
+    //      `--target <triple>`. CI builds with `--target
+    //      aarch64-apple-darwin`, which puts artifacts under
+    //      `target/aarch64-apple-darwin/release/`; without this
+    //      second copy the Tauri bundler errors with
+    //      `Library not found: ../target/release/lib*.dylib`.
+    //
+    // Be defensive: if the layout shifts (workspace override, custom
+    // target dir, etc.) we just skip the copies and rely on the
+    // OUT_DIR-rpath above.
     if let Ok(profile) = env::var("PROFILE") {
-        let target_dir = locate_target_dir().map(|d| d.join(&profile));
-        if let Some(target_dir) = target_dir {
-            let dest = target_dir.join("libzen_apple_speech_bridge.dylib");
+        let dylib_filename = "libzen_apple_speech_bridge.dylib";
+
+        // (1) Next to binary — OUT_DIR.parent^3.
+        if let Some(exec_dir) = next_to_binary_dir(&out_dir) {
+            let dest = exec_dir.join(dylib_filename);
             if let Err(e) = std::fs::copy(&dylib_path, &dest) {
                 eprintln!(
                     "zen-apple-speech: warning — failed to copy dylib to {}: {e}",
                     dest.display()
+                );
+            }
+        }
+
+        // (2) Stable workspace path for tauri.conf.json.
+        if let Some(workspace_target) = locate_workspace_target_dir(&out_dir) {
+            let stable_dest = workspace_target.join(&profile).join(dylib_filename);
+            // The next-to-binary copy above may already have
+            // written here in the no-triple case — `fs::copy` is
+            // idempotent, no harm.
+            if let Some(parent) = stable_dest.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if let Err(e) = std::fs::copy(&dylib_path, &stable_dest) {
+                eprintln!(
+                    "zen-apple-speech: warning — failed to copy dylib to stable workspace path {}: {e}",
+                    stable_dest.display()
                 );
             }
         }
@@ -185,18 +218,38 @@ fn probe_sdk_version() -> Option<String> {
     }
 }
 
-/// Walk up from OUT_DIR to find the `target/` directory. OUT_DIR is
-/// usually `<workspace>/target/<profile>/build/<crate>-<hash>/out`.
-/// We climb four parents to land on `target/`.
-fn locate_target_dir() -> Option<PathBuf> {
-    let out = env::var("OUT_DIR").ok().map(PathBuf::from)?;
-    let mut p = out.as_path();
-    for _ in 0..4 {
-        p = p.parent()?;
+/// The `<workspace>/target/[<triple>/]<profile>/` directory the
+/// final binary will be written to — i.e. where `@executable_path/.`
+/// resolves to at runtime. OUT_DIR is `<that>/build/<crate>-<hash>/out`,
+/// so this is `OUT_DIR.parent^3`. Used for the "next to the binary"
+/// dylib copy.
+fn next_to_binary_dir(out_dir: &PathBuf) -> Option<PathBuf> {
+    out_dir
+        .parent() // .../build/<crate>/
+        .and_then(|p| p.parent()) // .../build/
+        .and_then(|p| p.parent()) // .../<profile>/  (or .../<triple>/<profile>/)
+        .map(|p| p.to_path_buf())
+}
+
+/// Walk up from OUT_DIR until we find an ancestor named `target/`.
+/// Handles both layouts:
+///
+///   * No `--target`:  OUT_DIR = `<ws>/target/<profile>/build/<crate>/out`
+///                     → walk 4 levels → `<ws>/target/`
+///   * With `--target`: OUT_DIR = `<ws>/target/<triple>/<profile>/build/<crate>/out`
+///                     → walk 5 levels → `<ws>/target/`
+///
+/// Returns `<ws>/target/` in both cases. Caller appends `<profile>/`
+/// to land at the stable workspace-relative bundle path
+/// `tauri.conf.json` expects.
+fn locate_workspace_target_dir(out_dir: &PathBuf) -> Option<PathBuf> {
+    let mut p = out_dir.as_path();
+    for _ in 0..8 {
+        let parent = p.parent()?;
+        if parent.file_name().map(|n| n == "target").unwrap_or(false) {
+            return Some(parent.to_path_buf());
+        }
+        p = parent;
     }
-    if p.file_name().map(|n| n == "target").unwrap_or(false) {
-        Some(p.to_path_buf())
-    } else {
-        None
-    }
+    None
 }

@@ -98,16 +98,39 @@ fn main() {
 
     println!("cargo:rustc-cfg=screen_vocab_compiled");
 
-    // Copy the dylib next to the eventual binary so plain `cargo run`
-    // works without a bundle. Same reasoning as zen-apple-speech.
+    // Copy the dylib to two places — same scheme as zen-apple-speech:
+    //
+    //   1. Next to the eventual binary (resolved from OUT_DIR^3) so
+    //      `cargo run` finds it via `@executable_path/.`.
+    //   2. `<workspace>/target/<profile>/` (always, no triple) so
+    //      `tauri.conf.json`'s static `../target/release/lib*.dylib`
+    //      resolves regardless of `--target` flag. CI builds with
+    //      `--target aarch64-apple-darwin` and the bundler errors
+    //      with `Library not found` if this stable copy is missing.
     if let Ok(profile) = env::var("PROFILE") {
-        let target_dir = locate_target_dir().map(|d| d.join(&profile));
-        if let Some(target_dir) = target_dir {
-            let dest = target_dir.join("libzen_screen_vocab_bridge.dylib");
+        let dylib_filename = "libzen_screen_vocab_bridge.dylib";
+
+        // (1) Next to binary.
+        if let Some(exec_dir) = next_to_binary_dir(&out_dir) {
+            let dest = exec_dir.join(dylib_filename);
             if let Err(e) = std::fs::copy(&dylib_path, &dest) {
                 eprintln!(
                     "zen-screen-vocab: warning — failed to copy dylib to {}: {e}",
                     dest.display()
+                );
+            }
+        }
+
+        // (2) Stable workspace path for tauri.conf.json.
+        if let Some(workspace_target) = locate_workspace_target_dir(&out_dir) {
+            let stable_dest = workspace_target.join(&profile).join(dylib_filename);
+            if let Some(parent) = stable_dest.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if let Err(e) = std::fs::copy(&dylib_path, &stable_dest) {
+                eprintln!(
+                    "zen-screen-vocab: warning — failed to copy dylib to stable workspace path {}: {e}",
+                    stable_dest.display()
                 );
             }
         }
@@ -127,15 +150,31 @@ fn probe_sdk_version() -> Option<String> {
     if v.is_empty() { None } else { Some(v) }
 }
 
-fn locate_target_dir() -> Option<PathBuf> {
-    let out = env::var("OUT_DIR").ok().map(PathBuf::from)?;
-    let mut p = out.as_path();
-    for _ in 0..4 {
-        p = p.parent()?;
+/// Where the final binary will sit (`OUT_DIR.parent^3`). Same shape
+/// as the helper in `crates/zen-apple-speech/build.rs` — kept
+/// duplicated rather than factored into a tiny shared crate so each
+/// build script stays self-contained (build-time deps cost cold-build
+/// minutes more than they're worth here).
+fn next_to_binary_dir(out_dir: &PathBuf) -> Option<PathBuf> {
+    out_dir
+        .parent()
+        .and_then(|p| p.parent())
+        .and_then(|p| p.parent())
+        .map(|p| p.to_path_buf())
+}
+
+/// Walks up from OUT_DIR until it finds an ancestor named `target/`.
+/// Handles both no-`--target` (4 levels) and `--target <triple>`
+/// (5 levels) layouts. Returns the workspace's `target/` so callers
+/// can land at the stable bundle path the Tauri config expects.
+fn locate_workspace_target_dir(out_dir: &PathBuf) -> Option<PathBuf> {
+    let mut p = out_dir.as_path();
+    for _ in 0..8 {
+        let parent = p.parent()?;
+        if parent.file_name().map(|n| n == "target").unwrap_or(false) {
+            return Some(parent.to_path_buf());
+        }
+        p = parent;
     }
-    if p.file_name().map(|n| n == "target").unwrap_or(false) {
-        Some(p.to_path_buf())
-    } else {
-        None
-    }
+    None
 }
