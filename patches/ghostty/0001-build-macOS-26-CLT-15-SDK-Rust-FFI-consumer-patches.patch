@@ -670,7 +670,7 @@ index fcf3055f8..a221b9137 100644
      run_lib.addFileArg(output_ir);
      run_lib.step.dependOn(&run_ir.step);
 diff --git a/src/main_c.zig b/src/main_c.zig
-index 9d48f376d..192d3cfea 100644
+index 9d48f376d..d5e7bc337 100644
 --- a/src/main_c.zig
 +++ b/src/main_c.zig
 @@ -38,7 +38,25 @@ comptime {
@@ -689,7 +689,7 @@ index 9d48f376d..192d3cfea 100644
 +    // &@field(...) not the bare function value.
 +    if (@hasDecl(apprt.runtime, "CAPI")) {
 +        const CAPI = apprt.runtime.CAPI;
-+        inline for (std.meta.declarations(CAPI)) |decl| {
++        for (std.meta.declarations(CAPI)) |decl| {
 +            const field = @field(CAPI, decl.name);
 +            switch (@typeInfo(@TypeOf(field))) {
 +                .@"fn" => @export(&@field(CAPI, decl.name), .{ .name = decl.name }),
