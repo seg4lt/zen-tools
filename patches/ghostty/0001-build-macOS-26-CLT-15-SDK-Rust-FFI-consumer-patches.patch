@@ -98,7 +98,7 @@ index c573c3910..bdeda6a2b 100644
              .target = &step.rootModuleTarget(),
              .verbose = false,
 diff --git a/src/apprt/embedded.zig b/src/apprt/embedded.zig
-index 0d5a4f8da..5322f99f4 100644
+index 0d5a4f8da..d52469f43 100644
 --- a/src/apprt/embedded.zig
 +++ b/src/apprt/embedded.zig
 @@ -1394,7 +1394,7 @@ pub const CAPI = struct {
@@ -106,7 +106,7 @@ index 0d5a4f8da..5322f99f4 100644
  
      /// Create a new app.
 -    export fn ghostty_app_new(
-+    pub fn ghostty_app_new(
++    pub export fn ghostty_app_new(
          opts: *const apprt.runtime.App.Options,
          config: *const Config,
      ) ?*App {
@@ -115,7 +115,7 @@ index 0d5a4f8da..5322f99f4 100644
      /// Tick the event loop. This should be called whenever the "wakeup"
      /// callback is invoked for the runtime.
 -    export fn ghostty_app_tick(v: *App) void {
-+    pub fn ghostty_app_tick(v: *App) void {
++    pub export fn ghostty_app_tick(v: *App) void {
          v.core_app.tick(v) catch |err| {
              log.err("error app tick err={}", .{err});
          };
@@ -123,12 +123,12 @@ index 0d5a4f8da..5322f99f4 100644
  
      /// Return the userdata associated with the app.
 -    export fn ghostty_app_userdata(v: *App) ?*anyopaque {
-+    pub fn ghostty_app_userdata(v: *App) ?*anyopaque {
++    pub export fn ghostty_app_userdata(v: *App) ?*anyopaque {
          return v.opts.userdata;
      }
  
 -    export fn ghostty_app_free(v: *App) void {
-+    pub fn ghostty_app_free(v: *App) void {
++    pub export fn ghostty_app_free(v: *App) void {
          const core_app = v.core_app;
          v.terminate();
          global.alloc.destroy(v);
@@ -137,7 +137,7 @@ index 0d5a4f8da..5322f99f4 100644
  
      /// Update the focused state of the app.
 -    export fn ghostty_app_set_focus(
-+    pub fn ghostty_app_set_focus(
++    pub export fn ghostty_app_set_focus(
          app: *App,
          focused: bool,
      ) void {
@@ -146,7 +146,7 @@ index 0d5a4f8da..5322f99f4 100644
      /// true if the key was captured by the app, in which case the caller
      /// should not process the key.
 -    export fn ghostty_app_key(
-+    pub fn ghostty_app_key(
++    pub export fn ghostty_app_key(
          app: *App,
          event: KeyEvent,
      ) bool {
@@ -155,7 +155,7 @@ index 0d5a4f8da..5322f99f4 100644
      /// is important because things like trigger sequences are only
      /// valid until the next key event.
 -    export fn ghostty_app_key_is_binding(
-+    pub fn ghostty_app_key_is_binding(
++    pub export fn ghostty_app_key_is_binding(
          app: *App,
          event: KeyEvent,
      ) bool {
@@ -164,7 +164,7 @@ index 0d5a4f8da..5322f99f4 100644
      /// Notify the app that the keyboard was changed. This causes the
      /// keyboard layout to be reloaded from the OS.
 -    export fn ghostty_app_keyboard_changed(v: *App) void {
-+    pub fn ghostty_app_keyboard_changed(v: *App) void {
++    pub export fn ghostty_app_keyboard_changed(v: *App) void {
          v.reloadKeymap() catch |err| {
              log.err("error reloading keyboard map err={}", .{err});
              return;
@@ -173,7 +173,7 @@ index 0d5a4f8da..5322f99f4 100644
  
      /// Open the configuration.
 -    export fn ghostty_app_open_config(v: *App) void {
-+    pub fn ghostty_app_open_config(v: *App) void {
++    pub export fn ghostty_app_open_config(v: *App) void {
          _ = v.performAction(.app, .open_config, {}) catch |err| {
              log.err("error reloading config err={}", .{err});
              return;
@@ -182,7 +182,7 @@ index 0d5a4f8da..5322f99f4 100644
      /// Update the configuration to the provided config. This will propagate
      /// to all surfaces as well.
 -    export fn ghostty_app_update_config(
-+    pub fn ghostty_app_update_config(
++    pub export fn ghostty_app_update_config(
          v: *App,
          config: *const Config,
      ) void {
@@ -191,19 +191,19 @@ index 0d5a4f8da..5322f99f4 100644
  
      /// Returns true if the app needs to confirm quitting.
 -    export fn ghostty_app_needs_confirm_quit(v: *App) bool {
-+    pub fn ghostty_app_needs_confirm_quit(v: *App) bool {
++    pub export fn ghostty_app_needs_confirm_quit(v: *App) bool {
          return v.core_app.needsConfirmQuit();
      }
  
      /// Returns true if the app has global keybinds.
 -    export fn ghostty_app_has_global_keybinds(v: *App) bool {
-+    pub fn ghostty_app_has_global_keybinds(v: *App) bool {
++    pub export fn ghostty_app_has_global_keybinds(v: *App) bool {
          return v.hasGlobalKeybinds();
      }
  
      /// Update the color scheme of the app.
 -    export fn ghostty_app_set_color_scheme(v: *App, scheme_raw: c_int) void {
-+    pub fn ghostty_app_set_color_scheme(v: *App, scheme_raw: c_int) void {
++    pub export fn ghostty_app_set_color_scheme(v: *App, scheme_raw: c_int) void {
          const scheme = std.meta.intToEnum(apprt.ColorScheme, scheme_raw) catch {
              log.warn(
                  "invalid color scheme to ghostty_surface_set_color_scheme value={}",
@@ -212,13 +212,13 @@ index 0d5a4f8da..5322f99f4 100644
  
      /// Returns initial surface options.
 -    export fn ghostty_surface_config_new() apprt.Surface.Options {
-+    pub fn ghostty_surface_config_new() apprt.Surface.Options {
++    pub export fn ghostty_surface_config_new() apprt.Surface.Options {
          return .{};
      }
  
      /// Create a new surface as part of an app.
 -    export fn ghostty_surface_new(
-+    pub fn ghostty_surface_new(
++    pub export fn ghostty_surface_new(
          app: *App,
          opts: *const apprt.Surface.Options,
      ) ?*Surface {
@@ -227,25 +227,25 @@ index 0d5a4f8da..5322f99f4 100644
      }
  
 -    export fn ghostty_surface_free(ptr: *Surface) void {
-+    pub fn ghostty_surface_free(ptr: *Surface) void {
++    pub export fn ghostty_surface_free(ptr: *Surface) void {
          ptr.app.closeSurface(ptr);
      }
  
      /// Returns the userdata associated with the surface.
 -    export fn ghostty_surface_userdata(surface: *Surface) ?*anyopaque {
-+    pub fn ghostty_surface_userdata(surface: *Surface) ?*anyopaque {
++    pub export fn ghostty_surface_userdata(surface: *Surface) ?*anyopaque {
          return surface.userdata;
      }
  
      /// Returns the app associated with a surface.
 -    export fn ghostty_surface_app(surface: *Surface) *App {
-+    pub fn ghostty_surface_app(surface: *Surface) *App {
++    pub export fn ghostty_surface_app(surface: *Surface) *App {
          return surface.app;
      }
  
      /// Returns the config to use for surfaces that inherit from this one.
 -    export fn ghostty_surface_inherited_config(
-+    pub fn ghostty_surface_inherited_config(
++    pub export fn ghostty_surface_inherited_config(
          surface: *Surface,
          source: apprt.surface.NewSurfaceContext,
      ) Surface.Options {
@@ -254,7 +254,7 @@ index 0d5a4f8da..5322f99f4 100644
  
      /// Update the configuration to the provided config for only this surface.
 -    export fn ghostty_surface_update_config(
-+    pub fn ghostty_surface_update_config(
++    pub export fn ghostty_surface_update_config(
          surface: *Surface,
          config: *const Config,
      ) void {
@@ -263,26 +263,26 @@ index 0d5a4f8da..5322f99f4 100644
  
      /// Returns true if the surface needs to confirm quitting.
 -    export fn ghostty_surface_needs_confirm_quit(surface: *Surface) bool {
-+    pub fn ghostty_surface_needs_confirm_quit(surface: *Surface) bool {
++    pub export fn ghostty_surface_needs_confirm_quit(surface: *Surface) bool {
          return surface.core_surface.needsConfirmQuit();
      }
  
      /// Returns true if the surface process has exited.
 -    export fn ghostty_surface_process_exited(surface: *Surface) bool {
-+    pub fn ghostty_surface_process_exited(surface: *Surface) bool {
++    pub export fn ghostty_surface_process_exited(surface: *Surface) bool {
          return surface.core_surface.child_exited;
      }
  
      /// Returns true if the surface has a selection.
 -    export fn ghostty_surface_has_selection(surface: *Surface) bool {
-+    pub fn ghostty_surface_has_selection(surface: *Surface) bool {
++    pub export fn ghostty_surface_has_selection(surface: *Surface) bool {
          return surface.core_surface.hasSelection();
      }
  
      /// Same as ghostty_surface_read_text but reads from the user selection,
      /// if any.
 -    export fn ghostty_surface_read_selection(
-+    pub fn ghostty_surface_read_selection(
++    pub export fn ghostty_surface_read_selection(
          surface: *Surface,
          result: *Text,
      ) bool {
@@ -291,7 +291,7 @@ index 0d5a4f8da..5322f99f4 100644
      /// often. We recommend that callers cache the result and throttle
      /// calls to this function.
 -    export fn ghostty_surface_read_text(
-+    pub fn ghostty_surface_read_text(
++    pub export fn ghostty_surface_read_text(
          surface: *Surface,
          sel: Selection,
          result: *Text,
@@ -300,33 +300,33 @@ index 0d5a4f8da..5322f99f4 100644
      }
  
 -    export fn ghostty_surface_free_text(ptr: *Text) void {
-+    pub fn ghostty_surface_free_text(ptr: *Text) void {
++    pub export fn ghostty_surface_free_text(ptr: *Text) void {
          ptr.deinit();
      }
  
      /// Tell the surface that it needs to schedule a render
 -    export fn ghostty_surface_refresh(surface: *Surface) void {
-+    pub fn ghostty_surface_refresh(surface: *Surface) void {
++    pub export fn ghostty_surface_refresh(surface: *Surface) void {
          surface.refresh();
      }
  
      /// Tell the surface that it needs to schedule a render
      /// call as soon as possible (NOW if possible).
 -    export fn ghostty_surface_draw(surface: *Surface) void {
-+    pub fn ghostty_surface_draw(surface: *Surface) void {
++    pub export fn ghostty_surface_draw(surface: *Surface) void {
          surface.draw();
      }
  
      /// Update the size of a surface. This will trigger resize notifications
      /// to the pty and the renderer.
 -    export fn ghostty_surface_set_size(surface: *Surface, w: u32, h: u32) void {
-+    pub fn ghostty_surface_set_size(surface: *Surface, w: u32, h: u32) void {
++    pub export fn ghostty_surface_set_size(surface: *Surface, w: u32, h: u32) void {
          surface.updateSize(w, h);
      }
  
      /// Return the size information a surface has.
 -    export fn ghostty_surface_size(surface: *Surface) SurfaceSize {
-+    pub fn ghostty_surface_size(surface: *Surface) SurfaceSize {
++    pub export fn ghostty_surface_size(surface: *Surface) SurfaceSize {
          const grid_size = surface.core_surface.size.grid();
          return .{
              .columns = grid_size.columns,
@@ -335,7 +335,7 @@ index 0d5a4f8da..5322f99f4 100644
  
      /// Update the color scheme of the surface.
 -    export fn ghostty_surface_set_color_scheme(surface: *Surface, scheme_raw: c_int) void {
-+    pub fn ghostty_surface_set_color_scheme(surface: *Surface, scheme_raw: c_int) void {
++    pub export fn ghostty_surface_set_color_scheme(surface: *Surface, scheme_raw: c_int) void {
          const scheme = std.meta.intToEnum(apprt.ColorScheme, scheme_raw) catch {
              log.warn(
                  "invalid color scheme to ghostty_surface_set_color_scheme value={}",
@@ -344,19 +344,19 @@ index 0d5a4f8da..5322f99f4 100644
  
      /// Update the content scale of the surface.
 -    export fn ghostty_surface_set_content_scale(surface: *Surface, x: f64, y: f64) void {
-+    pub fn ghostty_surface_set_content_scale(surface: *Surface, x: f64, y: f64) void {
++    pub export fn ghostty_surface_set_content_scale(surface: *Surface, x: f64, y: f64) void {
          surface.updateContentScale(x, y);
      }
  
      /// Update the focused state of a surface.
 -    export fn ghostty_surface_set_focus(surface: *Surface, focused: bool) void {
-+    pub fn ghostty_surface_set_focus(surface: *Surface, focused: bool) void {
++    pub export fn ghostty_surface_set_focus(surface: *Surface, focused: bool) void {
          surface.focusCallback(focused);
      }
  
      /// Update the occlusion state of a surface.
 -    export fn ghostty_surface_set_occlusion(surface: *Surface, visible: bool) void {
-+    pub fn ghostty_surface_set_occlusion(surface: *Surface, visible: bool) void {
++    pub export fn ghostty_surface_set_occlusion(surface: *Surface, visible: bool) void {
          surface.occlusionCallback(visible);
      }
  
@@ -365,7 +365,7 @@ index 0d5a4f8da..5322f99f4 100644
      /// key translation but should NOT be sent back via the `_key`
      /// function -- the original mods should be used for that.
 -    export fn ghostty_surface_key_translation_mods(
-+    pub fn ghostty_surface_key_translation_mods(
++    pub export fn ghostty_surface_key_translation_mods(
          surface: *Surface,
          mods_raw: c_int,
      ) c_int {
@@ -374,7 +374,7 @@ index 0d5a4f8da..5322f99f4 100644
      /// This will handle the keymap translation and send the appropriate
      /// key and char events.
 -    export fn ghostty_surface_key(
-+    pub fn ghostty_surface_key(
++    pub export fn ghostty_surface_key(
          surface: *Surface,
          event: KeyEvent,
      ) bool {
@@ -383,7 +383,7 @@ index 0d5a4f8da..5322f99f4 100644
      /// is important because things like trigger sequences are only
      /// valid until the next key event.
 -    export fn ghostty_surface_key_is_binding(
-+    pub fn ghostty_surface_key_is_binding(
++    pub export fn ghostty_surface_key_is_binding(
          surface: *Surface,
          event: KeyEvent,
          c_flags: ?*input.Binding.Flags.C,
@@ -392,7 +392,7 @@ index 0d5a4f8da..5322f99f4 100644
      /// so this isn't useful for sending escape sequences. For that,
      /// individual key input should be used.
 -    export fn ghostty_surface_text(
-+    pub fn ghostty_surface_text(
++    pub export fn ghostty_surface_text(
          surface: *Surface,
          ptr: [*]const u8,
          len: usize,
@@ -401,7 +401,7 @@ index 0d5a4f8da..5322f99f4 100644
      /// Set the preedit text for the surface. This is used for IME
      /// composition. If the length is 0, then the preedit text is cleared.
 -    export fn ghostty_surface_preedit(
-+    pub fn ghostty_surface_preedit(
++    pub export fn ghostty_surface_preedit(
          surface: *Surface,
          ptr: [*]const u8,
          len: usize,
@@ -410,13 +410,13 @@ index 0d5a4f8da..5322f99f4 100644
      /// Returns true if the surface currently has mouse capturing
      /// enabled.
 -    export fn ghostty_surface_mouse_captured(surface: *Surface) bool {
-+    pub fn ghostty_surface_mouse_captured(surface: *Surface) bool {
++    pub export fn ghostty_surface_mouse_captured(surface: *Surface) bool {
          return surface.core_surface.mouseCaptured();
      }
  
      /// Tell the surface that it needs to schedule a render
 -    export fn ghostty_surface_mouse_button(
-+    pub fn ghostty_surface_mouse_button(
++    pub export fn ghostty_surface_mouse_button(
          surface: *Surface,
          action: input.MouseButtonState,
          button: input.MouseButton,
@@ -425,7 +425,7 @@ index 0d5a4f8da..5322f99f4 100644
  
      /// Update the mouse position within the view.
 -    export fn ghostty_surface_mouse_pos(
-+    pub fn ghostty_surface_mouse_pos(
++    pub export fn ghostty_surface_mouse_pos(
          surface: *Surface,
          x: f64,
          y: f64,
@@ -434,7 +434,7 @@ index 0d5a4f8da..5322f99f4 100644
      }
  
 -    export fn ghostty_surface_mouse_scroll(
-+    pub fn ghostty_surface_mouse_scroll(
++    pub export fn ghostty_surface_mouse_scroll(
          surface: *Surface,
          x: f64,
          y: f64,
@@ -443,7 +443,7 @@ index 0d5a4f8da..5322f99f4 100644
      }
  
 -    export fn ghostty_surface_mouse_pressure(
-+    pub fn ghostty_surface_mouse_pressure(
++    pub export fn ghostty_surface_mouse_pressure(
          surface: *Surface,
          stage_raw: u32,
          pressure: f64,
@@ -452,7 +452,7 @@ index 0d5a4f8da..5322f99f4 100644
      }
  
 -    export fn ghostty_surface_ime_point(
-+    pub fn ghostty_surface_ime_point(
++    pub export fn ghostty_surface_ime_point(
          surface: *Surface,
          x: *f64,
          y: *f64,
@@ -461,13 +461,13 @@ index 0d5a4f8da..5322f99f4 100644
      /// Request that the surface become closed. This will go through the
      /// normal trigger process that a close surface input binding would.
 -    export fn ghostty_surface_request_close(ptr: *Surface) void {
-+    pub fn ghostty_surface_request_close(ptr: *Surface) void {
++    pub export fn ghostty_surface_request_close(ptr: *Surface) void {
          ptr.core_surface.close();
      }
  
      /// Request that the surface split in the given direction.
 -    export fn ghostty_surface_split(ptr: *Surface, direction: apprt.action.SplitDirection) void {
-+    pub fn ghostty_surface_split(ptr: *Surface, direction: apprt.action.SplitDirection) void {
++    pub export fn ghostty_surface_split(ptr: *Surface, direction: apprt.action.SplitDirection) void {
          _ = ptr.app.performAction(
              .{ .surface = &ptr.core_surface },
              .new_split,
@@ -476,7 +476,7 @@ index 0d5a4f8da..5322f99f4 100644
  
      /// Focus on the next split (if any).
 -    export fn ghostty_surface_split_focus(
-+    pub fn ghostty_surface_split_focus(
++    pub export fn ghostty_surface_split_focus(
          ptr: *Surface,
          direction: apprt.action.GotoSplit,
      ) void {
@@ -485,7 +485,7 @@ index 0d5a4f8da..5322f99f4 100644
      /// move relative to the focused split. `amount` is a fractional value
      /// between 0 and 1 that specifies by how much the divider will move.
 -    export fn ghostty_surface_split_resize(
-+    pub fn ghostty_surface_split_resize(
++    pub export fn ghostty_surface_split_resize(
          ptr: *Surface,
          direction: apprt.action.ResizeSplit.Direction,
          amount: u16,
@@ -494,7 +494,7 @@ index 0d5a4f8da..5322f99f4 100644
  
      /// Equalize the size of all splits in the current window.
 -    export fn ghostty_surface_split_equalize(ptr: *Surface) void {
-+    pub fn ghostty_surface_split_equalize(ptr: *Surface) void {
++    pub export fn ghostty_surface_split_equalize(ptr: *Surface) void {
          _ = ptr.app.performAction(
              .{ .surface = &ptr.core_surface },
              .equalize_splits,
@@ -503,7 +503,7 @@ index 0d5a4f8da..5322f99f4 100644
  
      /// Invoke an action on the surface.
 -    export fn ghostty_surface_binding_action(
-+    pub fn ghostty_surface_binding_action(
++    pub export fn ghostty_surface_binding_action(
          ptr: *Surface,
          action_ptr: [*]const u8,
          action_len: usize,
@@ -512,7 +512,7 @@ index 0d5a4f8da..5322f99f4 100644
      /// This can only be called once for a given request. Once it is called
      /// with a request the request pointer will be invalidated.
 -    export fn ghostty_surface_complete_clipboard_request(
-+    pub fn ghostty_surface_complete_clipboard_request(
++    pub export fn ghostty_surface_complete_clipboard_request(
          ptr: *Surface,
          str: [*:0]const u8,
          state: *apprt.ClipboardRequest,
@@ -521,7 +521,7 @@ index 0d5a4f8da..5322f99f4 100644
      }
  
 -    export fn ghostty_surface_inspector(ptr: *Surface) ?*Inspector {
-+    pub fn ghostty_surface_inspector(ptr: *Surface) ?*Inspector {
++    pub export fn ghostty_surface_inspector(ptr: *Surface) ?*Inspector {
          return ptr.initInspector() catch |err| {
              log.err("error initializing inspector err={}", .{err});
              return null;
@@ -529,22 +529,22 @@ index 0d5a4f8da..5322f99f4 100644
      }
  
 -    export fn ghostty_inspector_free(ptr: *Surface) void {
-+    pub fn ghostty_inspector_free(ptr: *Surface) void {
++    pub export fn ghostty_inspector_free(ptr: *Surface) void {
          ptr.freeInspector();
      }
  
 -    export fn ghostty_inspector_set_size(ptr: *Inspector, w: u32, h: u32) void {
-+    pub fn ghostty_inspector_set_size(ptr: *Inspector, w: u32, h: u32) void {
++    pub export fn ghostty_inspector_set_size(ptr: *Inspector, w: u32, h: u32) void {
          ptr.updateSize(w, h);
      }
  
 -    export fn ghostty_inspector_set_content_scale(ptr: *Inspector, x: f64, y: f64) void {
-+    pub fn ghostty_inspector_set_content_scale(ptr: *Inspector, x: f64, y: f64) void {
++    pub export fn ghostty_inspector_set_content_scale(ptr: *Inspector, x: f64, y: f64) void {
          ptr.updateContentScale(x, y);
      }
  
 -    export fn ghostty_inspector_mouse_button(
-+    pub fn ghostty_inspector_mouse_button(
++    pub export fn ghostty_inspector_mouse_button(
          ptr: *Inspector,
          action: input.MouseButtonState,
          button: input.MouseButton,
@@ -553,12 +553,12 @@ index 0d5a4f8da..5322f99f4 100644
      }
  
 -    export fn ghostty_inspector_mouse_pos(ptr: *Inspector, x: f64, y: f64) void {
-+    pub fn ghostty_inspector_mouse_pos(ptr: *Inspector, x: f64, y: f64) void {
++    pub export fn ghostty_inspector_mouse_pos(ptr: *Inspector, x: f64, y: f64) void {
          ptr.cursorPosCallback(x, y);
      }
  
 -    export fn ghostty_inspector_mouse_scroll(
-+    pub fn ghostty_inspector_mouse_scroll(
++    pub export fn ghostty_inspector_mouse_scroll(
          ptr: *Inspector,
          x: f64,
          y: f64,
@@ -567,7 +567,7 @@ index 0d5a4f8da..5322f99f4 100644
      }
  
 -    export fn ghostty_inspector_key(
-+    pub fn ghostty_inspector_key(
++    pub export fn ghostty_inspector_key(
          ptr: *Inspector,
          action: input.Action,
          key: input.Key,
@@ -576,7 +576,7 @@ index 0d5a4f8da..5322f99f4 100644
      }
  
 -    export fn ghostty_inspector_text(
-+    pub fn ghostty_inspector_text(
++    pub export fn ghostty_inspector_text(
          ptr: *Inspector,
          str: [*:0]const u8,
      ) void {
@@ -584,7 +584,7 @@ index 0d5a4f8da..5322f99f4 100644
      }
  
 -    export fn ghostty_inspector_set_focus(ptr: *Inspector, focused: bool) void {
-+    pub fn ghostty_inspector_set_focus(ptr: *Inspector, focused: bool) void {
++    pub export fn ghostty_inspector_set_focus(ptr: *Inspector, focused: bool) void {
          ptr.focusCallback(focused);
      }
  
@@ -593,7 +593,7 @@ index 0d5a4f8da..5322f99f4 100644
      /// This uses an undocumented, non-public API because this is what
      /// every terminal appears to use, including Terminal.app.
 -    export fn ghostty_set_window_background_blur(
-+    pub fn ghostty_set_window_background_blur(
++    pub export fn ghostty_set_window_background_blur(
          app: *App,
          window: *anyopaque,
      ) void {
@@ -602,7 +602,7 @@ index 0d5a4f8da..5322f99f4 100644
      // Darwin-only C APIs.
      const Darwin = struct {
 -        export fn ghostty_surface_set_display_id(ptr: *Surface, display_id: u32) void {
-+        pub fn ghostty_surface_set_display_id(ptr: *Surface, display_id: u32) void {
++        pub export fn ghostty_surface_set_display_id(ptr: *Surface, display_id: u32) void {
              const surface = &ptr.core_surface;
              _ = surface.renderer_thread.mailbox.push(
                  .{ .macos_display_id = display_id },
@@ -611,7 +611,7 @@ index 0d5a4f8da..5322f99f4 100644
          /// regardless of the selected text. If coretext is not in use
          /// then this will return nothing.
 -        export fn ghostty_surface_quicklook_font(ptr: *Surface) ?*anyopaque {
-+        pub fn ghostty_surface_quicklook_font(ptr: *Surface) ?*anyopaque {
++        pub export fn ghostty_surface_quicklook_font(ptr: *Surface) ?*anyopaque {
              // For non-CoreText we just return null.
              if (comptime font.options.backend != .coretext) {
                  return null;
@@ -620,7 +620,7 @@ index 0d5a4f8da..5322f99f4 100644
          ///
          /// This does not modify the selection active on the surface (if any).
 -        export fn ghostty_surface_quicklook_word(
-+        pub fn ghostty_surface_quicklook_word(
++        pub export fn ghostty_surface_quicklook_word(
              ptr: *Surface,
              result: *Text,
          ) bool {
@@ -629,12 +629,12 @@ index 0d5a4f8da..5322f99f4 100644
          }
  
 -        export fn ghostty_inspector_metal_init(ptr: *Inspector, device: objc.c.id) bool {
-+        pub fn ghostty_inspector_metal_init(ptr: *Inspector, device: objc.c.id) bool {
++        pub export fn ghostty_inspector_metal_init(ptr: *Inspector, device: objc.c.id) bool {
              return ptr.initMetal(.fromId(device));
          }
  
 -        export fn ghostty_inspector_metal_render(
-+        pub fn ghostty_inspector_metal_render(
++        pub export fn ghostty_inspector_metal_render(
              ptr: *Inspector,
              command_buffer: objc.c.id,
              descriptor: objc.c.id,
@@ -643,7 +643,7 @@ index 0d5a4f8da..5322f99f4 100644
          }
  
 -        export fn ghostty_inspector_metal_shutdown(ptr: *Inspector) void {
-+        pub fn ghostty_inspector_metal_shutdown(ptr: *Inspector) void {
++        pub export fn ghostty_inspector_metal_shutdown(ptr: *Inspector) void {
              if (ptr.backend) |v| {
                  v.deinit();
                  ptr.backend = null;
@@ -670,7 +670,7 @@ index fcf3055f8..a221b9137 100644
      run_lib.addFileArg(output_ir);
      run_lib.step.dependOn(&run_ir.step);
 diff --git a/src/main_c.zig b/src/main_c.zig
-index 9d48f376d..d5e7bc337 100644
+index 9d48f376d..9b08b1333 100644
 --- a/src/main_c.zig
 +++ b/src/main_c.zig
 @@ -38,7 +38,25 @@ comptime {
@@ -678,21 +678,21 @@ index 9d48f376d..d5e7bc337 100644
  
      // Any apprt-specific C API, mainly libghostty for apprt.embedded.
 -    if (@hasDecl(apprt.runtime, "CAPI")) _ = apprt.runtime.CAPI;
-+    // PATCH (tauri-terminal): In Zig 0.15.x static-library builds, lazy
-+    // analysis means `pub fn` inside a struct is not code-generated unless
-+    // explicitly forced. The CAPI functions in apprt/embedded.zig are `pub
-+    // fn` (not `pub export fn`) so that @export below is the SOLE exporter
-+    // of each symbol — having both `export fn` and @export on the same name
-+    // causes "exported symbol collision". We iterate std.meta.declarations
-+    // (which returns only pub decls) and call @export for each function.
-+    // Zig 0.15.x: @export requires a *pointer* to the function — use
-+    // &@field(...) not the bare function value.
++    // PATCH (tauri-terminal): In Zig 0.15.x lazy-analysis builds, `pub
++    // export fn` inside a struct is only code-generated (and its symbol
++    // emitted) when a pointer to the function is taken — referencing the
++    // struct type or calling @field alone is insufficient.
++    //
++    // We iterate all pub declarations and take &@field(...) for each fn.
++    // Taking a function pointer forces Zig to analyse and emit the symbol
++    // via the `pub export fn` declaration. We must NOT also call @export —
++    // that causes "exported symbol collision" because `pub export fn` already
++    // registers the symbol once the function is compiled.
 +    if (@hasDecl(apprt.runtime, "CAPI")) {
 +        const CAPI = apprt.runtime.CAPI;
 +        for (std.meta.declarations(CAPI)) |decl| {
-+            const field = @field(CAPI, decl.name);
-+            switch (@typeInfo(@TypeOf(field))) {
-+                .@"fn" => @export(&@field(CAPI, decl.name), .{ .name = decl.name }),
++            switch (@typeInfo(@TypeOf(@field(CAPI, decl.name)))) {
++                .@"fn" => _ = &@field(CAPI, decl.name),
 +                else => {},
 +            }
 +        }
