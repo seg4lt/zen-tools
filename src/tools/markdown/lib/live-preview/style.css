@@ -125,6 +125,8 @@
   text-align: left;
   white-space: pre-wrap;
   word-break: break-word;
+  max-height: 8rem;
+  overflow-y: auto;
 }
 
 /* Hover-only copy toolbar floating over the diagram's top-right.

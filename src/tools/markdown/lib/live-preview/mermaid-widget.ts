@@ -96,14 +96,22 @@ async function renderMermaid(source: string): Promise<string> {
   const cached = renderCache.get(source);
   if (cached !== undefined) return cached;
   const lib = await loadMermaid();
-  const { svg } = await lib.render(uniqueId(), source);
-  renderCache.set(source, svg);
-  if (renderCache.size > RENDER_CACHE_LIMIT) {
-    // FIFO eviction — drop the oldest entry.
-    const first = renderCache.keys().next().value;
-    if (first !== undefined) renderCache.delete(first);
+  const id = uniqueId();
+  try {
+    const { svg } = await lib.render(id, source);
+    renderCache.set(source, svg);
+    if (renderCache.size > RENDER_CACHE_LIMIT) {
+      // FIFO eviction — drop the oldest entry.
+      const first = renderCache.keys().next().value;
+      if (first !== undefined) renderCache.delete(first);
+    }
+    return svg;
+  } finally {
+    // mermaid may inject a temporary element into document.body during
+    // rendering (including on error).  Always remove it so stray error
+    // icons never leak into the page.
+    document.getElementById(id)?.remove();
   }
-  return svg;
 }
 
 // ────────────────────────────────────────────────────────────────────────
@@ -298,13 +306,12 @@ export class MermaidWidget extends WidgetType {
       })
       .catch((err: unknown) => {
         status.remove();
+        const message = err instanceof Error ? err.message : String(err);
         const errBox = document.createElement("pre");
         errBox.className = "cm-md-mermaid-error";
-        const message = err instanceof Error ? err.message : String(err);
         errBox.textContent = `mermaid error\n${message}`;
         wrapper.appendChild(errBox);
-        // Hide the toolbar — there's nothing to copy from a parse
-        // failure.
+        // Hide the toolbar — there's nothing to copy from a parse failure.
         toolbar.style.display = "none";
       });
 
