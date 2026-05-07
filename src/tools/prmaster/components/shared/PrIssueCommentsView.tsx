@@ -9,18 +9,24 @@
  * warms this list — clicking the Comments tab right after entering
  * the review page is instant.
  *
- * View-only for now: no compose / reply UI (use github.com if you
- * need to post a general comment). Each row links out to the
- * comment's permalink so the user can edit / quote upstream.
+ * Authors can edit their own comments in-app. The edit affordance
+ * (pencil icon) is only shown when `comment.authorLogin` matches
+ * the current authenticated user. Clicking switches the body to an
+ * inline textarea; saving PATCHes the comment via
+ * `prmasterTauri.editIssueComment` and refetches the list.
  */
 
-import { useQuery } from "@tanstack/react-query";
-import { ExternalLink, Loader2, MessageSquare, RefreshCw } from "lucide-react";
+import { useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+
+import { ExternalLink, Loader2, MessageSquare, Pencil, RefreshCw, X } from "lucide-react";
 import { open as openUrl } from "@tauri-apps/plugin-shell";
 import { Button } from "@zen-tools/ui";
 import { MarkdownView } from "@zen-tools/editor";
 import { prIssueCommentsQueryOptions } from "../../lib/queries";
+import { prmasterTauri } from "../../lib/tauri";
 import type { IssueComment, PrRef } from "../../lib/tauri";
+import { usePrMasterStore } from "../../store/prmaster-store";
 
 interface Props {
   pr: PrRef;
@@ -29,6 +35,8 @@ interface Props {
 export function PrIssueCommentsView({ pr }: Props) {
   const query = useQuery(prIssueCommentsQueryOptions(pr));
   const comments = query.data ?? [];
+  const { state } = usePrMasterStore();
+  const currentUser = state.currentUser;
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -76,7 +84,7 @@ export function PrIssueCommentsView({ pr }: Props) {
         ) : (
           <div className="flex flex-col gap-2 px-1 py-2">
             {comments.map((c) => (
-              <CommentCard key={c.id} comment={c} />
+              <CommentCard key={c.id} comment={c} pr={pr} currentUser={currentUser} />
             ))}
           </div>
         )}
@@ -85,11 +93,57 @@ export function PrIssueCommentsView({ pr }: Props) {
   );
 }
 
-function CommentCard({ comment }: { comment: IssueComment }) {
+function CommentCard({
+  comment,
+  pr,
+  currentUser,
+}: {
+  comment: IssueComment;
+  pr: PrRef;
+  currentUser: string | null;
+}) {
+  const queryClient = useQueryClient();
+  const [editMode, setEditMode] = useState(false);
+  const [editBody, setEditBody] = useState(comment.body);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+
+  const isOwn =
+    !!currentUser &&
+    !!comment.authorLogin &&
+    comment.authorLogin === currentUser;
+
   const avatarUrl = comment.authorLogin
     ? `https://avatars.githubusercontent.com/${comment.authorLogin}?size=64`
     : null;
   const initials = (comment.authorLogin ?? "??").slice(0, 2).toUpperCase();
+
+  async function handleSave() {
+    const trimmed = editBody.trim();
+    if (!trimmed) return;
+    setSaving(true);
+    setSaveError(null);
+    try {
+      await prmasterTauri.editIssueComment({
+        pr,
+        commentId: comment.id,
+        body: trimmed,
+      });
+      await queryClient.invalidateQueries({ queryKey: prIssueCommentsQueryOptions(pr).queryKey });
+      setEditMode(false);
+    } catch (err) {
+      setSaveError(formatError(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function handleCancel() {
+    setEditBody(comment.body);
+    setSaveError(null);
+    setEditMode(false);
+  }
+
   return (
     <div className="flex items-start gap-3 py-2">
       {avatarUrl ? (
@@ -124,25 +178,100 @@ function CommentCard({ comment }: { comment: IssueComment }) {
               · edited
             </span>
           )}
-          {comment.htmlUrl && (
-            <button
-              type="button"
-              onClick={() => void openUrl(comment.htmlUrl!)}
-              className="ml-auto inline-flex shrink-0 items-center gap-1 text-muted-foreground hover:text-foreground"
-              title="Open this comment on GitHub"
-              aria-label="Open on GitHub"
-            >
-              <ExternalLink className="size-3" />
-            </button>
-          )}
+          <div className="ml-auto flex shrink-0 items-center gap-1">
+            {isOwn && !editMode && (
+              <button
+                type="button"
+                onClick={() => {
+                  setEditBody(comment.body);
+                  setSaveError(null);
+                  setEditMode(true);
+                }}
+                className="inline-flex items-center gap-1 text-muted-foreground hover:text-foreground"
+                title="Edit this comment"
+                aria-label="Edit comment"
+              >
+                <Pencil className="size-3" />
+              </button>
+            )}
+            {comment.htmlUrl && !editMode && (
+              <button
+                type="button"
+                onClick={() => void openUrl(comment.htmlUrl!)}
+                className="inline-flex items-center gap-1 text-muted-foreground hover:text-foreground"
+                title="Open this comment on GitHub"
+                aria-label="Open on GitHub"
+              >
+                <ExternalLink className="size-3" />
+              </button>
+            )}
+            {editMode && (
+              <button
+                type="button"
+                onClick={handleCancel}
+                disabled={saving}
+                className="inline-flex items-center gap-1 text-muted-foreground hover:text-foreground disabled:opacity-50"
+                title="Cancel edit"
+                aria-label="Cancel edit"
+              >
+                <X className="size-3" />
+              </button>
+            )}
+          </div>
         </div>
-        <div className="mt-1 text-sm">
-          {comment.body ? (
-            <MarkdownView body={comment.body} />
-          ) : (
-            <span className="italic text-muted-foreground">(no content)</span>
-          )}
-        </div>
+
+        {editMode ? (
+          <div className="mt-2 flex flex-col gap-2">
+            <textarea
+              className="w-full rounded border border-border bg-background px-2 py-1.5 text-sm leading-relaxed text-foreground outline-none focus:ring-1 focus:ring-ring"
+              rows={Math.max(3, editBody.split("\n").length)}
+              value={editBody}
+              onChange={(e) => setEditBody(e.target.value)}
+              onKeyDown={(e) => {
+                if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+                  e.preventDefault();
+                  void handleSave();
+                } else if (e.key === "Escape") {
+                  e.preventDefault();
+                  handleCancel();
+                }
+              }}
+              disabled={saving}
+              autoFocus
+            />
+            {saveError && (
+              <p className="text-xs text-destructive">{saveError}</p>
+            )}
+            <div className="flex items-center gap-2">
+              <Button
+                size="xs"
+                onClick={() => void handleSave()}
+                disabled={saving || !editBody.trim()}
+              >
+                {saving ? "Saving…" : "Save"}
+              </Button>
+              <Button
+                size="xs"
+                variant="ghost"
+                onClick={handleCancel}
+                disabled={saving}
+              >
+                Cancel
+              </Button>
+              <span className="text-[10px] text-muted-foreground">
+                ⌘+Enter to save · Esc to cancel
+              </span>
+            </div>
+          </div>
+        ) : (
+          <div className="mt-1 text-sm">
+            {comment.body ? (
+              <MarkdownView body={comment.body} />
+            ) : (
+              <span className="italic text-muted-foreground">(no content)</span>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );

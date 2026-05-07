@@ -108,6 +108,16 @@ export interface DiffViewerProps {
    *  threads whose root comment carries a `threadId` AND whose
    *  parent has `onResolve` get the button. */
   onResolve?: (input: { threadId: string }) => Promise<void> | void;
+  /** Called when the current user edits one of their own inline
+   *  review comments. Only shown when `currentUser` is provided and
+   *  matches the comment's `authorLogin`. */
+  onEditComment?: (input: {
+    commentId: string;
+    body: string;
+  }) => Promise<void> | void;
+  /** Login of the authenticated user. Used to show the edit
+   *  affordance only on comments the current user authored. */
+  currentUser?: string | null;
 }
 
 // ── Side translation ─────────────────────────────────────────────
@@ -153,6 +163,8 @@ export function DiffViewer({
   onAddComment,
   onReply,
   onResolve,
+  onEditComment,
+  currentUser,
 }: DiffViewerProps) {
   const [composer, setComposer] = useState<ComposerTarget | null>(null);
 
@@ -238,11 +250,19 @@ export function DiffViewer({
                 }
               : undefined
           }
+          onEdit={
+            onEditComment
+              ? async (commentId, body) => {
+                  await onEditComment({ commentId, body });
+                }
+              : undefined
+          }
+          currentUser={currentUser ?? null}
           onCancel={closeComposer}
         />
       );
     },
-    [onAddComment, onReply, onResolve, closeComposer],
+    [onAddComment, onReply, onResolve, onEditComment, currentUser, closeComposer],
   );
 
   // Pierre's `FileDiffOptions` — diff style, theme pair (auto-flips
@@ -341,6 +361,12 @@ interface AnnotationBlockProps {
   /** Resolve the entire thread. Only rendered when both this prop
    *  and the thread root's `threadId` are present. */
   onResolve?: (threadId: string) => Promise<void> | void;
+  /** Called when the current user edits one of their own inline
+   *  comments. `commentId` is the comment's stable REST id. */
+  onEdit?: (commentId: string, body: string) => Promise<void> | void;
+  /** Login of the authenticated user — passed to each `CommentRow`
+   *  so the edit pencil only appears on the user's own comments. */
+  currentUser?: string | null;
   onCancel: () => void;
 }
 
@@ -364,6 +390,8 @@ function AnnotationBlock({
   onSubmit,
   onReply,
   onResolve,
+  onEdit,
+  currentUser,
   onCancel,
 }: AnnotationBlockProps) {
   const [replyOpen, setReplyOpen] = useState(false);
@@ -441,7 +469,20 @@ function AnnotationBlock({
           style={{ display: "flex", flexDirection: "column", gap: 12 }}
         >
           {comments.map((c) => (
-            <CommentRow key={c.id} comment={c} />
+            <CommentRow
+              key={c.id}
+              comment={c}
+              isCurrentUser={
+                !!currentUser &&
+                !!c.authorLogin &&
+                c.authorLogin === currentUser
+              }
+              onEdit={
+                onEdit
+                  ? (body) => onEdit(c.id, body)
+                  : undefined
+              }
+            />
           ))}
         </div>
       )}
@@ -618,14 +659,84 @@ function formatSubmitError(err: unknown): string {
 
 /** One comment row inside an annotation card — avatar + author +
  *  relative timestamp on the header line, body underneath. Matches
- *  GitHub / diffs.com layout. */
-function CommentRow({ comment }: { comment: InlineComment }) {
+ *  GitHub / diffs.com layout.
+ *
+ *  When `isCurrentUser` is true, a small pencil button appears in
+ *  the header row. Clicking it swaps the body into an inline
+ *  textarea so the user can edit and save without leaving the page.
+ *  Inline styles throughout (no Tailwind) — this component is
+ *  projected into Pierre's Shadow DOM via `<slot>` and Tailwind
+ *  utilities are unreliable in that context. */
+function CommentRow({
+  comment,
+  isCurrentUser = false,
+  onEdit,
+}: {
+  comment: InlineComment;
+  /** True when the comment was authored by the currently-logged-in
+   *  user — controls whether the edit pencil is rendered. */
+  isCurrentUser?: boolean;
+  /** Called with the new body when the user saves an edit. Omit to
+   *  hide the edit affordance entirely (e.g. no `onEditComment`
+   *  prop was supplied to `DiffViewer`). */
+  onEdit?: (body: string) => Promise<void> | void;
+}) {
+  const [editMode, setEditMode] = useState(false);
+  const [editBody, setEditBody] = useState(comment.body);
+  const [saving, setSaving] = useState(false);
+  const [editError, setEditError] = useState<string | null>(null);
+
   const avatarUrl = comment.authorLogin
     ? `https://avatars.githubusercontent.com/${comment.authorLogin}?size=40`
     : null;
   const initials = (comment.authorLogin ?? "??")
     .slice(0, 2)
     .toUpperCase();
+
+  const openEdit = () => {
+    setEditBody(comment.body);
+    setEditError(null);
+    setEditMode(true);
+  };
+
+  const cancelEdit = () => {
+    setEditBody(comment.body);
+    setEditError(null);
+    setEditMode(false);
+  };
+
+  const handleSave = async () => {
+    const trimmed = editBody.trim();
+    if (!trimmed || !onEdit) return;
+    setSaving(true);
+    setEditError(null);
+    try {
+      await onEdit(trimmed);
+      setEditMode(false);
+    } catch (err) {
+      setEditError(formatSubmitError(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  // Shared button style (same as "Add reply" / "Resolve") so the
+  // edit button blends in with existing Shadow DOM affordances.
+  const actionBtnStyle: React.CSSProperties = {
+    background: "transparent",
+    border: 0,
+    color: "var(--primary, #3b82f6)",
+    cursor: "pointer",
+    padding: 0,
+    fontSize: 12,
+    fontWeight: 500,
+    fontFamily: "inherit",
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 4,
+    opacity: 0.8,
+  };
+
   return (
     <div style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
       {avatarUrl ? (
@@ -663,6 +774,7 @@ function CommentRow({ comment }: { comment: InlineComment }) {
         </div>
       )}
       <div style={{ flex: 1, minWidth: 0 }}>
+        {/* Header row: author + timestamp + optional edit button */}
         <div
           style={{
             display: "flex",
@@ -679,8 +791,119 @@ function CommentRow({ comment }: { comment: InlineComment }) {
               {formatRelativeTime(comment.createdAt)}
             </span>
           )}
+          {/* Pencil edit button — only visible for the current user's
+              own comments when `onEdit` is wired up. */}
+          {isCurrentUser && onEdit && !editMode && (
+            <button
+              type="button"
+              onClick={openEdit}
+              title="Edit this comment"
+              aria-label="Edit comment"
+              style={{ ...actionBtnStyle, marginLeft: "auto" }}
+            >
+              {/* Unicode pencil — reliable in Shadow DOM without an
+                  SVG import chain. */}
+              ✎
+            </button>
+          )}
+          {editMode && (
+            <button
+              type="button"
+              onClick={cancelEdit}
+              disabled={saving}
+              title="Cancel edit"
+              aria-label="Cancel edit"
+              style={{
+                ...actionBtnStyle,
+                marginLeft: "auto",
+                color: "inherit",
+                opacity: 0.5,
+              }}
+            >
+              ✕
+            </button>
+          )}
         </div>
-        <MarkdownView body={comment.body} />
+
+        {/* Body: markdown view OR inline edit textarea */}
+        {editMode ? (
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            <textarea
+              value={editBody}
+              onChange={(e) => setEditBody(e.target.value)}
+              onKeyDown={(e) => {
+                if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+                  e.preventDefault();
+                  void handleSave();
+                } else if (e.key === "Escape") {
+                  e.preventDefault();
+                  cancelEdit();
+                }
+              }}
+              disabled={saving}
+              autoFocus
+              rows={Math.max(3, editBody.split("\n").length)}
+              style={{
+                width: "100%",
+                boxSizing: "border-box",
+                padding: "6px 8px",
+                fontSize: 13,
+                fontFamily: "ui-sans-serif, system-ui, sans-serif",
+                lineHeight: 1.5,
+                border: "1px solid rgba(120,120,130,0.4)",
+                borderRadius: 4,
+                background: "rgba(120,120,130,0.08)",
+                color: "inherit",
+                resize: "vertical",
+                outline: "none",
+              }}
+            />
+            {editError && (
+              <span style={{ fontSize: 12, color: "rgb(239,68,68)" }}>
+                {editError}
+              </span>
+            )}
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <button
+                type="button"
+                onClick={() => void handleSave()}
+                disabled={saving || !editBody.trim()}
+                style={{
+                  ...actionBtnStyle,
+                  padding: "3px 10px",
+                  borderRadius: 4,
+                  background: "var(--primary, #3b82f6)",
+                  color: "#fff",
+                  opacity: saving || !editBody.trim() ? 0.5 : 1,
+                  cursor: saving || !editBody.trim() ? "not-allowed" : "pointer",
+                }}
+              >
+                {saving ? "Saving…" : "Save"}
+              </button>
+              <button
+                type="button"
+                onClick={cancelEdit}
+                disabled={saving}
+                style={{
+                  ...actionBtnStyle,
+                  padding: "3px 10px",
+                  borderRadius: 4,
+                  border: "1px solid rgba(120,120,130,0.35)",
+                  color: "inherit",
+                  opacity: saving ? 0.5 : 0.8,
+                  cursor: saving ? "not-allowed" : "pointer",
+                }}
+              >
+                Cancel
+              </button>
+              <span style={{ fontSize: 11, opacity: 0.5 }}>
+                ⌘+Enter to save · Esc to cancel
+              </span>
+            </div>
+          </div>
+        ) : (
+          <MarkdownView body={comment.body} />
+        )}
       </div>
     </div>
   );

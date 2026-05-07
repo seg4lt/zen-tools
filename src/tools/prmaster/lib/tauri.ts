@@ -412,6 +412,24 @@ export const prmasterTauri = {
     body: string;
   }) => invoke<void>("prmaster_reply_review_comment", params),
   /**
+   * Edit an existing inline review comment. `commentId` is the
+   * stringified REST numeric id (matches `ReviewComment.id`).
+   */
+  editReviewComment: (params: {
+    pr: PrRef;
+    commentId: string;
+    body: string;
+  }) => invoke<void>("prmaster_edit_review_comment", params),
+  /**
+   * Edit an existing general (issue) comment. `commentId` is the
+   * stringified REST numeric id (matches `IssueComment.id`).
+   */
+  editIssueComment: (params: {
+    pr: PrRef;
+    commentId: string;
+    body: string;
+  }) => invoke<void>("prmaster_edit_issue_comment", params),
+  /**
    * Mark a review thread as resolved. `threadId` is the GraphQL node
    * id (matches `ReviewComment.threadId`). Idempotent.
    */

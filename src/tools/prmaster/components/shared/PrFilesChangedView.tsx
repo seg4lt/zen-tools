@@ -371,6 +371,18 @@ export function PrFilesChangedView({ pr, viewMode }: Props) {
     [allComments, ref, currentUser],
   );
 
+  // Edit an existing inline review comment. We don't optimistically
+  // update the local list because the body change is immediately
+  // visible after a refetch and the window is short enough that
+  // the flicker is acceptable.
+  const handleEditComment = useCallback(
+    async ({ commentId, body }: { commentId: string; body: string }) => {
+      await prmasterTauri.editReviewComment({ pr: ref, commentId, body });
+      void commentsQuery.refetch();
+    },
+    [ref, commentsQuery],
+  );
+
   // Resolve a single thread by its GraphQL node id. We don't
   // optimistically remove the thread from the local list — the
   // refresh tick after the mutation will fold the new server state
@@ -628,6 +640,8 @@ export function PrFilesChangedView({ pr, viewMode }: Props) {
                 }
                 onReply={showComments ? handleReply : undefined}
                 onResolve={showComments ? handleResolve : undefined}
+                onEditComment={showComments ? handleEditComment : undefined}
+                currentUser={currentUser}
               />
             )
           ) : (

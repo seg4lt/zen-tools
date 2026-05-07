@@ -43,7 +43,7 @@ const components: Components = {
   // Tighter paragraph spacing than browser default (`<p>` defaults
   // to ~1em margins; comment bodies are short so 4px reads better).
   p: ({ children }) => (
-    <p style={{ margin: "4px 0", lineHeight: 1.5 }}>{children}</p>
+    <p style={{ margin: "4px 0", lineHeight: 1.5, overflowWrap: "break-word", wordBreak: "break-word" }}>{children}</p>
   ),
   // Inline code (`foo`) → boxed monospace; fenced code (```…```)
   // gets the `<pre>` wrapper handled separately below.
@@ -123,7 +123,7 @@ const components: Components = {
   ol: ({ children }) => (
     <ol style={{ margin: "4px 0", paddingLeft: 20 }}>{children}</ol>
   ),
-  li: ({ children }) => <li style={{ margin: "2px 0" }}>{children}</li>,
+  li: ({ children }) => <li style={{ margin: "2px 0", overflowWrap: "break-word", wordBreak: "break-word" }}>{children}</li>,
   blockquote: ({ children }) => (
     <blockquote
       style={{
@@ -235,6 +235,7 @@ export function MarkdownView({ body, style }: MarkdownViewProps) {
       // surrounding card decides the base style.
       style={{
         wordBreak: "break-word",
+        overflowWrap: "break-word",
         ...style,
       }}
     >

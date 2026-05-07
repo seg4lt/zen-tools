@@ -220,6 +220,51 @@ pub async fn prmaster_reply_review_comment(
     Ok(())
 }
 
+/// Edit an existing inline review comment. `comment_id` is the REST
+/// numeric id (stringified to avoid JS Number precision loss on very
+/// large repos; we parse it back to u64 here).
+#[tauri::command]
+pub async fn prmaster_edit_review_comment(
+    state: State<'_, Mutex<AppState>>,
+    pr: PrRef,
+    comment_id: String,
+    body: String,
+) -> AppResult<()> {
+    let id: u64 = comment_id.parse().map_err(|e| {
+        crate::error::AppError::Other(format!(
+            "comment_id is not a valid u64 ({comment_id:?}): {e}"
+        ))
+    })?;
+    let engine = {
+        let s = state.lock().await;
+        engine(&s)
+    };
+    engine.edit_review_comment(&pr, id, &body).await?;
+    Ok(())
+}
+
+/// Edit an existing general (issue) comment. `comment_id` is the REST
+/// numeric id (stringified to avoid JS Number precision loss).
+#[tauri::command]
+pub async fn prmaster_edit_issue_comment(
+    state: State<'_, Mutex<AppState>>,
+    pr: PrRef,
+    comment_id: String,
+    body: String,
+) -> AppResult<()> {
+    let id: u64 = comment_id.parse().map_err(|e| {
+        crate::error::AppError::Other(format!(
+            "comment_id is not a valid u64 ({comment_id:?}): {e}"
+        ))
+    })?;
+    let engine = {
+        let s = state.lock().await;
+        engine(&s)
+    };
+    engine.edit_issue_comment(&pr, id, &body).await?;
+    Ok(())
+}
+
 /// Add `login` as a requested reviewer on `pr`. The frontend supplies the
 /// login (typically the result of [`prmaster_whoami`]).
 #[tauri::command]

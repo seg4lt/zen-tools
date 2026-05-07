@@ -802,6 +802,33 @@ impl PrMasterEngine {
         res
     }
 
+    /// Edit an existing inline review comment body. Drives the in-app
+    /// edit affordance shown to the comment's author on the Files tab.
+    pub async fn edit_review_comment(
+        &self,
+        pr: &PrRef,
+        comment_id: u64,
+        body: &str,
+    ) -> GhResult<()> {
+        let res = self.inner.gh.edit_review_comment(pr, comment_id, body).await;
+        self.invalidate_cache();
+        res
+    }
+
+    /// Edit an existing general (issue) comment body. Drives the
+    /// in-app edit affordance shown to the comment's author on the
+    /// Comments tab.
+    pub async fn edit_issue_comment(
+        &self,
+        pr: &PrRef,
+        comment_id: u64,
+        body: &str,
+    ) -> GhResult<()> {
+        let res = self.inner.gh.edit_issue_comment(pr, comment_id, body).await;
+        self.invalidate_cache();
+        res
+    }
+
     /// Drop the cached refresh — the next `list_*` call will refetch.
     /// Called after every action that mutates server state so the UI
     /// reflects the change on its next read.

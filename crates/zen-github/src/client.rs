@@ -1164,6 +1164,50 @@ impl GhClient {
         Ok(())
     }
 
+    /// Edit an existing inline review comment body.
+    /// Hits `PATCH /repos/{owner}/{repo}/pulls/comments/{comment_id}`.
+    pub async fn edit_review_comment(
+        &self,
+        pr: &PrRef,
+        comment_id: u64,
+        body: &str,
+    ) -> GhResult<()> {
+        let api_path = format!(
+            "repos/{}/{}/pulls/comments/{}",
+            pr.owner, pr.repo, comment_id
+        );
+        let label = format!(
+            "edit review comment {}/{}#{} id={}",
+            pr.owner, pr.repo, pr.number, comment_id
+        );
+        let body_arg = format!("body={body}");
+        self.gh_retry(&label, &["api", "-X", "PATCH", &api_path, "-f", &body_arg])
+            .await?;
+        Ok(())
+    }
+
+    /// Edit an existing general (issue) comment body.
+    /// Hits `PATCH /repos/{owner}/{repo}/issues/comments/{comment_id}`.
+    pub async fn edit_issue_comment(
+        &self,
+        pr: &PrRef,
+        comment_id: u64,
+        body: &str,
+    ) -> GhResult<()> {
+        let api_path = format!(
+            "repos/{}/{}/issues/comments/{}",
+            pr.owner, pr.repo, comment_id
+        );
+        let label = format!(
+            "edit issue comment {}/{}#{} id={}",
+            pr.owner, pr.repo, pr.number, comment_id
+        );
+        let body_arg = format!("body={body}");
+        self.gh_retry(&label, &["api", "-X", "PATCH", &api_path, "-f", &body_arg])
+            .await?;
+        Ok(())
+    }
+
     /// Add `login` to the PR's requested-reviewers list.
     pub async fn add_reviewer(&self, pr: &PrRef, login: &str) -> GhResult<()> {
         let path = format!(
