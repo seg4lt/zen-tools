@@ -381,13 +381,15 @@ pub fn run() {
                 if let Some(main) = app.get_webview_window("main") {
                     main.on_window_event(move |event| {
                         if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                            // Always prevent the native close so the background
+                            // agent stays alive. Emit `app:close-requested` and
+                            // let the frontend decide what to do:
+                            //   * markdown route with open tabs → close the
+                            //     active tab (no window action)
+                            //   * everything else → invoke `app_hide_main_window`
+                            //     which hides the window + flips to Accessory.
                             api.prevent_close();
-                            if let Some(win) = app_handle.get_webview_window("main") {
-                                let _ = win.hide();
-                            }
-                            let _ = app_handle.set_activation_policy(
-                                tauri::ActivationPolicy::Accessory,
-                            );
+                            let _ = app_handle.emit("app:close-requested", ());
                         }
                     });
                 }
@@ -460,6 +462,7 @@ pub fn run() {
             commands::perf::get_perf_metrics,
             // misc
             commands::misc::open_in_editor,
+            commands::misc::app_hide_main_window,
             // preferences
             commands::preferences::get_preferences,
             commands::preferences::save_preferences,
@@ -617,7 +620,11 @@ pub fn run() {
                     let _ = win.show();
                     let _ = win.set_focus();
                 }
-                let _ = app.emit("app:focus-first-tool", ());
+                // Do NOT emit `app:focus-first-tool` here.  The React app is
+                // still running on whatever route the user was viewing when
+                // they clicked ✕ — just showing the window is enough to
+                // restore the previous state.  The ⌥⌘⇧T global hotkey still
+                // navigates to /terminal when the user wants that explicitly.
             }
             #[cfg(not(target_os = "macos"))]
             {

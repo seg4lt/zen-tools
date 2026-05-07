@@ -9,6 +9,7 @@ import {
   useRouterState,
 } from "@tanstack/react-router";
 import { listen } from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
 import { AppProviders } from "@/components/app-shell/app-providers";
 import { TitleBar } from "@/components/app-shell/title-bar";
 import { UpdateBanner } from "@/lib/updater/UpdateBanner";
@@ -50,6 +51,7 @@ const rootRoute = createRootRoute({
           <AppProviders>
             <FocusRouteListener />
             <FirstToolListener />
+            <CloseRequestedListener />
             <Outlet />
           </AppProviders>
         </main>
@@ -125,16 +127,14 @@ function FocusRouteListener() {
 
 /**
  * Listens for the generic `app:focus-first-tool` Tauri event and
- * navigates to the user's first enabled tool. Fired by:
+/**
+ * Listens for the `app:focus-first-tool` Tauri event and navigates to the
+ * user's first enabled tool. Fired by the dictation menu-bar tray's
+ * "Show Zen Tools" item.
  *
- *   * `RunEvent::Reopen` (Dock-icon click after the user closed the
- *     main window — the app was running in Accessory mode), and
- *   * the dictation menu-bar tray's "Show Zen Tools" item.
- *
- * Without this, reopening from accessory mode lands on whatever
- * route was active when the user hit ✕ — and since users often
- * tweak Settings right before closing, that ends up being /settings
- * which is a confusing surface to greet them with.
+ * (Previously also fired by `RunEvent::Reopen`; the dock-icon re-open path
+ * no longer emits this event so the window simply restores to whatever
+ * route was active when the user closed it.)
  *
  * The latest enabled-tool list is captured via a ref so the
  * listener doesn't need to be unbound and re-bound every time
@@ -171,6 +171,36 @@ function FirstToolListener() {
   return null;
 }
 
+/**
+ * Handles the `app:close-requested` Tauri event for all routes except
+ * `/markdown`.  On markdown the keyboard-nav hook registers its own
+ * listener that closes the active tab first.
+ */
+function CloseRequestedListener() {
+  const pathname = useRouterState({ select: (s) => s.location.pathname });
+  const pathnameRef = useRef(pathname);
+  useEffect(() => {
+    pathnameRef.current = pathname;
+  }, [pathname]);
+
+  useEffect(() => {
+    if (isPrmasterPopover()) return;
+    let unlisten: (() => void) | null = null;
+    (async () => {
+      unlisten = await listen<null>("app:close-requested", () => {
+        // Markdown has its own handler in use-keyboard-nav.ts that closes
+        // the active tab first — skip here to avoid a double-hide race.
+        if (!pathnameRef.current.startsWith("/markdown")) {
+          void invoke("app_hide_main_window");
+        }
+      });
+    })();
+    return () => {
+      unlisten?.();
+    };
+  }, []);
+  return null;
+}
 
 const indexRoute = createRoute({
   getParentRoute: () => rootRoute,

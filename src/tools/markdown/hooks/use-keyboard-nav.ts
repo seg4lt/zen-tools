@@ -15,6 +15,9 @@
  * swaps mode without closing — same affordance Flowstate gives.
  */
 
+import { useEffect, useRef } from "react";
+import { listen } from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
 import { useShortcut } from "@zen-tools/keyboard/registry";
 import { useMarkdownStore } from "../store/markdown-store";
 import { useVaults } from "./use-vaults";
@@ -77,6 +80,9 @@ export function useMarkdownKeyboardNav() {
 
   // Cmd+W closes the active tab when one is open.  Bound here so the
   // editor's vim mode doesn't swallow the keystroke.
+  // NOTE: on macOS AppKit intercepts Cmd+W before WKWebView does, so this
+  // `useShortcut` binding may not fire.  The `app:close-requested` Tauri
+  // listener below is the primary macOS path.
   useShortcut(
     "mod+w",
     (e) => {
@@ -88,6 +94,40 @@ export function useMarkdownKeyboardNav() {
     true,
     { fireInInputs: true },
   );
+
+  // Primary Cmd+W handler for macOS.  AppKit intercepts Cmd+W before
+  // WKWebView so `useShortcut("mod+w")` never fires; instead the Rust
+  // `CloseRequested` handler emits `app:close-requested` and defers the
+  // decision to us.
+  //
+  // * Active tab → close it; window stays visible.
+  // * No tabs → fall through to `app_hide_main_window` so Cmd+W still
+  //   hides the app as expected.
+  //
+  // `activeTabId` is captured in a ref so the listener can close the
+  // *current* active tab even if the state changed since the effect ran.
+  const activeTabIdRef = useRef(state.activeTabId);
+  const dispatchRef = useRef(dispatch);
+  useEffect(() => {
+    activeTabIdRef.current = state.activeTabId;
+    dispatchRef.current = dispatch;
+  });
+
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    (async () => {
+      unlisten = await listen<null>("app:close-requested", () => {
+        if (activeTabIdRef.current) {
+          dispatchRef.current({ type: "closeTab", id: activeTabIdRef.current });
+        } else {
+          void invoke("app_hide_main_window");
+        }
+      });
+    })();
+    return () => {
+      unlisten?.();
+    };
+  }, []);
 
   // Cmd+Opt+T → "close all other tabs", keeping just the active one.
   // Mirrors browsers / VS Code's "Close Others" command.
