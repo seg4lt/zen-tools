@@ -148,8 +148,6 @@ pub fn bootstrap(app: &AppHandle) {
             // Existing install upgrading: don't migrate behind their
             // back. They can opt in via Settings.
             Provider::Whisper
-        } else if zen_apple_speech::is_supported() {
-            Provider::AppleSpeech
         } else {
             Provider::Whisper
         };
@@ -327,6 +325,5 @@ pub async fn ensure_provider_ready(
             let id = state.manager.selected_model().unwrap_or(ModelId::Base);
             ensure_model_present(app, state, id).await
         }
-        Provider::AppleSpeech => Ok(()),
     }
 }

@@ -382,11 +382,5 @@ fn build_context(
             let ctx = zen_whisper::WhisperContext::load(&path)?;
             Ok(Box::new(ctx))
         }
-        Provider::AppleSpeech => {
-            let ctx = zen_apple_speech::AppleSpeechContext::new(
-                zen_apple_speech::DEFAULT_LOCALE,
-            )?;
-            Ok(Box::new(ctx))
-        }
     }
 }

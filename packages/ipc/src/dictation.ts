@@ -10,7 +10,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
-  AppleSpeechStateDto,
   ModelDto,
   DictationStateDto,
   DownloadProgressDto,
@@ -23,7 +22,7 @@ import type {
  * Wire id for the active transcription provider. Mirrors
  * `zen_dictation::Provider::as_wire`.
  */
-export type DictationProvider = "apple-speech" | "whisper";
+export type DictationProvider = "whisper";
 
 /** React-Query key for the dictation snapshot. */
 export const DICTATION_STATE_KEY = ["dictation", "state"] as const;
@@ -78,7 +77,7 @@ export const dictationIpc = {
   getState: (): Promise<DictationStateDto> => invoke<DictationStateDto>("dictation_get_state"),
   selectModel: (id: string): Promise<void> =>
     invoke<void>("dictation_select_model", { id }),
-  /** Switch the active transcription provider (Apple Speech vs Whisper). */
+  /** Switch the active transcription provider (currently only Whisper). */
   setProvider: (provider: DictationProvider): Promise<void> =>
     invoke<void>("dictation_set_provider", { provider }),
   /**
@@ -98,14 +97,6 @@ export const dictationIpc = {
    */
   testScreenVocab: (): Promise<ScreenVocabPreviewDto> =>
     invoke<ScreenVocabPreviewDto>("dictation_test_screen_vocab"),
-  /**
-   * Install an Apple Speech locale model into the system-wide
-   * `AssetInventory`. Pass `undefined` to install the default
-   * (`en-US`) locale. Reuses the `dictation:download-progress` event
-   * stream — model id is `apple-speech:<locale>`.
-   */
-  installAppleLocale: (locale?: string): Promise<void> =>
-    invoke<void>("dictation_install_apple_locale", { locale }),
   downloadModel: (id: string): Promise<void> =>
     invoke<void>("dictation_download_model", { id }),
   openAppDataDir: (): Promise<void> => invoke<void>("dictation_open_app_data_dir"),
@@ -167,7 +158,6 @@ export function listenDictationStatus(
 }
 
 export type {
-  AppleSpeechStateDto,
   ModelDto,
   DictationStateDto,
   DownloadProgressDto,

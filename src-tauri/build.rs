@@ -2,10 +2,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn main() {
-    // On macOS we link against two Swift-emitted dylibs whose
-    // install_names start with `@rpath/`:
+    // On macOS we link against a Swift-emitted dylib whose
+    // install_name starts with `@rpath/`:
     //
-    //   * `libzen_apple_speech_bridge.dylib` (zen-apple-speech)
     //   * `libzen_screen_vocab_bridge.dylib` (zen-screen-vocab)
     //
     // Cargo only honors `cargo:rustc-link-arg=...` for artifacts of
@@ -46,7 +45,7 @@ fn main() {
         //   src-tauri's compile. Cargo's build-script ordering only
         //   guarantees that THIS build.rs's [build-dependencies] are
         //   ready before it runs — regular dependencies like
-        //   `zen-apple-speech` may still be compiling, with their
+        //   `zen-screen-vocab` may still be compiling, with their
         //   own build.rs's not yet started, when tauri_build runs.
         //   On a cold CI build that race bites and tauri_build fails
         //   even though the bridges *would* eventually copy the
@@ -75,11 +74,6 @@ struct Bridge {
 }
 
 const BRIDGES: &[Bridge] = &[
-    Bridge {
-        swift_relpath: "crates/zen-apple-speech/swift/AppleSpeechBridge.swift",
-        dylib_filename: "libzen_apple_speech_bridge.dylib",
-        module_name: "ZenAppleSpeechBridge",
-    },
     Bridge {
         swift_relpath: "crates/zen-screen-vocab/swift/ScreenVocabBridge.swift",
         dylib_filename: "libzen_screen_vocab_bridge.dylib",
@@ -185,7 +179,7 @@ fn compile_bridge(swift_src: &Path, dest: &Path, module_name: &str) {
     );
 
     // Mirror the swiftc invocation used in
-    // `crates/zen-apple-speech/build.rs` and
+    // `crates/zen-screen-vocab/build.rs` and
     // `crates/zen-screen-vocab/build.rs` — same flags, same output
     // shape. `xcrun swiftc` (not the resolved absolute path from
     // `xcrun -f swiftc`) is used so SDKROOT / DEVELOPER_DIR are

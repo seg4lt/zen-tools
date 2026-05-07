@@ -152,35 +152,43 @@ pub async fn markdown_discover_files(
 }
 
 /// Classify a markdown-vault file basename (lowercased) into the kind
-/// string the frontend expects, or `None` if the file should be skipped.
+/// string the frontend expects.  Anything we don't recognise as a
+/// markdown / drawing / image still gets a slot — `"file"` — so the
+/// sidebar can show it and the normal text editor can open it.  The
+/// vault is just a folder; users keep `.txt` notes, `.json` config,
+/// shell scripts, and so on alongside their markdown, and hiding those
+/// behind an extension allowlist makes the tree feel broken.
 ///
 /// Order matters: excalidraw drawings end in `.svg` / `.png`, so they
 /// must be checked **before** the generic image classifier.
-fn classify_markdown_file(name: &str) -> Option<&'static str> {
+fn classify_markdown_file(name: &str) -> &'static str {
     if is_markdown(name) {
-        Some("markdown")
+        "markdown"
     } else if is_excalidraw(name) {
-        Some("excalidraw")
+        "excalidraw"
     } else if is_image(name) {
-        Some("image")
+        "image"
     } else {
-        None
+        "file"
     }
 }
 
 fn collect_markdown(dir: &Path) -> Vec<MarkdownFileItem> {
     let cfg = zen_fs::WalkConfig {
-        include_file: &|name| classify_markdown_file(name).is_some(),
+        // No extension filter — show every file the walker yields.
+        // `walk_inner` still skips dotfiles + `DEFAULT_PRUNED_DIRS`
+        // (`.git`, `node_modules`, …) so the tree doesn't fill up
+        // with build junk, but anything the user actually put in
+        // their vault is now visible.  Non-markdown files come back
+        // with `kind: "file"` and open in the regular CodeMirror
+        // editor like everything else.
+        include_file: &|_name| true,
         // Emit every (non-hidden, non-pruned) directory regardless of
-        // whether its subtree contains markdown / images. The
+        // whether its subtree contains a recognised file. The
         // previous "subtree must contain a matching file" gate hid
-        // freshly-created empty folders from the sidebar, which is
+        // freshly-created empty folders from the sidebar, which was
         // confusing — the user just made the folder, but it
-        // disappears until they drop a `.md` in it. `walk_inner`
-        // still skips dotfiles + `DEFAULT_PRUNED_DIRS` (`.git`,
-        // `node_modules`, …) so the tree doesn't fill up with build
-        // junk; we only stopped hiding genuinely user-meaningful
-        // empties.
+        // disappeared until they dropped a `.md` in it.
         include_dir: &|_p| true,
         ..Default::default()
     };
@@ -194,9 +202,7 @@ fn collect_markdown(dir: &Path) -> Vec<MarkdownFileItem> {
             kind: if e.is_dir {
                 "directory".to_string()
             } else {
-                classify_markdown_file(&e.name.to_ascii_lowercase())
-                    .unwrap_or("markdown")
-                    .to_string()
+                classify_markdown_file(&e.name.to_ascii_lowercase()).to_string()
             },
         })
         .collect()

@@ -9,10 +9,6 @@ pub enum DictationError {
     #[error("whisper: {0}")]
     Whisper(#[from] zen_whisper::WhisperError),
 
-    /// Apple Speech bridge failure (passed-through Swift error).
-    #[error("apple speech bridge: {0}")]
-    AppleSpeechBridge(#[from] zen_apple_speech::AppleSpeechError),
-
     /// Audio capture / device failure.
     #[error("audio: {0}")]
     Audio(String),

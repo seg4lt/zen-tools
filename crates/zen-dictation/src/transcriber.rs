@@ -114,22 +114,3 @@ impl Transcriber for zen_whisper::WhisperContext {
     }
 }
 
-// ── Apple Speech provider impl ──────────────────────────────────────────
-//
-// Identical pattern to whisper. The `From<AppleSpeechError>` impl on
-// `DictationError` (see `error.rs`) does the lifting.
-impl Transcriber for zen_apple_speech::AppleSpeechContext {
-    fn transcribe(&mut self, samples: &[f32]) -> Result<String, DictationError> {
-        zen_apple_speech::AppleSpeechContext::transcribe(self, samples)
-            .map_err(DictationError::from)
-    }
-
-    fn transcribe_with_vocab(
-        &mut self,
-        samples: &[f32],
-        vocab: &[String],
-    ) -> Result<String, DictationError> {
-        zen_apple_speech::AppleSpeechContext::transcribe_with_vocab(self, samples, vocab)
-            .map_err(DictationError::from)
-    }
-}

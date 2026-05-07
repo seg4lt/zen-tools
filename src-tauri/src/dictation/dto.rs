@@ -29,45 +29,18 @@ pub struct ModelDto {
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct DictationStateDto {
-    /// Wire id of the currently-selected provider
-    /// (`"apple-speech" | "whisper"`).
+    /// Wire id of the currently-selected provider (`"whisper"`).
     pub provider: String,
-    /// Wire id of the currently-selected Whisper model. Only
-    /// meaningful when `provider == "whisper"`; for Apple Speech the
-    /// frontend ignores this field.
+    /// Wire id of the currently-selected Whisper model.
     pub selected_model: String,
     /// All Whisper models, fast → slow.
     pub models: Vec<ModelDto>,
     /// `true` while a recording is in flight.
     pub is_recording: bool,
-    /// Apple Speech availability + locale install state. Lets the UI
-    /// decide whether to render the provider radio at all (when
-    /// `apple_speech.supported == false` we hide it entirely).
-    pub apple_speech: AppleSpeechStateDto,
     /// Screen-vocabulary feature: bias the recogniser using OCR'd
     /// text from the current screen. The frontend renders this as a
-    /// single Switch under the provider picker; defaults to OFF for
-    /// privacy. Same `supported` / `enabled` shape as the Apple
-    /// Speech panel so the UI gating mirrors the existing pattern.
+    /// single Switch; defaults to OFF for privacy.
     pub screen_vocab: ScreenVocabStateDto,
-}
-
-/// Apple Speech availability snapshot.
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
-pub struct AppleSpeechStateDto {
-    /// `true` when the Swift bridge was compiled into this build AND
-    /// the running OS is macOS 26+. Frontend hides the provider option
-    /// when `false`.
-    pub supported: bool,
-    /// BCP-47 locale the manager will use when transcribing
-    /// (e.g. `"en-US"`). Today this is hard-coded to
-    /// `zen_apple_speech::DEFAULT_LOCALE`.
-    pub locale: String,
-    /// `true` when `AssetInventory` reports the on-device speech
-    /// model for `locale` is installed. Frontend shows the
-    /// "Install language model" button when `false`.
-    pub installed: bool,
 }
 
 /// Screen-vocabulary availability + opt-in state.

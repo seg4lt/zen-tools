@@ -59,7 +59,6 @@
       "entitlements": "entitlements.plist",
       "minimumSystemVersion": "11.0",
       "frameworks": [
-        "../target/release/libzen_apple_speech_bridge.dylib",
         "../target/release/libzen_screen_vocab_bridge.dylib"
       ]
     }

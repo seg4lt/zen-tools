@@ -108,13 +108,20 @@ export function SearchPalette() {
     requestAnimationFrame(() => inputRef.current?.focus());
   }, [open, mode]);
 
-  // Flat list of `.md` paths across every vault — re-derived only
-  // when the discovered files change, not on every keystroke.
+  // Flat list of every openable file across every vault — re-derived
+  // only when the discovered files change, not on every keystroke.
+  // We include markdown, drawings, and plain `kind: "file"` entries
+  // (`.txt`, `.json`, configs, …) — anything the editor can open.
+  // Images are excluded because they can't open in CodeMirror; the
+  // sidebar still surfaces them, they just don't belong in the
+  // quick-switcher result list.
   const allMarkdownPaths = useMemo(() => {
     const out: string[] = [];
     for (const vault of Object.values(state.files)) {
       for (const item of vault.items) {
-        if (!item.isDir && item.kind === "markdown") out.push(item.path);
+        if (item.isDir) continue;
+        if (item.kind === "image") continue;
+        out.push(item.path);
       }
     }
     return out;
@@ -131,10 +138,10 @@ export function SearchPalette() {
   // `FilePicker::fuzzy_search`.  Backend ranking is more accurate
   // than the pure-TS subsequence scorer we used to ship and uses
   // the same warm in-memory index that backs grep.  We post-filter
-  // the ranked result against `allMarkdownPaths` so non-`.md`
-  // hits (images, drawings, configs that happen to live in the
-  // vault) don't surface in the palette — keeps today's UX while
-  // letting the engine see every file for ranking purposes.
+  // the ranked result against `allMarkdownPaths` so binary images
+  // (which can't open in the editor) don't surface in the
+  // palette; markdown, drawings, and plain text/config files all
+  // make the cut.
   const tabPath = activeTab(state)?.path ?? null;
   const [fileResults, setFileResults] = useState<string[]>([]);
   const fileSearchAbortRef = useRef(0);

@@ -1,3 +1,4 @@
+import { listen } from "@tauri-apps/api/event";
 import {
   createContext,
   useCallback,
@@ -69,11 +70,33 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   );
 
   // When the OS theme flips and we're in `system` mode the UI must
-  // follow live. The listener fires regardless of mode; we just swap
-  // an internal value that gets folded into the resolved `theme`.
+  // follow live. Two signal sources:
+  //
+  // 1. `tauri://theme-changed` — the primary path in a Tauri WKWebView.
+  //    tao listens to `AppleInterfaceThemeChangedNotification` and fires
+  //    this event whenever macOS switches dark ↔ light. WKWebView does
+  //    NOT fire `prefers-color-scheme` change events on its own, so
+  //    matchMedia alone is insufficient inside a Tauri app.
+  //
+  // 2. `window.matchMedia` change — kept as a fallback for browsers /
+  //    non-Tauri environments. The payload from Tauri already contains
+  //    the resolved `"light"|"dark"` string so we don't need to re-read
+  //    matchMedia when source (1) fires.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    // Source (1): Tauri native event.
+    listen<string>("tauri://theme-changed", (e) => {
+      setSystemTheme(e.payload === "dark" ? "dark" : "light");
+    })
+      .then((fn) => { unlisten = fn; })
+      .catch(() => { /* non-Tauri env — silently ignore */ });
+    return () => unlisten?.();
+  }, []);
+
   useEffect(() => {
     if (typeof window === "undefined") return;
     const mql = window.matchMedia(LIGHT_MEDIA);
+    // Source (2): matchMedia fallback (works in browsers; often silent in WKWebView).
     const onChange = () =>
       setSystemTheme(mql.matches ? "light" : "dark");
     if (mql.addEventListener) {

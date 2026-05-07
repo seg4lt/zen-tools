@@ -579,7 +579,6 @@ pub fn run() {
             dictation::commands::dictation_set_screen_vocab,
             dictation::commands::dictation_test_screen_vocab,
             dictation::commands::dictation_reset_screen_recording,
-            dictation::commands::dictation_install_apple_locale,
             dictation::commands::dictation_download_model,
             dictation::commands::dictation_open_app_data_dir,
             dictation::commands::dictation_open_logs_dir,

@@ -102,16 +102,6 @@ export function DictationSection() {
     mutationFn: (id: string) => dictationIpc.downloadModel(id),
   });
 
-  const setProvider = useMutation({
-    mutationFn: (p: "apple-speech" | "whisper") => dictationIpc.setProvider(p),
-    onSuccess: () => qc.invalidateQueries({ queryKey: DICTATION_STATE_KEY }),
-  });
-
-  const installAppleLocale = useMutation({
-    mutationFn: (locale?: string) => dictationIpc.installAppleLocale(locale),
-    onSuccess: () => qc.invalidateQueries({ queryKey: DICTATION_STATE_KEY }),
-  });
-
   const setScreenVocab = useMutation({
     mutationFn: (enabled: boolean) => dictationIpc.setScreenVocab(enabled),
     onSuccess: () => qc.invalidateQueries({ queryKey: DICTATION_STATE_KEY }),
@@ -315,42 +305,11 @@ export function DictationSection() {
 
       {enabled && state && (
         <>
-          {/* ── Provider selector ────────────────────────────────────
-              Hidden entirely on macOS < 26 / older Xcode builds where
-              the Apple Speech bridge isn't compiled — there's only one
-              option (Whisper) so we save the user the noise.            */}
-          {state.apple_speech.supported && (
-            <div className="flex flex-col gap-2 rounded-md border border-border/60 bg-card/40 px-3 py-2">
-              <div className="text-xs font-medium">Engine</div>
-              <div className="flex flex-col gap-1.5">
-                <ProviderRadio
-                  id="apple-speech"
-                  label="Apple Speech"
-                  description="On-device, faster, no per-app download. macOS 26+."
-                  checked={state.provider === "apple-speech"}
-                  onSelect={() => setProvider.mutate("apple-speech")}
-                  disabled={setProvider.isPending}
-                  badge="recommended"
-                />
-                <ProviderRadio
-                  id="whisper"
-                  label="Whisper (whisper.cpp)"
-                  description="Open-source. Pick a model size below; weights are downloaded once."
-                  checked={state.provider === "whisper"}
-                  onSelect={() => setProvider.mutate("whisper")}
-                  disabled={setProvider.isPending}
-                />
-              </div>
-            </div>
-          )}
-
           {/* ── Screen vocabulary toggle ────────────────────────────────
               Available on macOS only (where ScreenCaptureKit + Vision
               ship). Off by default — flipping it on triggers the
               Screen Recording TCC prompt the next time dictation
-              records. Applies to both Apple Speech and Whisper: the
-              backend formats the OCR'd vocabulary appropriately for
-              each provider's contextual-hint API.                       */}
+              records.                                                   */}
           {state.screen_vocab.supported && (
             <div className="flex items-start justify-between rounded-md border border-border/60 bg-card/40 px-3 py-2">
               <div className="flex flex-1 flex-col gap-0.5 pr-3">
@@ -499,22 +458,6 @@ export function DictationSection() {
             );
           })()}
 
-          {/* ── Apple Speech: locale install banner ─────────────────── */}
-          {state.provider === "apple-speech" && state.apple_speech.supported && (
-            <AppleSpeechPanel
-              locale={state.apple_speech.locale}
-              installed={state.apple_speech.installed}
-              installPending={installAppleLocale.isPending}
-              onInstall={() => installAppleLocale.mutate(undefined)}
-              installError={
-                installAppleLocale.error instanceof Error
-                  ? installAppleLocale.error.message
-                  : null
-              }
-              progress={progress[`apple-speech:${state.apple_speech.locale}`]}
-            />
-          )}
-
           {/* ── Whisper: model picker + download flow ───────────────── */}
           {state.provider === "whisper" && (
             <>
@@ -555,9 +498,6 @@ export function DictationSection() {
               </Select>
 
               {Object.entries(progress)
-                // Filter out apple-speech pseudo-progress; that bar
-                // lives in `AppleSpeechPanel`.
-                .filter(([id]) => !id.startsWith("apple-speech:"))
                 .map(([id, p]) => {
                   // ts-rs maps Rust's `u64` to `bigint`; coerce to
                   // `number` before doing percentage math.
@@ -622,127 +562,3 @@ export function DictationSection() {
   );
 }
 
-/**
- * Plain radio row — accessible focus ring, full-row click target,
- * matches the visual weight of the existing "Enable dictation" card.
- */
-function ProviderRadio(props: {
-  id: string;
-  label: string;
-  description: string;
-  checked: boolean;
-  disabled: boolean;
-  onSelect: () => void;
-  badge?: string;
-}) {
-  return (
-    <label
-      className={`flex cursor-pointer items-start gap-2 rounded-md border px-2 py-1.5 transition-colors ${
-        props.checked
-          ? "border-primary/60 bg-primary/5"
-          : "border-border/40 hover:bg-accent/40"
-      } ${props.disabled ? "opacity-60" : ""}`}
-    >
-      <input
-        type="radio"
-        name="dictation-provider"
-        value={props.id}
-        checked={props.checked}
-        disabled={props.disabled}
-        onChange={() => props.onSelect()}
-        className="mt-0.5"
-      />
-      <div className="flex flex-1 flex-col gap-0.5">
-        <div className="flex items-center gap-1.5 text-xs font-medium">
-          {props.label}
-          {props.badge && (
-            <span className="rounded bg-emerald-500/20 px-1 py-0.5 text-[9px] font-semibold text-emerald-600 dark:text-emerald-400">
-              {props.badge}
-            </span>
-          )}
-        </div>
-        <span className="text-[10px] text-muted-foreground">
-          {props.description}
-        </span>
-      </div>
-    </label>
-  );
-}
-
-/**
- * Apple Speech locale install panel. Three states:
- *
- *   * installed → soft confirmation, no action needed
- *   * not installed, no install in flight → "Install language model" button
- *   * install in flight → indeterminate progress bar (the Swift
- *     bridge doesn't tee byte-level progress yet, so the bar is a
- *     simple "in progress" indicator until completion)
- */
-function AppleSpeechPanel(props: {
-  locale: string;
-  installed: boolean;
-  installPending: boolean;
-  onInstall: () => void;
-  installError: string | null;
-  progress?: DownloadProgressDto;
-}) {
-  if (props.installed) {
-    return (
-      <div className="rounded-md border border-emerald-500/30 bg-emerald-500/5 px-3 py-2 text-xs">
-        <span className="font-medium text-emerald-700 dark:text-emerald-300">
-          Apple Speech ready
-        </span>
-        <span className="ml-1 text-muted-foreground">
-          ({props.locale} model installed)
-        </span>
-      </div>
-    );
-  }
-
-  const inProgress = props.installPending || props.progress != null;
-
-  return (
-    <div className="rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs">
-      <div className="font-medium text-amber-700 dark:text-amber-300">
-        Apple Speech: language model not installed
-      </div>
-      <p className="mt-1 text-[11px] text-amber-700/80 dark:text-amber-300/80">
-        First-time setup downloads the on-device speech model
-        (~50 MB) into the system-wide store. It's shared with every
-        other app on this Mac, so you'll only ever do this once per
-        device.
-      </p>
-      {inProgress ? (
-        <div className="mt-2 flex flex-col gap-1">
-          <div className="flex justify-between text-[10px] text-muted-foreground">
-            <span>Installing {props.locale} model…</span>
-            <span>…</span>
-          </div>
-          <div className="h-1.5 overflow-hidden rounded-full bg-muted">
-            {/* Indeterminate-ish bar: 30% width, gentle pulse via
-                tailwind's animate-pulse. Replace with a real percentage
-                once the Swift bridge tees AssetInventory progress. */}
-            <div className="h-full w-1/3 animate-pulse bg-primary" />
-          </div>
-        </div>
-      ) : (
-        <div className="mt-2 flex flex-wrap items-center gap-2">
-          <button
-            type="button"
-            onClick={() => props.onInstall()}
-            disabled={props.installPending}
-            className="rounded-md border border-border/60 bg-card px-2.5 py-1 text-[11px] hover:bg-accent disabled:opacity-50"
-          >
-            Install language model
-          </button>
-          <span className="text-[10px] text-muted-foreground">
-            (~50 MB, one-time)
-          </span>
-        </div>
-      )}
-      {props.installError && (
-        <p className="mt-1 text-[10px] text-red-500">{props.installError}</p>
-      )}
-    </div>
-  );
-}

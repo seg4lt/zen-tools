@@ -31,6 +31,18 @@ pub fn init() -> TauriPlugin<Wry> {
 
     #[cfg(target_os = "macos")]
     {
+        // CRITICAL: set GHOSTTY_RESOURCES_DIR *before* init_once().
+        //
+        // ghostty's `global.state.init()` (called from `ghostty_init` inside
+        // `init_once`) calls `os.resourcesdir.resourcesDir()` which reads
+        // GHOSTTY_RESOURCES_DIR at that moment and caches the result in
+        // `global_state.resources_dir`. Every subsequent theme lookup does
+        //   `global_state.resources_dir.app() orelse return null`
+        // so if the env var wasn't set at init time, ALL named themes
+        // (`theme = dark:Cursor Dark,light:CLRS`) silently fail to load —
+        // even if we set the env var later in `create_app()`.
+        commands::ensure_ghostty_resources_dir();
+
         tracing::info!("[plugin-ghostty] init_once starting");
         // libghostty's process-level state must be initialised once,
         // before any app/surface call.

@@ -434,6 +434,18 @@ pub fn terminal_set_traffic_lights_hidden(
 // ---- Internals ----------------------------------------------------------
 
 fn create_app() -> ghostty_rs::Result<App> {
+    // Point ghostty at its resource bundle (themes, terminfo, shell integration)
+    // BEFORE calling any config API. `ghostty_config_finalize` resolves
+    // named themes (e.g. `theme = dark:Cursor Dark,light:CLRS`) by looking in
+    // the resources directory — if the env var is unset the lookup silently
+    // fails and the user's config settings are discarded.
+    //
+    // We set this once per process via OnceLock. Priority:
+    //   1. GHOSTTY_RESOURCES_DIR already set by the user/environment → keep it.
+    //   2. Native Ghostty.app bundle (user probably installed Ghostty already).
+    //   3. A dev-build install path recorded at compile time by ghostty-sys.
+    ensure_ghostty_resources_dir();
+
     let mut config = Config::new()?;
     config.load_default_files();
     apply_zen_tools_overrides(&mut config);
@@ -494,6 +506,67 @@ fn apply_zen_tools_overrides(config: &mut Config) {
             "ghostty: failed to load padding override file; using defaults"
         );
     }
+}
+
+/// Set `GHOSTTY_RESOURCES_DIR` once per process so ghostty can resolve
+/// built-in themes, shell-integration scripts, and terminfo at runtime.
+///
+/// Only runs when the env var is not already set. Candidates are tried in
+/// order; the first one whose directory actually exists wins:
+///
+///   1. `/Applications/Ghostty.app/Contents/Resources/ghostty`
+///      (native Ghostty app installed by the user — has themes, terminfo, etc.)
+///   2. `GHOSTTY_RESOURCES_DIR_BUILDTIME` (compile-time const embedded by
+///      `ghostty-sys/build.rs` pointing at the zig-build install output).
+///      Valid for `cargo tauri dev` only; the path doesn't exist in a
+///      production .app bundle.
+///   3. `~/Applications/Ghostty.app/Contents/Resources/ghostty`
+///      (user-local install location on some macOS setups).
+pub fn ensure_ghostty_resources_dir() {
+    use std::sync::OnceLock;
+    static ONCE: OnceLock<()> = OnceLock::new();
+    ONCE.get_or_init(|| {
+        // If the caller already set it, leave it alone.
+        if std::env::var_os("GHOSTTY_RESOURCES_DIR").is_some() {
+            return;
+        }
+
+        let candidates: &[&str] = &[
+            "/Applications/Ghostty.app/Contents/Resources/ghostty",
+            // Compile-time path from ghostty-sys build.rs (dev builds only).
+            option_env!("GHOSTTY_RESOURCES_DIR_BUILDTIME").unwrap_or(""),
+        ];
+
+        // Also check ~/Applications/Ghostty.app (user-scoped installs).
+        let home_candidate: Option<String> = std::env::var("HOME").ok().map(|h| {
+            format!("{h}/Applications/Ghostty.app/Contents/Resources/ghostty")
+        });
+
+        for candidate in candidates
+            .iter()
+            .map(|s| s.to_string())
+            .chain(home_candidate)
+        {
+            if candidate.is_empty() {
+                continue;
+            }
+            if std::path::Path::new(&candidate).is_dir() {
+                tracing::info!(path = %candidate, "ghostty: using resources dir");
+                // SAFETY: single-threaded at this point (ghostty_app_new hasn't
+                // been called yet). OnceLock ensures we only write once.
+                #[allow(unused_unsafe)]
+                unsafe {
+                    std::env::set_var("GHOSTTY_RESOURCES_DIR", &candidate);
+                }
+                return;
+            }
+        }
+
+        tracing::warn!(
+            "ghostty: no resources dir found; named themes (e.g. `theme = dark:Cursor Dark`) \
+             will not load. Install Ghostty.app or set GHOSTTY_RESOURCES_DIR."
+        );
+    });
 }
 
 fn run_on_main<F, T>(window: &Window<Wry>, f: F) -> tauri::Result<T>

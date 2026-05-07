@@ -6,7 +6,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use zen_dictation::{ModelId, Provider};
 
 use crate::dictation::dto::{
-    AppleSpeechStateDto, DictationStateDto, ModelDto, PathsDto, ScreenVocabStateDto,
+    DictationStateDto, ModelDto, PathsDto, ScreenVocabStateDto,
 };
 use crate::dictation::state::DictationTauriState;
 use crate::dictation::{PROVIDER_KEY, SCREEN_VOCAB_KEY, SELECTED_MODEL_KEY};
@@ -61,34 +61,11 @@ pub async fn dictation_get_state(
         selected_model: selected,
         models,
         is_recording: state.manager.is_recording(),
-        apple_speech: build_apple_speech_dto(),
         screen_vocab: ScreenVocabStateDto {
             supported: zen_screen_vocab::is_supported(),
             enabled: state.manager.screen_vocab_enabled(),
         },
     })
-}
-
-/// Build the Apple-Speech availability snapshot. Cheap — both calls
-/// are non-blocking; the install check round-trips through the Swift
-/// bridge but the bridge runs an `await` Task internally that's
-/// fast on the cached AssetInventory query.
-fn build_apple_speech_dto() -> AppleSpeechStateDto {
-    let locale = zen_apple_speech::DEFAULT_LOCALE;
-    let supported = zen_apple_speech::is_supported();
-    let installed = if supported {
-        // Failing to query asset state is treated as "not installed";
-        // the frontend then shows the install button, which is the
-        // right next step.
-        zen_apple_speech::is_locale_installed(locale).unwrap_or(false)
-    } else {
-        false
-    };
-    AppleSpeechStateDto {
-        supported,
-        locale: locale.to_string(),
-        installed,
-    }
 }
 
 /// Persist a new model selection. Kicks an asynchronous download if
@@ -155,8 +132,7 @@ pub async fn dictation_download_model(
     Ok(())
 }
 
-/// Switch the active transcription provider (`"apple-speech"` or
-/// `"whisper"`). Persists the choice into the KV store and drops any
+/// Switch the active transcription provider. Persists the choice into the KV store and drops any
 /// cached backend so the next transcription rebuilds against the new
 /// provider.
 #[tauri::command]
@@ -268,77 +244,6 @@ pub async fn dictation_set_screen_vocab(
         }
     }
     Ok(())
-}
-
-/// Synchronously download + install the Apple Speech model for
-/// `locale` (e.g. `"en-US"`) into the system-wide `AssetInventory`.
-/// Blocks the calling task until done — the Swift bridge wraps an
-/// async download in a semaphore. Surfaces a single
-/// `dictation:download-progress` "in-flight" event when it starts and
-/// a "complete" event when done; granular byte-level progress is
-/// deferred (the underlying `Progress` object isn't easily teed to a
-/// C callback).
-#[tauri::command]
-pub async fn dictation_install_apple_locale(
-    locale: Option<String>,
-    app: AppHandle,
-    state: State<'_, DictationTauriState>,
-) -> AppResult<()> {
-    let locale = locale.unwrap_or_else(|| zen_apple_speech::DEFAULT_LOCALE.to_string());
-    let pseudo_id = format!("apple-speech:{locale}");
-
-    {
-        let mut in_flight = state.in_flight.lock();
-        if !in_flight.insert(pseudo_id.clone()) {
-            return Ok(()); // idempotent
-        }
-    }
-
-    // Emit a synthetic "starting" progress so the UI shows the bar.
-    let _ = app.emit(
-        "dictation:download-progress",
-        crate::dictation::dto::DownloadProgressDto {
-            model_id: pseudo_id.clone(),
-            downloaded: 0,
-            total: None,
-        },
-    );
-
-    let app_clone = app.clone();
-    let st_clone = state.inner().clone();
-    let pseudo_id_clone = pseudo_id.clone();
-    let locale_clone = locale.clone();
-    let result = tauri::async_runtime::spawn_blocking(move || {
-        zen_apple_speech::install_locale(&locale_clone)
-    })
-    .await;
-
-    st_clone.in_flight.lock().remove(&pseudo_id_clone);
-
-    match result {
-        Ok(Ok(())) => {
-            // Synthetic "complete": report a finished bar so the UI
-            // hides the progress row and re-fetches the snapshot.
-            let _ = app_clone.emit(
-                "dictation:download-progress",
-                crate::dictation::dto::DownloadProgressDto {
-                    model_id: pseudo_id,
-                    downloaded: 1,
-                    total: Some(1),
-                },
-            );
-            Ok(())
-        }
-        Ok(Err(e)) => {
-            tracing::warn!(?e, %locale, "dictation: apple speech install failed");
-            let _ = app_clone.emit(
-                "dictation:download-error",
-                serde_json::json!({ "model_id": pseudo_id, "message": e.to_string() }),
-            );
-            Err(AppError::Other(e.to_string()))
-        }
-        Err(e) => Err(AppError::Other(format!("spawn_blocking: {e}"))),
-    }
 }
 
 /// Wipe the Screen Recording TCC entry for our bundle id and trigger

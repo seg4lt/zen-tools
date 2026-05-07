@@ -12,11 +12,10 @@ export type { PmConfig } from "./PmConfig";
 export type { ProcSummary } from "./ProcSummary";
 export type { Sample } from "./Sample";
 export type { TotalStats } from "./TotalStats";
-// Dictation tool DTOs (Apple Speech + local Whisper).
+// Dictation tool DTOs (local Whisper).
 export type { ModelDto } from "./ModelDto";
 export type { DictationStateDto } from "./DictationStateDto";
 export type { DownloadProgressDto } from "./DownloadProgressDto";
 export type { PathsDto } from "./PathsDto";
-export type { AppleSpeechStateDto } from "./AppleSpeechStateDto";
 export type { ScreenVocabStateDto } from "./ScreenVocabStateDto";
 export type { ScreenVocabPreviewDto } from "./ScreenVocabPreviewDto";

@@ -402,7 +402,6 @@ function TreeRow({ node }: TreeRowProps) {
   const open = item.isDir ? isExpanded(state.expanded, item.path) : false;
   const active = !item.isDir && activeTab(state)?.path === item.path;
   const isImage = item.kind === "image";
-  const isMarkdown = item.kind === "markdown";
   const isExcalidraw = item.kind === "excalidraw";
 
   const isRenaming =
@@ -435,7 +434,12 @@ function TreeRow({ node }: TreeRowProps) {
       dispatch({ type: "toggleExpand", nodeId: item.path });
       return;
     }
-    if (isMarkdown || isExcalidraw) {
+    // Images stay visual-only (preview rendered elsewhere).  Every
+    // other file — markdown, excalidraw, or a plain `kind: "file"`
+    // (`.txt`, `.json`, a shell script, …) — opens in the editor.
+    // The non-markdown ones land in CodeMirror with no special
+    // mode; that's fine, the user just wants to read/edit text.
+    if (!isImage) {
       void openFile(item.path, dispatch);
     }
   };

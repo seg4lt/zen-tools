@@ -12,7 +12,6 @@ path = "src/lib.rs"
 
 [dependencies]
 zen-whisper = { workspace = true }
-zen-apple-speech = { workspace = true }
 zen-screen-vocab = { workspace = true }
 
 # Async runtime — used for the model download stream and the hotkey →
