@@ -43,7 +43,16 @@ const components: Components = {
   // Tighter paragraph spacing than browser default (`<p>` defaults
   // to ~1em margins; comment bodies are short so 4px reads better).
   p: ({ children }) => (
-    <p style={{ margin: "4px 0", lineHeight: 1.5, overflowWrap: "break-word", wordBreak: "break-word" }}>{children}</p>
+    <p
+      style={{
+        margin: "4px 0",
+        lineHeight: 1.5,
+        overflowWrap: "anywhere",
+        wordBreak: "normal",
+      }}
+    >
+      {children}
+    </p>
   ),
   // Inline code (`foo`) → boxed monospace; fenced code (```…```)
   // gets the `<pre>` wrapper handled separately below.
@@ -123,7 +132,17 @@ const components: Components = {
   ol: ({ children }) => (
     <ol style={{ margin: "4px 0", paddingLeft: 20 }}>{children}</ol>
   ),
-  li: ({ children }) => <li style={{ margin: "2px 0", overflowWrap: "break-word", wordBreak: "break-word" }}>{children}</li>,
+  li: ({ children }) => (
+    <li
+      style={{
+        margin: "2px 0",
+        overflowWrap: "anywhere",
+        wordBreak: "normal",
+      }}
+    >
+      {children}
+    </li>
+  ),
   blockquote: ({ children }) => (
     <blockquote
       style={{
@@ -230,12 +249,14 @@ const components: Components = {
 export function MarkdownView({ body, style }: MarkdownViewProps) {
   return (
     <div
-      // `wordBreak: break-word` so long URLs / hashes don't blow out
-      // the comment card width. Inherited font/colour means the
+      // `overflowWrap: anywhere` keeps normal prose on word
+      // boundaries, but still breaks long URLs / hashes before they
+      // blow out the comment card width. Inherited font/colour means the
       // surrounding card decides the base style.
       style={{
-        wordBreak: "break-word",
-        overflowWrap: "break-word",
+        whiteSpace: "normal",
+        overflowWrap: "anywhere",
+        wordBreak: "normal",
         ...style,
       }}
     >

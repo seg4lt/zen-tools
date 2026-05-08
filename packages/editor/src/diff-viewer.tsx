@@ -39,6 +39,24 @@ import type {
 } from "@pierre/diffs";
 import { MarkdownView } from "./markdown";
 
+const ANNOTATION_WRAP_CSS = `
+  [data-overflow="scroll"] [data-annotation-content] {
+    align-self: stretch !important;
+    width: calc(100% - var(--diffs-column-number-width, 0px)) !important;
+    max-width: calc(100% - var(--diffs-column-number-width, 0px)) !important;
+    white-space: normal !important;
+    overflow-wrap: anywhere !important;
+    word-break: normal !important;
+  }
+
+  [data-overflow="scroll"] [data-annotation-slot] {
+    display: block !important;
+    white-space: normal !important;
+    overflow-wrap: anywhere !important;
+    word-break: normal !important;
+  }
+`;
+
 // ── Types ────────────────────────────────────────────────────────
 
 /** A single inline comment rendered next to a line. */
@@ -215,51 +233,67 @@ export function DiffViewer({
       const meta = annotation.metadata;
       if (!meta) return null;
       const domainSide = fromPierreSide(annotation.side);
+      // Pierre's [data-annotation-content] has align-self:flex-start in
+      // its Shadow DOM, which makes it shrink to the slotted content's
+      // max-content width — so word-break on inner elements never fires.
+      // Wrapping in a div with minWidth:"100%" forces it to fill the
+      // full available width that --diffs-column-content-width provides,
+      // giving the comment body a definite line-box to wrap against.
       return (
-        <AnnotationBlock
-          line={annotation.lineNumber}
-          side={domainSide}
-          comments={meta.comments}
-          composerOpen={meta.composerOpen}
-          onSubmit={
-            onAddComment
-              ? async (body) => {
-                  await onAddComment({
-                    line: annotation.lineNumber,
-                    side: domainSide,
-                    body,
-                  });
-                  // Host's next `comments` update will surface the
-                  // freshly-posted comment in the list above; close
-                  // the composer either way so the textarea drops.
-                  setComposer(null);
-                }
-              : undefined
-          }
-          onReply={
-            onReply
-              ? async (parentId, body) => {
-                  await onReply({ parentId, body });
-                }
-              : undefined
-          }
-          onResolve={
-            onResolve
-              ? async (threadId) => {
-                  await onResolve({ threadId });
-                }
-              : undefined
-          }
-          onEdit={
-            onEditComment
-              ? async (commentId, body) => {
-                  await onEditComment({ commentId, body });
-                }
-              : undefined
-          }
-          currentUser={currentUser ?? null}
-          onCancel={closeComposer}
-        />
+        <div
+          style={{
+            minWidth: "100%",
+            maxWidth: "100%",
+            whiteSpace: "normal",
+            wordBreak: "normal",
+            overflowWrap: "anywhere",
+          }}
+        >
+          <AnnotationBlock
+            line={annotation.lineNumber}
+            side={domainSide}
+            comments={meta.comments}
+            composerOpen={meta.composerOpen}
+            onSubmit={
+              onAddComment
+                ? async (body) => {
+                    await onAddComment({
+                      line: annotation.lineNumber,
+                      side: domainSide,
+                      body,
+                    });
+                    // Host's next `comments` update will surface the
+                    // freshly-posted comment in the list above; close
+                    // the composer either way so the textarea drops.
+                    setComposer(null);
+                  }
+                : undefined
+            }
+            onReply={
+              onReply
+                ? async (parentId, body) => {
+                    await onReply({ parentId, body });
+                  }
+                : undefined
+            }
+            onResolve={
+              onResolve
+                ? async (threadId) => {
+                    await onResolve({ threadId });
+                  }
+                : undefined
+            }
+            onEdit={
+              onEditComment
+                ? async (commentId, body) => {
+                    await onEditComment({ commentId, body });
+                  }
+                : undefined
+            }
+            currentUser={currentUser ?? null}
+            onCancel={closeComposer}
+          />
+        </div>
       );
     },
     [onAddComment, onReply, onResolve, onEditComment, currentUser, closeComposer],
@@ -274,6 +308,7 @@ export function DiffViewer({
       diffStyle: viewMode,
       theme: { dark: "pierre-dark", light: "pierre-light" },
       themeType: isDark ? "dark" : "light",
+      unsafeCSS: ANNOTATION_WRAP_CSS,
     };
     if (fullFileMode) {
       // Pierre's default: unchanged regions are *collapsed* with
@@ -323,7 +358,20 @@ export function DiffViewer({
   );
 
   return (
-    <div className="diff-viewer-host h-full w-full overflow-auto">
+    <div
+      className="diff-viewer-host h-full w-full overflow-auto"
+      // Pierre's Shadow-DOM annotation wrapper uses
+      //   width: var(--diffs-column-content-width, auto)
+      // on [data-annotation-content], which has align-self: flex-start.
+      // Without an explicit width that element shrinks to max-content,
+      // so word-break / overflow-wrap on slotted children never trigger.
+      // Setting the variable to "calc(100% - var(--diffs-column-number-width, 0px))"
+      // is evaluated at the usage site (Shadow DOM), where
+      // --diffs-column-number-width is already defined by Pierre, so the
+      // annotation content gets exactly (row-width - gutter-width) and
+      // text inside it wraps normally.
+      style={{ "--diffs-column-content-width": "calc(100% - var(--diffs-column-number-width, 0px))" } as React.CSSProperties}
+    >
       {fullFileMode && oldFile && newFile ? (
         <MultiFileDiff<AnnotationData>
           oldFile={oldFile}
@@ -615,7 +663,9 @@ function AnnotationBlock({
           title={submitError}
         >
           <span aria-hidden>⚠</span>
-          <span style={{ flex: 1, wordBreak: "break-word" }}>
+          <span
+            style={{ flex: 1, wordBreak: "normal", overflowWrap: "anywhere" }}
+          >
             Failed to post: {submitError}
           </span>
           <button
