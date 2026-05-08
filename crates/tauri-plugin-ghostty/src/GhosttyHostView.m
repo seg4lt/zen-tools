@@ -43,6 +43,12 @@ static void collect_hosts(NSView *root, NSMutableArray<GhosttyHostView *> *out);
 // visibility into `g_tab_container` and `g_inset_*`.
 static void resync_chrome_and_surfaces(GhosttyHostView *fallback);
 
+// Tentative forward declaration — the explicit definition (with
+// initialiser) lives alongside the other tab-state statics further
+// down the file. Needed here so -ghosttySafeSize can read the value
+// without moving the method past the globals block.
+static CGFloat g_inset_top;
+
 @interface GhosttyHostView : NSView <NSTextInputClient> {
     ghostty_surface_t          _surface;
     NSTrackingArea            *_tracking;
@@ -320,6 +326,15 @@ static void resync_chrome_and_surfaces(GhosttyHostView *fallback);
 - (NSSize)ghosttySafeSize {
     NSSize bounds = self.bounds.size;
     if (!self.window) return bounds;
+    // When there is no top-chrome inset (distraction-free / full-window
+    // mode) the tab container fills the entire contentView height.  The
+    // contentLayoutRect clip applied below would otherwise shave off
+    // titleBarHeight points from the bottom of the reported surface,
+    // producing a visible gap at the bottom of the window equal to the
+    // title-bar height (~28 pt).  In DF mode the title bar and traffic
+    // lights are explicitly hidden, so letting ghostty use every pixel
+    // is correct — subtract/add those heights only when chrome is present.
+    if (g_inset_top < 1.0) return bounds;
     NSRect cl = self.window.contentLayoutRect;
     // contentLayoutRect is in window-content coordinates. Clip our
     // bounds height to it so we never report area that's behind a
