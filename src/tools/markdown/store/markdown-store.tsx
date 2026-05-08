@@ -40,9 +40,9 @@ export interface OpenFileState {
   dirty: boolean;
 }
 
-/** What sort of editor a tab needs.  Drives both the icon in the
- *  tab strip and the component the view layer mounts in the body. */
-export type TabKind = "markdown" | "excalidraw";
+/** What sort of editor a tab needs. Drives both the icon in the tab
+ *  strip and the component the view layer mounts in the body. */
+export type TabKind = "markdown" | "file" | "excalidraw";
 
 /** One entry in the tab strip — own copy of the doc + dirty flag so
  *  the user can switch away mid-edit and come back to their changes. */
@@ -59,9 +59,9 @@ export interface TabState {
    *  save time.  `dirty` is still flipped via a sentinel `editDoc`. */
   doc: string;
   dirty: boolean;
-  /** Markdown by default; `"excalidraw"` for `*.excalidraw.svg`
-   *  tabs.  Set once at `openFile` time — the path doesn't change
-   *  the tab kind even if the file is later renamed. */
+  /** `"markdown"` for markdown docs, `"file"` for other text files,
+   *  `"excalidraw"` for drawings. Set once at `openFile` time — the
+   *  path doesn't change the tab kind even if the file is later renamed. */
   kind: TabKind;
 }
 
@@ -150,7 +150,7 @@ export type MarkdownAction =
       path: string;
       doc: string;
       gotoLine?: number;
-      /** Defaults to `"markdown"`; pass `"excalidraw"` for drawings. */
+      /** Kind of editor to mount for this file. */
       kind?: TabKind;
     }
   | { type: "closeFile" }

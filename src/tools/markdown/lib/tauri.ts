@@ -16,6 +16,7 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 /** What sort of leaf this item is — drives icon + click behaviour. */
 export type MarkdownItemKind =
   | "markdown"
+  | "file"
   | "image"
   | "directory"
   // Excalidraw drawings — files named `*.excalidraw.svg` carry an
@@ -245,6 +246,7 @@ export {
   basenameNoExt,
   dirname,
   isExcalidrawPath,
+  isMarkdownPath,
   normalizePath,
   posixRelative,
   slugify,

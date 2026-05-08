@@ -30,7 +30,7 @@ import { FileText, PenLine, X } from "lucide-react";
 import { Button } from "@zen-tools/ui";
 import { cn } from "@zen-tools/ui";
 import type { TabState } from "../store/markdown-store";
-import { basenameNoExt } from "../lib/tauri";
+import { basename } from "../lib/tauri";
 
 export interface TabStripProps {
   /** Global open tabs (shared across all splits). */
@@ -54,12 +54,12 @@ export function TabStrip({
   const subtitles = useMemo(() => {
     const counts = new Map<string, number>();
     for (const tab of tabs) {
-      const name = basenameNoExt(tab.path).toLowerCase();
+      const name = tabLabel(tab.path).toLowerCase();
       counts.set(name, (counts.get(name) ?? 0) + 1);
     }
     const out = new Map<string, string>();
     for (const tab of tabs) {
-      const name = basenameNoExt(tab.path).toLowerCase();
+      const name = tabLabel(tab.path).toLowerCase();
       if ((counts.get(name) ?? 0) > 1) {
         const segs = tab.path.split("/").filter(Boolean);
         out.set(tab.id, segs.length >= 2 ? segs[segs.length - 2] : "");
@@ -111,7 +111,7 @@ interface TabProps {
 }
 
 function Tab({ tab, active, subtitle, onSelect, onClose }: TabProps) {
-  const name = basenameNoExt(tab.path);
+  const name = tabLabel(tab.path);
   const Icon = tab.kind === "excalidraw" ? PenLine : FileText;
   return (
     <div
@@ -187,4 +187,8 @@ function Tab({ tab, active, subtitle, onSelect, onClose }: TabProps) {
       </Button>
     </div>
   );
+}
+
+function tabLabel(path: string): string {
+  return basename(path);
 }

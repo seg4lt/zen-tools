@@ -23,6 +23,7 @@ import { DragHandle } from "@/components/drag-handle";
 import { useVimMode } from "@/hooks/use-vim-mode";
 import { cn } from "@zen-tools/ui";
 import {
+  CodeEditor,
   SplitLayout,
   leafIds,
   useJumpList,
@@ -51,7 +52,12 @@ import { useAutoSave } from "@/hooks/use-auto-save";
 import { markdownTauri } from "./lib/tauri";
 import { useVaults } from "./hooks/use-vaults";
 import { useMarkdownKeyboardNav } from "./hooks/use-keyboard-nav";
-import { basename, basenameNoExt, dirname, normalizePath } from "./lib/tauri";
+import {
+  basename,
+  basenameNoExt,
+  dirname,
+  normalizePath,
+} from "./lib/tauri";
 import { useTheme } from "@/hooks/use-theme";
 
 export function MarkdownView() {
@@ -164,6 +170,7 @@ export function MarkdownView() {
   const tab = tabForLeaf(workspace.focusedLeafId);
   const isExcalidraw = tab?.kind === "excalidraw";
   const { theme } = useTheme();
+  const isDark = theme === "dark";
 
   // Push a jump-list entry whenever the focused leaf's active tab
   // changes — captures both palette / sidebar file switches and
@@ -535,12 +542,12 @@ export function MarkdownView() {
             title={tab.path}
           >
             {tab.dirty ? "●" : ""}{" "}
-            {/* Excalidraw + non-`.md` markdown variants need the full
-             *  basename so the suffix is visible.  Pre-existing
-             *  behaviour for `*.md` was `<stem>.md`, preserved. */}
-            {isExcalidraw
-              ? basename(tab.path)
-              : `${basenameNoExt(tab.path)}.md`}
+            {/* Preserve the historical `foo.md` label for true `.md`
+             * files, but show the full basename for drawings and
+             * non-`.md` text files so their real suffix stays visible. */}
+            {tab.kind === "markdown" && /\.md$/i.test(tab.path)
+              ? `${basenameNoExt(tab.path)}.md`
+              : basename(tab.path)}
           </span>
         ) : null}
         <div className="ml-auto flex items-center gap-1">
@@ -556,7 +563,7 @@ export function MarkdownView() {
               <Save className="size-3" /> Save
             </Button>
           ) : null}
-          {/* Vim mode applies only to the CodeMirror text editor —
+          {/* Vim mode applies only to CodeMirror-based text editors —
            *  hide the toggle in the Excalidraw drawing pane where
            *  the chrome would just be confusing. */}
           {!isExcalidraw && (
@@ -686,11 +693,12 @@ export function MarkdownView() {
                       onSave={onLeafSave}
                       onMoveFocus={workspace.moveFocus}
                       onJumpBack={onJumpBack}
-                      onJumpForward={onJumpForward}
-                      vimMode={vimMode}
-                      getDocDir={getDocDir}
-                      getCurrentPath={getCurrentPath}
-                      getVaults={getVaults}
+                       onJumpForward={onJumpForward}
+                       vimMode={vimMode}
+                       isDark={isDark}
+                       getDocDir={getDocDir}
+                       getCurrentPath={getCurrentPath}
+                       getVaults={getVaults}
                       getWikilinkCandidates={getCandidates}
                       onWikilinkOpen={onWikilinkOpen}
                       onLinkOpen={onLinkOpen}
@@ -745,6 +753,7 @@ interface MarkdownLeafShellProps {
   onJumpBack: () => boolean;
   onJumpForward: () => boolean;
   vimMode: boolean;
+  isDark: boolean;
   getDocDir: () => string;
   getCurrentPath: () => string | null;
   getVaults: () => string[];
@@ -768,6 +777,7 @@ function MarkdownLeafShell({
   onJumpBack,
   onJumpForward,
   vimMode,
+  isDark,
   getDocDir,
   getCurrentPath,
   getVaults,
@@ -854,23 +864,37 @@ function MarkdownLeafShell({
         onClose={onCloseTab}
       />
       <div className="min-h-0 min-w-0 flex-1">
-        <MarkdownEditor
-          imperativeRef={handleRef}
-          value={leafTab?.doc ?? ""}
-          onChange={handleEditorChange}
-          onSave={handleEditorSave}
-          onMoveFocus={onMoveFocus}
-          onJumpBack={onJumpBack}
-          onJumpForward={onJumpForward}
-          vimMode={vimMode}
-          getDocDir={getDocDir}
-          getCurrentPath={getCurrentPath}
-          getVaults={getVaults}
-          getWikilinkCandidates={getWikilinkCandidates}
-          onWikilinkOpen={onWikilinkOpen}
-          onLinkOpen={onLinkOpen}
-          onImageSaved={onImageSaved}
-        />
+        {leafTab?.kind === "file" ? (
+          <CodeEditor
+            imperativeRef={handleRef}
+            value={leafTab.doc}
+            onChange={handleEditorChange}
+            onSave={handleEditorSave}
+            onMoveFocus={onMoveFocus}
+            onJumpBack={onJumpBack}
+            onJumpForward={onJumpForward}
+            vimMode={vimMode}
+            isDark={isDark}
+          />
+        ) : (
+          <MarkdownEditor
+            imperativeRef={handleRef}
+            value={leafTab?.doc ?? ""}
+            onChange={handleEditorChange}
+            onSave={handleEditorSave}
+            onMoveFocus={onMoveFocus}
+            onJumpBack={onJumpBack}
+            onJumpForward={onJumpForward}
+            vimMode={vimMode}
+            getDocDir={getDocDir}
+            getCurrentPath={getCurrentPath}
+            getVaults={getVaults}
+            getWikilinkCandidates={getWikilinkCandidates}
+            onWikilinkOpen={onWikilinkOpen}
+            onLinkOpen={onLinkOpen}
+            onImageSaved={onImageSaved}
+          />
+        )}
       </div>
     </div>
   );

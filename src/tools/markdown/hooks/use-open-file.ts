@@ -10,6 +10,7 @@ import { useCallback } from "react";
 import {
   basenameNoExt,
   isExcalidrawPath,
+  isMarkdownPath,
   markdownTauri,
   normalizePath,
 } from "../lib/tauri";
@@ -35,28 +36,31 @@ export function useOpenFile() {
       // the sidebar.
       const path = normalizePath(rawPath);
       // Drawings get their own tab kind so the view layer mounts the
-      // Excalidraw pane instead of CodeMirror.  We don't read the SVG
-      // here — it can be megabytes and shouldn't sit in `tab.doc`
-      // bouncing through reducer churn on every keystroke; the
-      // Excalidraw editor reads it directly from disk on mount.
-      const isExcalidraw = isExcalidrawPath(path);
+      // Excalidraw pane instead of CodeMirror. Markdown docs keep the
+      // markdown-specific editor; every other text file uses the plain
+      // CodeMirror host with no markdown parsing or live preview.
+      const kind = isExcalidrawPath(path)
+        ? "excalidraw"
+        : isMarkdownPath(path)
+          ? "markdown"
+          : "file";
       try {
         // Avoid re-reading from disk when the file is already open as
         // a tab — we'd clobber any dirty edits the user has made.
         const existing = state.tabs.find((t) => t.path === path);
         if (existing) {
           dispatch({ type: "selectTab", id: existing.id, gotoLine });
-        } else if (isExcalidraw) {
+        } else if (kind === "excalidraw") {
           dispatch({
             type: "openFile",
             path,
             doc: "",
             gotoLine,
-            kind: "excalidraw",
+            kind,
           });
         } else {
           const doc = await markdownTauri.readFile(path);
-          dispatch({ type: "openFile", path, doc, gotoLine });
+          dispatch({ type: "openFile", path, doc, gotoLine, kind });
         }
         // Expand the sidebar tree so the user can see where the file
         // they just opened lives — same affordance as Obsidian /

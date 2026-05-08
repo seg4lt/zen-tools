@@ -13,7 +13,7 @@
  * normalise back-slashes before invoking these.
  */
 
-/** Extract the basename (no extension) of a `.md` path. */
+/** Extract the basename (no extension) of a path. */
 export function basenameNoExt(path: string): string {
   const last = path.split("/").pop() ?? path;
   const dot = last.lastIndexOf(".");
@@ -35,6 +35,18 @@ export function basename(path: string): string {
 export function isExcalidrawPath(path: string): boolean {
   const lower = path.toLowerCase();
   return lower.endsWith(".excalidraw.svg") || lower.endsWith(".excalidraw.png");
+}
+
+/** `true` when `path` is one of the markdown formats the vault walker
+ *  and editor treat as markdown rather than a generic text file. */
+export function isMarkdownPath(path: string): boolean {
+  const lower = path.toLowerCase();
+  return (
+    lower.endsWith(".md") ||
+    lower.endsWith(".markdown") ||
+    lower.endsWith(".mdown") ||
+    lower.endsWith(".mkd")
+  );
 }
 
 /** Parent directory of an absolute path. Returns `""` when none. */

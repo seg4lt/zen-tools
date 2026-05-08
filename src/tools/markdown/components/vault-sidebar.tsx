@@ -57,6 +57,7 @@ import {
   useMarkdownStore,
 } from "../store/markdown-store";
 import {
+  isMarkdownPath,
   isExcalidrawPath,
   markdownTauri,
   normalizePath,
@@ -874,16 +875,19 @@ async function openFile(
   const path = normalizePath(rawPath);
   // Drawings shouldn't load through `readFile` — the SVG can be
   // multi-MB and we don't want it sitting in `tab.doc` for the
-  // reducer to churn over.  The Excalidraw editor reads the file
-  // straight from disk on mount; we just open the tab with an empty
-  // doc and the right kind.
-  const isExcalidraw = isExcalidrawPath(path);
+  // reducer to churn over. Markdown docs keep the markdown editor;
+  // other files use the plain text editor.
+  const kind = isExcalidrawPath(path)
+    ? "excalidraw"
+    : isMarkdownPath(path)
+      ? "markdown"
+      : "file";
   try {
-    if (isExcalidraw) {
-      dispatch({ type: "openFile", path, doc: "", kind: "excalidraw" });
+    if (kind === "excalidraw") {
+      dispatch({ type: "openFile", path, doc: "", kind });
     } else {
       const doc = await markdownTauri.readFile(path);
-      dispatch({ type: "openFile", path, doc });
+      dispatch({ type: "openFile", path, doc, kind });
     }
     // Reveal in tree — keeps the sidebar in sync when the user
     // double-clicks a deeply-nested file or follows a wikilink.
