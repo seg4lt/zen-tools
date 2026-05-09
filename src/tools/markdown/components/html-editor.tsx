@@ -104,12 +104,20 @@ type ViewMode = "code" | "preview" | "split";
 function withBase(html: string, docDir: string): string {
   if (!html.trim()) return "";
   if (!docDir) return html;
-  // Asset protocol resolves a directory by the URL the webview was
-  // configured to expose; trailing slash is required for relative URLs
-  // to compose correctly (`asset://…/dir/` + `./style.css` →
-  // `asset://…/dir/style.css`, no slash collision).
-  const dirAbs = docDir.endsWith("/") ? docDir : `${docDir}/`;
-  const baseHref = assetUrl(dirAbs);
+  // `convertFileSrc()` (the engine behind `assetUrl`) calls
+  // `encodeURIComponent` on the *entire* path — including the
+  // separators — so `/Users/x/dir/` becomes
+  // `asset://localhost/%2FUsers%2Fx%2Fdir%2F`. That URL has no
+  // literal trailing `/`, which means the browser treats the whole
+  // encoded blob as the "filename" segment of the base — so
+  // `./style.css` resolves to `asset://localhost/style.css`,
+  // wiping the directory entirely. The fix: strip any trailing
+  // slash before converting, then append a *literal* `/` after.
+  // The asset-protocol handler decodes the `%2F` segments back into
+  // real slashes when serving the request, so the on-disk path is
+  // resolved correctly.
+  const dirAbs = docDir.replace(/\/+$/, "");
+  const baseHref = `${assetUrl(dirAbs)}/`;
 
   let doc: Document;
   try {
