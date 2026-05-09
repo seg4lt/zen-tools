@@ -246,6 +246,7 @@ export {
   basenameNoExt,
   dirname,
   isExcalidrawPath,
+  isHtmlPath,
   isMarkdownPath,
   normalizePath,
   posixRelative,

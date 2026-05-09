@@ -4,7 +4,7 @@
  *
  * Today this is just the POSIX path utilities (basename, dirname,
  * normalizePath, posixRelative, slugify, isExcalidrawPath,
- * isMarkdownPath); the
+ * isHtmlPath, isMarkdownPath); the
  * package will grow to host other zero-IPC utilities as they're
  * lifted out of tool `lib/` directories.
  */
@@ -13,6 +13,7 @@ export {
   basenameNoExt,
   dirname,
   isExcalidrawPath,
+  isHtmlPath,
   isMarkdownPath,
   normalizePath,
   posixRelative,

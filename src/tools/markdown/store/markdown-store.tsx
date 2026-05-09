@@ -42,7 +42,7 @@ export interface OpenFileState {
 
 /** What sort of editor a tab needs. Drives both the icon in the tab
  *  strip and the component the view layer mounts in the body. */
-export type TabKind = "markdown" | "file" | "excalidraw";
+export type TabKind = "markdown" | "file" | "excalidraw" | "html";
 
 /** One entry in the tab strip — own copy of the doc + dirty flag so
  *  the user can switch away mid-edit and come back to their changes. */

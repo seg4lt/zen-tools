@@ -26,7 +26,7 @@
  */
 
 import { useLayoutEffect, useMemo, useRef } from "react";
-import { FileText, PenLine, X } from "lucide-react";
+import { Code as CodeIcon, FileText, PenLine, X } from "lucide-react";
 import { Button } from "@zen-tools/ui";
 import { cn } from "@zen-tools/ui";
 import type { TabState } from "../store/markdown-store";
@@ -112,7 +112,12 @@ interface TabProps {
 
 function Tab({ tab, active, subtitle, onSelect, onClose }: TabProps) {
   const name = tabLabel(tab.path);
-  const Icon = tab.kind === "excalidraw" ? PenLine : FileText;
+  const Icon =
+    tab.kind === "excalidraw"
+      ? PenLine
+      : tab.kind === "html"
+        ? CodeIcon
+        : FileText;
   return (
     <div
       role="tab"
@@ -139,7 +144,9 @@ function Tab({ tab, active, subtitle, onSelect, onClose }: TabProps) {
           "size-3.5 shrink-0",
           active && tab.kind === "excalidraw"
             ? "text-violet-500/90"
-            : undefined,
+            : active && tab.kind === "html"
+              ? "text-orange-500/90"
+              : undefined,
         )}
       />
 

@@ -40,6 +40,7 @@ import {
   MarkdownEditor,
   type MarkdownEditorHandle,
 } from "./components/markdown-editor";
+import { HtmlEditor } from "./components/html-editor";
 // Excalidraw is ~3 MB worth of canvas + utility code.  Lazy-load it
 // behind a Suspense boundary so users who never open a drawing don't
 // pay the bundle cost.
@@ -864,7 +865,19 @@ function MarkdownLeafShell({
         onClose={onCloseTab}
       />
       <div className="min-h-0 min-w-0 flex-1">
-        {leafTab?.kind === "file" ? (
+        {leafTab?.kind === "html" ? (
+          <HtmlEditor
+            imperativeRef={handleRef}
+            value={leafTab.doc}
+            onChange={handleEditorChange}
+            onSave={handleEditorSave}
+            onMoveFocus={onMoveFocus}
+            onJumpBack={onJumpBack}
+            onJumpForward={onJumpForward}
+            vimMode={vimMode}
+            getDocDir={getDocDir}
+          />
+        ) : leafTab?.kind === "file" ? (
           <CodeEditor
             imperativeRef={handleRef}
             value={leafTab.doc}
