@@ -48,6 +48,7 @@
     "clsx": "^2.1.1",
     "cmdk": "^1.1.1",
     "diff": "^9.0.0",
+    "node-diff3": "^3.1.2",
     "lucide-react": "^0.451.0",
     "mermaid": "^11",
     "radix-ui": "^1.4.3",

@@ -4,6 +4,7 @@
 use serde::{Serialize, Serializer};
 use thiserror::Error;
 use zen_db::DbError;
+use zen_git::GitError;
 use zen_github::GhError;
 use zen_http::{CrossFileDependencyError, DependencyError, FileRegistryError, HttpError};
 use zen_parser::ParserError;
@@ -49,6 +50,10 @@ pub enum AppError {
     #[error("github: {0}")]
     Github(#[from] GhError),
 
+    /// Local-git failure (Git tool — merge editor + commit log).
+    #[error("git: {0}")]
+    Git(#[from] GitError),
+
     /// SQLite-backed storage failure (`zen-storage`).
     #[error("storage: {0}")]
     Storage(#[from] StorageError),
@@ -84,6 +89,7 @@ impl AppError {
             AppError::Perf(_) => "perf",
             AppError::Db(_) => "db",
             AppError::Github(_) => "github",
+            AppError::Git(_) => "git",
             AppError::Storage(_) => "storage",
             AppError::Tauri(_) => "tauri",
             AppError::Other(_) => "other",
