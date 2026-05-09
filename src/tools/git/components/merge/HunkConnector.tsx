@@ -14,7 +14,7 @@
  */
 
 import { ChevronLeft, ChevronRight } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { EditorView } from "@codemirror/view";
 import { cn } from "@zen-tools/ui";
 
@@ -64,6 +64,16 @@ export function HunkConnector({
 }: HunkConnectorProps) {
   const [rects, setRects] = useState<RibbonRect[]>([]);
   const [height, setHeight] = useState(0);
+  // Ref to the strip's own DOM node so we can measure where the SVG
+  // (0,0) actually paints in the page. Using the local editor's
+  // `getBoundingClientRect().top` instead — like the previous
+  // version did — was wrong: each `<Pane>` wraps its CodeEditor with
+  // a header bar, but the connector strip is a *direct sibling* of
+  // the panes with no header. So the connector's top sits at the
+  // row top, while `localScrollDOM.top` sits below the LOCAL pane's
+  // header. Subtracting `ldTop` from screen-y values therefore
+  // over-shifted every ribbon up by exactly the pane header height.
+  const stripRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     if (!localView || !remoteView) {
@@ -72,38 +82,38 @@ export function HunkConnector({
     }
 
     const recompute = () => {
-      const ld = localView.scrollDOM;
-      const rd = remoteView.scrollDOM;
-      const ldTop = ld.getBoundingClientRect().top;
-      // The connector strip is positioned absolutely against the
-      // wrapper that contains both editors; its (0,0) lines up with
-      // the top of the local editor's scroll container in the
-      // page's coordinate space. We use a single reference point
-      // (the local editor's box) so y-values for both sides are
-      // expressed in the same coordinate system.
+      const strip = stripRef.current;
+      if (!strip) return;
+      // Single shared origin: the connector strip's own screen-y.
+      // Every line's y is converted to screen-space via
+      // `lineScreenY` (which uses `view.documentTop` so it already
+      // folds in `scrollTop`, contentDOM padding, and any chrome
+      // above the editor) and then re-expressed relative to the
+      // strip's top, so the SVG element placed at that y lands
+      // exactly on the painted line.
+      const stripTop = strip.getBoundingClientRect().top;
       const next: RibbonRect[] = [];
       for (const p of pairs) {
-        const lFrom = lineY(localView, p.localFrom, "top") - ld.scrollTop;
-        const lTo = lineY(localView, p.localTo, "bottom") - ld.scrollTop;
-        const rFrom = lineY(remoteView, p.remoteFrom, "top") - rd.scrollTop;
-        const rTo = lineY(remoteView, p.remoteTo, "bottom") - rd.scrollTop;
-        // Adjust by the offset between the two scroll containers so
-        // both columns share a single y-origin. Their tops are in
-        // the same flex row, so this is usually 0.
-        const remoteOffset = rd.getBoundingClientRect().top - ldTop;
+        const lFrom = lineScreenY(localView, p.localFrom, "top") - stripTop;
+        const lTo = lineScreenY(localView, p.localTo, "bottom") - stripTop;
+        const rFrom = lineScreenY(remoteView, p.remoteFrom, "top") - stripTop;
+        const rTo = lineScreenY(remoteView, p.remoteTo, "bottom") - stripTop;
         next.push({
           blockId: p.blockId,
           active: p.active,
           resolved: p.resolved,
           yLT: lFrom,
           yLB: lTo,
-          yRT: rFrom + remoteOffset,
-          yRB: rTo + remoteOffset,
+          yRT: rFrom,
+          yRB: rTo,
         });
       }
       setRects(next);
-      // Track parent height so the SVG fills the wrapper.
-      setHeight(ld.clientHeight);
+      // Track the strip's own height so the SVG canvas covers the
+      // full vertical extent the connector occupies — using the
+      // local editor's `clientHeight` would clip the bottom by the
+      // pane-header height (mirror of the origin bug above).
+      setHeight(strip.clientHeight);
     };
 
     recompute();
@@ -118,6 +128,11 @@ export function HunkConnector({
     const ro = new ResizeObserver(recompute);
     ro.observe(localView.scrollDOM);
     ro.observe(remoteView.scrollDOM);
+    // Also watch the strip itself — its height drives the SVG canvas
+    // size, and a parent flex change (e.g. drag-resizing the
+    // RESULT/top split) only fires `resize` on the strip, not on the
+    // editor scroll containers.
+    if (stripRef.current) ro.observe(stripRef.current);
     return () => {
       localView.scrollDOM.removeEventListener("scroll", onLocalScroll);
       remoteView.scrollDOM.removeEventListener("scroll", onRemoteScroll);
@@ -127,6 +142,7 @@ export function HunkConnector({
 
   return (
     <div
+      ref={stripRef}
       className="relative shrink-0 select-none border-x bg-muted/30"
       style={{ width }}
     >
@@ -198,13 +214,30 @@ export function HunkConnector({
   );
 }
 
-/** Pixel y of `line` (1-based) in the editor's content coordinate
- *  space (`top` of the line block, or `bottom`). Returns 0 for an
- *  out-of-range line. */
-function lineY(view: EditorView, line: number, edge: "top" | "bottom"): number {
+/** Screen-space y of `line` (1-based) in the editor — the absolute
+ *  page coordinate where the row's top (or bottom) is currently
+ *  painted. Caller is expected to subtract its own reference point
+ *  (e.g. the connector wrapper's screen top) to convert into a local
+ *  layout coordinate.
+ *
+ *  Implementation: `view.documentTop` is the screen-y of the
+ *  contentDOM's origin and is recomputed by CodeMirror on every
+ *  measurement pass — so it already accounts for the editor's
+ *  current `scrollTop`, the contentDOM's padding, and any chrome
+ *  rendered above the editor (toolbars, headers, etc). Adding the
+ *  block's content-space `top` therefore gives an honest screen-y.
+ *  We deliberately don't use `coordsAtPos` because it returns `null`
+ *  when the line is outside the rendered viewport, which would make
+ *  the ribbon disappear during scroll. */
+function lineScreenY(
+  view: EditorView,
+  line: number,
+  edge: "top" | "bottom",
+): number {
   const total = view.state.doc.lines;
   const clamped = Math.max(1, Math.min(total, line));
   const pos = view.state.doc.line(clamped).from;
   const block = view.lineBlockAt(pos);
-  return edge === "top" ? block.top : block.bottom;
+  const docTop = view.documentTop;
+  return edge === "top" ? block.top + docTop : block.bottom + docTop;
 }

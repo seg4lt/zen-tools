@@ -101,6 +101,14 @@ export interface CodeEditorProps {
    * `useTheme` hook.
    */
   isDark?: boolean;
+  /**
+   * Whether long lines wrap visually onto the next row. Defaults to
+   * `true` to match the historical behaviour every text-editor caller
+   * relies on. The merge editor explicitly opts out via
+   * `lineWrapping={false}` so its accept/reject ribbon math (which
+   * assumes one logical line == one visual row) stays accurate.
+   */
+  lineWrapping?: boolean;
   /** Forwarded ref for imperative control. */
   imperativeRef?: Ref<CodeEditorHandle>;
   /**
@@ -176,6 +184,7 @@ export function CodeEditor({
   extensions,
   vimMode = true,
   isDark = false,
+  lineWrapping = true,
   imperativeRef,
   onView,
   onMoveFocus,
@@ -245,7 +254,7 @@ export function CodeEditor({
     highlightActiveLine(),
     ...(extensionsRef.current?.({ isDark }) ?? []),
     makeEditorTheme(isDark),
-    EditorView.lineWrapping,
+    ...(lineWrapping ? [EditorView.lineWrapping] : []),
     EditorState.readOnly.of(readOnly),
     // Action shortcuts at highest precedence so vim's keymap doesn't
     // swallow them in normal/insert/visual mode. Without `Prec.highest`,
@@ -459,7 +468,7 @@ export function CodeEditor({
       }),
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isDark, readOnly, vimMode]);
+  }, [isDark, readOnly, vimMode, lineWrapping]);
 
   useImperativeHandle(
     imperativeRef,

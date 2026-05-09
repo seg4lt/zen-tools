@@ -820,6 +820,15 @@ export function ThreeWayMergeEditor({
                   isDark={isDark}
                   extensions={buildExtensions}
                   vimMode={false}
+                  // Wrap OFF — the connector ribbons assume one
+                  // logical line == one visual row when computing
+                  // hunk y-coordinates. Wrap would let a long line
+                  // span multiple visual rows on one side and one row
+                  // on the other, which makes the cross-pane
+                  // alignment ambiguous and shifts the accept/reject
+                  // buttons off the highlighted hunk. Horizontal
+                  // scroll is fine here — diffs are usually short.
+                  lineWrapping={false}
                   onView={(v) => {
                     localViewRef.current = v;
                     bumpViewVersion();
@@ -836,6 +845,7 @@ export function ThreeWayMergeEditor({
                     isDark={isDark}
                     extensions={buildExtensions}
                     vimMode={false}
+                    lineWrapping={false}
                     onView={(v) => {
                       baseViewRef.current = v;
                       bumpViewVersion();
@@ -866,6 +876,7 @@ export function ThreeWayMergeEditor({
                   isDark={isDark}
                   extensions={buildExtensions}
                   vimMode={false}
+                  lineWrapping={false}
                   onView={(v) => {
                     remoteViewRef.current = v;
                     bumpViewVersion();
@@ -882,6 +893,10 @@ export function ThreeWayMergeEditor({
                 onChange={onResultChange}
                 extensions={buildExtensions}
                 vimMode={false}
+                // RESULT pane stays wrap-off too so its visual rows
+                // line up 1:1 with line numbers — easier to map a
+                // conflict-marker line to what the user is seeing.
+                lineWrapping={false}
                 onView={(v) => {
                   resultViewRef.current = v;
                   bumpViewVersion();
