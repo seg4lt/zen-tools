@@ -10,6 +10,7 @@ import { useCallback } from "react";
 import {
   basenameNoExt,
   isExcalidrawPath,
+  isHtmlPath,
   isMarkdownPath,
   markdownTauri,
   normalizePath,
@@ -43,7 +44,9 @@ export function useOpenFile() {
         ? "excalidraw"
         : isMarkdownPath(path)
           ? "markdown"
-          : "file";
+          : isHtmlPath(path)
+            ? "html"
+            : "file";
       try {
         // Avoid re-reading from disk when the file is already open as
         // a tab — we'd clobber any dirty edits the user has made.

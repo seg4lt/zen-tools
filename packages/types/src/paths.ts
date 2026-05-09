@@ -37,6 +37,14 @@ export function isExcalidrawPath(path: string): boolean {
   return lower.endsWith(".excalidraw.svg") || lower.endsWith(".excalidraw.png");
 }
 
+/** `true` when `path` is an HTML document. The viewer mounts a
+ *  Code/Preview split for these instead of the plain text editor — see
+ *  `HtmlEditor` in the markdown tool. */
+export function isHtmlPath(path: string): boolean {
+  const lower = path.toLowerCase();
+  return lower.endsWith(".html") || lower.endsWith(".htm");
+}
+
 /** `true` when `path` is one of the markdown formats the vault walker
  *  and editor treat as markdown rather than a generic text file. */
 export function isMarkdownPath(path: string): boolean {

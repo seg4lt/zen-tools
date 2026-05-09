@@ -57,6 +57,7 @@ import {
   useMarkdownStore,
 } from "../store/markdown-store";
 import {
+  isHtmlPath,
   isMarkdownPath,
   isExcalidrawPath,
   markdownTauri,
@@ -881,7 +882,9 @@ async function openFile(
     ? "excalidraw"
     : isMarkdownPath(path)
       ? "markdown"
-      : "file";
+      : isHtmlPath(path)
+        ? "html"
+        : "file";
   try {
     if (kind === "excalidraw") {
       dispatch({ type: "openFile", path, doc: "", kind });
