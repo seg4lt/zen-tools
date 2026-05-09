@@ -1,0 +1,54 @@
+/*
+ * Hunk highlighting for the 3-way merge editor.
+ *
+ * Classes are emitted by `hunk-highlight.ts` via `Decoration.line({class: …})`
+ * on a per-line basis. We scope every selector under `.cm-editor` to keep
+ * the styles from leaking onto the rest of the host page.
+ *
+ * Palette intent:
+ *   LOCAL  — red    (the side you'd be replacing)
+ *   REMOTE — green  (the side you'd be merging in)
+ *   BASE   — neutral gray
+ *   RESULT — amber  (an unresolved conflict block in the editable pane)
+ *
+ * Active variant: solid colour + a chunky inset bar on the left edge so
+ * the user can tell at a glance which hunk we're navigating.
+ */
+
+.cm-editor .cm-merge-line {
+  background-color: rgba(120, 120, 120, 0.06);
+}
+
+.cm-editor .cm-merge-local {
+  background-color: rgba(239, 68, 68, 0.12);
+}
+.cm-editor .cm-merge-remote {
+  background-color: rgba(34, 197, 94, 0.12);
+}
+.cm-editor .cm-merge-base {
+  background-color: rgba(168, 162, 158, 0.12);
+}
+.cm-editor .cm-merge-result {
+  background-color: rgba(245, 158, 11, 0.10);
+}
+
+/* Active hunk — the conflict the user is currently navigating
+   (driven by `activeIdx` in `ThreeWayMergeEditor`). Stronger fill +
+   a solid 3px left bar so it stands out even when scrolled near
+   another hunk. */
+.cm-editor .cm-merge-local.cm-merge-active {
+  background-color: rgba(239, 68, 68, 0.32);
+  box-shadow: inset 3px 0 0 rgba(239, 68, 68, 0.95);
+}
+.cm-editor .cm-merge-remote.cm-merge-active {
+  background-color: rgba(34, 197, 94, 0.32);
+  box-shadow: inset 3px 0 0 rgba(34, 197, 94, 0.95);
+}
+.cm-editor .cm-merge-base.cm-merge-active {
+  background-color: rgba(168, 162, 158, 0.34);
+  box-shadow: inset 3px 0 0 rgba(168, 162, 158, 0.95);
+}
+.cm-editor .cm-merge-result.cm-merge-active {
+  background-color: rgba(245, 158, 11, 0.32);
+  box-shadow: inset 3px 0 0 rgba(245, 158, 11, 0.95);
+}

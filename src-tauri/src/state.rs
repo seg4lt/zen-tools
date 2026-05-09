@@ -9,6 +9,7 @@ use zen_http::{FileRegistry, HttpExecutor};
 use zen_parser::PerfConfig;
 use zen_perf::{MetricsSnapshot, RequestSample, StopHandle};
 use zen_process_monitor::{Sample as PmSample, SamplerHandle, SamplerState, SharedState as PmSharedState};
+use zen_git::GitEngine;
 use zen_prmaster::PrMasterEngine;
 use zen_types::prelude::*;
 
@@ -149,6 +150,14 @@ pub struct AppState {
     /// `set_tool_disabled` command can abort them when the user toggles
     /// PRMaster off; populated by `prmaster_lifecycle::start`.
     pub prmaster_lifecycle: PrMasterLifecycle,
+
+    // ──── Git (merge editor + commit log) ────
+    /// Domain controller for the Git tool — wraps a shell-out-based
+    /// `git` CLI client + a persisted multi-repo registry. Cheap to
+    /// clone (`Arc`-backed); commands clone it out from under this
+    /// `Mutex<AppState>` lock and drop the lock before awaiting any
+    /// git work.
+    pub git: GitEngine,
 }
 
 /// Per-app lifecycle handles for PRMaster. Toggling PRMaster off
@@ -199,6 +208,7 @@ impl AppState {
             sql_workspace_dirs: Vec::new(),
             prmaster: PrMasterEngine::new(),
             prmaster_lifecycle: PrMasterLifecycle::default(),
+            git: GitEngine::new(),
         }
     }
 

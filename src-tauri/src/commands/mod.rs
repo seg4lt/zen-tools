@@ -6,6 +6,7 @@ pub mod sql_workspace;
 pub mod environment;
 pub mod execute;
 pub mod files;
+pub mod git;
 pub mod markdown;
 pub mod markdown_index;
 pub mod misc;

@@ -7,6 +7,7 @@ import {
   Activity,
   Database,
   FileText,
+  GitMerge,
   GitPullRequest,
   Sparkles,
   TerminalSquare,
@@ -89,6 +90,13 @@ export const TOOLS: readonly Tool[] = [
     route: "/prmaster",
     description:
       "GitHub PR review dashboard — Mine, To Review, Done, Conversations, AI Summary",
+  },
+  {
+    id: "git",
+    label: "Git",
+    icon: GitMerge,
+    route: "/git",
+    description: "Git merge editor & IntelliJ-style commit log",
   },
   // Native macOS terminal (Ghostty). Only registered on macOS — the
   // `tauri-plugin-ghostty` crate is `cfg(target_os = "macos")` and

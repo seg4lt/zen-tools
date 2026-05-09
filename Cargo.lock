@@ -8862,6 +8862,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "zen-git"
+version = "0.1.45"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "zen-shell",
+]
+
+[[package]]
 name = "zen-github"
 version = "0.1.45"
 dependencies = [
@@ -9064,6 +9077,7 @@ dependencies = [
  "zen-db",
  "zen-dictation",
  "zen-fs",
+ "zen-git",
  "zen-github",
  "zen-http",
  "zen-parser",

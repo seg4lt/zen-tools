@@ -21,6 +21,7 @@ import { MarkdownShell } from "@/tools/markdown/MarkdownShell";
 import { DatabaseExplorerShell } from "@/tools/database-explorer/DatabaseExplorerShell";
 import { PRMasterShell } from "@/tools/prmaster/PRMasterShell";
 import { PRMasterReviewPage } from "@/tools/prmaster/PRMasterReviewPage";
+import { GitShell } from "@/tools/git/GitShell";
 import { SettingsView } from "@/tools/settings/SettingsView";
 import { TerminalShell } from "@/tools/terminal/TerminalShell";
 import { useDistractionFree } from "@/tools/terminal/store/distraction-free";
@@ -327,6 +328,36 @@ const prmasterReviewRoute = createRoute({
   ),
 });
 
+const gitRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/git",
+  component: () => (
+    <DisabledGuard toolId="git">
+      <GitShell />
+    </DisabledGuard>
+  ),
+});
+
+const gitLogRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/git/log",
+  component: () => (
+    <DisabledGuard toolId="git">
+      <GitShell initialTab="log" />
+    </DisabledGuard>
+  ),
+});
+
+const gitMergeRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/git/merge",
+  component: () => (
+    <DisabledGuard toolId="git">
+      <GitShell initialTab="merge" />
+    </DisabledGuard>
+  ),
+});
+
 // Native Ghostty terminal — see `crates/tauri-plugin-ghostty/`. The
 // route is registered on every platform; on non-macOS the plugin's
 // no-op `init()` means the commands fail and the view will simply
@@ -356,6 +387,9 @@ const routeTree = rootRoute.addChildren([
   databaseExplorerRoute,
   prmasterRoute,
   prmasterReviewRoute,
+  gitRoute,
+  gitLogRoute,
+  gitMergeRoute,
   terminalRoute,
   settingsRoute,
 ]);

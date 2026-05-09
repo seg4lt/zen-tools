@@ -1,0 +1,19 @@
+[package]
+name = "zen-git"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Local-git client backed entirely by the `git` CLI — used by the zen-tools 'git' app (merge editor + commit log)."
+
+[lints.rust]
+missing_docs = "warn"
+
+[dependencies]
+zen-shell = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
