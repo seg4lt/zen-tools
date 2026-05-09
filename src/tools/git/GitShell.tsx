@@ -1,48 +1,49 @@
 /**
  * Top-level shell for the **Git** tool.
  *
- *   ┌─── RepoSidebar ───┬─── Tabs: Log | Merge ────────────────────────┐
- *   │                   │                                              │
- *   │  • repo A         │   active tab pane                            │
- *   │  • repo B         │                                              │
- *   │                   │                                              │
- *   └───────────────────┴──────────────────────────────────────────────┘
+ *   ┌──┬─── Side panel ───┬─── Tabs: Log | Merge ────────────────┐
+ *   │A │                  │                                      │
+ *   │c │  Repos OR Files  │   active tab pane                    │
+ *   │t │  (mode-driven)   │                                      │
+ *   │  │                  │                                      │
+ *   └──┴──────────────────┴──────────────────────────────────────┘
  *
  * Layout primitives:
- *   - The sidebar collapses to a 40 px icon strip via the chevron in its
- *     header (`localStorage["git.sidebar.collapsed"]`).
- *   - The boundary between sidebar and main is a drag-resizable
- *     `<Split>` (size persisted under `git.split:shell.sidebar`).
+ *   - The leftmost 40 px strip is a VSCode-style ActivityBar — its
+ *     buttons drive `sidebarMode: "repos" | "files" | null`. Clicking
+ *     the active button collapses the side panel; clicking a different
+ *     one switches modes.
+ *   - The boundary between the side panel and the main pane is a
+ *     drag-resizable `<Split>`. When `sidebarMode === null` the panel
+ *     is collapsed via `collapseFirst`.
  *   - Both `<CommitLogPane>` and `<MergePane>` are *always* mounted —
  *     hidden via CSS when their tab isn't active. That preserves
  *     scroll positions, loaded blobs, and the RESULT-pane buffer
- *     across tab switches.
- *   - Focus mode overlays the merge editor on top of everything via
- *     `position: fixed; inset: 0; z-50`. Crucially, the React-tree
- *     position of `<MergePane>` does NOT change between modes, so no
- *     remount happens and all merge state survives the toggle.
+ *     across tab switches. MergePane writes its conflicts list into
+ *     the git-store, so the side panel's "Files" tree can render the
+ *     same data without a duplicate fetch.
+ *   - Focus mode overlays the merge editor on top of the rest of the
+ *     git tool via `position: absolute; inset: 0; z-40` inside the
+ *     `relative` GitShell root. The host TitleBar (and the
+ *     UpdateBanner, if any) stay visible.
  */
 
 import { useEffect, useMemo, useState } from "react";
-import { GitBranch, GitMerge, History } from "lucide-react";
-import {
-  Tabs,
-  TabsContent,
-  TabsList,
-  TabsTrigger,
-  cn,
-} from "@zen-tools/ui";
+import { Files, FolderGit2, GitBranch } from "lucide-react";
+import { cn } from "@zen-tools/ui";
 
 import { useTheme } from "@/hooks/use-theme";
 
+import { ActivityBar, type SidePanelMode } from "./components/ActivityBar";
 import { CommitLogPane } from "./components/log/CommitLogPane";
+import { ConflictFileList } from "./components/merge/ConflictFileList";
 import { MergePane } from "./components/merge/MergePane";
 import { RepoSidebar } from "./components/RepoSidebar";
 import { Split } from "./components/shared/Split";
 import { gitTauri } from "./lib/tauri";
 import { GitStoreProvider, useGitStore } from "./store/git-store";
 
-const COLLAPSE_KEY = "git.sidebar.collapsed";
+const MODE_KEY = "git.sidebar.mode";
 
 export type GitInitialTab = "log" | "merge";
 
@@ -58,31 +59,40 @@ export function GitShell(props: GitShellProps) {
   );
 }
 
+function readMode(): SidePanelMode | null {
+  try {
+    const raw = window.localStorage.getItem(MODE_KEY);
+    if (raw === "repos" || raw === "files" || raw === null) return raw;
+    return "repos";
+  } catch {
+    return "repos";
+  }
+}
+
+function writeMode(mode: SidePanelMode | null) {
+  try {
+    if (mode === null) window.localStorage.setItem(MODE_KEY, "");
+    else window.localStorage.setItem(MODE_KEY, mode);
+  } catch {
+    /* ignore */
+  }
+}
+
 function GitShellInner({ initialTab = "log" }: GitShellProps) {
   const { state, dispatch } = useGitStore();
   const { theme } = useTheme();
   const isDark = theme === "dark";
 
-  const [collapsed, setCollapsed] = useState<boolean>(() => {
-    try {
-      return window.localStorage.getItem(COLLAPSE_KEY) === "1";
-    } catch {
-      return false;
-    }
-  });
+  const [sidebarMode, setSidebarMode] = useState<SidePanelMode | null>(() =>
+    readMode(),
+  );
   const [focusMode, setFocusMode] = useState(false);
   const [activeTab, setActiveTab] = useState<GitInitialTab>(initialTab);
 
-  const toggleCollapsed = () =>
-    setCollapsed((prev) => {
-      const next = !prev;
-      try {
-        window.localStorage.setItem(COLLAPSE_KEY, next ? "1" : "0");
-      } catch {
-        /* ignore */
-      }
-      return next;
-    });
+  const onChangeMode = (m: SidePanelMode | null) => {
+    setSidebarMode(m);
+    writeMode(m);
+  };
 
   // Poll merge state for the active repo so the Merge-tab pill can
   // show a badge when conflicts exist.
@@ -95,7 +105,7 @@ function GitShellInner({ initialTab = "log" }: GitShellProps) {
         const ms = await gitTauri.mergeState(state.activeRepoPath!);
         if (!cancelled) dispatch({ type: "set-merge-state", state: ms });
       } catch {
-        /* ignore — surfaces inside Merge tab */
+        /* surfaced inside the merge tab */
       }
     };
     void tick();
@@ -106,20 +116,40 @@ function GitShellInner({ initialTab = "log" }: GitShellProps) {
     };
   }, [state.activeRepoPath, dispatch]);
 
-  const mergeBadge = useMemo(() => {
-    const ms = state.mergeState;
-    if (!ms || ms.kind === "none") return null;
-    return ms.unresolved > 0 ? `${ms.unresolved}` : "✓";
-  }, [state.mergeState]);
+  // Switch to the merge tab on first appearance of conflicts so the
+  // user lands on something useful — but ONLY on transition. Don't
+  // re-trigger if they intentionally switched back to Log while a
+  // merge is still in progress.
+  const conflictsExist = state.conflicts.length > 0;
+  useEffect(() => {
+    if (conflictsExist && activeTab === "log") {
+      // Only nudge — keep their explicit pick if they picked Log just
+      // before this. We do NOT auto-switch on every render, only on
+      // the rising edge of "conflicts appeared".
+    }
+    // intentionally noop here; auto-switch policy lives at MergePane level
+  }, [conflictsExist, activeTab]);
 
   // ── Empty state ────────────────────────────────────────────────────
   if (!state.activeRepoPath) {
     return (
       <div className="flex h-full w-full min-h-0">
-        <RepoSidebar
-          collapsed={collapsed}
-          onToggleCollapsed={toggleCollapsed}
+        <ActivityBar
+          mode={sidebarMode}
+          onChangeMode={onChangeMode}
+          items={[
+            {
+              id: "repos",
+              label: "Repositories",
+              icon: FolderGit2,
+            },
+          ]}
         />
+        {sidebarMode === "repos" ? (
+          <div className="w-56 shrink-0 border-r">
+            <RepoSidebar />
+          </div>
+        ) : null}
         <div className="flex flex-1 items-center justify-center text-center text-sm text-muted-foreground">
           <div>
             <GitBranch className="mx-auto mb-3 h-6 w-6 opacity-60" />
@@ -130,95 +160,168 @@ function GitShellInner({ initialTab = "log" }: GitShellProps) {
     );
   }
 
-  // ── Main layout ───────────────────────────────────────────────────
-  // Both tab contents are `forceMount`ed so their inner state survives
-  // tab switches. Visibility is driven by Radix's `data-state`
-  // attribute via the `data-[state=inactive]:hidden` utility.
-  const main = (
-    <Tabs
-      value={activeTab}
-      onValueChange={(v) => setActiveTab(v as GitInitialTab)}
-      className="flex h-full min-h-0 flex-col"
-    >
-      {/* Tab strip is hidden in focus mode but stays mounted. */}
-      <TabsList
-        className={cn("mx-3 mt-2 self-start", focusMode && "hidden")}
-      >
-        <TabsTrigger value="log" className="gap-1.5">
-          <History className="h-3.5 w-3.5" /> Log
-        </TabsTrigger>
-        <TabsTrigger value="merge" className="gap-1.5">
-          <GitMerge className="h-3.5 w-3.5" /> Merge
-          {mergeBadge && (
-            <span
-              className={cn(
-                "ml-1 rounded px-1 py-0.5 text-[9px] font-mono",
-                mergeBadge === "✓"
-                  ? "bg-emerald-500/20 text-emerald-600"
-                  : "bg-amber-500/20 text-amber-600",
-              )}
-            >
-              {mergeBadge}
+  return (
+    <div className="relative flex h-full w-full min-h-0">
+      <ActivityBar
+        mode={sidebarMode}
+        onChangeMode={onChangeMode}
+        items={[
+          {
+            id: "repos",
+            label: "Repositories",
+            icon: FolderGit2,
+            badge:
+              state.repos.length > 1 ? String(state.repos.length) : undefined,
+            badgeTone: "muted",
+          },
+          {
+            id: "files",
+            label: "Conflict files",
+            icon: Files,
+            badge:
+              state.conflicts.length > 0
+                ? String(state.conflicts.length)
+                : undefined,
+            badgeTone: state.conflicts.length > 0 ? "amber" : "muted",
+          },
+        ]}
+      />
+
+      <div className="relative flex min-h-0 min-w-0 flex-1">
+        <Split
+          direction="horizontal"
+          // Distinct keys per mode so each mode remembers its own width.
+          storageKey={
+            sidebarMode === "files"
+              ? "shell.sidebar.files"
+              : sidebarMode === "repos"
+                ? "shell.sidebar.repos"
+                : "shell.sidebar.collapsed"
+          }
+          defaultFirst={sidebarMode === "files" ? 280 : 220}
+          minFirst={160}
+          maxFirst={520}
+          minSecond={400}
+          disabled={sidebarMode === null || focusMode}
+          collapseFirst={sidebarMode === null || focusMode}
+        >
+          <SidePanel mode={sidebarMode} />
+          <MainArea
+            isDark={isDark}
+            activeRepoPath={state.activeRepoPath}
+            activeTab={activeTab}
+            onTabChange={setActiveTab}
+            focusMode={focusMode}
+            onToggleFocusMode={() => setFocusMode((v) => !v)}
+          />
+        </Split>
+      </div>
+    </div>
+  );
+}
+
+function SidePanel({ mode }: { mode: SidePanelMode | null }) {
+  const { state, dispatch } = useGitStore();
+
+  if (mode === null) return <div className="h-full w-0" aria-hidden />;
+
+  if (mode === "repos") {
+    return <RepoSidebar />;
+  }
+
+  // mode === "files"
+  return (
+    <div className="flex h-full min-h-0 w-full min-w-0 flex-col bg-muted/10">
+      <div className="flex items-center justify-between gap-2 border-b px-2 py-1">
+        <span className="flex min-w-0 items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+          <Files className="h-3 w-3 shrink-0" />
+          <span className="truncate">Conflicts</span>
+          {state.conflicts.length > 0 && (
+            <span className="ml-1 rounded bg-amber-500/20 px-1 font-mono text-[10px] text-amber-700 dark:text-amber-400">
+              {state.conflicts.length}
             </span>
           )}
-        </TabsTrigger>
-      </TabsList>
+        </span>
+      </div>
+      <div className="min-h-0 flex-1">
+        <ConflictFileList
+          conflicts={state.conflicts}
+          activePath={state.activeConflictPath}
+          onSelect={(p) => dispatch({ type: "set-active-conflict", path: p })}
+          resolvedPaths={state.resolvedPaths}
+        />
+      </div>
+    </div>
+  );
+}
 
-      <TabsContent
-        value="log"
-        forceMount
+interface MainAreaProps {
+  isDark: boolean;
+  activeRepoPath: string;
+  activeTab: GitInitialTab;
+  onTabChange: (tab: GitInitialTab) => void;
+  focusMode: boolean;
+  onToggleFocusMode: () => void;
+}
+
+function MainArea({
+  isDark,
+  activeRepoPath,
+  activeTab,
+  onTabChange,
+  focusMode,
+  onToggleFocusMode,
+}: MainAreaProps) {
+  return (
+    <div className="flex h-full min-h-0 min-w-0 flex-col">
+      {/* Both panes are mounted at all times so their state survives
+          tab switches; CSS hides the inactive one. */}
+      <div
         className={cn(
-          "flex-1 min-h-0 min-w-0 outline-none",
-          // Hide log when not active OR when in focus mode (focus =
-          // merge takes over).
+          "flex-1 min-h-0 min-w-0",
           (activeTab !== "log" || focusMode) && "hidden",
         )}
       >
-        <CommitLogPane repo={state.activeRepoPath} isDark={isDark} />
-      </TabsContent>
+        <CommitLogPane
+          repo={activeRepoPath}
+          isDark={isDark}
+          activeTab={activeTab}
+          onTabChange={onTabChange}
+        />
+      </div>
 
-      {/* Merge content is `forceMount`ed AND, when focus mode is on,
-          its wrapper escapes the layout via `fixed inset-0 z-50`.
-          The MergePane component itself never moves in the React
-          tree, so no remount happens on focus toggle. */}
-      <TabsContent
-        value="merge"
-        forceMount
+      {/* Merge content: when focus mode is on, the wrapper escapes
+          the local layout via `absolute inset-0 z-40`, anchored to
+          the `relative` GitShell root so it sits below the host
+          TitleBar. The MergePane component itself never moves in the
+          React tree, so no remount happens on focus toggle. */}
+      <div
         className={cn(
-          "outline-none",
           focusMode
-            ? "fixed inset-0 z-50 bg-background"
+            ? "absolute inset-0 z-40 bg-background"
             : cn("flex-1 min-h-0 min-w-0", activeTab !== "merge" && "hidden"),
         )}
       >
         <MergePane
-          repo={state.activeRepoPath}
+          repo={activeRepoPath}
           isDark={isDark}
           focusMode={focusMode}
-          onToggleFocusMode={() => setFocusMode((v) => !v)}
+          onToggleFocusMode={onToggleFocusMode}
+          activeTab={activeTab}
+          onTabChange={onTabChange}
         />
-      </TabsContent>
-    </Tabs>
+      </div>
+    </div>
   );
+}
 
-  // In focus mode the sidebar is hidden (the merge overlay covers
-  // everything anyway), but we still render it to keep its tree
-  // position stable.
-  return (
-    <Split
-      direction="horizontal"
-      // Distinct keys per mode so collapsing snaps to 40 px without
-      // wiping the user's preferred expanded width.
-      storageKey={collapsed ? "shell.sidebar.collapsed" : "shell.sidebar"}
-      defaultFirst={collapsed ? 40 : 220}
-      minFirst={collapsed ? 40 : 140}
-      maxFirst={collapsed ? 40 : 420}
-      minSecond={400}
-      disabled={collapsed || focusMode}
-      collapseFirst={focusMode}
-    >
-      <RepoSidebar collapsed={collapsed} onToggleCollapsed={toggleCollapsed} />
-      <div className="flex h-full min-h-0 min-w-0 flex-col">{main}</div>
-    </Split>
-  );
+// Re-export the merge-state badge helper for the Merge tab pill in
+// case any consumer wants it externally.
+export function useMergeBadge(): string | null {
+  const { state } = useGitStore();
+  return useMemo(() => {
+    const ms = state.mergeState;
+    if (!ms || ms.kind === "none") return null;
+    return ms.unresolved > 0 ? `${ms.unresolved}` : "✓";
+  }, [state.mergeState]);
 }

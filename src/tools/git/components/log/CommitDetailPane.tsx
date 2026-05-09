@@ -4,7 +4,7 @@
  * via the shared `<DiffViewer>` from `@zen-tools/editor`).
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { DiffViewer } from "@zen-tools/editor";
 import { cn } from "@zen-tools/ui";
 
@@ -15,6 +15,7 @@ import {
   type FileDiff,
 } from "../../lib/tauri";
 import { shortIso, statusColor } from "../../lib/format";
+import { FileTree, type FileTreeItem } from "../shared/FileTree";
 
 export interface CommitDetailPaneProps {
   repo: string;
@@ -154,37 +155,14 @@ export function CommitDetailPane({
 
       {/* File list + diff */}
       <div className="flex min-h-0 min-w-0 flex-1">
-        <ul className="w-56 shrink-0 overflow-auto border-r py-1 text-xs">
-          {loadingFiles ? (
-            <li className="px-3 py-2 text-muted-foreground">Loading…</li>
-          ) : files.length === 0 ? (
-            <li className="px-3 py-2 text-muted-foreground">No files.</li>
-          ) : (
-            files.map((f) => (
-              <li key={f.path}>
-                <button
-                  type="button"
-                  onClick={() => setActivePath(f.path)}
-                  className={cn(
-                    "flex w-full items-center gap-2 px-3 py-1 text-left hover:bg-accent",
-                    activePath === f.path && "bg-accent font-medium",
-                  )}
-                  title={f.path}
-                >
-                  <span
-                    className={cn(
-                      "w-4 shrink-0 font-mono text-[11px]",
-                      statusColor(f.status),
-                    )}
-                  >
-                    {f.status}
-                  </span>
-                  <span className="truncate">{f.path}</span>
-                </button>
-              </li>
-            ))
-          )}
-        </ul>
+        <div className="w-64 shrink-0 overflow-hidden border-r">
+          <CommitFileTree
+            files={files}
+            loading={loadingFiles}
+            activePath={activePath}
+            onSelect={setActivePath}
+          />
+        </div>
         <div className="min-w-0 flex-1 overflow-auto">
           {loadingDiff ? (
             <div className="p-4 text-xs text-muted-foreground">Loading diff…</div>
@@ -205,5 +183,55 @@ export function CommitDetailPane({
         </div>
       </div>
     </div>
+  );
+}
+
+interface CommitFileTreeProps {
+  files: FileChange[];
+  loading: boolean;
+  activePath: string | null;
+  onSelect: (path: string) => void;
+}
+
+function CommitFileTree({
+  files,
+  loading,
+  activePath,
+  onSelect,
+}: CommitFileTreeProps) {
+  const items = useMemo<FileTreeItem<FileChange>[]>(
+    () => files.map((f) => ({ path: f.path, data: f })),
+    [files],
+  );
+  if (loading) {
+    return (
+      <div className="px-3 py-2 text-xs text-muted-foreground">Loading…</div>
+    );
+  }
+  if (files.length === 0) {
+    return (
+      <div className="px-3 py-2 text-xs text-muted-foreground">No files.</div>
+    );
+  }
+  return (
+    <FileTree
+      items={items}
+      selectedPath={activePath}
+      onSelect={onSelect}
+      renderLeaf={(f, { basename }) => (
+        <>
+          <span
+            className={cn(
+              "w-4 shrink-0 font-mono text-[11px]",
+              statusColor(f.status),
+            )}
+            title={f.status}
+          >
+            {f.status}
+          </span>
+          <span className="truncate font-mono">{basename}</span>
+        </>
+      )}
+    />
   );
 }

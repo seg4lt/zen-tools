@@ -1,26 +1,41 @@
 /**
- * Top-level Merge tab. Composes header + conflict file rail + 3-way
- * editor. Polls `git_merge_state` + `git_list_conflicts` on mount and
- * after every staging mutation so the UI stays in sync with what
- * `git` thinks the working tree looks like.
+ * Top-level Merge tab — combined tab + merge-state header in one row,
+ * then the 3-way editor underneath.
+ *
+ * The conflict file rail no longer lives here; it's hosted by
+ * GitShell's side panel (driven by the activity bar's "Files" mode)
+ * so toggling visibility is unified across repos / files.
+ *
+ * Conflicts state (the list, the active path, and the
+ * resolved-this-session set) lives in `git-store` so the side panel
+ * and the editor see the same data without a duplicate fetch.
+ *
+ * Polls `git_merge_state` + `git_list_conflicts` on mount and after
+ * every staging mutation so the UI stays in sync with what `git`
+ * thinks the working tree looks like.
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Maximize2, Minimize2, RotateCw } from "lucide-react";
+import {
+  Maximize2,
+  Minimize2,
+  Pause,
+  Play,
+  RotateCcw,
+  RotateCw,
+} from "lucide-react";
 import { Button, cn } from "@zen-tools/ui";
 
 import {
   gitTauri,
   type ConflictBlobs,
-  type ConflictFile,
   type MergeState,
 } from "../../lib/tauri";
 import { useGitStore } from "../../store/git-store";
-import { ConflictFileList } from "./ConflictFileList";
-import { MergeHeader } from "./MergeHeader";
 import { PreMergePreviewDialog } from "./PreMergePreviewDialog";
 import { ThreeWayMergeEditor } from "./ThreeWayMergeEditor";
-import { Split } from "../shared/Split";
+import { TabStrip } from "../shared/TabStrip";
+import type { GitInitialTab } from "../../GitShell";
 
 export interface MergePaneProps {
   repo: string;
@@ -30,7 +45,17 @@ export interface MergePaneProps {
   focusMode?: boolean;
   /** Toggle focus mode on/off. Rendered as a button in the header. */
   onToggleFocusMode?: () => void;
+  activeTab: GitInitialTab;
+  onTabChange: (t: GitInitialTab) => void;
 }
+
+const KIND_LABEL: Record<MergeState["kind"], string> = {
+  merge: "Merge",
+  rebase: "Rebase",
+  cherryPick: "Cherry-pick",
+  revert: "Revert",
+  none: "",
+};
 
 /**
  * Pick the seed text for the editable RESULT pane.
@@ -54,7 +79,6 @@ function pickWorkingSeed(b: {
   if (b.working) return b.working;
   const local = b.local ?? "";
   const remote = b.remote ?? "";
-  // For AA (both added), surfaces the disagreement immediately.
   return `<<<<<<< HEAD\n${local}\n=======\n${remote}\n>>>>>>> incoming\n`;
 }
 
@@ -63,28 +87,19 @@ export function MergePane({
   isDark,
   focusMode = false,
   onToggleFocusMode,
+  activeTab,
+  onTabChange,
 }: MergePaneProps) {
-  const { dispatch } = useGitStore();
-  const [state, setState] = useState<MergeState | null>(null);
-  const [conflicts, setConflicts] = useState<ConflictFile[]>([]);
-  const [activePath, setActivePath] = useState<string | null>(null);
-  /**
-   * Loaded blobs + the path they belong to. We track `loadedFor`
-   * separately so a click-during-load doesn't paint stale content
-   * under a new filename. The 3-way editor only mounts when
-   * `loadedFor === activePath`.
-   */
+  const { state: storeState, dispatch } = useGitStore();
+  const { activeConflictPath, resolvedPaths, mergeState } = storeState;
   const [blobs, setBlobs] = useState<{
     loadedFor: string;
     data: ConflictBlobs;
   } | null>(null);
-  const [resolved, setResolved] = useState<Set<string>>(() => new Set());
   const [busy, setBusy] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [previewOpen, setPreviewOpen] = useState(false);
-  // Bumped by the manual refresh button to force the blob-loading
-  // effect to re-run even when `activePath` and `repo` are unchanged.
   const [reloadTick, setReloadTick] = useState(0);
 
   const refresh = useCallback(async () => {
@@ -93,14 +108,8 @@ export function MergePane({
         gitTauri.mergeState(repo),
         gitTauri.listConflicts(repo).catch(() => []),
       ]);
-      setState(s);
       dispatch({ type: "set-merge-state", state: s });
-      setConflicts(c);
-      // Drop active selection if the path is no longer in conflict.
-      setActivePath((prev) => {
-        if (prev && c.some((f) => f.path === prev)) return prev;
-        return c[0]?.path ?? null;
-      });
+      dispatch({ type: "set-conflicts", conflicts: c });
     } catch (e) {
       setError(String(e));
     }
@@ -113,13 +122,12 @@ export function MergePane({
   // Load blobs whenever the active conflict changes. Clear
   // `blobs` to null *immediately* so the editor unmounts —
   // otherwise the click-then-load gap shows stale content under a
-  // new filename. `reloadTick` is included so the manual refresh
-  // button can force a re-fetch of the same file's blobs.
+  // new filename.
   useEffect(() => {
     setBlobs(null);
-    if (!activePath) return;
+    if (!activeConflictPath) return;
     let cancelled = false;
-    const target = activePath;
+    const target = activeConflictPath;
     void (async () => {
       try {
         const b = await gitTauri.conflictBlobs(repo, target);
@@ -134,14 +142,8 @@ export function MergePane({
     return () => {
       cancelled = true;
     };
-  }, [repo, activePath, reloadTick]);
+  }, [repo, activeConflictPath, reloadTick]);
 
-  /**
-   * Manual refresh: re-fetch merge state, conflicts, and the active
-   * file's blobs. Discards in-memory resolutions for the active
-   * file (the user is asking to see what's on disk *now*; if they
-   * had unsaved accept-LOCAL/REMOTE choices, those are reset).
-   */
   const refreshAll = useCallback(async () => {
     if (refreshing) return;
     setRefreshing(true);
@@ -169,16 +171,12 @@ export function MergePane({
   }, [refreshAll]);
 
   const onMarkResolved = async (content: string) => {
-    if (!activePath) return;
+    if (!activeConflictPath) return;
     setBusy(true);
     setError(null);
     try {
-      await gitTauri.writeResolved(repo, activePath, content);
-      setResolved((prev) => {
-        const next = new Set(prev);
-        next.add(activePath);
-        return next;
-      });
+      await gitTauri.writeResolved(repo, activeConflictPath, content);
+      dispatch({ type: "mark-conflict-resolved", path: activeConflictPath });
       await refresh();
     } catch (e) {
       setError(String(e));
@@ -195,7 +193,7 @@ export function MergePane({
     setError(null);
     try {
       await fn(repo);
-      setResolved(new Set());
+      dispatch({ type: "clear-resolved" });
       await refresh();
     } catch (e) {
       // eslint-disable-next-line no-console
@@ -208,31 +206,36 @@ export function MergePane({
 
   const headerState: MergeState = useMemo(
     () =>
-      state ?? {
+      mergeState ?? {
         kind: "none",
         head: null,
         incoming: null,
         unresolved: 0,
       },
-    [state],
+    [mergeState],
   );
+  const idle = headerState.kind === "none";
+  const skipSupported =
+    headerState.kind === "rebase" ||
+    headerState.kind === "cherryPick" ||
+    headerState.kind === "revert";
 
   const editorPane =
-    !activePath ? (
+    !activeConflictPath ? (
       <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
-        {headerState.kind === "none"
+        {idle
           ? "Working tree is clean. Use “Preview merge…” to dry-run a merge."
           : "Select a conflicting file to start resolving."}
       </div>
-    ) : !blobs || blobs.loadedFor !== activePath ? (
+    ) : !blobs || blobs.loadedFor !== activeConflictPath ? (
       <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
-        Loading {activePath}…
+        Loading {activeConflictPath}…
       </div>
     ) : blobs.data.binary ? (
       <div className="flex h-full items-center justify-center px-6 text-center text-sm text-muted-foreground">
         Binary file — resolve externally and run{" "}
         <code className="mx-1 rounded bg-muted px-1 font-mono">
-          git add {activePath}
+          git add {activeConflictPath}
         </code>
       </div>
     ) : (
@@ -248,80 +251,150 @@ export function MergePane({
       />
     );
 
-  const fileRail = (
-    <ConflictFileList
-      conflicts={conflicts}
-      activePath={activePath}
-      onSelect={setActivePath}
-      resolvedPaths={resolved}
-    />
+  const mergeBadge = idle
+    ? null
+    : headerState.unresolved > 0
+      ? `${headerState.unresolved}`
+      : "✓";
+  const tone = idle
+    ? "neutral"
+    : headerState.unresolved > 0
+      ? "amber"
+      : "emerald";
+
+  // ── Center cell of the tab strip — describes the in-progress op. ──
+  const centerContent = idle ? null : (
+    <span className="truncate">
+      <span className="font-medium">{KIND_LABEL[headerState.kind]}</span>{" "}
+      <span className="text-muted-foreground">in progress</span>
+      {headerState.incoming && (
+        <>
+          {" — "}
+          <code className="rounded bg-muted px-1 font-mono text-[11px]">
+            {headerState.incoming}
+          </code>
+        </>
+      )}
+      {headerState.head && (
+        <>
+          {" → "}
+          <code className="rounded bg-muted px-1 font-mono text-[11px]">
+            {headerState.head}
+          </code>
+        </>
+      )}
+      {resolvedPaths.size > 0 && (
+        <span className="ml-2 text-[11px] text-emerald-600 dark:text-emerald-400">
+          {resolvedPaths.size} resolved
+        </span>
+      )}
+      <span className="ml-2 text-[11px] text-muted-foreground">
+        · {headerState.unresolved} unresolved
+      </span>
+    </span>
+  );
+
+  // ── Right-side action group: preview / continue / abort + util icons.
+  const rightActions = (
+    <>
+      <Button
+        size="sm"
+        variant="ghost"
+        onClick={() => setPreviewOpen(true)}
+        disabled={busy}
+        className="h-7 px-2 text-[11px]"
+      >
+        Preview…
+      </Button>
+      {!idle && (
+        <>
+          <Button
+            size="sm"
+            onClick={handleHeader(gitTauri.continueOp, "continue")}
+            disabled={busy || headerState.unresolved > 0}
+            title={
+              headerState.unresolved > 0
+                ? `Resolve ${headerState.unresolved} file(s) first`
+                : "Continue"
+            }
+            className="h-7 gap-1 px-2 text-[11px]"
+          >
+            <Play className="h-3 w-3" />
+            Continue
+          </Button>
+          {skipSupported && (
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={handleHeader(gitTauri.skipOp, "skip")}
+              disabled={busy}
+              className="h-7 gap-1 px-2 text-[11px]"
+            >
+              <Pause className="h-3 w-3" />
+              Skip
+            </Button>
+          )}
+          <Button
+            size="sm"
+            variant="destructive"
+            onClick={handleHeader(gitTauri.abortOp, "abort")}
+            disabled={busy}
+            className="h-7 gap-1 px-2 text-[11px]"
+          >
+            <RotateCcw className="h-3 w-3" />
+            Abort
+          </Button>
+        </>
+      )}
+      <span className="mx-0.5 h-4 w-px bg-border/60" aria-hidden />
+      <Button
+        size="icon"
+        variant="ghost"
+        onClick={refreshAll}
+        disabled={refreshing || busy}
+        title={`Refresh (${navigator.platform.includes("Mac") ? "⌘" : "Ctrl+"}R)`}
+        className="h-7 w-7"
+      >
+        <RotateCw className={cn("h-3.5 w-3.5", refreshing && "animate-spin")} />
+      </Button>
+      {onToggleFocusMode && (
+        <Button
+          size="icon"
+          variant="ghost"
+          onClick={onToggleFocusMode}
+          title={focusMode ? "Exit focus mode" : "Focus on this file"}
+          className="h-7 w-7"
+        >
+          {focusMode ? (
+            <Minimize2 className="h-3.5 w-3.5" />
+          ) : (
+            <Maximize2 className="h-3.5 w-3.5" />
+          )}
+        </Button>
+      )}
+    </>
   );
 
   return (
-    <div className="flex h-full w-full min-h-0 min-w-0 flex-1 flex-col">
-      <div className="flex items-stretch border-b">
-        <div className="flex-1 min-w-0">
-          <MergeHeader
-            state={headerState}
-            busy={busy}
-            onContinue={handleHeader(gitTauri.continueOp, "continue")}
-            onAbort={handleHeader(gitTauri.abortOp, "abort")}
-            onSkip={handleHeader(gitTauri.skipOp, "skip")}
-            onPreview={() => setPreviewOpen(true)}
-          />
-        </div>
-        <div className="flex shrink-0 items-center gap-1 self-center pr-2">
-          <Button
-            size="icon"
-            variant="ghost"
-            onClick={refreshAll}
-            disabled={refreshing || busy}
-            title={`Refresh from git (${navigator.platform.includes("Mac") ? "⌘" : "Ctrl+"}R)`}
-          >
-            <RotateCw
-              className={cn("h-4 w-4", refreshing && "animate-spin")}
-            />
-          </Button>
-          {onToggleFocusMode && (
-            <Button
-              size="icon"
-              variant="ghost"
-              onClick={onToggleFocusMode}
-              title={focusMode ? "Exit focus mode" : "Focus on this file"}
-            >
-              {focusMode ? (
-                <Minimize2 className="h-4 w-4" />
-              ) : (
-                <Maximize2 className="h-4 w-4" />
-              )}
-            </Button>
-          )}
-        </div>
-      </div>
+    <div className="flex h-full w-full min-h-0 min-w-0 flex-col">
+      {/* TabStrip always renders — even in focus mode — so the
+          un-maximize button (and Continue/Abort) stay reachable. */}
+      <TabStrip
+        activeTab={activeTab}
+        onTabChange={onTabChange}
+        mergeBadge={mergeBadge}
+        tone={tone}
+        centerContent={centerContent}
+        rightActions={rightActions}
+      />
 
       {error && (
-        <div className="border-b border-rose-500/30 bg-rose-500/10 px-3 py-1.5 text-xs text-rose-600">
+        <div className="border-b border-rose-500/30 bg-rose-500/10 px-3 py-1 text-[11px] text-rose-600">
           {error}
         </div>
       )}
 
-      {focusMode ? (
-        <div className="min-h-0 flex-1">{editorPane}</div>
-      ) : (
-        <div className="min-h-0 flex-1">
-          <Split
-            direction="horizontal"
-            storageKey="merge.fileList"
-            defaultFirst={240}
-            minFirst={160}
-            maxFirst={500}
-            minSecond={400}
-          >
-            <aside className="h-full">{fileRail}</aside>
-            <section className="h-full min-h-0 min-w-0">{editorPane}</section>
-          </Split>
-        </div>
-      )}
+      <div className="min-h-0 flex-1">{editorPane}</div>
 
       <PreMergePreviewDialog
         repo={repo}

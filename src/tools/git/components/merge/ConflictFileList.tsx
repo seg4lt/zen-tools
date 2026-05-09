@@ -1,21 +1,18 @@
 /**
- * Left rail of the Merge tab — every conflicting path with its
- * conflict-status pill.
+ * Left rail of the Merge tab — every conflicting path in a directory
+ * tree, with a status icon and a tiny conflict-status pill.
  */
 
+import { useMemo } from "react";
 import { CheckCircle2, FileWarning } from "lucide-react";
 import { cn } from "@zen-tools/ui";
 
 import type { ConflictFile } from "../../lib/tauri";
+import { FileTree, type FileTreeItem } from "../shared/FileTree";
 
-function basename(path: string): string {
-  const idx = path.lastIndexOf("/");
-  return idx === -1 ? path : path.slice(idx + 1);
-}
-
-function dirname(path: string): string {
-  const idx = path.lastIndexOf("/");
-  return idx === -1 ? "" : path.slice(0, idx);
+interface LeafData {
+  conflict: ConflictFile;
+  resolved: boolean;
 }
 
 const STATUS_LABEL: Record<ConflictFile["status"], string> = {
@@ -41,6 +38,15 @@ export function ConflictFileList({
   onSelect,
   resolvedPaths,
 }: ConflictFileListProps) {
+  const items = useMemo<FileTreeItem<LeafData>[]>(
+    () =>
+      conflicts.map((c) => ({
+        path: c.path,
+        data: { conflict: c, resolved: resolvedPaths.has(c.path) },
+      })),
+    [conflicts, resolvedPaths],
+  );
+
   if (conflicts.length === 0) {
     return (
       <div className="flex h-full items-center justify-center px-4 py-6 text-center text-xs text-muted-foreground">
@@ -49,43 +55,32 @@ export function ConflictFileList({
     );
   }
   return (
-    <ul className="h-full overflow-auto py-1 text-xs">
-      {conflicts.map((c) => {
-        const resolved = resolvedPaths.has(c.path);
-        return (
-          <li key={c.path}>
-            <button
-              type="button"
-              onClick={() => onSelect(c.path)}
-              className={cn(
-                "flex w-full items-start gap-2 px-3 py-1.5 text-left hover:bg-accent",
-                activePath === c.path && "bg-accent",
-              )}
-              title={c.path}
-            >
-              {resolved ? (
-                <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-500" />
-              ) : (
-                <FileWarning className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-500" />
-              )}
-              <div className="min-w-0 flex-1">
-                <div className="truncate font-mono text-[11px]">
-                  {basename(c.path)}
-                </div>
-                {dirname(c.path) && (
-                  <div className="truncate text-[10px] text-muted-foreground/80">
-                    {dirname(c.path)}
-                  </div>
-                )}
-                <div className="text-[10px] text-muted-foreground">
-                  {STATUS_LABEL[c.status]}
-                  {c.binary && " · binary"}
-                </div>
-              </div>
-            </button>
-          </li>
-        );
-      })}
-    </ul>
+    <FileTree
+      items={items}
+      selectedPath={activePath}
+      onSelect={onSelect}
+      renderLeaf={({ conflict, resolved }, { basename }) => (
+        <>
+          {resolved ? (
+            <CheckCircle2 className="size-3 shrink-0 text-emerald-500" />
+          ) : (
+            <FileWarning className="size-3 shrink-0 text-amber-500" />
+          )}
+          <span className="truncate font-mono">{basename}</span>
+          <span
+            className={cn(
+              "ml-auto pl-2 text-[10px]",
+              resolved
+                ? "text-emerald-600 dark:text-emerald-400"
+                : "text-muted-foreground",
+            )}
+            title={STATUS_LABEL[conflict.status]}
+          >
+            {STATUS_LABEL[conflict.status]}
+            {conflict.binary && " · bin"}
+          </span>
+        </>
+      )}
+    />
   );
 }

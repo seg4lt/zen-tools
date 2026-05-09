@@ -274,11 +274,18 @@ export function ThreeWayMergeEditor({
 
   const runMagicMerge = useCallback(() => {
     if (!canMagicMerge) {
-      setMagicFlash(
-        magicPreview.unresolved === 0 && magicPreview.resolved === 0
-          ? "Nothing to merge — all blocks already resolved."
-          : "Magic merge can't help here — every remaining conflict has both sides editing the same lines differently.",
-      );
+      const totalConflicts = conflictBlocks.length;
+      if (totalConflicts === 0) {
+        setMagicFlash("Nothing to merge — all blocks already resolved.");
+      } else if (magicPreview.unresolved === totalConflicts) {
+        setMagicFlash(
+          `Magic merge can't help here. All ${totalConflicts} conflict${totalConflicts === 1 ? "" : "s"} ${totalConflicts === 1 ? "has" : "have"} both sides editing the same lines differently — pick a side or edit manually.`,
+        );
+      } else {
+        setMagicFlash(
+          "Magic merge has nothing to do — looks like every block is already resolved or unambiguous.",
+        );
+      }
       return;
     }
     applyParsed(magicPreview.parsed);
@@ -317,7 +324,7 @@ export function ThreeWayMergeEditor({
     setMagicFlash(
       `${parts.join("; ")} (${breakdown.join(", ")})${tail}`,
     );
-  }, [magicPreview, canMagicMerge, applyParsed]);
+  }, [magicPreview, canMagicMerge, applyParsed, conflictBlocks.length]);
 
   const onResultChange = (value: string) => {
     // Drop self-feedback from our own programmatic setValue calls —
@@ -596,31 +603,35 @@ export function ThreeWayMergeEditor({
 
   return (
     <div className="flex h-full min-h-0 min-w-0 flex-col">
-      {/* Conflict-nav toolbar */}
-      <div className="flex flex-wrap items-center gap-2 border-b px-3 py-1.5 text-xs">
+      {/* Compact conflict-nav toolbar — icon-only secondary actions
+          + a single primary "Mark resolved" button on the right. */}
+      <div className="flex h-8 shrink-0 items-center gap-2 border-b px-2 text-[11px]">
         <span
-          className="min-w-0 truncate font-mono text-[11px] text-muted-foreground"
+          className="min-w-0 truncate font-mono text-muted-foreground"
           title={fileName}
         >
           {fileName}
         </span>
-        <span className="shrink-0">
+        <span className="shrink-0 font-mono">
           {conflictBlocks.length === 0
-            ? "no conflicts"
-            : `${activeIdx + 1} / ${conflictBlocks.length}`}{" "}
-          <span className="text-muted-foreground">
-            ({unresolved} unresolved)
-          </span>
+            ? "—"
+            : `${activeIdx + 1}/${conflictBlocks.length}`}
         </span>
-        <div className="ml-auto flex shrink-0 items-center gap-1">
+        {unresolved > 0 && (
+          <span className="shrink-0 text-amber-600 dark:text-amber-400">
+            {unresolved} left
+          </span>
+        )}
+        <div className="ml-auto flex shrink-0 items-center gap-0.5">
           <Button
             size="icon"
             variant="ghost"
             onClick={undo}
             disabled={!canUndo}
-            title={`Undo last resolution (${navigator.platform.includes("Mac") ? "⌘" : "Ctrl+"}Z)`}
+            title={`Undo (${navigator.platform.includes("Mac") ? "⌘" : "Ctrl+"}Z)`}
+            className="h-6 w-6"
           >
-            <Undo2 className="h-4 w-4" />
+            <Undo2 className="h-3.5 w-3.5" />
           </Button>
           <Button
             size="icon"
@@ -628,53 +639,62 @@ export function ThreeWayMergeEditor({
             onClick={redo}
             disabled={!canRedo}
             title={`Redo (${navigator.platform.includes("Mac") ? "⇧⌘" : "Ctrl+Shift+"}Z)`}
+            className="h-6 w-6"
           >
-            <Redo2 className="h-4 w-4" />
+            <Redo2 className="h-3.5 w-3.5" />
           </Button>
-          <span className="mx-1 h-4 w-px bg-border" aria-hidden />
+          <span className="mx-1 h-3.5 w-px bg-border/60" aria-hidden />
           <Button
-            size="sm"
+            size="icon"
             variant={canMagicMerge ? "secondary" : "ghost"}
             onClick={runMagicMerge}
-            disabled={!canMagicMerge}
-            title="Magic merge — auto-resolve every block where one side is unchanged from base or both sides made the same change. Undoable with ⌘Z."
-            className="h-7 gap-1 px-2 text-[11px]"
+            title={
+              canMagicMerge
+                ? `Magic merge — auto-resolve ${magicPreview.resolved} block${magicPreview.resolved === 1 ? "" : "s"}${magicPreview.split > 0 ? ` and split ${magicPreview.split} large conflict${magicPreview.split === 1 ? "" : "s"}` : ""}. Undoable with ⌘Z.`
+                : "Magic merge — click for a status report. (Auto-resolves blocks where one side is unchanged or both sides made the same change.)"
+            }
+            className="h-6 w-6"
           >
             <Wand2 className="h-3.5 w-3.5" />
-            Magic merge
           </Button>
-          <span className="mx-1 h-4 w-px bg-border" aria-hidden />
           <Button
             size="icon"
             variant="ghost"
             onClick={() => navigate(-1)}
             title="Previous conflict (Shift+F7)"
+            className="h-6 w-6"
           >
-            <ChevronUp className="h-4 w-4" />
+            <ChevronUp className="h-3.5 w-3.5" />
           </Button>
           <Button
             size="icon"
             variant="ghost"
             onClick={() => navigate(1)}
             title="Next conflict (F7)"
+            className="h-6 w-6"
           >
-            <ChevronDown className="h-4 w-4" />
+            <ChevronDown className="h-3.5 w-3.5" />
           </Button>
           <Button
-            size="sm"
+            size="icon"
             variant={showBase ? "secondary" : "ghost"}
             onClick={() => setShowBase((v) => !v)}
             title={showBase ? "Hide base pane" : "Show base pane"}
-            className="h-7 gap-1 px-2 text-[11px]"
+            className="h-6 w-6"
           >
             {showBase ? (
               <EyeOff className="h-3.5 w-3.5" />
             ) : (
               <Eye className="h-3.5 w-3.5" />
             )}
-            {showBase ? "Hide base" : "Show base"}
           </Button>
-          <Button size="sm" onClick={onMark} disabled={busy}>
+          <span className="mx-1 h-3.5 w-px bg-border/60" aria-hidden />
+          <Button
+            size="sm"
+            onClick={onMark}
+            disabled={busy}
+            className="h-6 px-2 text-[11px]"
+          >
             Mark resolved
           </Button>
         </div>
