@@ -17,12 +17,18 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 
 import type { Commit } from "../../lib/tauri";
 import { CommitRow } from "./CommitRow";
+import type { GraphLayout } from "./graph-layout";
 
 const ROW_HEIGHT = 28;
 const OVERSCAN_TRIGGER = 20;
 
 export interface CommitListProps {
   commits: Commit[];
+  /** Per-row graph geometry (lane assignments, arcs) computed once at
+   *  the parent level. `graph.rows.length` always matches
+   *  `commits.length`; `graph.maxLanes` drives the constant graph-
+   *  column width for every row in this window. */
+  graph: GraphLayout;
   /** Multi-selection set (always contains `primarySha` when non-empty). */
   selectedShas: ReadonlySet<string>;
   /** "Focused" sha — the one whose detail/diff is shown. */
@@ -35,6 +41,7 @@ export interface CommitListProps {
 
 export function CommitList({
   commits,
+  graph,
   selectedShas,
   primarySha,
   onSelect,
@@ -93,6 +100,8 @@ export function CommitList({
               >
                 <CommitRow
                   commit={commit}
+                  rowGraph={graph.rows[vi.index]}
+                  maxLanes={graph.maxLanes}
                   selected={selected}
                   primary={primary}
                   onClick={(e) => onSelect(commit.hash, e)}

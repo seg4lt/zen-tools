@@ -21,6 +21,7 @@ import type { GitInitialTab } from "../../GitShell";
 import { CommitDetailPane, type RangeSpec } from "./CommitDetailPane";
 import { CommitFilterBar } from "./CommitFilterBar";
 import { CommitList } from "./CommitList";
+import { computeGraphLayout } from "./graph-layout";
 
 const PAGE_SIZE = 200;
 const NO_MERGES_KEY = "git.log.noMerges";
@@ -95,6 +96,12 @@ export function CommitLogPane({
   const [hasMore, setHasMore] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [refreshTick, setRefreshTick] = useState(0);
+
+  // IntelliJ-style graph layout for the loaded commit window. Pure
+  // function over `commits`; recomputed on every page extension /
+  // filter change. O(n × max_lanes), trivially fast for the
+  // few-hundred to few-thousand row windows the log shows.
+  const graph = useMemo(() => computeGraphLayout(commits), [commits]);
 
   const selectedSha = storeState.logSelectedSha;
   const selectedShas = storeState.logSelectedShas;
@@ -321,6 +328,7 @@ export function CommitLogPane({
           <section className="flex h-full min-h-0 min-w-0 flex-col">
             <CommitList
               commits={commits}
+              graph={graph}
               selectedShas={selectedShas}
               primarySha={selectedSha}
               onSelect={onCommitClick}

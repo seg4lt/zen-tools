@@ -1,6 +1,11 @@
 /**
- * One row in the virtualized commit list. Shows: parent-count dot,
+ * One row in the virtualized commit list. Shows: graph column,
  * short hash, message subject, ref chips, author + relative time.
+ *
+ * The graph column (an `<CommitGraph>` SVG slice) sits flush-left so
+ * lanes line up edge-to-edge with the row above and below — that's why
+ * we don't put any horizontal padding before it. The rest of the row
+ * keeps the original `gap-2` rhythm.
  *
  * Visual states:
  *   - `primary` — the focused row (its diff/detail is showing).
@@ -12,9 +17,16 @@
 import { cn } from "@zen-tools/ui";
 import { relativeTime } from "../../lib/format";
 import type { Commit } from "../../lib/tauri";
+import { CommitGraph } from "./CommitGraph";
+import type { RowGraph } from "./graph-layout";
 
 export interface CommitRowProps {
   commit: Commit;
+  /** This row's slice of the precomputed graph layout. */
+  rowGraph: RowGraph;
+  /** Window-wide max lane count, drives the graph SVG width so every
+   *  row in this list shares the same content offset. */
+  maxLanes: number;
   /** Row is in the selection set. */
   selected: boolean;
   /** Row is the focused / primary commit (drives the detail pane). */
@@ -24,17 +36,18 @@ export interface CommitRowProps {
 
 export function CommitRow({
   commit,
+  rowGraph,
+  maxLanes,
   selected,
   primary,
   onClick,
 }: CommitRowProps) {
-  const isMerge = commit.parents.length > 1;
   return (
     <button
       type="button"
       onClick={onClick}
       className={cn(
-        "relative flex w-full min-w-0 items-center gap-2 px-3 py-1.5 text-left text-xs hover:bg-accent",
+        "relative flex h-full w-full min-w-0 items-center gap-2 pr-3 text-left text-xs hover:bg-accent",
         // Primary = solid accent. Secondary (in set, not primary) =
         // dimmer accent + a left-side primary stripe so multi-select
         // is unmistakable at a glance.
@@ -45,14 +58,7 @@ export function CommitRow({
       )}
       title={`${commit.shortHash}  ${commit.subject}`}
     >
-      <span
-        className={cn(
-          "inline-block h-2.5 w-2.5 shrink-0 rounded-full border",
-          isMerge
-            ? "border-amber-500 bg-amber-500/20"
-            : "border-muted-foreground bg-muted-foreground/30",
-        )}
-      />
+      <CommitGraph row={rowGraph} maxLanes={maxLanes} />
       <span className="shrink-0 font-mono text-[11px] text-muted-foreground">
         {commit.shortHash}
       </span>
