@@ -24,7 +24,14 @@ import { CommitList } from "./CommitList";
 import { computeGraphLayout } from "./graph-layout";
 
 const PAGE_SIZE = 200;
-const NO_MERGES_KEY = "git.log.noMerges";
+// Bumped from `git.log.noMerges` → `git.log.noMerges.v2` when we
+// flipped the default from ON to OFF. The graph column added in v2
+// only makes sense with merge commits visible — hiding them turns
+// every history into a straight line and defeats the point of the
+// graph. Bumping the key resets every existing user to the new
+// default; people who genuinely want merges hidden can re-toggle
+// from the filter bar (the new pref is then persisted under v2).
+const NO_MERGES_KEY = "git.log.noMerges.v2";
 
 // Git's universal "empty tree" SHA. Used as the `from` side of a
 // range diff when the oldest selected commit is a root commit (has
@@ -52,8 +59,13 @@ function readNoMergesPref(): boolean {
   } catch {
     /* ignore */
   }
-  // Default ON — merge commits are noise for most review tasks.
-  return true;
+  // Default OFF — show merge commits so the graph column has
+  // something to branch from. `git log --no-merges` strips every
+  // multi-parent commit before the data reaches us, leaving only
+  // first-parent traversals — i.e. one straight line — which makes
+  // the graph useless. If the user prefers a flat first-parent view
+  // they can flip this back from the filter bar.
+  return false;
 }
 
 function writeNoMergesPref(on: boolean) {
