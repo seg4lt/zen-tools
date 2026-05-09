@@ -103,6 +103,98 @@ pub async fn commit_diff_file(
     })
 }
 
+/// Files that changed between two revisions (a "range diff"). Used by
+/// the Log tab when the user multi-selects commits — we surface the
+/// union of files touched between `from..to` so the side-panel tree
+/// shows exactly what the combined patch will display.
+///
+/// `from` is treated as exclusive and `to` as inclusive (matches
+/// `git diff <from> <to>`).
+pub async fn range_diff_files(
+    exec: &ShellExecutor,
+    repo: &Path,
+    from: &str,
+    to: &str,
+) -> GitResult<Vec<FileChange>> {
+    let stdout = shell::git(
+        exec,
+        repo,
+        &[
+            "diff",
+            "--no-color",
+            "--name-status",
+            from,
+            to,
+        ],
+    )
+    .await?;
+    Ok(parse_name_status(&stdout))
+}
+
+/// Per-file unified diff for a range of commits (`git diff <from> <to>
+/// -- <path>`). Mirrors [`commit_diff_file`] but for a range instead of
+/// a single revision. Status is derived from the same `--name-status`
+/// pass so the caller doesn't need to re-issue the listing.
+pub async fn range_diff_file(
+    exec: &ShellExecutor,
+    repo: &Path,
+    from: &str,
+    to: &str,
+    path: &str,
+) -> GitResult<FileDiff> {
+    let stdout = shell::git(
+        exec,
+        repo,
+        &[
+            "diff",
+            "--no-color",
+            from,
+            to,
+            "--",
+            path,
+        ],
+    )
+    .await?;
+    let status_stdout = shell::git(
+        exec,
+        repo,
+        &[
+            "diff",
+            "--no-color",
+            "--name-status",
+            from,
+            to,
+            "--",
+            path,
+        ],
+    )
+    .await
+    .unwrap_or_default();
+    let mut status = FileChangeStatus::M;
+    let mut from_path: Option<String> = None;
+    if let Some(line) = status_stdout.lines().next() {
+        let mut parts = line.splitn(3, '\t');
+        if let Some(letter) = parts.next() {
+            if let Some(c) = letter.chars().next() {
+                status = FileChangeStatus::from_letter(c);
+            }
+        }
+        let p1 = parts.next();
+        let p2 = parts.next();
+        if let (Some(a), Some(_)) = (p1, p2) {
+            from_path = Some(a.to_string());
+        }
+    }
+    let binary = stdout.contains("Binary files ") && stdout.contains(" differ");
+    Ok(FileDiff {
+        path: path.to_string(),
+        from_path,
+        status,
+        patch: stdout,
+        binary,
+    })
+}
+
 /// Read the contents of a file at a given revision (`git show <rev>:<path>`).
 /// Returns an empty string when the path didn't exist at `rev` rather
 /// than erroring — callers (e.g. the diff viewer) treat "missing" as

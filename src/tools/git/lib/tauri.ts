@@ -159,6 +159,10 @@ export const gitTauri = {
     invoke<FileDiff>("git_commit_diff", { repo, rev, path }),
   fileAtRev: (repo: string, rev: string, path: string) =>
     invoke<string>("git_file_at_rev", { repo, rev, path }),
+  rangeDiffFiles: (repo: string, from: string, to: string) =>
+    invoke<FileChange[]>("git_range_diff_files", { repo, from, to }),
+  rangeDiffFile: (repo: string, from: string, to: string, path: string) =>
+    invoke<FileDiff>("git_range_diff_file", { repo, from, to, path }),
 
   // ── Merge state / conflicts ───────────────────────────────────────────
   mergeState: (repo: string) =>

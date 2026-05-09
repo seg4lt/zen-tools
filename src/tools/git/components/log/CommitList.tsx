@@ -1,6 +1,15 @@
 /**
  * Virtualized commit list (TanStack Virtual). Fetches the next page
  * when the user scrolls within `OVERSCAN_TRIGGER` rows of the bottom.
+ *
+ * Selection is multi-row capable:
+ *   - Plain click  → replace selection with this row.
+ *   - Cmd/Ctrl-click → toggle membership.
+ *   - Shift-click  → contiguous range from the primary to the target.
+ *
+ * The list itself is dumb — it forwards the `MouseEvent` to the parent
+ * via `onSelect` so the pane can dispatch the appropriate store
+ * action.
  */
 
 import { useEffect, useRef } from "react";
@@ -14,8 +23,11 @@ const OVERSCAN_TRIGGER = 20;
 
 export interface CommitListProps {
   commits: Commit[];
-  selectedSha: string | null;
-  onSelect: (sha: string) => void;
+  /** Multi-selection set (always contains `primarySha` when non-empty). */
+  selectedShas: ReadonlySet<string>;
+  /** "Focused" sha — the one whose detail/diff is shown. */
+  primarySha: string | null;
+  onSelect: (sha: string, event: React.MouseEvent) => void;
   onLoadMore: () => void;
   loading: boolean;
   hasMore: boolean;
@@ -23,7 +35,8 @@ export interface CommitListProps {
 
 export function CommitList({
   commits,
-  selectedSha,
+  selectedShas,
+  primarySha,
   onSelect,
   onLoadMore,
   loading,
@@ -64,6 +77,8 @@ export function CommitList({
         >
           {virtualizer.getVirtualItems().map((vi) => {
             const commit = commits[vi.index];
+            const selected = selectedShas.has(commit.hash);
+            const primary = primarySha === commit.hash;
             return (
               <div
                 key={commit.hash}
@@ -78,8 +93,9 @@ export function CommitList({
               >
                 <CommitRow
                   commit={commit}
-                  selected={selectedSha === commit.hash}
-                  onClick={() => onSelect(commit.hash)}
+                  selected={selected}
+                  primary={primary}
+                  onClick={(e) => onSelect(commit.hash, e)}
                 />
               </div>
             );

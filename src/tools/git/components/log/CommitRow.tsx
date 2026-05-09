@@ -1,6 +1,12 @@
 /**
  * One row in the virtualized commit list. Shows: parent-count dot,
  * short hash, message subject, ref chips, author + relative time.
+ *
+ * Visual states:
+ *   - `primary` — the focused row (its diff/detail is showing).
+ *   - `selected` — the row is in the multi-selection set (may or
+ *     may not be the primary).
+ *   - neither — default look.
  */
 
 import { cn } from "@zen-tools/ui";
@@ -9,19 +15,33 @@ import type { Commit } from "../../lib/tauri";
 
 export interface CommitRowProps {
   commit: Commit;
+  /** Row is in the selection set. */
   selected: boolean;
-  onClick: () => void;
+  /** Row is the focused / primary commit (drives the detail pane). */
+  primary: boolean;
+  onClick: (e: React.MouseEvent) => void;
 }
 
-export function CommitRow({ commit, selected, onClick }: CommitRowProps) {
+export function CommitRow({
+  commit,
+  selected,
+  primary,
+  onClick,
+}: CommitRowProps) {
   const isMerge = commit.parents.length > 1;
   return (
     <button
       type="button"
       onClick={onClick}
       className={cn(
-        "flex w-full min-w-0 items-center gap-2 px-3 py-1.5 text-left text-xs hover:bg-accent",
-        selected && "bg-accent",
+        "relative flex w-full min-w-0 items-center gap-2 px-3 py-1.5 text-left text-xs hover:bg-accent",
+        // Primary = solid accent. Secondary (in set, not primary) =
+        // dimmer accent + a left-side primary stripe so multi-select
+        // is unmistakable at a glance.
+        primary && "bg-accent",
+        selected &&
+          !primary &&
+          "bg-primary/15 before:absolute before:left-0 before:top-0 before:h-full before:w-0.5 before:bg-primary before:content-['']",
       )}
       title={`${commit.shortHash}  ${commit.subject}`}
     >

@@ -177,6 +177,29 @@ impl GitEngine {
         diff::file_at_rev(&self.inner.exec, repo, rev, path).await
     }
 
+    /// Files changed across a `<from>..<to>` revision range. Used by
+    /// the Log tab's multi-select mode to show the union of files
+    /// touched by a group of commits.
+    pub async fn range_diff_files(
+        &self,
+        repo: &Path,
+        from: &str,
+        to: &str,
+    ) -> GitResult<Vec<FileChange>> {
+        diff::range_diff_files(&self.inner.exec, repo, from, to).await
+    }
+
+    /// Per-file unified diff for a `<from>..<to>` revision range.
+    pub async fn range_diff_file(
+        &self,
+        repo: &Path,
+        from: &str,
+        to: &str,
+        path: &str,
+    ) -> GitResult<FileDiff> {
+        diff::range_diff_file(&self.inner.exec, repo, from, to, path).await
+    }
+
     // ── Merge state / conflict / ops ─────────────────────────────────
 
     /// What kind of operation (if any) is in progress in this repo.

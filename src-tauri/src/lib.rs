@@ -588,6 +588,8 @@ pub fn run() {
             commands::git::git_commit_files,
             commands::git::git_commit_diff,
             commands::git::git_file_at_rev,
+            commands::git::git_range_diff_files,
+            commands::git::git_range_diff_file,
             commands::git::git_merge_state,
             commands::git::git_list_conflicts,
             commands::git::git_conflict_blobs,

@@ -39,8 +39,10 @@ import { CommitLogPane } from "./components/log/CommitLogPane";
 import { ConflictFileList } from "./components/merge/ConflictFileList";
 import { MergePane } from "./components/merge/MergePane";
 import { RepoSidebar } from "./components/RepoSidebar";
+import { FileTree, type FileTreeItem } from "./components/shared/FileTree";
 import { Split } from "./components/shared/Split";
-import { gitTauri } from "./lib/tauri";
+import { gitTauri, type FileChange } from "./lib/tauri";
+import { statusColor } from "./lib/format";
 import { GitStoreProvider, useGitStore } from "./store/git-store";
 
 const MODE_KEY = "git.sidebar.mode";
@@ -160,6 +162,21 @@ function GitShellInner({ initialTab = "log" }: GitShellProps) {
     );
   }
 
+  // The Files activity-bar item is *context-aware*: on the Merge tab
+  // it shows conflicting files and the count; on the Log tab it shows
+  // the selected commit's changed files. Same icon, same toggle, the
+  // tree just morphs to match the current tab.
+  const filesBadge =
+    activeTab === "merge"
+      ? state.conflicts.length > 0
+        ? String(state.conflicts.length)
+        : undefined
+      : state.logFiles.length > 0
+        ? String(state.logFiles.length)
+        : undefined;
+  const filesBadgeTone =
+    activeTab === "merge" && state.conflicts.length > 0 ? "amber" : "muted";
+
   return (
     <div className="relative flex h-full w-full min-h-0">
       <ActivityBar
@@ -176,13 +193,10 @@ function GitShellInner({ initialTab = "log" }: GitShellProps) {
           },
           {
             id: "files",
-            label: "Conflict files",
+            label: activeTab === "merge" ? "Conflict files" : "Commit files",
             icon: Files,
-            badge:
-              state.conflicts.length > 0
-                ? String(state.conflicts.length)
-                : undefined,
-            badgeTone: state.conflicts.length > 0 ? "amber" : "muted",
+            badge: filesBadge,
+            badgeTone: filesBadgeTone,
           },
         ]}
       />
@@ -205,7 +219,7 @@ function GitShellInner({ initialTab = "log" }: GitShellProps) {
           disabled={sidebarMode === null || focusMode}
           collapseFirst={sidebarMode === null || focusMode}
         >
-          <SidePanel mode={sidebarMode} />
+          <SidePanel mode={sidebarMode} activeTab={activeTab} />
           <MainArea
             isDark={isDark}
             activeRepoPath={state.activeRepoPath}
@@ -220,38 +234,90 @@ function GitShellInner({ initialTab = "log" }: GitShellProps) {
   );
 }
 
-function SidePanel({ mode }: { mode: SidePanelMode | null }) {
+function SidePanel({
+  mode,
+  activeTab,
+}: {
+  mode: SidePanelMode | null;
+  activeTab: GitInitialTab;
+}) {
   const { state, dispatch } = useGitStore();
 
   if (mode === null) return <div className="h-full w-0" aria-hidden />;
+  if (mode === "repos") return <RepoSidebar />;
 
-  if (mode === "repos") {
-    return <RepoSidebar />;
+  // mode === "files" — Files panel is tab-aware.
+  if (activeTab === "merge") {
+    return (
+      <div className="flex h-full min-h-0 w-full min-w-0 flex-col bg-muted/10">
+        <div className="flex items-center justify-between gap-2 border-b px-2 py-1">
+          <span className="flex min-w-0 items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+            <Files className="h-3 w-3 shrink-0" />
+            <span className="truncate">Conflicts</span>
+            {state.conflicts.length > 0 && (
+              <span className="ml-1 rounded bg-amber-500/20 px-1 font-mono text-[10px] text-amber-700 dark:text-amber-400">
+                {state.conflicts.length}
+              </span>
+            )}
+          </span>
+        </div>
+        <div className="min-h-0 flex-1">
+          <ConflictFileList
+            conflicts={state.conflicts}
+            activePath={state.activeConflictPath}
+            onSelect={(p) =>
+              dispatch({ type: "set-active-conflict", path: p })
+            }
+            resolvedPaths={state.resolvedPaths}
+          />
+        </div>
+      </div>
+    );
   }
 
-  // mode === "files"
+  // activeTab === "log"
   return (
     <div className="flex h-full min-h-0 w-full min-w-0 flex-col bg-muted/10">
       <div className="flex items-center justify-between gap-2 border-b px-2 py-1">
         <span className="flex min-w-0 items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
           <Files className="h-3 w-3 shrink-0" />
-          <span className="truncate">Conflicts</span>
-          {state.conflicts.length > 0 && (
-            <span className="ml-1 rounded bg-amber-500/20 px-1 font-mono text-[10px] text-amber-700 dark:text-amber-400">
-              {state.conflicts.length}
+          <span className="truncate">Files</span>
+          {state.logFiles.length > 0 && (
+            <span className="ml-1 rounded bg-muted px-1 font-mono text-[10px] text-muted-foreground">
+              {state.logFiles.length}
             </span>
           )}
         </span>
       </div>
       <div className="min-h-0 flex-1">
-        <ConflictFileList
-          conflicts={state.conflicts}
-          activePath={state.activeConflictPath}
-          onSelect={(p) => dispatch({ type: "set-active-conflict", path: p })}
-          resolvedPaths={state.resolvedPaths}
-        />
+        <CommitFilesPanel />
       </div>
     </div>
+  );
+}
+
+function CommitFilesPanel() {
+  const { state, dispatch } = useGitStore();
+  if (state.logSelectedSha == null) {
+    return (
+      <div className="px-3 py-3 text-[11px] text-muted-foreground">
+        Pick a commit to see its files.
+      </div>
+    );
+  }
+  if (state.logFiles.length === 0) {
+    return (
+      <div className="px-3 py-3 text-[11px] text-muted-foreground">
+        No files in this commit.
+      </div>
+    );
+  }
+  return (
+    <CommitFilesTree
+      files={state.logFiles}
+      activePath={state.logActiveFilePath}
+      onSelect={(p) => dispatch({ type: "set-log-active-file", path: p })}
+    />
   );
 }
 
@@ -275,11 +341,18 @@ function MainArea({
   return (
     <div className="flex h-full min-h-0 min-w-0 flex-col">
       {/* Both panes are mounted at all times so their state survives
-          tab switches; CSS hides the inactive one. */}
+          tab switches; CSS hides the inactive one. Focus mode is
+          tab-aware: when the Log tab is the active one, the log pane
+          escapes the layout via `absolute inset-0`. The Merge tab
+          uses the same pattern. */}
       <div
         className={cn(
-          "flex-1 min-h-0 min-w-0",
-          (activeTab !== "log" || focusMode) && "hidden",
+          focusMode && activeTab === "log"
+            ? "absolute inset-0 z-40 bg-background"
+            : cn(
+                "flex-1 min-h-0 min-w-0",
+                (activeTab !== "log" || focusMode) && "hidden",
+              ),
         )}
       >
         <CommitLogPane
@@ -287,6 +360,8 @@ function MainArea({
           isDark={isDark}
           activeTab={activeTab}
           onTabChange={onTabChange}
+          focusMode={focusMode && activeTab === "log"}
+          onToggleFocusMode={onToggleFocusMode}
         />
       </div>
 
@@ -297,7 +372,7 @@ function MainArea({
           React tree, so no remount happens on focus toggle. */}
       <div
         className={cn(
-          focusMode
+          focusMode && activeTab === "merge"
             ? "absolute inset-0 z-40 bg-background"
             : cn("flex-1 min-h-0 min-w-0", activeTab !== "merge" && "hidden"),
         )}
@@ -305,7 +380,7 @@ function MainArea({
         <MergePane
           repo={activeRepoPath}
           isDark={isDark}
-          focusMode={focusMode}
+          focusMode={focusMode && activeTab === "merge"}
           onToggleFocusMode={onToggleFocusMode}
           activeTab={activeTab}
           onTabChange={onTabChange}
@@ -324,4 +399,38 @@ export function useMergeBadge(): string | null {
     if (!ms || ms.kind === "none") return null;
     return ms.unresolved > 0 ? `${ms.unresolved}` : "✓";
   }, [state.mergeState]);
+}
+
+interface CommitFilesTreeProps {
+  files: FileChange[];
+  activePath: string | null;
+  onSelect: (path: string) => void;
+}
+
+function CommitFilesTree({ files, activePath, onSelect }: CommitFilesTreeProps) {
+  const items = useMemo<FileTreeItem<FileChange>[]>(
+    () => files.map((f) => ({ path: f.path, data: f })),
+    [files],
+  );
+  return (
+    <FileTree
+      items={items}
+      selectedPath={activePath}
+      onSelect={onSelect}
+      renderLeaf={(f, { basename }) => (
+        <>
+          <span
+            className={cn(
+              "w-4 shrink-0 font-mono text-[11px]",
+              statusColor(f.status),
+            )}
+            title={f.status}
+          >
+            {f.status}
+          </span>
+          <span className="truncate font-mono">{basename}</span>
+        </>
+      )}
+    />
+  );
 }

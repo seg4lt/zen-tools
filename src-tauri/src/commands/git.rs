@@ -218,6 +218,41 @@ pub async fn git_file_at_rev(
         .await?)
 }
 
+/// Files changed across a `<from>..<to>` revision range.
+#[tauri::command]
+pub async fn git_range_diff_files(
+    state: State<'_, Mutex<AppState>>,
+    repo: String,
+    from: String,
+    to: String,
+) -> AppResult<Vec<FileChange>> {
+    let eng = {
+        let s = state.lock().await;
+        engine(&s)
+    };
+    Ok(eng
+        .range_diff_files(&PathBuf::from(repo), &from, &to)
+        .await?)
+}
+
+/// Per-file unified diff for a `<from>..<to>` revision range.
+#[tauri::command]
+pub async fn git_range_diff_file(
+    state: State<'_, Mutex<AppState>>,
+    repo: String,
+    from: String,
+    to: String,
+    path: String,
+) -> AppResult<FileDiff> {
+    let eng = {
+        let s = state.lock().await;
+        engine(&s)
+    };
+    Ok(eng
+        .range_diff_file(&PathBuf::from(repo), &from, &to, &path)
+        .await?)
+}
+
 // ──────────────────────────────────────────────────────────────────────────
 // Merge state / conflicts / ops
 // ──────────────────────────────────────────────────────────────────────────

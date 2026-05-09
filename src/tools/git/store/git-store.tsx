@@ -34,6 +34,7 @@ import {
 import {
   gitTauri,
   type ConflictFile,
+  type FileChange,
   type MergeState,
   type RepoEntry,
 } from "../lib/tauri";
@@ -48,6 +49,23 @@ export interface GitStoreState {
   conflicts: ConflictFile[];
   activeConflictPath: string | null;
   resolvedPaths: ReadonlySet<string>;
+  /** Primary commit on the Log tab — the most-recently-clicked sha,
+   *  always also a member of `logSelectedShas`. The detail pane uses
+   *  this to show single-commit metadata when the selection is a
+   *  single row. */
+  logSelectedSha: string | null;
+  /** Full multi-selection. When `size === 1`, behaviour is identical
+   *  to the old single-select mode. When `size > 1`, the detail pane
+   *  switches into "range" mode and shows the combined diff between
+   *  the oldest selected commit's parent and the newest selected
+   *  commit. */
+  logSelectedShas: ReadonlySet<string>;
+  /** Files touched by the selected commit (or the union of files in
+   *  range mode). Mirrored here so the side-panel "Files" mode can
+   *  render the same tree the detail pane is showing the diff for. */
+  logFiles: FileChange[];
+  /** Which file inside `logFiles` the user has open in the diff view. */
+  logActiveFilePath: string | null;
 }
 
 type Action =
@@ -58,7 +76,12 @@ type Action =
   | { type: "set-conflicts"; conflicts: ConflictFile[] }
   | { type: "set-active-conflict"; path: string | null }
   | { type: "mark-conflict-resolved"; path: string }
-  | { type: "clear-resolved" };
+  | { type: "clear-resolved" }
+  | { type: "set-log-selected-sha"; sha: string | null }
+  | { type: "toggle-log-selected-sha"; sha: string }
+  | { type: "set-log-selected-range"; shas: ReadonlySet<string>; primary: string }
+  | { type: "set-log-files"; sha: string | null; files: FileChange[] }
+  | { type: "set-log-active-file"; path: string | null };
 
 function reducer(state: GitStoreState, action: Action): GitStoreState {
   switch (action.type) {
@@ -111,6 +134,72 @@ function reducer(state: GitStoreState, action: Action): GitStoreState {
     }
     case "clear-resolved":
       return { ...state, resolvedPaths: new Set() };
+    case "set-log-selected-sha":
+      // Plain (non-modifier) click: collapse multi-selection down to
+      // just this sha (or clear when null).
+      return {
+        ...state,
+        logSelectedSha: action.sha,
+        logSelectedShas:
+          action.sha == null ? new Set() : new Set([action.sha]),
+      };
+    case "toggle-log-selected-sha": {
+      // Cmd/Ctrl-click: flip membership. The clicked sha always
+      // becomes the primary on add; on remove, primary falls back to
+      // any remaining sha (deterministic by iteration order).
+      const next = new Set(state.logSelectedShas);
+      if (next.has(action.sha)) {
+        next.delete(action.sha);
+        const primary =
+          state.logSelectedSha === action.sha
+            ? next.values().next().value ?? null
+            : state.logSelectedSha;
+        return {
+          ...state,
+          logSelectedShas: next,
+          logSelectedSha: primary ?? null,
+        };
+      }
+      next.add(action.sha);
+      return {
+        ...state,
+        logSelectedShas: next,
+        logSelectedSha: action.sha,
+      };
+    }
+    case "set-log-selected-range":
+      // Shift-click: replace the set with a contiguous slice already
+      // computed by the caller. The caller is responsible for
+      // including both anchor and target.
+      return {
+        ...state,
+        logSelectedShas: action.shas,
+        logSelectedSha: action.primary,
+      };
+    case "set-log-files": {
+      // Drop the active-file pointer if it isn't part of the new
+      // file list — otherwise the diff pane would keep showing
+      // whatever file we *had* selected from the previous commit.
+      //
+      // CRITICAL: do NOT touch `logSelectedSha` here. The selection
+      // is owned by the click handler in CommitLogPane; this reducer
+      // is purely about syncing the file list. In range mode the
+      // detail pane dispatches `set-log-files` with `sha: null`, and
+      // clobbering the primary selection here used to wipe out the
+      // multi-select highlight (and break the next interaction).
+      const stillThere =
+        state.logActiveFilePath != null &&
+        action.files.some((f) => f.path === state.logActiveFilePath);
+      return {
+        ...state,
+        logFiles: action.files,
+        logActiveFilePath: stillThere
+          ? state.logActiveFilePath
+          : action.files[0]?.path ?? null,
+      };
+    }
+    case "set-log-active-file":
+      return { ...state, logActiveFilePath: action.path };
     default:
       return state;
   }
@@ -140,6 +229,10 @@ export function GitStoreProvider({ children }: { children: ReactNode }) {
     conflicts: [],
     activeConflictPath: null,
     resolvedPaths: new Set<string>(),
+    logSelectedSha: null,
+    logSelectedShas: new Set<string>(),
+    logFiles: [],
+    logActiveFilePath: null,
   }));
 
   // Persist active repo to localStorage (cheap, runs only on change).
@@ -155,12 +248,13 @@ export function GitStoreProvider({ children }: { children: ReactNode }) {
     }
   }, [state.activeRepoPath]);
 
-  // When the active repo changes, throw away conflict state — the
-  // next merge tab visit will refetch for the new repo.
+  // When the active repo changes, throw away conflict + log state —
+  // the next tab visit will refetch for the new repo.
   useEffect(() => {
     dispatch({ type: "set-conflicts", conflicts: [] });
     dispatch({ type: "clear-resolved" });
     dispatch({ type: "set-merge-state", state: null });
+    dispatch({ type: "set-log-files", sha: null, files: [] });
   }, [state.activeRepoPath]);
 
   // Hydrate the repo list once on mount.
