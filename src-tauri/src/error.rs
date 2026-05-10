@@ -9,6 +9,7 @@ use zen_github::GhError;
 use zen_http::{CrossFileDependencyError, DependencyError, FileRegistryError, HttpError};
 use zen_parser::ParserError;
 use zen_perf::PerfError;
+use zen_pr_review::ReviewError;
 use zen_storage::StorageError;
 
 /// All errors raised by Tauri commands.
@@ -58,6 +59,10 @@ pub enum AppError {
     #[error("storage: {0}")]
     Storage(#[from] StorageError),
 
+    /// AI code review orchestration failure (`zen-pr-review`).
+    #[error("review: {0}")]
+    Review(#[from] ReviewError),
+
     /// Tauri framework error.
     #[error("tauri: {0}")]
     Tauri(#[from] tauri::Error),
@@ -91,6 +96,7 @@ impl AppError {
             AppError::Github(_) => "github",
             AppError::Git(_) => "git",
             AppError::Storage(_) => "storage",
+            AppError::Review(_) => "review",
             AppError::Tauri(_) => "tauri",
             AppError::Other(_) => "other",
             AppError::BadRequest(_) => "badRequest",

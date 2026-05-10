@@ -1,0 +1,29 @@
+[package]
+name = "zen-pr-review"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "AI-driven PR code review orchestration: detached worktree per PR head SHA, Claude Code stream-json supervision, severity-grouped HTML report rendering."
+
+[lints.rust]
+missing_docs = "warn"
+
+[dev-dependencies]
+tempfile = "3"
+
+[dependencies]
+zen-shell = { workspace = true }
+zen-storage = { workspace = true }
+zen-github = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+tokio = { workspace = true, features = ["process", "io-util"] }
+parking_lot = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+ahash = { workspace = true }
+dirs = { workspace = true }
+rusqlite = { workspace = true }

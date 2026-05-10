@@ -340,6 +340,10 @@ export interface PrMasterSettings {
    *  against author name AND email work — e.g. `"alice"` matches
    *  both `Alice Smith <alice@…>` and `alice@github.com`. */
   extra_authors: string[];
+  /** Override base directory for AI Review worktrees. `null` /
+   *  empty → `<app_data>/prmaster/ai-review/worktrees/`. Otherwise
+   *  worktrees go under `<value>/zen-tools-ai-review/`. */
+  ai_review_worktrees_dir?: string | null;
 }
 
 export interface RefreshSnapshot {
@@ -464,7 +468,241 @@ export const prmasterTauri = {
     invoke<RefreshSnapshot | null>("prmaster_load_pr_snapshot"),
   listAccessibleRepos: () => invoke<RepoListResult>("prmaster_list_repos"),
   fetchRepos: () => invoke<RepoListResult>("prmaster_fetch_repos"),
+  // ── AI code review tab (third tab on the PR review page) ──────────
+  /**
+   * Spawn a new AI code review for `pr` at `headSha`. Returns
+   * immediately; live progress arrives on the
+   * `prmaster:ai-review:event` Tauri event channel (see
+   * `listenAiReviewEvent`). Re-attach to a still-running review via
+   * `aiReviewStatus(runId)`.
+   */
+  aiReviewStart: (params: {
+    pr: PrRef;
+    headSha: string;
+    headBranch: string | null;
+    baseBranch: string | null;
+    model: string | null;
+  }) => invoke<AiReviewStartResp>("prmaster_ai_review_start", params),
+  aiReviewStatus: (runId: string) =>
+    invoke<AiReviewStatusResp | null>("prmaster_ai_review_status", { runId }),
+  aiReviewCancel: (runId: string) =>
+    invoke<boolean>("prmaster_ai_review_cancel", { runId }),
+  aiReviewGetReport: (runId: string) =>
+    invoke<AiReviewReportResp>("prmaster_ai_review_get_report", { runId }),
+  aiReviewListRuns: (pr: PrRef) =>
+    invoke<AiReviewRunSummary[]>("prmaster_ai_review_list_runs", { pr }),
+  /**
+   * Return the default formatted comment body for a finding — what
+   * would be posted if the user clicked Post without editing. The
+   * inline editor pre-fills its textarea with this string.
+   */
+  aiReviewPreviewFindingBody: (runId: string, findingId: string) =>
+    invoke<string>("prmaster_ai_review_preview_finding_body", {
+      runId,
+      findingId,
+    }),
+  /**
+   * Post a finding (by `findingId`) as a real GitHub inline review
+   * comment, anchored at the head SHA the review ran against. The
+   * `body` is taken verbatim from the inline editor — empty bodies
+   * are rejected by the backend.
+   */
+  aiReviewPostFinding: (runId: string, findingId: string, body: string) =>
+    invoke<void>("prmaster_ai_review_post_finding", {
+      runId,
+      findingId,
+      body,
+    }),
+  aiReviewCleanupMerged: (visibleSlugs: string[]) =>
+    invoke<number>("prmaster_ai_review_cleanup_merged", { visibleSlugs }),
+  /**
+   * Reveal `<app_data>/prmaster/ai-review/reports/` in the system
+   * file manager. Surfaced from the global Settings → Paths section
+   * so users can inspect the persisted reports / findings JSON
+   * directly when they want to.
+   */
+  aiReviewOpenReportsDir: () =>
+    invoke<void>("prmaster_ai_review_open_reports_dir"),
 };
+
+// ────────────────────────────────────────────────────────────────────────
+// AI code review — types
+// ────────────────────────────────────────────────────────────────────────
+
+export type AiReviewStatusKind =
+  | "starting"
+  | "running"
+  | "done"
+  | "error"
+  | "cancelled";
+
+/**
+ * One unit of streaming output from a Claude review run. Matches the
+ * `#[serde(tag = "kind")]` discriminated-union shape on the Rust side
+ * (`zen_pr_review::AiReviewEvent`).
+ */
+export type AiReviewEvent =
+  | { kind: "stdout"; line: string }
+  | { kind: "thought"; text: string }
+  | { kind: "tool_use"; name: string; input_preview: string }
+  | {
+      kind: "tool_result";
+      name: string;
+      output_preview: string;
+      is_error: boolean;
+    }
+  | { kind: "text"; text: string }
+  | {
+      kind: "done";
+      cost_usd: number | null;
+      duration_ms: number;
+      report_path: string | null;
+      findings_count: number | null;
+    }
+  | { kind: "error"; message: string };
+
+/** Wire payload of one `prmaster:ai-review:event` Tauri event. */
+export interface AiReviewEventPayload {
+  run_id: string;
+  ts_ms: number;
+  /** Inlined event fields (`kind` + per-variant data). */
+  kind: AiReviewEvent["kind"];
+  // The remaining variant-specific keys are present at the top level
+  // because the Rust side `#[serde(flatten)]`s the event into the
+  // payload. We type-narrow at the call site.
+  [extra: string]: unknown;
+}
+
+/** Reconstruct a discriminated `AiReviewEvent` from the flat
+ *  Tauri payload emitted by the backend (which `#[serde(flatten)]`s
+ *  the variant data alongside `run_id`/`ts_ms`). */
+export function parseAiReviewEvent(payload: AiReviewEventPayload): AiReviewEvent {
+  switch (payload.kind) {
+    case "stdout":
+      return { kind: "stdout", line: String(payload.line ?? "") };
+    case "thought":
+      return { kind: "thought", text: String(payload.text ?? "") };
+    case "tool_use":
+      return {
+        kind: "tool_use",
+        name: String(payload.name ?? ""),
+        input_preview: String(payload.input_preview ?? ""),
+      };
+    case "tool_result":
+      return {
+        kind: "tool_result",
+        name: String(payload.name ?? ""),
+        output_preview: String(payload.output_preview ?? ""),
+        is_error: Boolean(payload.is_error),
+      };
+    case "text":
+      return { kind: "text", text: String(payload.text ?? "") };
+    case "done":
+      return {
+        kind: "done",
+        cost_usd: typeof payload.cost_usd === "number" ? payload.cost_usd : null,
+        duration_ms:
+          typeof payload.duration_ms === "number" ? payload.duration_ms : 0,
+        report_path:
+          typeof payload.report_path === "string"
+            ? (payload.report_path as string)
+            : null,
+        findings_count:
+          typeof payload.findings_count === "number"
+            ? (payload.findings_count as number)
+            : null,
+      };
+    case "error":
+      return { kind: "error", message: String(payload.message ?? "") };
+    default:
+      return { kind: "stdout", line: JSON.stringify(payload) };
+  }
+}
+
+/** One finding parsed from `report.json`. Mirrors `zen_pr_review::Finding`. */
+export interface AiReviewFinding {
+  id: string;
+  severity: "critical" | "high" | "medium" | "low" | string;
+  title: string;
+  path: string;
+  /** 1-based start line of the **finding itself** (the anchor for
+   *  posting an inline GitHub review comment). May be inside the
+   *  middle of `current` when context lines are included above. */
+  start_line: number;
+  /** 1-based, inclusive end line of the finding (anchor end). */
+  end_line: number;
+  side: "LEFT" | "RIGHT" | string;
+  /** 1-based line number the first character of `current`
+   *  corresponds to. Falls back to `start_line` for older records. */
+  snippet_start_line?: number | null;
+  current: string;
+  suggested: string;
+  /** Lowercase language id used by the syntax highlighter. */
+  language?: string;
+  rationale: string;
+}
+
+export interface AiReviewStartResp {
+  run_id: string;
+  worktree_path: string;
+  head_sha: string;
+}
+
+export interface AiReviewStatusResp {
+  status: AiReviewStatusKind;
+  events: AiReviewEvent[];
+  report_path: string | null;
+  pr: { owner: string; repo: string; number: number };
+  head_sha: string;
+  model: string;
+  started_at_ms: number;
+  finished_at_ms: number | null;
+  cost_usd: number | null;
+}
+
+export interface AiReviewReportResp {
+  /** Legacy self-contained HTML body (older runs only). The React
+   *  renderer uses `findings` directly; `html` is kept around as a
+   *  fall-back / debug artefact. */
+  html: string | null;
+  findings: AiReviewFinding[];
+  /** Streaming events captured while the run was live (drives the
+   *  History panel's "Log" action). Empty for runs that errored
+   *  before they buffered anything, or for older records persisted
+   *  before this field existed. */
+  events: AiReviewEvent[];
+  /** One-sentence verdict copied from `report.json`'s `summary`. */
+  overall_summary: string;
+  /** The exact prompt the run sent to `claude -p`. */
+  prompt: string;
+  pr: { owner: string; repo: string; number: number };
+  head_sha: string;
+  model: string;
+  cost_usd: number | null;
+  finished_at_ms: number | null;
+}
+
+export interface AiReviewRunSummary {
+  run_id: string;
+  head_sha: string;
+  model: string;
+  started_at_ms: number;
+  finished_at_ms: number | null;
+  status: AiReviewStatusKind;
+  cost_usd: number | null;
+}
+
+/**
+ * Subscribe to AI review events. The frontend wires this once at app
+ * boot and demuxes by `run_id` into the global `ai-review-store`.
+ */
+export function listenAiReviewEvent(
+  cb: (payload: AiReviewEventPayload) => void,
+): Promise<UnlistenFn> {
+  return listen<AiReviewEventPayload>("prmaster:ai-review:event", (e) =>
+    cb(e.payload),
+  );
+}
 
 export interface RepoListResult {
   repos: string[];

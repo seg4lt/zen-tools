@@ -33,6 +33,7 @@ zen-db = { workspace = true }
 zen-github = { workspace = true }
 zen-git = { workspace = true }
 zen-prmaster = { workspace = true }
+zen-pr-review = { workspace = true }
 # Local dictation: vendored whisper.cpp wrapper + mic capture / hotkey.
 # Pulled in unconditionally so the Settings page renders the Paths
 # section on every platform; the actual recording pipeline is gated

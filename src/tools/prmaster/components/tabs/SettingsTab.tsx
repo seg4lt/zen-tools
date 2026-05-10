@@ -340,6 +340,15 @@ export function SettingsTab() {
                   }
                 />
               </Section>
+
+              <Section title="AI Review worktrees" wide>
+                <AiReviewWorktreesEditor
+                  value={settings.ai_review_worktrees_dir ?? null}
+                  onChange={(ai_review_worktrees_dir) =>
+                    void persist({ ...settings, ai_review_worktrees_dir })
+                  }
+                />
+              </Section>
             </div>
           )}
         </div>
@@ -879,6 +888,79 @@ function ExtraAuthorsEditor({
         placeholder="alice@example.com, bob, charlie@old-job.com"
         className="h-8 font-mono"
       />
+    </div>
+  );
+}
+
+/** Editor for the per-user AI Review worktree base directory.
+ *
+ *  Default (unset / empty) → worktrees go under
+ *  `<app_data>/prmaster/ai-review/worktrees/`. When set, they go under
+ *  `<value>/zen-tools-ai-review/`. The persisted reports always stay
+ *  in `<app_data>` so this setting only relocates the temporary
+ *  detached checkouts (the slice users typically want on a fast
+ *  scratch SSD or inside a folder git already has on PATH). */
+function AiReviewWorktreesEditor({
+  value,
+  onChange,
+}: {
+  value: string | null;
+  onChange: (next: string | null) => void;
+}) {
+  async function pick() {
+    const result = await openDialog({
+      directory: true,
+      multiple: false,
+      title: "Choose a base directory for AI Review worktrees",
+    });
+    if (typeof result === "string") {
+      onChange(result);
+    }
+  }
+
+  function clear() {
+    onChange(null);
+  }
+
+  const display = value && value.trim() !== "" ? value : null;
+
+  return (
+    <div className="grid gap-2">
+      <p className="text-xs text-muted-foreground">
+        Where to create the per-PR detached worktrees that AI Review
+        runs against. Leave unset to use the app data dir; pick a
+        custom location (a fast scratch SSD, or a folder git already
+        has on PATH) to override. Each review still lives under a
+        per-PR subfolder named{" "}
+        <code className="font-mono text-[11px]">
+          zen-tools-ai-review/&lt;owner&gt;__&lt;repo&gt;__&lt;number&gt;__&lt;short_sha&gt;/
+        </code>{" "}
+        — persisted reports stay in the app data dir regardless.
+      </p>
+      <div className="flex flex-wrap items-center gap-1.5 rounded-md border bg-background p-1.5">
+        <span
+          className={cn(
+            "min-w-0 flex-1 truncate font-mono text-[11px]",
+            display ? "text-foreground" : "text-muted-foreground italic",
+          )}
+          title={display ?? "Default: <app_data>/prmaster/ai-review/worktrees/"}
+        >
+          {display ?? "Default: <app_data>/prmaster/ai-review/worktrees/"}
+        </span>
+        <Button size="sm" variant="outline" onClick={() => void pick()}>
+          {display ? "Change…" : "Choose folder…"}
+        </Button>
+        {display && (
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={clear}
+            title="Reset to default"
+          >
+            Reset
+          </Button>
+        )}
+      </div>
     </div>
   );
 }

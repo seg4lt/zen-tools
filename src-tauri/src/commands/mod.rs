@@ -14,5 +14,6 @@ pub mod parse;
 pub mod perf;
 pub mod preferences;
 pub mod process_monitor;
+pub mod pr_review;
 pub mod prmaster;
 pub mod runs;

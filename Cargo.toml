@@ -16,6 +16,7 @@ members = [
     "crates/zen-git",
     "crates/zen-ai-cli",
     "crates/zen-prmaster",
+    "crates/zen-pr-review",
     "crates/zen-whisper",
     "crates/zen-screen-vocab",
     "crates/zen-dictation",
@@ -111,6 +112,7 @@ zen-github = { path = "crates/zen-github" }
 zen-git = { path = "crates/zen-git" }
 zen-ai-cli = { path = "crates/zen-ai-cli" }
 zen-prmaster = { path = "crates/zen-prmaster" }
+zen-pr-review = { path = "crates/zen-pr-review" }
 zen-whisper = { path = "crates/zen-whisper" }
 zen-screen-vocab = { path = "crates/zen-screen-vocab" }
 zen-dictation = { path = "crates/zen-dictation" }

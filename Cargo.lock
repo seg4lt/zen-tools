@@ -8953,6 +8953,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "zen-pr-review"
+version = "0.1.46"
+dependencies = [
+ "ahash",
+ "chrono",
+ "dirs 5.0.1",
+ "parking_lot",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "uuid",
+ "zen-github",
+ "zen-shell",
+ "zen-storage",
+]
+
+[[package]]
 name = "zen-prmaster"
 version = "0.1.46"
 dependencies = [
@@ -9082,6 +9103,7 @@ dependencies = [
  "zen-http",
  "zen-parser",
  "zen-perf",
+ "zen-pr-review",
  "zen-prmaster",
  "zen-process-monitor",
  "zen-runs",

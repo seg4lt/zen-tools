@@ -506,7 +506,7 @@ pub async fn dictation_open_privacy_pane(pane: String) -> AppResult<()> {
 /// We `create_dir_all` first so a click on "Logs" right after a
 /// fresh install (before any log line has rotated to disk) still
 /// opens the folder instead of erroring.
-async fn open_path_in_finder(path: &Path) -> AppResult<()> {
+pub(crate) async fn open_path_in_finder(path: &Path) -> AppResult<()> {
     if !path.exists() {
         std::fs::create_dir_all(path).map_err(|e| {
             AppError::Other(format!("create {}: {}", path.display(), e))

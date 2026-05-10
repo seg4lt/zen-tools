@@ -10,6 +10,7 @@ use zen_parser::PerfConfig;
 use zen_perf::{MetricsSnapshot, RequestSample, StopHandle};
 use zen_process_monitor::{Sample as PmSample, SamplerHandle, SamplerState, SharedState as PmSharedState};
 use zen_git::GitEngine;
+use zen_pr_review::ReviewEngine;
 use zen_prmaster::PrMasterEngine;
 use zen_types::prelude::*;
 
@@ -151,6 +152,13 @@ pub struct AppState {
     /// PRMaster off; populated by `prmaster_lifecycle::start`.
     pub prmaster_lifecycle: PrMasterLifecycle,
 
+    // ──── PRMaster — AI code review ────
+    /// Domain controller for the AI review tab on the PR Master review
+    /// page. Cheap to clone (`Arc`-backed); holds the in-memory run
+    /// registry across command invocations so a re-mount can replay
+    /// events from a still-running review.
+    pub review: ReviewEngine,
+
     // ──── Git (merge editor + commit log) ────
     /// Domain controller for the Git tool — wraps a shell-out-based
     /// `git` CLI client + a persisted multi-repo registry. Cheap to
@@ -208,6 +216,7 @@ impl AppState {
             sql_workspace_dirs: Vec::new(),
             prmaster: PrMasterEngine::new(),
             prmaster_lifecycle: PrMasterLifecycle::default(),
+            review: ReviewEngine::new(),
             git: GitEngine::new(),
         }
     }

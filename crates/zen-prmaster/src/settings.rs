@@ -111,6 +111,16 @@ pub struct PrMasterSettings {
     /// author name / email — so `"alice"` matches both
     /// `Alice Smith <alice@…>` and `alice@github.com`.
     pub extra_authors: Vec<String>,
+    /// Override base directory for AI Review worktrees. When `None`
+    /// (default), worktrees go under
+    /// `<app_data>/prmaster/ai-review/worktrees/`. When set, they
+    /// go under `<value>/zen-tools-ai-review/`.
+    /// Persisted reports remain in `<app_data>` regardless — only
+    /// the temporary detached checkout moves, which is the slice
+    /// users typically want to point at a fast scratch SSD or a
+    /// directory git already has on PATH.
+    #[serde(default)]
+    pub ai_review_worktrees_dir: Option<String>,
 }
 
 impl Default for PrMasterSettings {
@@ -136,6 +146,7 @@ impl Default for PrMasterSettings {
             cached_repos_at_ms: None,
             repo_mappings: Vec::new(),
             extra_authors: Vec::new(),
+            ai_review_worktrees_dir: None,
         }
     }
 }

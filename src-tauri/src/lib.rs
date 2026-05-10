@@ -575,6 +575,16 @@ pub fn run() {
             commands::prmaster::prmaster_get_ai_runs,
             commands::prmaster::prmaster_list_repos,
             commands::prmaster::prmaster_fetch_repos,
+            // prmaster — AI code review tab
+            commands::pr_review::prmaster_ai_review_start,
+            commands::pr_review::prmaster_ai_review_status,
+            commands::pr_review::prmaster_ai_review_cancel,
+            commands::pr_review::prmaster_ai_review_get_report,
+            commands::pr_review::prmaster_ai_review_list_runs,
+            commands::pr_review::prmaster_ai_review_preview_finding_body,
+            commands::pr_review::prmaster_ai_review_post_finding,
+            commands::pr_review::prmaster_ai_review_cleanup_merged,
+            commands::pr_review::prmaster_ai_review_open_reports_dir,
             // git (merge editor + commit log)
             commands::git::git_list_repos,
             commands::git::git_add_repo,

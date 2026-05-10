@@ -187,6 +187,26 @@ export function PrMasterStoreProvider({ children }: { children: ReactNode }) {
       unlisten = await listenRefresh((snapshot) => {
         if (!alive) return;
         dispatch({ type: "applyRefresh", snapshot });
+        // Hand the visible-PR slug list to the AI Review backend so
+        // review artefacts (worktrees, reports, run history) for any
+        // PR that just dropped out of all three buckets — most often
+        // because it merged or was closed — get purged. Best-effort:
+        // failures here are logged and non-fatal.
+        const visible: string[] = [];
+        for (const list of [
+          snapshot.to_review,
+          snapshot.reviewed,
+          snapshot.mine,
+        ]) {
+          for (const row of list) {
+            visible.push(
+              `${row.pr.repository.nameWithOwner}#${row.pr.number}`,
+            );
+          }
+        }
+        void prmasterTauri.aiReviewCleanupMerged(visible).catch((e) => {
+          console.warn("[prmaster] aiReviewCleanupMerged failed:", e);
+        });
       });
     })();
     return () => {

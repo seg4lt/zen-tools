@@ -29,12 +29,14 @@ import {
   FileDiff,
   MessageSquare,
   Rows2,
+  Sparkles,
 } from "lucide-react";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import { Button, Tabs, TabsList, TabsTrigger, cn } from "@zen-tools/ui";
 import type { DiffViewMode } from "@zen-tools/editor";
 import { PrFilesChangedView } from "./components/shared/PrFilesChangedView";
 import { PrIssueCommentsView } from "./components/shared/PrIssueCommentsView";
+import { PrAiReviewView } from "./components/shared/PrAiReviewView";
 import {
   enrichedId,
   usePrMasterStore,
@@ -44,7 +46,7 @@ import { prRefFor, type EnrichedPullRequest } from "./lib/tauri";
 const VIEW_MODE_KEY = "prmaster.reviewViewMode";
 
 /** Top-level tab on the review page. */
-type ReviewTab = "files" | "comments";
+type ReviewTab = "files" | "comments" | "ai-review";
 
 /** Read the user's last selected view mode from localStorage. Falls
  *  back to `"unified"` when never set / storage unavailable / value
@@ -171,6 +173,11 @@ export function PRMasterReviewPage() {
                 icon={<MessageSquare className="size-3" />}
                 label="Comments"
               />
+              <SectionTabTrigger
+                value="ai-review"
+                icon={<Sparkles className="size-3" />}
+                label="AI review"
+              />
             </TabsList>
           </Tabs>
         </div>
@@ -204,8 +211,10 @@ export function PRMasterReviewPage() {
         {pr ? (
           tab === "files" ? (
             <PrFilesChangedView pr={pr} viewMode={viewMode} />
-          ) : (
+          ) : tab === "comments" ? (
             <PrIssueCommentsView pr={prRefFor(pr.pr)} />
+          ) : (
+            <PrAiReviewView pr={pr} />
           )
         ) : (
           <NotLoaded
