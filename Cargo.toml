@@ -34,7 +34,7 @@ members = [
 exclude = ["crates/zen-test-server"]
 
 [workspace.package]
-version = "0.1.46"
+version = "0.1.47"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["zen-tools"]
