@@ -38,6 +38,7 @@ pub fn terminal_new(
     config: Option<TerminalNewConfig>,
 ) -> Result<TerminalNewResult, String> {
     let config = config.unwrap_or_default();
+    let launch_directory = config.working_directory.clone();
 
     // Lazy-init the GhosttyApp on the main thread. (Even ghostty_app_new
     // can fire AppKit-style notifications during init.)
@@ -63,8 +64,8 @@ pub fn terminal_new(
         // 0.0 means "use ghostty's config default" — keeps every pane
         // and every tab spawned later at the same starting font size.
         font_size: config.font_size.unwrap_or(0.0),
-        working_directory: config.working_directory,
-        command: config.command,
+        working_directory: launch_directory.clone(),
+        command: config.command.clone(),
         initial_input: None,
         wait_after_command: false,
         context: ghostty_rs::SurfaceContext::Window,
@@ -123,6 +124,8 @@ pub fn terminal_new(
             id: tab_id,
             surfaces: vec![surface_id],
             title: String::new(),
+            cwd: launch_directory.clone(),
+            launch_directory: launch_directory.clone(),
         });
 
         // Install the application-level Cmd-key monitor (idempotent).
@@ -312,6 +315,8 @@ pub struct TabInfo {
     pub id: TabId,
     pub title: String,
     pub active: bool,
+    pub cwd_absolute_path: Option<String>,
+    pub launch_directory: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -325,7 +330,9 @@ pub struct TerminalNewTabResult {
 pub fn terminal_new_tab(
     window: Window<Wry>,
     app_handle: AppHandle<Wry>,
+    config: Option<TerminalNewConfig>,
 ) -> Result<TerminalNewTabResult, String> {
+    let config = config.unwrap_or_default();
     let scale = window
         .scale_factor()
         .map_err(|e| format!("scale_factor: {e}"))?;
@@ -337,7 +344,7 @@ pub fn terminal_new_tab(
             return Err("ns_window returned null".into());
         }
         let container = unsafe { macos::ensure_tab_container(ns_window) };
-        spawn_tab_native(&app_handle_for_main, container, scale)
+        spawn_tab_native(&app_handle_for_main, container, scale, config)
     })
     .map_err(|e| format!("run_on_main: {e}"))??;
 
@@ -379,6 +386,8 @@ pub fn terminal_list_tabs(state: State<'_, PluginState>) -> Result<Vec<TabInfo>,
             id: t.id,
             title: t.title.clone(),
             active: t.id == active,
+            cwd_absolute_path: t.cwd.clone(),
+            launch_directory: t.launch_directory.clone(),
         })
         .collect();
     Ok(infos)
@@ -597,6 +606,7 @@ fn spawn_tab_native(
     app_handle: &AppHandle<Wry>,
     container: *mut c_void,
     scale: f64,
+    config: TerminalNewConfig,
 ) -> Result<TabId, String> {
     let frame = unsafe { container_bounds(container) };
     let host_view = unsafe { macos::create_host_view(frame) };
@@ -606,6 +616,14 @@ fn spawn_tab_native(
 
     let state = app_handle.state::<PluginState>();
     let mut inner = state.inner.lock();
+    let working_directory = config.working_directory.clone().or_else(|| {
+        let active_tab = unsafe { macos::tab_active_id() };
+        inner
+            .tabs
+            .iter()
+            .find(|tab| tab.id == active_tab)
+            .and_then(|tab| tab.cwd.clone().or_else(|| tab.launch_directory.clone()))
+    });
     let app = inner
         .app
         .as_ref()
@@ -613,9 +631,9 @@ fn spawn_tab_native(
 
     let surface_cfg = SurfaceConfig {
         scale_factor: scale,
-        font_size: 0.0,
-        working_directory: None,
-        command: None,
+        font_size: config.font_size.unwrap_or(0.0),
+        working_directory: working_directory.clone(),
+        command: config.command,
         initial_input: None,
         wait_after_command: false,
         context: ghostty_rs::SurfaceContext::Tab,
@@ -631,6 +649,8 @@ fn spawn_tab_native(
         id: tab_id,
         surfaces: vec![surface_id],
         title: String::new(),
+        cwd: working_directory.clone(),
+        launch_directory: working_directory,
     });
     Ok(tab_id)
 }
@@ -691,18 +711,23 @@ static APP_HANDLE_FOR_TABS: OnceLock<AppHandle<Wry>> = OnceLock::new();
 struct TabEventPayload<'a> {
     id: TabId,
     title: Option<&'a str>,
+    cwd_absolute_path: Option<&'a str>,
+    launch_directory: Option<&'a str>,
 }
 
-extern "C" fn tab_event_trampoline(kind: i32, tab_id: i32, title: *const c_char) {
+extern "C" fn tab_event_trampoline(kind: i32, tab_id: i32, value: *const c_char) {
     let app = match APP_HANDLE_FOR_TABS.get() {
         Some(a) => a,
         None => return,
     };
-    let title_str = if title.is_null() {
+    let value_str = if value.is_null() {
         None
     } else {
-        Some(unsafe { CStr::from_ptr(title) }.to_string_lossy().into_owned())
+        Some(unsafe { CStr::from_ptr(value) }.to_string_lossy().into_owned())
     };
+    let mut title = None::<String>;
+    let mut cwd_absolute_path = None::<String>;
+    let mut launch_directory = None::<String>;
     let event = match crate::macos::TabEventKind::from_i32(kind) {
         Some(crate::macos::TabEventKind::Created) => "tab:created",
         Some(crate::macos::TabEventKind::Focused) => "tab:focused",
@@ -711,18 +736,34 @@ extern "C" fn tab_event_trampoline(kind: i32, tab_id: i32, title: *const c_char)
             // Update title in PluginState as well.
             let state = app.state::<PluginState>();
             let mut inner = state.inner.lock();
-            if let Some(t) = title_str.as_ref() {
+            if let Some(t) = value_str.as_ref() {
                 if let Some(tab) = inner.tabs.iter_mut().find(|x| x.id == tab_id) {
                     tab.title = t.clone();
+                    title = Some(tab.title.clone());
+                    cwd_absolute_path = tab.cwd.clone();
+                    launch_directory = tab.launch_directory.clone();
                 }
             }
             "tab:title-changed"
+        }
+        Some(crate::macos::TabEventKind::Pwd) => {
+            let state = app.state::<PluginState>();
+            let mut inner = state.inner.lock();
+            if let Some(tab) = inner.tabs.iter_mut().find(|x| x.id == tab_id) {
+                tab.cwd = value_str.clone();
+                title = Some(tab.title.clone());
+                cwd_absolute_path = tab.cwd.clone();
+                launch_directory = tab.launch_directory.clone();
+            }
+            "tab:pwd-changed"
         }
         None => return,
     };
     let payload = TabEventPayload {
         id: tab_id,
-        title: title_str.as_deref(),
+        title: title.as_deref(),
+        cwd_absolute_path: cwd_absolute_path.as_deref(),
+        launch_directory: launch_directory.as_deref(),
     };
     let _ = app.emit(event, payload);
 }
@@ -749,7 +790,7 @@ extern "C" fn tab_action_trampoline(kind: i32, arg: i64) {
                 _ => return,
             };
             let container = unsafe { macos::ensure_tab_container(ns_window) };
-            let _ = spawn_tab_native(app, container, scale);
+            let _ = spawn_tab_native(app, container, scale, TerminalNewConfig::default());
         }
         crate::macos::TabActionKind::Close => {
             let target_tab = if arg == 0 {

@@ -33,7 +33,7 @@ extern "C" {
     fn GhosttyTabList(out: *mut i32, max: i32) -> i32;
     fn GhosttyTabActiveId() -> i32;
     fn GhosttyRegisterTabEventCallback(
-        fn_ptr: Option<extern "C" fn(kind: i32, tab_id: i32, title: *const c_char)>,
+        fn_ptr: Option<extern "C" fn(kind: i32, tab_id: i32, value: *const c_char)>,
     );
     fn GhosttyRegisterTabActionCallback(
         fn_ptr: Option<extern "C" fn(kind: i32, arg: i64)>,
@@ -173,6 +173,7 @@ pub enum TabEventKind {
     Focused = 2,
     Closed = 3,
     Title = 4,
+    Pwd = 5,
 }
 
 impl TabEventKind {
@@ -182,6 +183,7 @@ impl TabEventKind {
             2 => Self::Focused,
             3 => Self::Closed,
             4 => Self::Title,
+            5 => Self::Pwd,
             _ => return None,
         })
     }
@@ -229,7 +231,7 @@ pub unsafe fn tab_container_set_chrome_inset(top: f64, right: f64, bottom: f64, 
 
 /// Install the tab event callback. Calls land on the main thread.
 pub unsafe fn register_tab_event_callback(
-    fn_ptr: extern "C" fn(kind: i32, tab_id: i32, title: *const c_char),
+    fn_ptr: extern "C" fn(kind: i32, tab_id: i32, value: *const c_char),
 ) {
     GhosttyRegisterTabEventCallback(Some(fn_ptr));
 }

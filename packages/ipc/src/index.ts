@@ -3,6 +3,9 @@ export {
   getPreferences,
   savePreferences,
   type Preferences,
+  type TerminalSessionPanePreferences,
+  type TerminalSessionPreferences,
+  type TerminalSessionWorkspacePreferences,
 } from "./preferences";
 export { pickDirectory, readFileContent, writeFileContent } from "./files";
 export {

@@ -152,8 +152,8 @@ void GhosttyDisarmTaoSendEvent(void);
 //
 // Tab event kinds emitted via the registered callback.
 // Keep in sync with `TabEventKind` in macos.rs.
-//   1 = CREATED, 2 = FOCUSED, 3 = CLOSED, 4 = TITLE
-typedef void (*GhosttyTabEventFn)(int kind, int tab_id, const char * _Nullable title);
+//   1 = CREATED, 2 = FOCUSED, 3 = CLOSED, 4 = TITLE, 5 = PWD
+typedef void (*GhosttyTabEventFn)(int kind, int tab_id, const char * _Nullable value);
 
 /// Install the callback that receives tab lifecycle events. Pass NULL
 /// to clear. Calls happen on the main thread.

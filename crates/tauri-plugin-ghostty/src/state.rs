@@ -21,6 +21,11 @@ pub struct TabState {
     pub surfaces: Vec<SurfaceId>,
     /// Last-known title pushed via SET_TITLE.
     pub title: String,
+    /// Last-known absolute cwd pushed via OSC 7 / PWD action.
+    pub cwd: Option<String>,
+    /// Directory this tab was launched in (or inherited from the
+    /// focused tab when the user created a sibling tab).
+    pub launch_directory: Option<String>,
 }
 
 #[derive(Default)]

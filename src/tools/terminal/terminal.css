@@ -233,7 +233,8 @@ body.terminal-route-active main .terminal-chrome * {
   color: var(--term-bar-fg);
 }
 
-.terminal-workspace__input {
+.terminal-workspace__input,
+.terminal-pane__input {
   width: 100%;
   min-width: 0;
   border: 0;
@@ -245,7 +246,8 @@ body.terminal-route-active main .terminal-chrome * {
   outline: none;
 }
 
-.terminal-workspace__input::selection {
+.terminal-workspace__input::selection,
+.terminal-pane__input::selection {
   background: rgba(255, 255, 255, 0.2);
 }
 

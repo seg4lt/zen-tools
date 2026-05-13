@@ -11,6 +11,26 @@
 
 import { invoke } from "@tauri-apps/api/core";
 
+export interface TerminalSessionPanePreferences {
+  id: string;
+  titleOverride?: string | null;
+  cwdAbsolutePath?: string | null;
+  launchDirectory?: string | null;
+}
+
+export interface TerminalSessionWorkspacePreferences {
+  id: string;
+  name: string;
+  paneIds: string[];
+  lastActivePaneId?: string | null;
+}
+
+export interface TerminalSessionPreferences {
+  workspaces: TerminalSessionWorkspacePreferences[];
+  panes: TerminalSessionPanePreferences[];
+  activeWorkspaceId?: string | null;
+}
+
 /**
  * Shared shape of the preferences blob. Keep in sync with
  * `src-tauri/src/commands/preferences.rs`. Per-tool fields are listed
@@ -42,6 +62,8 @@ export interface Preferences {
   cleanerScanFolders?: string[];
   /** Database Explorer SQL workspace folders. */
   sqlWorkspaceDirs?: string[];
+  /** Terminal-only pane/workspace restore snapshot. */
+  terminalSession?: TerminalSessionPreferences;
   /**
    * Open-ended bucket for unknown fields. Other tools may persist
    * additional state under their own keys; we don't enumerate them

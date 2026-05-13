@@ -44,7 +44,6 @@ import {
   terminalSetChromeInset,
   terminalSetTrafficLightsHidden,
   type ChromeInset,
-  type PaneInfo,
 } from "./lib/tauri";
 import "./terminal.css";
 
@@ -77,8 +76,8 @@ function writeRailMode(mode: RailMode) {
   }
 }
 
-function paneTitle(title: string): string {
-  return title.trim() || "shell";
+function paneTitle(title: string | null | undefined): string {
+  return title?.trim() || "shell";
 }
 
 function paneMiniLabel(title: string): string {
@@ -92,7 +91,14 @@ function workspaceMiniLabel(name: string, index: number): string {
   return trimmed.slice(0, 1).toUpperCase() || String(index + 1);
 }
 
-function isPaneInfo(pane: PaneInfo | undefined): pane is PaneInfo {
+function paneDisplayTitle(pane: {
+  ghosttyTitle: string;
+  titleOverride: string | null;
+}): string {
+  return paneTitle(pane.titleOverride ?? pane.ghosttyTitle);
+}
+
+function isPaneInfo<T>(pane: T | undefined): pane is T {
   return pane != null;
 }
 
@@ -105,6 +111,7 @@ export function TerminalView() {
     ensureBootstrapped,
     createWorkspace,
     renameWorkspace,
+    renamePane,
     activateWorkspace,
     deleteWorkspace,
     movePaneToWorkspace,
@@ -118,6 +125,8 @@ export function TerminalView() {
     null,
   );
   const [editingWorkspaceName, setEditingWorkspaceName] = useState("");
+  const [editingPaneId, setEditingPaneId] = useState<number | null>(null);
+  const [editingPaneName, setEditingPaneName] = useState("");
   const [draggedPaneId, setDraggedPaneId] = useState<number | null>(null);
   const [dropWorkspaceId, setDropWorkspaceId] = useState<string | null>(null);
   const [deletingWorkspaceId, setDeletingWorkspaceId] = useState<
@@ -271,9 +280,19 @@ export function TerminalView() {
     setEditingWorkspaceName("");
   };
 
+  const cancelPaneRename = () => {
+    setEditingPaneId(null);
+    setEditingPaneName("");
+  };
+
   const commitWorkspaceRename = (workspaceId: string) => {
     renameWorkspace(workspaceId, editingWorkspaceName);
     cancelWorkspaceRename();
+  };
+
+  const commitPaneRename = (paneId: number) => {
+    renamePane(paneId, editingPaneName);
+    cancelPaneRename();
   };
 
   const handleCreateWorkspace = () => {
@@ -462,17 +481,28 @@ export function TerminalView() {
                   aria-label={`${activeWorkspace?.name ?? "Terminal"} panes`}
                 >
                   {activeWorkspacePanes.map((pane) => {
-                    const title = paneTitle(pane.title);
+                    const title = paneDisplayTitle(pane);
+                    const editing = pane.id === editingPaneId;
+                    const cwdTitle =
+                      pane.cwdAbsolutePath ?? pane.launchDirectory ?? title;
                     return (
                       <button
                         key={pane.id}
                         type="button"
                         role="tab"
-                        draggable={workspaces.length > 1}
+                        draggable={workspaces.length > 1 && !editing}
                         aria-selected={pane.id === activeId}
                         aria-label={title}
-                        title={title}
-                        onClick={() => focusPane(pane.id)}
+                        title={cwdTitle}
+                        onClick={() => {
+                          if (!editing) focusPane(pane.id);
+                        }}
+                        onDoubleClick={() => {
+                          if (railMode === "expanded") {
+                            setEditingPaneId(pane.id);
+                            setEditingPaneName(pane.titleOverride ?? "");
+                          }
+                        }}
                         onDragStart={(event) => {
                           event.dataTransfer.effectAllowed = "move";
                           event.dataTransfer.setData(
@@ -491,11 +521,33 @@ export function TerminalView() {
                         )}
                       >
                         <span className="terminal-tab__label">
-                          {railMode === "expanded"
-                            ? title
-                            : paneMiniLabel(pane.title)}
+                          {editing ? (
+                            <input
+                              autoFocus
+                              value={editingPaneName}
+                              onChange={(event) =>
+                                setEditingPaneName(event.target.value)
+                              }
+                              onBlur={() => commitPaneRename(pane.id)}
+                              onKeyDown={(event) => {
+                                if (event.key === "Enter") {
+                                  event.preventDefault();
+                                  commitPaneRename(pane.id);
+                                } else if (event.key === "Escape") {
+                                  event.preventDefault();
+                                  cancelPaneRename();
+                                }
+                              }}
+                              onClick={(event) => event.stopPropagation()}
+                              className="terminal-pane__input"
+                            />
+                          ) : railMode === "expanded" ? (
+                            title
+                          ) : (
+                            paneMiniLabel(title)
+                          )}
                         </span>
-                        {railMode === "expanded" && (
+                        {railMode === "expanded" && !editing && (
                           <span
                             role="button"
                             aria-label={`Close ${title}`}
@@ -527,7 +579,11 @@ export function TerminalView() {
                 expandedLabel={railMode === "expanded" ? "New pane" : undefined}
                 className="terminal-tab-add"
                 onClick={() => {
-                  void newPane();
+                  const sourcePane =
+                    activeWorkspacePanes[activeWorkspacePanes.length - 1];
+                  void newPane(
+                    sourcePane?.cwdAbsolutePath ?? sourcePane?.launchDirectory ?? null,
+                  );
                 }}
               />
               <IconRailButton

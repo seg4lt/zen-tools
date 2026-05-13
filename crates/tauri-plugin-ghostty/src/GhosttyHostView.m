@@ -1022,13 +1022,14 @@ static void tab_id_set(NSView *v, int id_) {
 static CGFloat g_inset_top = 0, g_inset_right = 0, g_inset_bottom = 0, g_inset_left = 0;
 
 // Tab event delivery — Rust installs a callback that emits Tauri events.
-typedef void (*GhosttyTabEventFn)(int kind, int tab_id, const char *title);
+typedef void (*GhosttyTabEventFn)(int kind, int tab_id, const char *value);
 // kind values map to TAB_EVENT_* below; kept in sync with macos.rs.
 enum {
     TAB_EVENT_CREATED = 1,
     TAB_EVENT_FOCUSED = 2,
     TAB_EVENT_CLOSED  = 3,
     TAB_EVENT_TITLE   = 4,
+    TAB_EVENT_PWD     = 5,
 };
 static GhosttyTabEventFn g_tab_event_fn = NULL;
 
@@ -1036,10 +1037,30 @@ void GhosttyRegisterTabEventCallback(GhosttyTabEventFn fn) {
     g_tab_event_fn = fn;
 }
 
-static void emit_tab_event(int kind, int tab_id, NSString *title) {
+static void emit_tab_event(int kind, int tab_id, NSString *value) {
     if (!g_tab_event_fn) return;
-    const char *t = title ? title.UTF8String : NULL;
-    g_tab_event_fn(kind, tab_id, t);
+    const char *v = value ? value.UTF8String : NULL;
+    g_tab_event_fn(kind, tab_id, v);
+}
+
+static int tab_id_for_surface(ghostty_surface_t surface) {
+    if (!surface || !g_tab_container) return 0;
+    for (NSView *child in g_tab_container.subviews) {
+        GhosttyHostView *match = nil;
+        NSMutableArray<NSView *> *stack = [@[child] mutableCopy];
+        while (stack.count > 0) {
+            NSView *cur = stack.lastObject;
+            [stack removeLastObject];
+            if ([cur isKindOfClass:[GhosttyHostView class]]
+                && [(GhosttyHostView *)cur surface] == surface) {
+                match = (GhosttyHostView *)cur;
+                break;
+            }
+            for (NSView *sub in cur.subviews) [stack addObject:sub];
+        }
+        if (match) return tab_id_get(child);
+    }
+    return 0;
 }
 
 static NSView *root_for_tab_id(int tab_id) {
@@ -1670,26 +1691,7 @@ bool GhosttyHandleAction(void *app, void *target, void *action) {
             // gives us the surface; walk up to its tab root.
             int tab_id = 0;
             if (tgt && tgt->tag == GHOSTTY_TARGET_SURFACE) {
-                ghostty_surface_t s = tgt->target.surface;
-                // Find the GhosttyHostView whose _surface matches s.
-                if (g_tab_container) {
-                    for (NSView *child in g_tab_container.subviews) {
-                        GhosttyHostView *match = nil;
-                        // Recursive search.
-                        NSMutableArray<NSView *> *stack = [@[child] mutableCopy];
-                        while (stack.count > 0) {
-                            NSView *cur = stack.lastObject;
-                            [stack removeLastObject];
-                            if ([cur isKindOfClass:[GhosttyHostView class]]
-                                && [(GhosttyHostView *)cur surface] == s) {
-                                match = (GhosttyHostView *)cur;
-                                break;
-                            }
-                            for (NSView *sub in cur.subviews) [stack addObject:sub];
-                        }
-                        if (match) { tab_id = tab_id_get(child); break; }
-                    }
-                }
+                tab_id = tab_id_for_surface(tgt->target.surface);
             }
             if (tab_id != 0 && title) {
                 emit_tab_event(TAB_EVENT_TITLE, tab_id, title);
@@ -1701,6 +1703,18 @@ bool GhosttyHandleAction(void *app, void *target, void *action) {
                 if (active == 0 || tab_id == 0 || active == tab_id) {
                     win.title = title;
                 }
+            }
+            return true;
+        }
+        case GHOSTTY_ACTION_PWD: {
+            int tab_id = 0;
+            if (tgt && tgt->tag == GHOSTTY_TARGET_SURFACE) {
+                tab_id = tab_id_for_surface(tgt->target.surface);
+            }
+            const char *pwd_c = act->action.pwd.pwd;
+            NSString *pwd = (pwd_c ? [NSString stringWithUTF8String:pwd_c] : nil);
+            if (tab_id != 0) {
+                emit_tab_event(TAB_EVENT_PWD, tab_id, pwd);
             }
             return true;
         }

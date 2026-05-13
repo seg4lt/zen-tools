@@ -87,6 +87,44 @@ pub struct Preferences {
     /// re-arms everything live without an app restart.
     #[serde(default)]
     pub disabled_tools: Vec<String>,
+    /// Terminal-only workspace + pane session snapshot. Used to
+    /// restore the embedded Ghostty session on app relaunch.
+    #[serde(default)]
+    pub terminal_session: Option<TerminalSessionPreferences>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalSessionPreferences {
+    #[serde(default)]
+    pub workspaces: Vec<TerminalSessionWorkspacePreferences>,
+    #[serde(default)]
+    pub panes: Vec<TerminalSessionPanePreferences>,
+    #[serde(default)]
+    pub active_workspace_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalSessionWorkspacePreferences {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub pane_ids: Vec<String>,
+    #[serde(default)]
+    pub last_active_pane_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalSessionPanePreferences {
+    pub id: String,
+    #[serde(default)]
+    pub title_override: Option<String>,
+    #[serde(default)]
+    pub cwd_absolute_path: Option<String>,
+    #[serde(default)]
+    pub launch_directory: Option<String>,
 }
 
 /// One persisted Database Explorer connection. Mirrors
@@ -150,6 +188,7 @@ impl Default for Preferences {
             app_zoom: default_app_zoom(),
             tool_order: Vec::new(),
             disabled_tools: Vec::new(),
+            terminal_session: None,
         }
     }
 }

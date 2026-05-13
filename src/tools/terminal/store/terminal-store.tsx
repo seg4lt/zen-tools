@@ -2,14 +2,9 @@
  * Terminal pane + workspace store.
  *
  * Ghostty still owns the native tabs, PTYs, and focused surface. This
- * store mirrors that flat tab list and layers a terminal-only
- * "workspace" grouping model on top so the UI can organize panes
- * without requiring backend changes.
- *
- * Hoisted into `<AppProviders>` so navigating away from `/terminal`
- * doesn't drop either the pane list or workspace grouping. The
- * tab-lifecycle listeners are wired once at app start and kept alive
- * for the lifetime of the window.
+ * store mirrors that flat tab list, layers a terminal-only workspace
+ * grouping model on top, and persists a restorable session snapshot
+ * through shared preferences.
  */
 
 import {
@@ -22,11 +17,19 @@ import {
   useRef,
   type ReactNode,
 } from "react";
+import {
+  getPreferences,
+  savePreferences,
+  type TerminalSessionPanePreferences,
+  type TerminalSessionPreferences,
+  type TerminalSessionWorkspacePreferences,
+} from "@zen-tools/ipc";
 import { useTheme } from "@/hooks/use-theme";
 import {
   onTabClosed,
   onTabCreated,
   onTabFocused,
+  onTabPwdChanged,
   onTabTitleChanged,
   terminalCloseTab,
   terminalListTabs,
@@ -37,6 +40,16 @@ import {
   type PaneInfo,
 } from "../lib/tauri";
 
+export interface TerminalPane {
+  id: number;
+  active: boolean;
+  persistentId: string;
+  ghosttyTitle: string;
+  titleOverride: string | null;
+  cwdAbsolutePath: string | null;
+  launchDirectory: string | null;
+}
+
 export interface TerminalWorkspace {
   id: string;
   name: string;
@@ -46,7 +59,7 @@ export interface TerminalWorkspace {
 }
 
 interface State {
-  panes: PaneInfo[];
+  panes: TerminalPane[];
   activeId: number | null;
   activeWorkspaceId: string | null;
   workspaces: TerminalWorkspace[];
@@ -59,11 +72,26 @@ interface State {
 }
 
 type Action =
-  | { type: "initialize"; panes: PaneInfo[]; activeId: number | null }
-  | { type: "add_pane"; pane: PaneInfo; workspaceId: string | null }
+  | { type: "initialize"; panes: TerminalPane[]; activeId: number | null }
+  | {
+      type: "hydrate";
+      panes: TerminalPane[];
+      workspaces: TerminalWorkspace[];
+      activeWorkspaceId: string | null;
+      activeId: number | null;
+      nextWorkspaceNumber: number;
+    }
+  | { type: "add_pane"; pane: TerminalPane; workspaceId: string | null }
   | { type: "remove_pane"; id: number }
   | { type: "set_active"; id: number | null }
   | { type: "set_title"; id: number; title: string }
+  | {
+      type: "set_cwd";
+      id: number;
+      cwdAbsolutePath: string | null;
+      launchDirectory?: string | null;
+    }
+  | { type: "rename_pane"; id: number; titleOverride: string }
   | { type: "create_workspace"; id: string; name: string; activate: boolean }
   | { type: "rename_workspace"; id: string; name: string }
   | { type: "activate_workspace"; id: string; paneId: number | null }
@@ -93,6 +121,11 @@ function normalizeWorkspaceName(name: string, fallback: string): string {
   return trimmed.length > 0 ? trimmed : fallback;
 }
 
+function normalizePaneOverride(name: string): string | null {
+  const trimmed = name.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
 function workspaceForCreate(id: string, name: string): TerminalWorkspace {
   return {
     id,
@@ -102,10 +135,32 @@ function workspaceForCreate(id: string, name: string): TerminalWorkspace {
   };
 }
 
+function paneFromInfo(
+  pane: PaneInfo,
+  options?: {
+    persistentId?: string;
+    titleOverride?: string | null;
+    cwdAbsolutePath?: string | null;
+    launchDirectory?: string | null;
+  },
+): TerminalPane {
+  return {
+    id: pane.id,
+    active: pane.active,
+    persistentId: options?.persistentId ?? crypto.randomUUID(),
+    ghosttyTitle: pane.title,
+    titleOverride: options?.titleOverride ?? null,
+    cwdAbsolutePath:
+      options?.cwdAbsolutePath ?? pane.cwd_absolute_path ?? null,
+    launchDirectory:
+      options?.launchDirectory ?? pane.launch_directory ?? null,
+  };
+}
+
 function setPaneActiveFlags(
-  panes: PaneInfo[],
+  panes: TerminalPane[],
   activeId: number | null,
-): PaneInfo[] {
+): TerminalPane[] {
   return panes.map((pane) => ({ ...pane, active: pane.id === activeId }));
 }
 
@@ -122,26 +177,76 @@ function chooseWorkspacePane(
   return workspace.paneIds[workspace.paneIds.length - 1] ?? null;
 }
 
+function nextWorkspaceNumberFor(workspaces: TerminalWorkspace[]): number {
+  const highestExplicit = workspaces.reduce((max, workspace) => {
+    const match = workspace.name.match(/^Workspace (\d+)$/);
+    return Math.max(max, match ? Number(match[1]) : 0);
+  }, 0);
+  return Math.max(workspaces.length, highestExplicit) + 1;
+}
+
+function buildDefaultState(
+  panes: TerminalPane[],
+  activeId: number | null,
+): State {
+  const workspaceId = crypto.randomUUID();
+  const workspace: TerminalWorkspace = {
+    id: workspaceId,
+    name: defaultWorkspaceName(1),
+    paneIds: panes.map((pane) => pane.id),
+    lastActivePaneId: activeId ?? panes[panes.length - 1]?.id ?? null,
+  };
+  return {
+    panes: setPaneActiveFlags(panes, activeId),
+    activeId,
+    activeWorkspaceId: workspaceId,
+    workspaces: [workspace],
+    paneWorkspaceIds: Object.fromEntries(
+      panes.map((pane) => [paneKey(pane.id), workspaceId]),
+    ),
+    nextWorkspaceNumber: 2,
+    bootstrapped: true,
+  };
+}
+
 function reducer(state: State, action: Action): State {
   switch (action.type) {
-    case "initialize": {
-      const workspaceId = crypto.randomUUID();
-      const workspace: TerminalWorkspace = {
-        id: workspaceId,
-        name: defaultWorkspaceName(1),
-        paneIds: action.panes.map((pane) => pane.id),
-        lastActivePaneId:
-          action.activeId ?? action.panes[action.panes.length - 1]?.id ?? null,
-      };
+    case "initialize":
+      return buildDefaultState(action.panes, action.activeId);
+
+    case "hydrate": {
+      const workspaces =
+        action.workspaces.length > 0
+          ? action.workspaces
+          : [
+              workspaceForCreate(
+                crypto.randomUUID(),
+                defaultWorkspaceName(action.nextWorkspaceNumber),
+              ),
+            ];
+      const activeWorkspaceId =
+        workspaces.find((workspace) => workspace.id === action.activeWorkspaceId)
+          ?.id ??
+        workspaces[0]?.id ??
+        null;
+      const activeId =
+        action.activeId != null &&
+        action.panes.some((pane) => pane.id === action.activeId)
+          ? action.activeId
+          : chooseWorkspacePane(
+              workspaces.find((workspace) => workspace.id === activeWorkspaceId),
+            );
       return {
-        panes: setPaneActiveFlags(action.panes, action.activeId),
-        activeId: action.activeId,
-        activeWorkspaceId: workspaceId,
-        workspaces: [workspace],
+        panes: setPaneActiveFlags(action.panes, activeId),
+        activeId,
+        activeWorkspaceId,
+        workspaces,
         paneWorkspaceIds: Object.fromEntries(
-          action.panes.map((pane) => [paneKey(pane.id), workspaceId]),
+          workspaces.flatMap((workspace) =>
+            workspace.paneIds.map((paneId) => [paneKey(paneId), workspace.id]),
+          ),
         ),
-        nextWorkspaceNumber: 2,
+        nextWorkspaceNumber: action.nextWorkspaceNumber,
         bootstrapped: true,
       };
     }
@@ -151,7 +256,15 @@ function reducer(state: State, action: Action): State {
       if (state.panes.some((pane) => pane.id === action.pane.id)) {
         const panes = state.panes.map((pane) =>
           pane.id === action.pane.id
-            ? { ...pane, title: action.pane.title, active: action.pane.active }
+            ? {
+                ...pane,
+                ghosttyTitle: action.pane.ghosttyTitle,
+                cwdAbsolutePath:
+                  action.pane.cwdAbsolutePath ?? pane.cwdAbsolutePath,
+                launchDirectory:
+                  action.pane.launchDirectory ?? pane.launchDirectory,
+                active: action.pane.active,
+              }
             : action.pane.active
               ? { ...pane, active: false }
               : pane,
@@ -224,7 +337,7 @@ function reducer(state: State, action: Action): State {
       const paneWorkspaceIds = { ...state.paneWorkspaceIds };
       delete paneWorkspaceIds[key];
 
-      let workspaces = state.workspaces.map((workspace) => {
+      const workspaces = state.workspaces.map((workspace) => {
         if (workspace.id !== workspaceId) return workspace;
         const paneIds = workspace.paneIds.filter((id) => id !== action.id);
         const lastActivePaneId =
@@ -286,7 +399,39 @@ function reducer(state: State, action: Action): State {
       return {
         ...state,
         panes: state.panes.map((pane) =>
-          pane.id === action.id ? { ...pane, title: action.title } : pane,
+          pane.id === action.id
+            ? { ...pane, ghosttyTitle: action.title }
+            : pane,
+        ),
+      };
+
+    case "set_cwd":
+      return {
+        ...state,
+        panes: state.panes.map((pane) =>
+          pane.id === action.id
+            ? {
+                ...pane,
+                cwdAbsolutePath: action.cwdAbsolutePath,
+                launchDirectory:
+                  action.launchDirectory === undefined
+                    ? pane.launchDirectory
+                    : action.launchDirectory,
+              }
+            : pane,
+        ),
+      };
+
+    case "rename_pane":
+      return {
+        ...state,
+        panes: state.panes.map((pane) =>
+          pane.id === action.id
+            ? {
+                ...pane,
+                titleOverride: normalizePaneOverride(action.titleOverride),
+              }
+            : pane,
         ),
       };
 
@@ -406,7 +551,7 @@ function reducer(state: State, action: Action): State {
       let workspaces = state.workspaces.filter(
         (workspace) => workspace.id !== action.id,
       );
-      let paneWorkspaceIds = { ...state.paneWorkspaceIds };
+      const paneWorkspaceIds = { ...state.paneWorkspaceIds };
       for (const paneId of deletedWorkspace.paneIds) {
         delete paneWorkspaceIds[paneKey(paneId)];
       }
@@ -457,16 +602,237 @@ function reducer(state: State, action: Action): State {
   }
 }
 
+function readOptionalString(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+
+function normalizePaneSnapshot(
+  value: unknown,
+): TerminalSessionPanePreferences | null {
+  if (!value || typeof value !== "object") return null;
+  const pane = value as Record<string, unknown>;
+  if (typeof pane.id !== "string" || pane.id.length === 0) return null;
+  return {
+    id: pane.id,
+    titleOverride: readOptionalString(pane.titleOverride),
+    cwdAbsolutePath: readOptionalString(pane.cwdAbsolutePath),
+    launchDirectory: readOptionalString(pane.launchDirectory),
+  };
+}
+
+function normalizeWorkspaceSnapshot(
+  value: unknown,
+): TerminalSessionWorkspacePreferences | null {
+  if (!value || typeof value !== "object") return null;
+  const workspace = value as Record<string, unknown>;
+  if (
+    typeof workspace.id !== "string" ||
+    workspace.id.length === 0 ||
+    typeof workspace.name !== "string"
+  ) {
+    return null;
+  }
+  return {
+    id: workspace.id,
+    name: workspace.name,
+    paneIds: Array.isArray(workspace.paneIds)
+      ? workspace.paneIds.filter((paneId): paneId is string => typeof paneId === "string")
+      : [],
+    lastActivePaneId: readOptionalString(workspace.lastActivePaneId),
+  };
+}
+
+function normalizeTerminalSession(
+  value: unknown,
+): TerminalSessionPreferences | null {
+  if (!value || typeof value !== "object") return null;
+  const session = value as Record<string, unknown>;
+  const panes = Array.isArray(session.panes)
+    ? session.panes.map(normalizePaneSnapshot).filter((pane): pane is TerminalSessionPanePreferences => pane != null)
+    : [];
+  const workspaces = Array.isArray(session.workspaces)
+    ? session.workspaces
+        .map(normalizeWorkspaceSnapshot)
+        .filter(
+          (workspace): workspace is TerminalSessionWorkspacePreferences =>
+            workspace != null,
+        )
+    : [];
+  if (panes.length === 0 && workspaces.length === 0) return null;
+  return {
+    panes,
+    workspaces,
+    activeWorkspaceId: readOptionalString(session.activeWorkspaceId),
+  };
+}
+
+function buildTerminalSession(state: State): TerminalSessionPreferences {
+  const panesById = new Map(state.panes.map((pane) => [pane.id, pane]));
+  return {
+    panes: state.panes.map((pane) => ({
+      id: pane.persistentId,
+      titleOverride: pane.titleOverride,
+      cwdAbsolutePath: pane.cwdAbsolutePath,
+      launchDirectory: pane.cwdAbsolutePath ?? pane.launchDirectory,
+    })),
+    workspaces: state.workspaces.map((workspace) => ({
+      id: workspace.id,
+      name: workspace.name,
+      paneIds: workspace.paneIds
+        .map((paneId) => panesById.get(paneId)?.persistentId ?? null)
+        .filter((paneId): paneId is string => paneId != null),
+      lastActivePaneId:
+        workspace.lastActivePaneId != null
+          ? (panesById.get(workspace.lastActivePaneId)?.persistentId ?? null)
+          : null,
+    })),
+    activeWorkspaceId: state.activeWorkspaceId,
+  };
+}
+
+interface RestoredState {
+  panes: TerminalPane[];
+  workspaces: TerminalWorkspace[];
+  activeWorkspaceId: string | null;
+  activeId: number | null;
+  nextWorkspaceNumber: number;
+}
+
+function buildRestoredState(
+  snapshot: TerminalSessionPreferences,
+  runtimePanes: PaneInfo[],
+  runtimeIdByPersistentId: Map<string, number>,
+): RestoredState {
+  const runtimePaneById = new Map(runtimePanes.map((pane) => [pane.id, pane]));
+
+  const panes: TerminalPane[] = snapshot.panes
+    .map((snapshotPane) => {
+      const runtimeId = runtimeIdByPersistentId.get(snapshotPane.id);
+      if (runtimeId == null) return null;
+      const runtimePane = runtimePaneById.get(runtimeId);
+      if (!runtimePane) {
+        return paneFromInfo(
+          {
+            id: runtimeId,
+            title: "",
+            active: false,
+            cwd_absolute_path:
+              snapshotPane.cwdAbsolutePath ?? snapshotPane.launchDirectory ?? null,
+            launch_directory: snapshotPane.launchDirectory ?? null,
+          },
+          {
+            persistentId: snapshotPane.id,
+            titleOverride: snapshotPane.titleOverride ?? null,
+          },
+        );
+      }
+      return paneFromInfo(runtimePane, {
+        persistentId: snapshotPane.id,
+        titleOverride: snapshotPane.titleOverride ?? null,
+        cwdAbsolutePath:
+          runtimePane.cwd_absolute_path ??
+          snapshotPane.cwdAbsolutePath ??
+          snapshotPane.launchDirectory ??
+          null,
+        launchDirectory:
+          runtimePane.launch_directory ??
+          snapshotPane.launchDirectory ??
+          null,
+      });
+    })
+    .filter((pane): pane is TerminalPane => pane != null);
+
+  const paneByPersistentId = new Map(panes.map((pane) => [pane.persistentId, pane]));
+  const assignedPersistentIds = new Set<string>();
+
+  const workspaces = snapshot.workspaces.map((workspace) => {
+    const paneIds = workspace.paneIds
+      .map((persistentId) => {
+        const pane = paneByPersistentId.get(persistentId);
+        if (!pane) return null;
+        assignedPersistentIds.add(persistentId);
+        return pane.id;
+      })
+      .filter((paneId): paneId is number => paneId != null);
+    const lastActivePaneId =
+      workspace.lastActivePaneId != null
+        ? (paneByPersistentId.get(workspace.lastActivePaneId)?.id ?? null)
+        : null;
+    return {
+      id: workspace.id,
+      name: workspace.name,
+      paneIds,
+      lastActivePaneId,
+    };
+  });
+
+  const unassignedPaneIds = panes
+    .filter((pane) => !assignedPersistentIds.has(pane.persistentId))
+    .map((pane) => pane.id);
+  if (unassignedPaneIds.length > 0) {
+    if (workspaces.length === 0) {
+      workspaces.push({
+        id: crypto.randomUUID(),
+        name: defaultWorkspaceName(1),
+        paneIds: unassignedPaneIds,
+        lastActivePaneId: unassignedPaneIds[unassignedPaneIds.length - 1] ?? null,
+      });
+    } else {
+      workspaces[0] = {
+        ...workspaces[0],
+        paneIds: [...workspaces[0].paneIds, ...unassignedPaneIds],
+        lastActivePaneId:
+          workspaces[0].lastActivePaneId ??
+          unassignedPaneIds[unassignedPaneIds.length - 1] ??
+          null,
+      };
+    }
+  }
+
+  if (workspaces.length === 0) {
+    workspaces.push(
+      workspaceForCreate(
+        crypto.randomUUID(),
+        defaultWorkspaceName(nextWorkspaceNumberFor([])),
+      ),
+    );
+  }
+
+  const activeWorkspaceId =
+    workspaces.find((workspace) => workspace.id === snapshot.activeWorkspaceId)?.id ??
+    workspaces[0]?.id ??
+    null;
+  const activeWorkspace =
+    workspaces.find((workspace) => workspace.id === activeWorkspaceId) ?? null;
+  const restoredActiveId = chooseWorkspacePane(activeWorkspace);
+  const runtimeActive = runtimePanes.find((pane) => pane.active)?.id ?? null;
+  const activeId =
+    restoredActiveId != null
+      ? restoredActiveId
+      : runtimeActive != null && panes.some((pane) => pane.id === runtimeActive)
+        ? runtimeActive
+        : null;
+
+  return {
+    panes,
+    workspaces,
+    activeWorkspaceId,
+    activeId,
+    nextWorkspaceNumber: nextWorkspaceNumberFor(workspaces),
+  };
+}
+
 interface ContextValue extends State {
   ensureBootstrapped: () => Promise<void>;
   createWorkspace: () => { id: string; name: string };
   renameWorkspace: (workspaceId: string, name: string) => void;
+  renamePane: (paneId: number, name: string) => void;
   activateWorkspace: (workspaceId: string) => void;
   deleteWorkspace: (workspaceId: string) => Promise<boolean>;
   movePaneToWorkspace: (paneId: number, workspaceId: string) => void;
   focusPane: (paneId: number) => void;
   closePane: (paneId: number) => Promise<void>;
-  newPane: () => Promise<void>;
+  newPane: (workingDirectory?: string | null) => Promise<void>;
 }
 
 const TerminalStoreContext = createContext<ContextValue | null>(null);
@@ -476,31 +842,77 @@ export function TerminalStoreProvider({ children }: { children: ReactNode }) {
   const stateRef = useRef(state);
   stateRef.current = state;
 
-  // Lock so concurrent `ensureBootstrapped` callers don't race.
   const bootstrapPromise = useRef<Promise<void> | null>(null);
+  const suppressLifecycleEvents = useRef(false);
+  const persistTimer = useRef<number | null>(null);
+  const persistQueue = useRef(Promise.resolve());
 
   useEffect(() => {
     let unlisteners: Array<() => void> = [];
     let cancelled = false;
 
+    const shouldIgnoreLifecycleEvent = () =>
+      suppressLifecycleEvents.current && !stateRef.current.bootstrapped;
+
     void (async () => {
       const subs = await Promise.all([
         onTabCreated((payload) => {
+          if (shouldIgnoreLifecycleEvent()) return;
           dispatch({
             type: "add_pane",
-            pane: { id: payload.id, title: payload.title ?? "", active: false },
+            pane: paneFromInfo(
+              {
+                id: payload.id,
+                title: payload.title ?? "",
+                active: false,
+                cwd_absolute_path: payload.cwd_absolute_path,
+                launch_directory: payload.launch_directory,
+              },
+              {
+                cwdAbsolutePath: payload.cwd_absolute_path ?? null,
+                launchDirectory: payload.launch_directory ?? null,
+              },
+            ),
             workspaceId: stateRef.current.activeWorkspaceId,
           });
         }),
-        onTabFocused((payload) => dispatch({ type: "set_active", id: payload.id })),
-        onTabClosed((payload) => dispatch({ type: "remove_pane", id: payload.id })),
-        onTabTitleChanged((payload) =>
+        onTabFocused((payload) => {
+          if (shouldIgnoreLifecycleEvent()) return;
+          dispatch({ type: "set_active", id: payload.id });
+        }),
+        onTabClosed((payload) => {
+          if (shouldIgnoreLifecycleEvent()) return;
+          dispatch({ type: "remove_pane", id: payload.id });
+        }),
+        onTabTitleChanged((payload) => {
+          if (shouldIgnoreLifecycleEvent()) return;
           dispatch({
             type: "set_title",
             id: payload.id,
             title: payload.title ?? "",
-          }),
-        ),
+          });
+          if (
+            payload.cwd_absolute_path !== undefined ||
+            payload.launch_directory !== undefined
+          ) {
+            dispatch({
+              type: "set_cwd",
+              id: payload.id,
+              cwdAbsolutePath: payload.cwd_absolute_path ?? null,
+              launchDirectory: payload.launch_directory ?? null,
+            });
+          }
+        }),
+        onTabPwdChanged((payload) => {
+          if (shouldIgnoreLifecycleEvent()) return;
+          dispatch({
+            type: "set_cwd",
+            id: payload.id,
+            cwdAbsolutePath: payload.cwd_absolute_path ?? null,
+            launchDirectory:
+              payload.launch_directory ?? payload.cwd_absolute_path ?? null,
+          });
+        }),
       ]);
 
       if (cancelled) {
@@ -515,6 +927,88 @@ export function TerminalStoreProvider({ children }: { children: ReactNode }) {
       for (const unlisten of unlisteners) unlisten();
     };
   }, []);
+
+  useEffect(() => {
+    if (!state.bootstrapped) return;
+    if (persistTimer.current != null) {
+      window.clearTimeout(persistTimer.current);
+    }
+    persistTimer.current = window.setTimeout(() => {
+      const snapshot = buildTerminalSession(stateRef.current);
+      persistQueue.current = persistQueue.current.then(async () => {
+        try {
+          const prefs = await getPreferences();
+          await savePreferences({
+            ...prefs,
+            terminalSession: snapshot,
+          });
+        } catch (err) {
+          console.error("[terminal] save terminal session failed:", err);
+        }
+      });
+    }, 150);
+
+    return () => {
+      if (persistTimer.current != null) {
+        window.clearTimeout(persistTimer.current);
+        persistTimer.current = null;
+      }
+    };
+  }, [state]);
+
+  const restoreSession = useCallback(
+    async (snapshot: TerminalSessionPreferences): Promise<RestoredState> => {
+      const seenPaneIds = new Set<string>();
+      const orderedPaneSnapshotIds = snapshot.workspaces
+        .flatMap((workspace) => workspace.paneIds)
+        .filter((paneId) => {
+          if (seenPaneIds.has(paneId)) return false;
+          seenPaneIds.add(paneId);
+          return true;
+        });
+      for (const pane of snapshot.panes) {
+        if (!seenPaneIds.has(pane.id)) {
+          orderedPaneSnapshotIds.push(pane.id);
+        }
+      }
+
+      const paneSnapshotById = new Map(snapshot.panes.map((pane) => [pane.id, pane]));
+      const runtimeIdByPersistentId = new Map<string, number>();
+      let needsTerminalBootstrap = true;
+
+      for (const persistentId of orderedPaneSnapshotIds) {
+        const snapshotPane = paneSnapshotById.get(persistentId);
+        if (!snapshotPane) continue;
+        const config =
+          snapshotPane.launchDirectory != null
+            ? { working_directory: snapshotPane.launchDirectory }
+            : {};
+
+        try {
+          if (needsTerminalBootstrap) {
+            const result = await terminalNew(config);
+            runtimeIdByPersistentId.set(persistentId, result.tab_id);
+            needsTerminalBootstrap = false;
+          } else {
+            const result = await terminalNewTab(config);
+            runtimeIdByPersistentId.set(persistentId, result.tab_id);
+          }
+        } catch (err) {
+          console.error("[terminal] restore pane failed:", err);
+        }
+      }
+
+      let runtimePanes: PaneInfo[] = [];
+      try {
+        runtimePanes = await terminalListTabs();
+      } catch (err) {
+        console.error("[terminal] terminal_list_tabs after restore failed:", err);
+      }
+
+      return buildRestoredState(snapshot, runtimePanes, runtimeIdByPersistentId);
+    },
+    [],
+  );
 
   const ensureBootstrapped = useCallback(async () => {
     if (stateRef.current.bootstrapped) return;
@@ -534,10 +1028,29 @@ export function TerminalStoreProvider({ children }: { children: ReactNode }) {
         console.error("[terminal] terminal_list_tabs failed:", err);
       }
 
+      let snapshot: TerminalSessionPreferences | null = null;
+      try {
+        const prefs = await getPreferences();
+        snapshot = normalizeTerminalSession(prefs.terminalSession);
+      } catch (err) {
+        console.error("[terminal] load terminal session failed:", err);
+      }
+
+      if (existing.length === 0 && snapshot) {
+        suppressLifecycleEvents.current = true;
+        try {
+          const restored = await restoreSession(snapshot);
+          dispatch({ type: "hydrate", ...restored });
+          return;
+        } finally {
+          suppressLifecycleEvents.current = false;
+        }
+      }
+
       if (existing.length === 0) {
         try {
-          const result = await terminalNew({});
-          existing = [{ id: result.tab_id, title: "", active: true }];
+          await terminalNew({});
+          existing = await terminalListTabs();
         } catch (err) {
           console.error("[terminal] terminal_new failed:", err);
         }
@@ -545,13 +1058,15 @@ export function TerminalStoreProvider({ children }: { children: ReactNode }) {
 
       dispatch({
         type: "initialize",
-        panes: existing,
+        panes: existing.map((pane) => paneFromInfo(pane)),
         activeId: existing.find((pane) => pane.active)?.id ?? null,
       });
-    })();
+    })().finally(() => {
+      bootstrapPromise.current = null;
+    });
 
     return bootstrapPromise.current;
-  }, []);
+  }, [restoreSession]);
 
   const createWorkspace = useCallback(() => {
     const id = crypto.randomUUID();
@@ -562,6 +1077,10 @@ export function TerminalStoreProvider({ children }: { children: ReactNode }) {
 
   const renameWorkspace = useCallback((workspaceId: string, name: string) => {
     dispatch({ type: "rename_workspace", id: workspaceId, name });
+  }, []);
+
+  const renamePane = useCallback((paneId: number, name: string) => {
+    dispatch({ type: "rename_pane", id: paneId, titleOverride: name });
   }, []);
 
   const activateWorkspace = useCallback((workspaceId: string) => {
@@ -613,9 +1132,11 @@ export function TerminalStoreProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
-  const newPane = useCallback(async () => {
+  const newPane = useCallback(async (workingDirectory?: string | null) => {
     try {
-      await terminalNewTab();
+      await terminalNewTab(
+        workingDirectory ? { working_directory: workingDirectory } : {},
+      );
     } catch (err) {
       console.error("[terminal] new_tab failed:", err);
     }
@@ -635,6 +1156,7 @@ export function TerminalStoreProvider({ children }: { children: ReactNode }) {
       ensureBootstrapped,
       createWorkspace,
       renameWorkspace,
+      renamePane,
       activateWorkspace,
       deleteWorkspace,
       movePaneToWorkspace,
@@ -647,6 +1169,7 @@ export function TerminalStoreProvider({ children }: { children: ReactNode }) {
       ensureBootstrapped,
       createWorkspace,
       renameWorkspace,
+      renamePane,
       activateWorkspace,
       deleteWorkspace,
       movePaneToWorkspace,

@@ -29,6 +29,10 @@ export interface PaneInfo {
   title: string;
   /** True for the pane currently visible inside the GhosttyHostView. */
   active: boolean;
+  /** Last-known live absolute cwd reported by the shell, if available. */
+  cwd_absolute_path?: string | null;
+  /** Directory the pane was launched in or inherited from. */
+  launch_directory?: string | null;
 }
 
 export interface TerminalConfig {
@@ -40,6 +44,8 @@ export interface TerminalConfig {
 export interface TabEventPayload {
   id: number;
   title?: string;
+  cwd_absolute_path?: string | null;
+  launch_directory?: string | null;
 }
 
 export interface ChromeInset {
@@ -69,8 +75,10 @@ export function terminalNew(config: TerminalConfig = {}) {
 }
 
 /** Add a new pane to the existing tab container. */
-export function terminalNewTab() {
-  return invoke<{ tab_id: number }>("plugin:ghostty|terminal_new_tab");
+export function terminalNewTab(config: TerminalConfig = {}) {
+  return invoke<{ tab_id: number }>("plugin:ghostty|terminal_new_tab", {
+    config,
+  });
 }
 
 /** Bring `tabId`'s NSView to the front; hides the previously active pane. */
@@ -211,6 +219,15 @@ export async function onTabTitleChanged(
 ): Promise<() => void> {
   return listen<TabEventPayload>(
     "tab:title-changed",
+    (e: TauriEvent<TabEventPayload>) => handler(e.payload),
+  );
+}
+
+export async function onTabPwdChanged(
+  handler: (p: TabEventPayload) => void,
+): Promise<() => void> {
+  return listen<TabEventPayload>(
+    "tab:pwd-changed",
     (e: TauriEvent<TabEventPayload>) => handler(e.payload),
   );
 }
