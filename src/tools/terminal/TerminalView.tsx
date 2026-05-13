@@ -5,7 +5,7 @@
  * (GhosttyHostView, owned by `tauri-plugin-ghostty`). That NSView is
  * attached as a subview of the Tauri window's `contentView`, sitting
  * **below** the WKWebView in the compositor stack. The WKWebView paints
- * a transparent overlay with the inner pane-tab strip; clicks fall
+ * a transparent overlay with the inner pane rail; clicks fall
  * through to the NSView via `pointer-events: none` (scoped to this
  * route only — see `terminal.css` and the `<body>` class toggle below).
  *
@@ -16,19 +16,21 @@
  *      window edges, in CSS points) to native side via a
  *      `ResizeObserver`. The plugin uses this to size the NSView's
  *      tab container so it doesn't render under the title bar or
- *      pane-tab strip.
+ *      pane rail.
  *   3. On unmount (user navigates to another tool), push a
  *      "collapse-to-empty" inset so the NSView is invisible behind
  *      the next tab's HTML. The PTY keeps running in the background
  *      — switching back is instant.
- *   4. Render the inner pane-tab strip + "+" button + pane close
+ *   4. Render the inner pane rail + "+" button + pane close
  *      buttons. These are the only HTML elements that need clicks,
  *      so they get `pointer-events: auto` via the
  *      `.terminal-chrome` carve-out.
  */
 
-import { useEffect, useRef } from "react";
+import { PanelLeftClose, PanelLeftOpen, Plus } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { cn } from "@zen-tools/ui";
 import { useDistractionFree } from "./store/distraction-free";
 import { useTerminalStore } from "./store/terminal-store";
 import {
@@ -51,19 +53,53 @@ const HIDDEN_INSET: ChromeInset = {
   left: 0,
 };
 
+const RAIL_MODE_KEY = "terminal.railMode.v1";
+
+type RailMode = "mini" | "expanded";
+
+function readRailMode(): RailMode {
+  try {
+    const raw = window.localStorage.getItem(RAIL_MODE_KEY);
+    if (raw === "mini" || raw === "expanded") return raw;
+  } catch {
+    /* ignore */
+  }
+  return "expanded";
+}
+
+function writeRailMode(mode: RailMode) {
+  try {
+    window.localStorage.setItem(RAIL_MODE_KEY, mode);
+  } catch {
+    /* ignore */
+  }
+}
+
+function paneTitle(title: string): string {
+  return title.trim() || "shell";
+}
+
+function paneMiniLabel(title: string): string {
+  return paneTitle(title).slice(0, 1).toUpperCase();
+}
+
 export function TerminalView() {
   const { panes, activeId, ensureBootstrapped } = useTerminalStore();
   const { enabled: dfEnabled, toggle: toggleDF } = useDistractionFree();
+  const [railMode, setRailMode] = useState<RailMode>(() => readRailMode());
   const containerRef = useRef<HTMLDivElement | null>(null);
-  const tabBarRef = useRef<HTMLDivElement | null>(null);
-  // The "growth area" div BELOW the tab bar — its top edge is where
+  const railRef = useRef<HTMLElement | null>(null);
+  // The "growth area" div NEXT TO the rail — its edges are where
   // the NSView should start. We measure THIS, not the route container,
-  // because the route container's top doesn't change when the tab bar
-  // appears inside it (the bar is a flex child) — but we DO want the
-  // NSView to be pushed down by the bar's height when it shows.
-  // Measuring the growth area gets that for free.
+  // because the route container does not reflect the inner chrome's
+  // current width or height. Measuring the growth area gets the
+  // hidden / mini / expanded rail offsets for free.
   const growthRef = useRef<HTMLDivElement | null>(null);
   const lastInset = useRef<ChromeInset>({ top: -1, right: -1, bottom: -1, left: -1 });
+
+  useEffect(() => {
+    writeRailMode(railMode);
+  }, [railMode]);
 
   // ── Bootstrap on first mount ──────────────────────────────────────
   useEffect(() => {
@@ -141,21 +177,17 @@ export function TerminalView() {
   // `commands::terminal_set_chrome_inset` re-frames the native tab
   // container to fit inside `contentView.bounds` minus the inset.
   //
-  // `push` is captured into a ref so the distraction-free effect
-  // below can trigger a fresh measurement when DF toggles (the
-  // ResizeObserver only catches *element* size changes; toggling
-  // DF removes the TitleBar from the DOM which moves the growth
-  // area's top edge — but the growth element's own size may not
-  // change in a way the observer notices until the layout settles).
+  // `push` is captured into a ref so the post-layout effect below can
+  // trigger a fresh measurement when DF toggles or the rail changes
+  // width (the ResizeObserver only catches *element* size changes,
+  // and some layout shifts are easier to measure after React flushes).
   const pushInsetRef = useRef<() => void>(() => {});
   useEffect(() => {
     const push = () => {
-      // Measure the GROWTH AREA (the div below the tab bar), not the
-      // route container. When the tab bar appears, the growth area's
-      // top edge moves down by the bar's height — which is exactly
-      // where the NSView should start. The original tauri-terminal
-      // app uses the same trick (`bar.getBoundingClientRect().height`
-      // as the top inset; HTML below the bar = NSView area).
+      // Measure the GROWTH AREA (the div beside the rail), not the
+      // route container. When the rail appears or changes width, the
+      // growth area's left edge moves — which is exactly where the
+      // NSView should start.
       //
       // Falls back to the route container if the growth ref isn't
       // mounted yet (shouldn't happen after first paint).
@@ -187,15 +219,14 @@ export function TerminalView() {
     pushInsetRef.current = push;
 
     push();
-    // Watch BOTH the growth area (its top moves when the tab bar
-    // appears or disappears — that's the trigger for an inset update)
-    // AND the route container (catches window resize, DPI change,
-    // outer chrome changes). Plus the window for fullscreen / global
-    // layout shifts.
+    // Watch BOTH the growth area (its top/left move when the rail
+    // appears, disappears, or changes width) AND the route container
+    // (catches window resize, DPI change, outer chrome changes). Plus
+    // the window for fullscreen / global layout shifts.
     const ro = new ResizeObserver(push);
     if (growthRef.current) ro.observe(growthRef.current);
     if (containerRef.current) ro.observe(containerRef.current);
-    if (tabBarRef.current) ro.observe(tabBarRef.current);
+    if (railRef.current) ro.observe(railRef.current);
     window.addEventListener("resize", push);
 
     return () => {
@@ -211,18 +242,14 @@ export function TerminalView() {
     };
   }, []);
 
-  // ── DF-triggered inset re-push ───────────────────────────────────
-  // Toggling DF mounts/unmounts the host TitleBar, which moves the
-  // growth area's top edge by ~50pt but doesn't necessarily resize
-  // the growth element itself in a way the ResizeObserver above
-  // catches in the same tick. requestAnimationFrame defers the
-  // measurement to after React has flushed the new layout — by that
-  // point `getBoundingClientRect().top` reflects the post-toggle
-  // position and the inset push lines the NSView up correctly.
+  // ── Post-layout inset re-push ────────────────────────────────────
+  // Toggling DF mounts/unmounts the host TitleBar, and toggling the
+  // rail changes the growth area's left edge. requestAnimationFrame
+  // defers the measurement to after React has flushed the new layout.
   useEffect(() => {
     const id = requestAnimationFrame(() => pushInsetRef.current());
     return () => cancelAnimationFrame(id);
-  }, [dfEnabled]);
+  }, [dfEnabled, railMode, panes.length]);
 
   // ── DF-triggered traffic-light toggle ────────────────────────────
   // CSS can't reach the macOS standard window buttons (close /
@@ -244,81 +271,140 @@ export function TerminalView() {
     };
   }, [dfEnabled]);
 
-  // The pane-tab strip is hidden when there's only one pane — matches
+  // The pane rail is hidden when there's only one pane — matches
   // the prototype's behaviour exactly (see
   // `tauri-terminal/packages/ui/src/main.ts` line 80-83). With a
   // single shell open, no HTML chrome is needed; new panes get
   // spawned via ghostty's built-in keyboard shortcut (cmd+T by
-  // default), and the bar slides back in as soon as the second
+  // default), and the rail slides back in as soon as the second
   // pane appears.
-  const showTabBar = panes.length > 1;
+  const showTabRail = panes.length > 1;
 
   return (
     <div
       ref={containerRef}
       className="flex h-full min-h-0 w-full flex-col"
       // The container itself must NOT receive clicks — clicks on the
-      // empty area need to reach the NSView below. The pane-tab strip
+      // empty area need to reach the NSView below. The pane rail
       // re-enables pointer events via `.terminal-chrome` (see
       // terminal.css).
     >
-      {showTabBar && (
-        <div
-          ref={tabBarRef}
-          className="terminal-chrome terminal-tab-bar"
-          role="tablist"
-          aria-label="Terminal panes"
-        >
-          <div className="terminal-tab-list">
-            {panes.map((pane) => (
-              <button
-                key={pane.id}
-                type="button"
-                role="tab"
-                aria-selected={pane.id === activeId}
-                onClick={() => {
-                  void terminalFocusTab(pane.id);
-                }}
-                className={`terminal-tab${pane.id === activeId ? " is-active" : ""}`}
-              >
-                <span className="terminal-tab__label">
-                  {pane.title || "shell"}
-                </span>
-                <span
-                  role="button"
-                  aria-label="Close pane"
-                  title="Close pane"
-                  className="terminal-tab__close"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    void terminalCloseTab(pane.id);
-                  }}
-                >
-                  ×
-                </span>
-              </button>
-            ))}
-          </div>
-          <button
-            type="button"
-            aria-label="New pane"
-            title="New pane"
-            className="terminal-tab-add"
-            onClick={() => {
-              void terminalNewTab();
-            }}
+      <div className="flex min-h-0 flex-1">
+        {showTabRail && (
+          <aside
+            ref={railRef}
+            className={cn(
+              "terminal-chrome terminal-tab-rail",
+              railMode === "mini" ? "is-mini" : "is-expanded",
+            )}
+            aria-label="Terminal pane rail"
           >
-            +
-          </button>
-        </div>
-      )}
+            <div className="terminal-rail__header">
+              {railMode === "expanded" ? (
+                <span className="terminal-rail__title">Panes</span>
+              ) : (
+                <span className="sr-only">Terminal panes</span>
+              )}
+              <button
+                type="button"
+                className="terminal-rail-toggle"
+                aria-label={
+                  railMode === "expanded"
+                    ? "Minimize pane rail"
+                    : "Expand pane rail"
+                }
+                title={
+                  railMode === "expanded"
+                    ? "Minimize pane rail"
+                    : "Expand pane rail"
+                }
+                onClick={() =>
+                  setRailMode((current) =>
+                    current === "expanded" ? "mini" : "expanded",
+                  )
+                }
+              >
+                {railMode === "expanded" ? (
+                  <PanelLeftClose className="size-3.5" />
+                ) : (
+                  <PanelLeftOpen className="size-3.5" />
+                )}
+              </button>
+            </div>
 
-      {/* Empty growth area — the NSView paints behind it. We do NOT
-          render any visible HTML here; that would block the GPU
-          surface. The element exists only so the ResizeObserver has
-          something to measure (its top edge = where the NSView
-          should start; its bottom = where the NSView should end). */}
-      <div ref={growthRef} className="flex-1" aria-hidden />
+            <div
+              className="terminal-tab-list"
+              role="tablist"
+              aria-label="Terminal panes"
+            >
+              {panes.map((pane) => {
+                const title = paneTitle(pane.title);
+                return (
+                  <button
+                    key={pane.id}
+                    type="button"
+                    role="tab"
+                    aria-selected={pane.id === activeId}
+                    aria-label={title}
+                    title={title}
+                    onClick={() => {
+                      void terminalFocusTab(pane.id);
+                    }}
+                    className={cn(
+                      "terminal-tab",
+                      pane.id === activeId && "is-active",
+                    )}
+                  >
+                    <span className="terminal-tab__label">
+                      {railMode === "expanded"
+                        ? title
+                        : paneMiniLabel(pane.title)}
+                    </span>
+                    {railMode === "expanded" && (
+                      <span
+                        role="button"
+                        aria-label={`Close ${title}`}
+                        title={`Close ${title}`}
+                        className="terminal-tab__close"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void terminalCloseTab(pane.id);
+                        }}
+                      >
+                        ×
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+
+            <div className="terminal-rail__footer">
+              <button
+                type="button"
+                aria-label="New pane"
+                title="New pane"
+                className="terminal-tab-add"
+                onClick={() => {
+                  void terminalNewTab();
+                }}
+              >
+                <Plus className="size-3.5" />
+                {railMode === "expanded" && (
+                  <span className="terminal-tab-add__label">New pane</span>
+                )}
+              </button>
+            </div>
+          </aside>
+        )}
+
+        {/* Empty growth area — the NSView paints behind it. We do NOT
+            render any visible HTML here; that would block the GPU
+            surface. The element exists only so the ResizeObserver has
+            something to measure (its edges = where the NSView should
+            start and end after host chrome is accounted for). */}
+        <div ref={growthRef} className="min-h-0 flex-1" aria-hidden />
+      </div>
     </div>
   );
 }
