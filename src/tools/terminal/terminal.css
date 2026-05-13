@@ -1,42 +1,25 @@
 /*
- * Terminal route — pointer-events scoping + pane-rail styling.
+ * Terminal route — pointer-events scoping + workspace-rail styling.
  *
- * Two responsibilities in one file:
- *
- *   1. Pointer-events scoping. The Ghostty NSView lives BELOW the
- *      WKWebView in the AppKit compositor. For the user to actually
- *      click into the terminal, the HTML on top must have
- *      `pointer-events: none` so clicks fall through to the native
- *      layer. Applying that globally would break every other tool, so
- *      it's scoped via the `body.terminal-route-active` class that
- *      `TerminalView` toggles on mount/unmount.
- *
- *   2. Pane-rail look. Derived from the original
- *      `tauri-terminal/packages/ui/index.html` palette, but adapted to
- *      a vertical rail with mini + expanded states.
+ * The native Ghostty surface sits below the WKWebView, so HTML chrome
+ * must opt into clicks selectively. The rail keeps the previous frosted
+ * terminal palette, but now styles two grouped lists: workspaces and
+ * panes.
  */
 
 :root {
-  /* Tab-bar palette — copied byte-for-byte from the reference app's
-     index.html. Lives at :root so the TerminalView can opt back into
-     `pointer-events: auto` selectively without redefining each color. */
   --term-bar-bg: rgba(28, 28, 30, 0.92);
   --term-bar-fg: #e8e8e8;
   --term-bar-fg-dim: #888;
-  --term-tab-bg-active: rgba(255, 255, 255, 0.10);
+  --term-tab-bg-active: rgba(255, 255, 255, 0.1);
   --term-tab-bg-hover: rgba(255, 255, 255, 0.05);
   --term-bar-border: rgba(255, 255, 255, 0.08);
-  --term-rail-width-mini: 48px;
-  --term-rail-width-expanded: 184px;
+  --term-rail-width-mini: 52px;
+  --term-rail-width-expanded: 220px;
 }
-
-/* ── 1. Pointer-events scoping ─────────────────────────────────── */
 
 body.terminal-route-active main {
   pointer-events: none;
-  /* Route content must be transparent so the Metal-rendered terminal
-     below shows through. Tailwind's `bg-background` on the root flex
-     container would otherwise paint over the NSView. */
   background-color: transparent !important;
 }
 
@@ -44,8 +27,6 @@ body.terminal-route-active main .terminal-chrome,
 body.terminal-route-active main .terminal-chrome * {
   pointer-events: auto;
 }
-
-/* ── 2. Pane rail ──────────────────────────────────────────────── */
 
 .terminal-tab-rail {
   display: flex;
@@ -73,13 +54,18 @@ body.terminal-route-active main .terminal-chrome * {
 }
 
 .terminal-rail__header,
+.terminal-rail__section,
 .terminal-rail__footer {
   display: flex;
-  align-items: center;
+  flex-direction: column;
+}
+
+.terminal-rail__header {
   gap: 6px;
 }
 
-.terminal-rail__title {
+.terminal-rail__title,
+.terminal-rail__section-title {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -90,13 +76,27 @@ body.terminal-route-active main .terminal-chrome * {
   color: var(--term-bar-fg-dim);
 }
 
+.terminal-rail__section {
+  min-height: 0;
+  gap: 6px;
+}
+
+.terminal-rail__section--grow {
+  flex: 1;
+}
+
+.terminal-rail__separator {
+  height: 1px;
+  background: var(--term-bar-border);
+}
+
 .terminal-rail-toggle,
 .terminal-tab-add {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 6px;
-  min-height: 28px;
+  min-height: 30px;
   border-radius: 7px;
   color: var(--term-bar-fg-dim);
   cursor: default;
@@ -107,68 +107,85 @@ body.terminal-route-active main .terminal-chrome * {
 }
 
 .terminal-rail-toggle {
-  margin-left: auto;
-  width: 28px;
-  min-width: 28px;
-}
-
-.terminal-tab-rail.is-mini .terminal-rail__header,
-.terminal-tab-rail.is-mini .terminal-rail__footer {
-  justify-content: center;
+  align-self: flex-end;
+  width: 30px;
+  min-width: 30px;
 }
 
 .terminal-tab-rail.is-mini .terminal-rail-toggle {
-  margin-left: 0;
+  align-self: center;
 }
 
+.terminal-workspace-list,
 .terminal-tab-list {
   display: flex;
   min-height: 0;
-  flex: 1;
   flex-direction: column;
   gap: 4px;
   overflow-y: auto;
 }
 
+.terminal-workspace,
 .terminal-tab {
   display: flex;
   align-items: center;
   gap: 6px;
   width: 100%;
   min-height: 30px;
-  padding: 0 8px;
   border-radius: 7px;
   background: transparent;
   color: var(--term-bar-fg-dim);
   cursor: default;
   border: 0;
+  padding: 0 8px;
   font: inherit;
 }
 
+.terminal-tab-rail.is-mini .terminal-workspace,
 .terminal-tab-rail.is-mini .terminal-tab {
   justify-content: center;
   padding: 0;
 }
 
-.terminal-tab:hover {
+.terminal-workspace:hover,
+.terminal-tab:hover,
+.terminal-rail-toggle:hover,
+.terminal-tab-add:hover {
   background: var(--term-tab-bg-hover);
+  color: var(--term-bar-fg);
 }
 
+.terminal-workspace.is-active,
 .terminal-tab.is-active {
   background: var(--term-tab-bg-active);
   color: var(--term-bar-fg);
 }
 
+.terminal-workspace.is-drop-target {
+  outline: 1px solid rgba(255, 255, 255, 0.18);
+  outline-offset: -1px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--term-bar-fg);
+}
+
+.terminal-workspace__label,
 .terminal-tab__label {
   flex: 1;
+  min-width: 0;
+}
+
+.terminal-workspace__name,
+.terminal-tab__label {
+  display: block;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   text-align: left;
 }
 
-.terminal-tab-rail.is-mini .terminal-tab__label {
-  flex: 0 0 auto;
+.terminal-tab-rail.is-mini .terminal-workspace__name,
+.terminal-tab-rail.is-mini .terminal-tab__label,
+.terminal-rail__empty {
   text-align: center;
   font-size: 11px;
   font-weight: 600;
@@ -176,30 +193,72 @@ body.terminal-route-active main .terminal-chrome * {
   text-transform: uppercase;
 }
 
+.terminal-workspace__count {
+  flex: 0 0 auto;
+  min-width: 18px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  padding: 0 6px;
+  text-align: center;
+  font-size: 10px;
+  line-height: 18px;
+  color: var(--term-bar-fg-dim);
+}
+
+.terminal-workspace__delete,
 .terminal-tab__close {
   opacity: 0;
-  width: 14px;
-  height: 14px;
-  line-height: 14px;
-  text-align: center;
-  border-radius: 3px;
-  font-size: 11px;
-  color: var(--term-bar-fg-dim);
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
   border: 0;
   background: transparent;
   padding: 0;
-  cursor: default;
+  color: var(--term-bar-fg-dim);
   display: inline-flex;
   align-items: center;
   justify-content: center;
 }
 
+.terminal-workspace:hover .terminal-workspace__delete,
+.terminal-workspace.is-active .terminal-workspace__delete,
 .terminal-tab:hover .terminal-tab__close,
-.terminal-tab.is-active .terminal-tab__close { opacity: 1; }
+.terminal-tab.is-active .terminal-tab__close {
+  opacity: 1;
+}
 
+.terminal-workspace__delete:hover,
 .terminal-tab__close:hover {
   background: rgba(255, 255, 255, 0.12);
   color: var(--term-bar-fg);
+}
+
+.terminal-workspace__input {
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.08);
+  padding: 2px 6px;
+  color: var(--term-bar-fg);
+  font: inherit;
+  outline: none;
+}
+
+.terminal-workspace__input::selection {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.terminal-rail__empty {
+  display: flex;
+  min-height: 30px;
+  align-items: center;
+  justify-content: center;
+  color: rgba(232, 232, 232, 0.45);
+}
+
+.terminal-rail__footer {
+  gap: 4px;
 }
 
 .terminal-tab-add {
@@ -209,7 +268,6 @@ body.terminal-route-active main .terminal-chrome * {
 }
 
 .terminal-tab-rail.is-mini .terminal-tab-add {
-  width: 28px;
   justify-content: center;
   padding: 0;
 }
@@ -220,8 +278,57 @@ body.terminal-route-active main .terminal-chrome * {
   white-space: nowrap;
 }
 
-.terminal-rail-toggle:hover,
-.terminal-tab-add:hover {
-  background: var(--term-tab-bg-hover);
+.terminal-empty-state {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.terminal-empty-state__card {
+  display: flex;
+  max-width: 320px;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 14px;
+  background: rgba(28, 28, 30, 0.78);
+  padding: 20px 22px;
+  text-align: center;
   color: var(--term-bar-fg);
+  backdrop-filter: blur(12px);
+}
+
+.terminal-empty-state__title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.terminal-empty-state__body {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: rgba(232, 232, 232, 0.68);
+}
+
+.terminal-empty-state__action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 32px;
+  border: 0;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.1);
+  padding: 0 12px;
+  color: var(--term-bar-fg);
+  font: inherit;
+}
+
+.terminal-empty-state__action:hover {
+  background: rgba(255, 255, 255, 0.16);
 }
