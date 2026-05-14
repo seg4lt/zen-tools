@@ -64,8 +64,21 @@ const HIDDEN_INSET: ChromeInset = {
   left: 0,
 };
 
+const COMPACT_RAIL_WINDOW_WIDTH = 960;
+
 function paneTitle(title: string | null | undefined): string {
   return title?.trim() || "shell";
+}
+
+function paneCompactLabel(title: string): string {
+  return paneTitle(title).slice(0, 1).toUpperCase();
+}
+
+function workspaceCompactLabel(name: string, index: number): string {
+  const trimmed = name.trim();
+  const numericSuffix = trimmed.match(/(\d+)$/)?.[1];
+  if (numericSuffix) return numericSuffix.slice(-2);
+  return trimmed.slice(0, 1).toUpperCase() || String(index + 1);
 }
 
 function paneDisplayTitle(pane: {
@@ -247,6 +260,11 @@ export function TerminalView() {
   const [deletingWorkspaceId, setDeletingWorkspaceId] = useState<
     string | null
   >(null);
+  const [railCompactOverride, setRailCompactOverride] = useState<boolean | null>(
+    null,
+  );
+  const [railCompactAuto, setRailCompactAuto] = useState(false);
+  const railCompact = railCompactOverride ?? railCompactAuto;
   const containerRef = useRef<HTMLDivElement | null>(null);
   const railRef = useRef<HTMLElement | null>(null);
   const growthRef = useRef<HTMLDivElement | null>(null);
@@ -315,6 +333,9 @@ export function TerminalView() {
   const pushInsetRef = useRef<() => void>(() => {});
   useEffect(() => {
     const push = () => {
+      const compact = window.innerWidth <= COMPACT_RAIL_WINDOW_WIDTH;
+      setRailCompactAuto((current) => (current === compact ? current : compact));
+
       const inset =
         growthRef.current
           ? (() => {
@@ -427,6 +448,13 @@ export function TerminalView() {
     [activatePinnedPane, pinnedPanes],
   );
 
+  const toggleRailCompact = useCallback(() => {
+    setRailCompactOverride((current) => {
+      const effective = current ?? railCompactAuto;
+      return !effective;
+    });
+  }, [railCompactAuto]);
+
   useShortcut("mod+[", () => cyclePane(-1), true, { fireInInputs: true });
   useShortcut("mod+]", () => cyclePane(1), true, { fireInInputs: true });
   useShortcut("mod+shift+[", () => void cycleWorkspace(-1), true, {
@@ -437,6 +465,9 @@ export function TerminalView() {
   });
   useShortcut("mod+n", openPaneInActiveWorkspace, true, { fireInInputs: true });
   useShortcut("mod+shift+n", handleCreateWorkspace, true, {
+    fireInInputs: true,
+  });
+  useShortcut("mod+shift+e", toggleRailCompact, true, {
     fireInInputs: true,
   });
 
@@ -452,6 +483,7 @@ export function TerminalView() {
     openPaneInActiveWorkspace,
     handleCreateWorkspace,
     activatePinnedByIndex,
+    toggleRailCompact,
     toggleDF,
   });
   nativeHookHandlers.current = {
@@ -460,6 +492,7 @@ export function TerminalView() {
     openPaneInActiveWorkspace,
     handleCreateWorkspace,
     activatePinnedByIndex,
+    toggleRailCompact,
     toggleDF,
   };
 
@@ -488,6 +521,9 @@ export function TerminalView() {
         }),
         listen("terminal:host-key-hook:cmd-shift-n", () => {
           nativeHookHandlers.current.handleCreateWorkspace();
+        }),
+        listen("terminal:host-key-hook:cmd-shift-e", () => {
+          nativeHookHandlers.current.toggleRailCompact();
         }),
         listen("terminal:host-key-hook:cmd-1", () => {
           nativeHookHandlers.current.activatePinnedByIndex(0);
@@ -583,13 +619,18 @@ export function TerminalView() {
         {workspaces.length > 0 && (
           <aside
             ref={railRef}
-            className="terminal-chrome terminal-tab-rail is-expanded"
+            className={cn(
+              "terminal-chrome terminal-tab-rail",
+              railCompact ? "is-mini" : "is-expanded",
+            )}
             aria-label="Terminal workspace rail"
           >
             <div className="terminal-rail__section">
               {pinnedPanes.length > 0 && (
                 <>
-                  <span className="terminal-rail__section-title">Pinned</span>
+                  {!railCompact ? (
+                    <span className="terminal-rail__section-title">Pinned</span>
+                  ) : null}
                   <div className="terminal-tab-list" role="list">
                     {pinnedPanes.map((pinnedPane, index) => (
                       <button
@@ -637,9 +678,11 @@ export function TerminalView() {
                         )}
                       >
                         <span className="terminal-tab__label">
-                          {pinnedPane.title}
+                          {railCompact
+                            ? paneCompactLabel(pinnedPane.title)
+                            : pinnedPane.title}
                         </span>
-                        <Pin className="terminal-pin__icon" />
+                        {!railCompact ? <Pin className="terminal-pin__icon" /> : null}
                       </button>
                     ))}
                   </div>
@@ -647,9 +690,11 @@ export function TerminalView() {
                 </>
               )}
 
-              <span className="terminal-rail__section-title">Workspaces</span>
+              {!railCompact ? (
+                <span className="terminal-rail__section-title">Workspaces</span>
+              ) : null}
               <div className="terminal-workspace-list" role="list">
-                {workspaces.map((workspace) => {
+                {workspaces.map((workspace, index) => {
                   const active = workspace.id === activeWorkspace?.id;
                   const editing = workspace.id === editingWorkspaceId;
                   const attention = workspaceAttentionById.get(workspace.id) ?? null;
@@ -737,14 +782,17 @@ export function TerminalView() {
                           />
                         ) : (
                           <span className="terminal-workspace__name">
-                            {workspace.name}
+                            {railCompact
+                              ? workspaceCompactLabel(workspace.name, index)
+                              : workspace.name}
                           </span>
                         )}
                       </span>
                       <TerminalAttentionIndicators
                         summary={attention}
+                        mini={railCompact}
                       />
-                      {!editing && (
+                      {!railCompact && !editing && (
                         <>
                           <button
                             type="button"
@@ -770,7 +818,9 @@ export function TerminalView() {
             <div className="terminal-rail__separator" />
 
             <div className="terminal-rail__section terminal-rail__section--grow">
-              <span className="terminal-rail__section-title">Panes</span>
+              {!railCompact ? (
+                <span className="terminal-rail__section-title">Panes</span>
+              ) : null}
               {activeWorkspaceHasPane ? (
                 <div
                   className="terminal-tab-list"
@@ -865,13 +915,14 @@ export function TerminalView() {
                               className="terminal-pane__input"
                             />
                           ) : (
-                            title
+                            railCompact ? paneCompactLabel(title) : title
                           )}
                         </span>
                         <TerminalAttentionIndicators
                           summary={attention}
+                          mini={railCompact}
                         />
-                        {!editing && (
+                        {!railCompact && !editing && (
                           <>
                             {pinnedPanes.some(
                               (pinnedPane) => pinnedPane.paneId === pane.id,
@@ -929,14 +980,14 @@ export function TerminalView() {
               <IconRailButton
                 icon={Plus}
                 label="New pane"
-                expandedLabel="New pane"
+                expandedLabel={railCompact ? undefined : "New pane"}
                 className="terminal-tab-add"
                 onClick={openPaneInActiveWorkspace}
               />
               <IconRailButton
                 icon={FolderPlus}
                 label="New workspace"
-                expandedLabel="New workspace"
+                expandedLabel={railCompact ? undefined : "New workspace"}
                 className="terminal-tab-add"
                 onClick={handleCreateWorkspace}
               />
@@ -986,16 +1037,23 @@ function TerminalAttentionIndicators({
       <span
         aria-hidden
         title={summary.label}
-        className={cn(
-          "terminal-status-dot",
-          summary.loading && "is-loading",
-          summary.paused && "is-paused",
-          summary.actionRequired && "is-action-required",
-          summary.completed && "is-completed",
-          summary.unhealthy && "is-unhealthy",
-          summary.unreadCount > 0 && !summary.loading && !summary.unhealthy && "is-notice",
-        )}
-      />
+        className="terminal-status-stack"
+      >
+        {summary.loading ? (
+          <Loader2 className="terminal-status-stack__primary is-loading" />
+        ) : summary.paused ? (
+          <Pause className="terminal-status-stack__primary is-paused" />
+        ) : summary.actionRequired || summary.unhealthy ? (
+          <AlertTriangle className="terminal-status-stack__primary is-unhealthy" />
+        ) : summary.completed ? (
+          <CheckCircle2 className="terminal-status-stack__primary is-completed" />
+        ) : null}
+        {summary.unreadCount > 0 ? (
+          <span className="terminal-status-stack__notice">
+            <BellDot className="terminal-status-stack__notice-icon" />
+          </span>
+        ) : null}
+      </span>
     );
   }
   return (

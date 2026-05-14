@@ -225,32 +225,59 @@ body.terminal-route-active main .terminal-chrome * {
   color: var(--term-bar-fg);
 }
 
-.terminal-status-dot {
+.terminal-status-stack {
   position: absolute;
-  top: 6px;
-  right: 6px;
-  width: 7px;
-  height: 7px;
+  top: 4px;
+  right: 4px;
+  width: 18px;
+  height: 18px;
+  pointer-events: none;
+}
+
+.terminal-status-stack__primary {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 13px;
+  height: 13px;
+  color: var(--term-bar-fg);
+}
+
+.terminal-status-stack__primary.is-loading {
+  animation: terminal-spin 1s linear infinite;
+  color: #86b7ff;
+}
+
+.terminal-status-stack__primary.is-paused {
+  color: #eab308;
+}
+
+.terminal-status-stack__primary.is-unhealthy {
+  color: #f97316;
+}
+
+.terminal-status-stack__primary.is-completed {
+  color: #34d399;
+}
+
+.terminal-status-stack__notice {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  display: inline-flex;
+  width: 10px;
+  height: 10px;
+  align-items: center;
+  justify-content: center;
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.35);
-  box-shadow: 0 0 0 1px rgba(28, 28, 30, 0.9);
+  background: rgba(28, 28, 30, 0.95);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.08);
 }
 
-.terminal-status-dot.is-loading {
-  background: #86b7ff;
-}
-
-.terminal-status-dot.is-paused {
-  background: #eab308;
-}
-
-.terminal-status-dot.is-action-required,
-.terminal-status-dot.is-unhealthy {
-  background: #f97316;
-}
-
-.terminal-status-dot.is-notice {
-  background: #e8e8e8;
+.terminal-status-stack__notice-icon {
+  width: 8px;
+  height: 8px;
+  color: #e8e8e8;
 }
 
 .terminal-workspace__delete,
