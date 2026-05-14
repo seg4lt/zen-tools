@@ -17,6 +17,7 @@ import {
   useRef,
   type ReactNode,
 } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   getPreferences,
   savePreferences,
@@ -698,6 +699,25 @@ interface RestoredState {
   nextWorkspaceNumber: number;
 }
 
+function orderedSnapshotPaneIds(
+  snapshot: TerminalSessionPreferences,
+): string[] {
+  const seenPaneIds = new Set<string>();
+  const orderedPaneIds = snapshot.workspaces
+    .flatMap((workspace) => workspace.paneIds)
+    .filter((paneId) => {
+      if (seenPaneIds.has(paneId)) return false;
+      seenPaneIds.add(paneId);
+      return true;
+    });
+  for (const pane of snapshot.panes) {
+    if (!seenPaneIds.has(pane.id)) {
+      orderedPaneIds.push(pane.id);
+    }
+  }
+  return orderedPaneIds;
+}
+
 function buildRestoredState(
   snapshot: TerminalSessionPreferences,
   runtimePanes: PaneInfo[],
@@ -822,6 +842,21 @@ function buildRestoredState(
   };
 }
 
+function adoptExistingSession(
+  snapshot: TerminalSessionPreferences,
+  runtimePanes: PaneInfo[],
+): RestoredState {
+  const runtimeIdByPersistentId = new Map<string, number>();
+  const orderedPaneIds = orderedSnapshotPaneIds(snapshot);
+  for (let index = 0; index < orderedPaneIds.length; index += 1) {
+    const persistentId = orderedPaneIds[index];
+    const runtimePane = runtimePanes[index];
+    if (!persistentId || !runtimePane) break;
+    runtimeIdByPersistentId.set(persistentId, runtimePane.id);
+  }
+  return buildRestoredState(snapshot, runtimePanes, runtimeIdByPersistentId);
+}
+
 interface ContextValue extends State {
   ensureBootstrapped: () => Promise<void>;
   createWorkspace: () => { id: string; name: string };
@@ -838,14 +873,55 @@ interface ContextValue extends State {
 const TerminalStoreContext = createContext<ContextValue | null>(null);
 
 export function TerminalStoreProvider({ children }: { children: ReactNode }) {
-  const [state, dispatch] = useReducer(reducer, initial);
+  const [state, baseDispatch] = useReducer(reducer, initial);
   const stateRef = useRef(state);
   stateRef.current = state;
 
   const bootstrapPromise = useRef<Promise<void> | null>(null);
   const suppressLifecycleEvents = useRef(false);
-  const persistTimer = useRef<number | null>(null);
-  const persistQueue = useRef(Promise.resolve());
+  const persistQueue = useRef<Promise<void>>(Promise.resolve());
+  const lastPersistedSnapshot = useRef<string | null>(null);
+  const allowWindowClose = useRef(false);
+
+  const persistSessionSnapshot = useCallback(
+    (snapshot: TerminalSessionPreferences) => {
+      const serialized = JSON.stringify(snapshot);
+      if (lastPersistedSnapshot.current === serialized) {
+        return persistQueue.current;
+      }
+      persistQueue.current = persistQueue.current.then(async () => {
+        try {
+          const prefs = await getPreferences();
+          await savePreferences({
+            ...prefs,
+            terminalSession: snapshot,
+          });
+          lastPersistedSnapshot.current = serialized;
+        } catch (err) {
+          console.error("[terminal] save terminal session failed:", err);
+        }
+      });
+      return persistQueue.current;
+    },
+    [],
+  );
+
+  const flushPersistedSession = useCallback(() => {
+    if (!stateRef.current.bootstrapped) return Promise.resolve();
+    return persistSessionSnapshot(buildTerminalSession(stateRef.current));
+  }, [persistSessionSnapshot]);
+
+  const dispatch = useCallback(
+    (action: Action) => {
+      const nextState = reducer(stateRef.current, action);
+      stateRef.current = nextState;
+      baseDispatch(action);
+      if (nextState.bootstrapped) {
+        void persistSessionSnapshot(buildTerminalSession(nextState));
+      }
+    },
+    [persistSessionSnapshot],
+  );
 
   useEffect(() => {
     let unlisteners: Array<() => void> = [];
@@ -929,49 +1005,52 @@ export function TerminalStoreProvider({ children }: { children: ReactNode }) {
   }, []);
 
   useEffect(() => {
-    if (!state.bootstrapped) return;
-    if (persistTimer.current != null) {
-      window.clearTimeout(persistTimer.current);
-    }
-    persistTimer.current = window.setTimeout(() => {
-      const snapshot = buildTerminalSession(stateRef.current);
-      persistQueue.current = persistQueue.current.then(async () => {
-        try {
-          const prefs = await getPreferences();
-          await savePreferences({
-            ...prefs,
-            terminalSession: snapshot,
-          });
-        } catch (err) {
-          console.error("[terminal] save terminal session failed:", err);
-        }
-      });
-    }, 150);
-
-    return () => {
-      if (persistTimer.current != null) {
-        window.clearTimeout(persistTimer.current);
-        persistTimer.current = null;
+    const handlePageHide = () => {
+      void flushPersistedSession();
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "hidden") {
+        void flushPersistedSession();
       }
     };
-  }, [state]);
+    window.addEventListener("pagehide", handlePageHide);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    let unlistenCloseRequested: (() => void) | null = null;
+    try {
+      const win = getCurrentWindow();
+      void win
+        .onCloseRequested(async (event) => {
+          if (allowWindowClose.current) return;
+          event.preventDefault();
+          await flushPersistedSession();
+          allowWindowClose.current = true;
+          try {
+            await win.close();
+          } finally {
+            allowWindowClose.current = false;
+          }
+        })
+        .then((unlisten) => {
+          unlistenCloseRequested = unlisten;
+        })
+        .catch((err) => {
+          console.error("[terminal] onCloseRequested listener failed:", err);
+        });
+    } catch {
+      /* ignore outside Tauri */
+    }
+
+    return () => {
+      window.removeEventListener("pagehide", handlePageHide);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      unlistenCloseRequested?.();
+    };
+  }, [flushPersistedSession]);
 
   const restoreSession = useCallback(
     async (snapshot: TerminalSessionPreferences): Promise<RestoredState> => {
-      const seenPaneIds = new Set<string>();
-      const orderedPaneSnapshotIds = snapshot.workspaces
-        .flatMap((workspace) => workspace.paneIds)
-        .filter((paneId) => {
-          if (seenPaneIds.has(paneId)) return false;
-          seenPaneIds.add(paneId);
-          return true;
-        });
-      for (const pane of snapshot.panes) {
-        if (!seenPaneIds.has(pane.id)) {
-          orderedPaneSnapshotIds.push(pane.id);
-        }
-      }
-
+      const orderedPaneSnapshotIds = orderedSnapshotPaneIds(snapshot);
       const paneSnapshotById = new Map(snapshot.panes.map((pane) => [pane.id, pane]));
       const runtimeIdByPersistentId = new Map<string, number>();
       let needsTerminalBootstrap = true;
@@ -1036,7 +1115,12 @@ export function TerminalStoreProvider({ children }: { children: ReactNode }) {
         console.error("[terminal] load terminal session failed:", err);
       }
 
-      if (existing.length === 0 && snapshot) {
+      if (snapshot) {
+        if (existing.length > 0) {
+          dispatch({ type: "hydrate", ...adoptExistingSession(snapshot, existing) });
+          return;
+        }
+
         suppressLifecycleEvents.current = true;
         try {
           const restored = await restoreSession(snapshot);
@@ -1133,10 +1217,13 @@ export function TerminalStoreProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const newPane = useCallback(async (workingDirectory?: string | null) => {
+    const config = workingDirectory ? { working_directory: workingDirectory } : {};
     try {
-      await terminalNewTab(
-        workingDirectory ? { working_directory: workingDirectory } : {},
-      );
+      if (stateRef.current.panes.length === 0) {
+        await terminalNew(config);
+      } else {
+        await terminalNewTab(config);
+      }
     } catch (err) {
       console.error("[terminal] new_tab failed:", err);
     }
