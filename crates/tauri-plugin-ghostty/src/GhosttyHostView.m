@@ -1010,6 +1010,21 @@ static void collect_hosts(NSView *root, NSMutableArray<GhosttyHostView *> *out);
 // Forward declaration — defined in the split-navigation section below.
 static GhosttyHostView *find_first_host_descendant(NSView *root);
 
+// Ghostty's occlusion API takes a "visible" boolean, not "occluded".
+// Keep the tab-root hidden state and every descendant surface's render
+// visibility in sync so background tabs stop behaving like visible
+// render targets while their PTYs and scrollback stay alive.
+static void set_tab_root_visible(NSView *root, BOOL visible) {
+    if (!root) return;
+    NSMutableArray<GhosttyHostView *> *hosts = [NSMutableArray array];
+    collect_hosts(root, hosts);
+    for (GhosttyHostView *host in hosts) {
+        ghostty_surface_t s = [host surface];
+        if (s) ghostty_surface_set_occlusion(s, visible);
+    }
+    root.hidden = !visible;
+}
+
 static int tab_id_get(NSView *v) {
     NSNumber *n = objc_getAssociatedObject(v, kTabIdKey);
     return n ? n.intValue : 0;
@@ -1176,8 +1191,8 @@ int GhosttyTabAdd(NSView *root) {
     root.frame = g_tab_container.bounds;
     root.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     // Hide whichever tab was previously active.
-    for (NSView *child in g_tab_container.subviews) child.hidden = YES;
-    root.hidden = NO;
+    for (NSView *child in g_tab_container.subviews) set_tab_root_visible(child, NO);
+    set_tab_root_visible(root, YES);
     [g_tab_container addSubview:root];
     emit_tab_event(TAB_EVENT_CREATED, id_, nil);
     emit_tab_event(TAB_EVENT_FOCUSED, id_, nil);
@@ -1188,7 +1203,9 @@ int GhosttyTabAdd(NSView *root) {
 BOOL GhosttyTabFocus(int tab_id) {
     NSView *target = root_for_tab_id(tab_id);
     if (!target) return NO;
-    for (NSView *child in g_tab_container.subviews) child.hidden = (child != target);
+    for (NSView *child in g_tab_container.subviews) {
+        set_tab_root_visible(child, child == target);
+    }
     // Restore focus to the (last-focused) pane inside this tab. We
     // pick the deepest GhosttyHostView left in the responder chain;
     // if none exists, just the first one.
@@ -1284,7 +1301,9 @@ BOOL GhosttyTabClose(int tab_id, BOOL *was_last) {
         // removal, so clamp.
         NSInteger pick = MIN((NSInteger)remaining.count - 1, MAX(0, idx));
         NSView *neighbour = remaining[pick];
-        for (NSView *child in remaining) child.hidden = (child != neighbour);
+        for (NSView *child in remaining) {
+            set_tab_root_visible(child, child == neighbour);
+        }
         GhosttyHostView *pane = find_first_host_descendant(neighbour);
         if (pane) [neighbour.window makeFirstResponder:pane];
         emit_tab_event(TAB_EVENT_FOCUSED, tab_id_get(neighbour), nil);

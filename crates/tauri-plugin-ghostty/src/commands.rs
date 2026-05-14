@@ -490,12 +490,25 @@ fn create_app() -> ghostty_rs::Result<App> {
 ///     embedded layout where the React title bar already provides
 ///     the visual gutter at the top.
 ///
+///   * `scrollback-limit = 2000000` — cap scrollback at 2 MB per
+///     terminal surface. Upstream's default is 10 MB per surface,
+///     which adds up quickly when multiple tabs or split panes stay
+///     alive in the background for long-running tasks.
+///
+///   * `image-storage-limit = 64000000` — cap Kitty graphics/image
+///     storage at 64 MB per screen instead of the 320 MB upstream
+///     default. This significantly reduces worst-case resident
+///     memory when tools emit image-heavy terminal output.
+///
 /// Failure modes are non-fatal: if the temp file can't be written,
 /// or `load_file` fails, the user just keeps ghostty's defaults.
 /// This is purely a polish step and we don't want to block the app
 /// from starting on a bad I/O day.
 fn apply_zen_tools_overrides(config: &mut Config) {
-    let body = "window-padding-balance = true\nwindow-padding-y = 0\n";
+    let body = "window-padding-balance = true\n\
+window-padding-y = 0\n\
+scrollback-limit = 2000000\n\
+image-storage-limit = 64000000\n";
     let dir = std::env::temp_dir();
     // Bundle-id-namespaced filename so multiple installs / dev
     // builds don't collide on the same file.

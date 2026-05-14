@@ -857,12 +857,27 @@ function adoptExistingSession(
   return buildRestoredState(snapshot, runtimePanes, runtimeIdByPersistentId);
 }
 
+function orderedWorkspacePaneIds(
+  snapshot: TerminalSessionPreferences,
+  workspaceIds: Set<string>,
+): string[] {
+  const seenPaneIds = new Set<string>();
+  return snapshot.workspaces
+    .filter((workspace) => workspaceIds.has(workspace.id))
+    .flatMap((workspace) => workspace.paneIds)
+    .filter((paneId) => {
+      if (seenPaneIds.has(paneId)) return false;
+      seenPaneIds.add(paneId);
+      return true;
+    });
+}
+
 interface ContextValue extends State {
   ensureBootstrapped: () => Promise<void>;
   createWorkspace: () => { id: string; name: string };
   renameWorkspace: (workspaceId: string, name: string) => void;
   renamePane: (paneId: number, name: string) => void;
-  activateWorkspace: (workspaceId: string) => void;
+  activateWorkspace: (workspaceId: string) => Promise<void>;
   deleteWorkspace: (workspaceId: string) => Promise<boolean>;
   movePaneToWorkspace: (paneId: number, workspaceId: string) => void;
   focusPane: (paneId: number) => void;
@@ -871,6 +886,16 @@ interface ContextValue extends State {
 }
 
 const TerminalStoreContext = createContext<ContextValue | null>(null);
+
+interface DeferredWorkspaceRestore {
+  paneIds: string[];
+  lastActivePaneId: string | null;
+}
+
+interface DeferredSessionRestore {
+  snapshot: TerminalSessionPreferences;
+  workspaces: Map<string, DeferredWorkspaceRestore>;
+}
 
 export function TerminalStoreProvider({ children }: { children: ReactNode }) {
   const [state, baseDispatch] = useReducer(reducer, initial);
@@ -882,6 +907,7 @@ export function TerminalStoreProvider({ children }: { children: ReactNode }) {
   const persistQueue = useRef<Promise<void>>(Promise.resolve());
   const lastPersistedSnapshot = useRef<string | null>(null);
   const allowWindowClose = useRef(false);
+  const deferredSessionRestore = useRef<DeferredSessionRestore | null>(null);
 
   const persistSessionSnapshot = useCallback(
     (snapshot: TerminalSessionPreferences) => {
@@ -927,8 +953,7 @@ export function TerminalStoreProvider({ children }: { children: ReactNode }) {
     let unlisteners: Array<() => void> = [];
     let cancelled = false;
 
-    const shouldIgnoreLifecycleEvent = () =>
-      suppressLifecycleEvents.current && !stateRef.current.bootstrapped;
+    const shouldIgnoreLifecycleEvent = () => suppressLifecycleEvents.current;
 
     void (async () => {
       const subs = await Promise.all([
@@ -1049,11 +1074,25 @@ export function TerminalStoreProvider({ children }: { children: ReactNode }) {
   }, [flushPersistedSession]);
 
   const restoreSession = useCallback(
-    async (snapshot: TerminalSessionPreferences): Promise<RestoredState> => {
-      const orderedPaneSnapshotIds = orderedSnapshotPaneIds(snapshot);
+    async (
+      snapshot: TerminalSessionPreferences,
+      workspaceIds?: Set<string>,
+    ): Promise<RestoredState> => {
+      const orderedPaneSnapshotIds = workspaceIds
+        ? orderedWorkspacePaneIds(snapshot, workspaceIds)
+        : orderedSnapshotPaneIds(snapshot);
       const paneSnapshotById = new Map(snapshot.panes.map((pane) => [pane.id, pane]));
       const runtimeIdByPersistentId = new Map<string, number>();
-      let needsTerminalBootstrap = true;
+      let needsTerminalBootstrap = stateRef.current.panes.length === 0;
+
+      if (needsTerminalBootstrap) {
+        try {
+          const existing = await terminalListTabs();
+          needsTerminalBootstrap = existing.length === 0;
+        } catch (err) {
+          console.error("[terminal] terminal_list_tabs before restore failed:", err);
+        }
+      }
 
       for (const persistentId of orderedPaneSnapshotIds) {
         const snapshotPane = paneSnapshotById.get(persistentId);
@@ -1117,13 +1156,43 @@ export function TerminalStoreProvider({ children }: { children: ReactNode }) {
 
       if (snapshot) {
         if (existing.length > 0) {
+          deferredSessionRestore.current = null;
           dispatch({ type: "hydrate", ...adoptExistingSession(snapshot, existing) });
           return;
         }
 
+        const eagerWorkspaceId =
+          snapshot.workspaces.find(
+            (workspace) => workspace.id === snapshot.activeWorkspaceId,
+          )?.id ??
+          snapshot.workspaces[0]?.id ??
+          null;
+        const eagerWorkspaceIds =
+          eagerWorkspaceId != null ? new Set([eagerWorkspaceId]) : new Set<string>();
+        const deferredWorkspaces = new Map<string, DeferredWorkspaceRestore>();
+        for (const workspace of snapshot.workspaces) {
+          if (eagerWorkspaceIds.has(workspace.id) || workspace.paneIds.length === 0) {
+            continue;
+          }
+          deferredWorkspaces.set(workspace.id, {
+            paneIds: workspace.paneIds,
+            lastActivePaneId: workspace.lastActivePaneId ?? null,
+          });
+        }
+        deferredSessionRestore.current =
+          deferredWorkspaces.size > 0
+            ? {
+                snapshot,
+                workspaces: deferredWorkspaces,
+              }
+            : null;
+
         suppressLifecycleEvents.current = true;
         try {
-          const restored = await restoreSession(snapshot);
+          const restored = await restoreSession(
+            snapshot,
+            eagerWorkspaceIds.size > 0 ? eagerWorkspaceIds : undefined,
+          );
           dispatch({ type: "hydrate", ...restored });
           return;
         } finally {
@@ -1167,17 +1236,57 @@ export function TerminalStoreProvider({ children }: { children: ReactNode }) {
     dispatch({ type: "rename_pane", id: paneId, titleOverride: name });
   }, []);
 
-  const activateWorkspace = useCallback((workspaceId: string) => {
+  const activateWorkspace = useCallback(async (workspaceId: string) => {
     const workspace = stateRef.current.workspaces.find(
       (item) => item.id === workspaceId,
     );
     if (!workspace) return;
+
+    const deferred = deferredSessionRestore.current?.workspaces.get(workspaceId);
+    if (workspace.paneIds.length === 0 && deferred && deferred.paneIds.length > 0) {
+      const snapshot = deferredSessionRestore.current?.snapshot;
+      if (!snapshot) return;
+
+      suppressLifecycleEvents.current = true;
+      try {
+        const restored = await restoreSession(snapshot, new Set([workspaceId]));
+        const restoredPanes = restored.panes.filter((pane) =>
+          deferred.paneIds.includes(pane.persistentId),
+        );
+        for (const pane of restoredPanes) {
+          dispatch({
+            type: "add_pane",
+            pane: { ...pane, active: false },
+            workspaceId,
+          });
+        }
+        const restoredWorkspace = restored.workspaces.find(
+          (item) => item.id === workspaceId,
+        );
+        dispatch({
+          type: "activate_workspace",
+          id: workspaceId,
+          paneId:
+            restoredWorkspace?.lastActivePaneId ??
+            restoredPanes[restoredPanes.length - 1]?.id ??
+            null,
+        });
+        deferredSessionRestore.current?.workspaces.delete(workspaceId);
+        if (deferredSessionRestore.current?.workspaces.size === 0) {
+          deferredSessionRestore.current = null;
+        }
+        return;
+      } finally {
+        suppressLifecycleEvents.current = false;
+      }
+    }
+
     dispatch({
       type: "activate_workspace",
       id: workspaceId,
       paneId: chooseWorkspacePane(workspace),
     });
-  }, []);
+  }, [restoreSession]);
 
   const deleteWorkspace = useCallback(async (workspaceId: string) => {
     const workspace = stateRef.current.workspaces.find(

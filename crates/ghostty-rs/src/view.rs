@@ -143,8 +143,11 @@ impl View {
         unsafe { ghostty_surface_set_color_scheme(self.inner, mode) };
     }
 
-    pub fn set_occlusion(&self, occluded: bool) {
-        unsafe { ghostty_surface_set_occlusion(self.inner, occluded) };
+    /// Update whether the surface is visible to the user. Ghostty's
+    /// embedded API takes a `visible` boolean here and uses it to pause
+    /// background rendering when the surface is not on screen.
+    pub fn set_visible(&self, visible: bool) {
+        unsafe { ghostty_surface_set_occlusion(self.inner, visible) };
     }
 
     pub fn refresh(&self) {

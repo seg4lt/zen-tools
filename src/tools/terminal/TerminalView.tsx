@@ -384,7 +384,7 @@ export function TerminalView() {
                       title={workspace.name}
                       aria-pressed={active}
                       onClick={() => {
-                        if (!editing) activateWorkspace(workspace.id);
+                        if (!editing) void activateWorkspace(workspace.id);
                       }}
                       onDoubleClick={() => {
                         if (railMode === "expanded") {
