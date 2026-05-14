@@ -532,11 +532,15 @@ fn create_app() -> ghostty_rs::Result<App> {
 ///     (top + bottom equally) rather than as an asymmetric strip
 ///     at the bottom alone.
 ///
-///   * `window-padding-y = 0` — removes ghostty's default 2-px
-///     vertical padding. With balance on the residual already gives
-///     us breathing room; the explicit padding is redundant in our
-///     embedded layout where the React title bar already provides
-///     the visual gutter at the top.
+///   * `window-padding-x = 0` / `window-padding-y = 0` — removes
+///     ghostty's default 2-px padding on all sides. In our embedded
+///     layout the React chrome already provides the visual gutter.
+///
+///   * `window-padding-color = extend-always` — makes ghostty fill
+///     any sub-cell residual padding area with the edge cell's
+///     background colour instead of the plain terminal background,
+///     so the thin strip left over from balancing is invisible
+///     rather than a contrasting band.
 ///
 ///   * `scrollback-limit = 2000000` — cap scrollback at 2 MB per
 ///     terminal surface. Upstream's default is 10 MB per surface,
@@ -561,7 +565,9 @@ fn create_app() -> ghostty_rs::Result<App> {
 /// from starting on a bad I/O day.
 fn apply_zen_tools_overrides(config: &mut Config) {
     let body = "window-padding-balance = true\n\
+window-padding-x = 0\n\
 window-padding-y = 0\n\
+window-padding-color = extend-always\n\
 scrollback-limit = 2000000\n\
 image-storage-limit = 64000000\n\
 notify-on-command-finish = always\n\

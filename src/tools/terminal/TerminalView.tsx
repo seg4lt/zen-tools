@@ -30,10 +30,10 @@ import {
   AlertTriangle,
   BellDot,
   CheckCircle2,
+  ChevronsLeft,
+  ChevronsRight,
   FolderPlus,
   Loader2,
-  PanelLeftClose,
-  PanelLeftOpen,
   Pause,
   Plus,
   Trash2,
@@ -469,6 +469,11 @@ export function TerminalView() {
   useShortcut("mod+shift+n", handleCreateWorkspace, true, {
     fireInInputs: true,
   });
+  const toggleRail = useCallback(
+    () => setRailMode((current) => (current === "expanded" ? "mini" : "expanded")),
+    [],
+  );
+  useShortcut("mod+shift+e", toggleRail, true, { fireInInputs: true });
 
   // Keep a ref to each native-key-hook handler so the Tauri `listen`
   // useEffect can safely use [] deps (register ONCE on mount). Without
@@ -482,6 +487,7 @@ export function TerminalView() {
     openPaneInActiveWorkspace,
     handleCreateWorkspace,
     toggleDF,
+    toggleRail,
   });
   nativeHookHandlers.current = {
     cyclePane,
@@ -489,6 +495,7 @@ export function TerminalView() {
     openPaneInActiveWorkspace,
     handleCreateWorkspace,
     toggleDF,
+    toggleRail,
   };
 
   useEffect(() => {
@@ -516,6 +523,9 @@ export function TerminalView() {
         }),
         listen("terminal:host-key-hook:cmd-shift-n", () => {
           nativeHookHandlers.current.handleCreateWorkspace();
+        }),
+        listen("terminal:host-key-hook:cmd-shift-e", () => {
+          nativeHookHandlers.current.toggleRail();
         }),
       ]);
       if (cancelled) {
@@ -567,26 +577,19 @@ export function TerminalView() {
           >
             <div className="terminal-rail__header">
               {railMode === "expanded" ? (
-                <div className="terminal-rail__title-row">
-                  <span className="terminal-rail__title">Terminal</span>
-                  <TerminalAttentionIndicators summary={terminalAttention} />
-                </div>
+                <TerminalAttentionIndicators summary={terminalAttention} />
               ) : (
                 <span className="sr-only">Terminal workspaces</span>
               )}
               <IconRailButton
-                icon={railMode === "expanded" ? PanelLeftClose : PanelLeftOpen}
+                icon={railMode === "expanded" ? ChevronsLeft : ChevronsRight}
                 label={
                   railMode === "expanded"
                     ? "Minimize workspace rail"
                     : "Expand workspace rail"
                 }
                 className="terminal-rail-toggle"
-                onClick={() =>
-                  setRailMode((current) =>
-                    current === "expanded" ? "mini" : "expanded",
-                  )
-                }
+                onClick={toggleRail}
               />
             </div>
 

@@ -2203,6 +2203,10 @@ void GhosttyInstallEventMonitor(ghostty_surface_t surface) {
                     if (g_host_key_hook_fn) g_host_key_hook_fn("cmd-shift-n");
                     return nil;
                 }
+                if ([chars isEqualToString:@"e"]) {
+                    if (g_host_key_hook_fn) g_host_key_hook_fn("cmd-shift-e");
+                    return nil;
+                }
             }
 
             // Look up the CURRENTLY focused pane (not the cached one

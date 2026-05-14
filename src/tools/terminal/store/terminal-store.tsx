@@ -904,7 +904,10 @@ function normalizeTerminalSession(
   };
 }
 
-function buildTerminalSession(state: State): TerminalSessionPreferences {
+function buildTerminalSession(
+  state: State,
+  deferredWorkspaces?: Map<string, DeferredWorkspaceRestore> | null,
+): TerminalSessionPreferences {
   const panesById = new Map(state.panes.map((pane) => [pane.id, pane]));
   return {
     panes: state.panes.map((pane) => ({
@@ -913,19 +916,30 @@ function buildTerminalSession(state: State): TerminalSessionPreferences {
       cwdAbsolutePath: pane.cwdAbsolutePath,
       launchDirectory: pane.cwdAbsolutePath ?? pane.launchDirectory,
     })),
-    workspaces: state.workspaces.map((workspace) => ({
-      id: workspace.id,
-      name: workspace.name,
-      paneIds: workspace.paneIds
+    workspaces: state.workspaces.map((workspace) => {
+      const statePaneIds = workspace.paneIds
         .map((paneId) => panesById.get(paneId)?.persistentId ?? null)
-        .filter((paneId): paneId is string => paneId != null),
+        .filter((paneId): paneId is string => paneId != null);
+      // For workspaces that haven't been activated yet (deferred restore),
+      // statePaneIds is empty. Fall back to the deferred snapshot data so
+      // we don't accidentally persist an empty pane list and lose the
+      // workspace's terminals on the next app start.
+      const deferred = statePaneIds.length === 0 ? deferredWorkspaces?.get(workspace.id) : null;
+      const paneIds = deferred ? deferred.paneIds : statePaneIds;
       // Only save lastActivePaneId if the pane is actually in this workspace.
-      lastActivePaneId:
-        workspace.lastActivePaneId != null &&
-        workspace.paneIds.includes(workspace.lastActivePaneId)
+      const lastActivePaneId = deferred
+        ? deferred.lastActivePaneId
+        : workspace.lastActivePaneId != null &&
+            workspace.paneIds.includes(workspace.lastActivePaneId)
           ? (panesById.get(workspace.lastActivePaneId)?.persistentId ?? null)
-          : null,
-    })),
+          : null;
+      return {
+        id: workspace.id,
+        name: workspace.name,
+        paneIds,
+        lastActivePaneId,
+      };
+    }),
     activeWorkspaceId: state.activeWorkspaceId,
   };
 }
@@ -1183,7 +1197,9 @@ export function TerminalStoreProvider({ children }: { children: ReactNode }) {
 
   const flushPersistedSession = useCallback(() => {
     if (!stateRef.current.bootstrapped) return Promise.resolve();
-    return persistSessionSnapshot(buildTerminalSession(stateRef.current));
+    return persistSessionSnapshot(
+      buildTerminalSession(stateRef.current, deferredSessionRestore.current?.workspaces),
+    );
   }, [persistSessionSnapshot]);
 
   const dispatch = useCallback(
@@ -1192,7 +1208,9 @@ export function TerminalStoreProvider({ children }: { children: ReactNode }) {
       stateRef.current = nextState;
       baseDispatch(action);
       if (nextState.bootstrapped) {
-        void persistSessionSnapshot(buildTerminalSession(nextState));
+        void persistSessionSnapshot(
+          buildTerminalSession(nextState, deferredSessionRestore.current?.workspaces),
+        );
       }
     },
     [persistSessionSnapshot],
