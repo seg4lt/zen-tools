@@ -262,11 +262,11 @@ body.terminal-route-active main .terminal-chrome * {
 
 .terminal-status-stack__notice {
   position: absolute;
-  right: 0;
-  bottom: 0;
+  right: -1px;
+  bottom: -1px;
   display: inline-flex;
-  width: 10px;
-  height: 10px;
+  width: 13px;
+  height: 13px;
   align-items: center;
   justify-content: center;
   border-radius: 999px;
@@ -275,8 +275,8 @@ body.terminal-route-active main .terminal-chrome * {
 }
 
 .terminal-status-stack__notice-icon {
-  width: 8px;
-  height: 8px;
+  width: 10px;
+  height: 10px;
   color: #e8e8e8;
 }
 
