@@ -13,6 +13,7 @@ import { invoke } from "@tauri-apps/api/core";
 
 export interface TerminalSessionPanePreferences {
   id: string;
+  ghosttyTitle?: string | null;
   titleOverride?: string | null;
   cwdAbsolutePath?: string | null;
   launchDirectory?: string | null;
@@ -29,6 +30,7 @@ export interface TerminalSessionPreferences {
   workspaces: TerminalSessionWorkspacePreferences[];
   panes: TerminalSessionPanePreferences[];
   activeWorkspaceId?: string | null;
+  pinnedPaneIds?: string[];
 }
 
 /**

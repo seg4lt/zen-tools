@@ -93,36 +93,57 @@ pub struct Preferences {
     pub terminal_session: Option<TerminalSessionPreferences>,
 }
 
+/// Persisted terminal-only session snapshot used to restore the
+/// embedded Ghostty surface across launches.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TerminalSessionPreferences {
+    /// Restorable workspace grouping metadata in user-defined order.
     #[serde(default)]
     pub workspaces: Vec<TerminalSessionWorkspacePreferences>,
+    /// Persisted pane metadata keyed by stable persistent id.
     #[serde(default)]
     pub panes: Vec<TerminalSessionPanePreferences>,
+    /// Workspace selected when the session snapshot was saved.
     #[serde(default)]
     pub active_workspace_id: Option<String>,
+    /// Ordered persistent pane ids pinned by the user.
+    #[serde(default)]
+    pub pinned_pane_ids: Vec<String>,
 }
 
+/// One persisted terminal workspace grouping.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TerminalSessionWorkspacePreferences {
+    /// Stable workspace id minted in the frontend.
     pub id: String,
+    /// User-facing workspace name.
     pub name: String,
+    /// Ordered persistent pane ids currently assigned to the workspace.
     #[serde(default)]
     pub pane_ids: Vec<String>,
+    /// The last active pane within this workspace, when known.
     #[serde(default)]
     pub last_active_pane_id: Option<String>,
 }
 
+/// One persisted terminal pane snapshot.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TerminalSessionPanePreferences {
+    /// Stable pane id minted in the frontend and remapped on restore.
     pub id: String,
+    /// Last-known Ghostty title, used for deferred pin labels.
+    #[serde(default)]
+    pub ghostty_title: Option<String>,
+    /// User-specified pane title override, if any.
     #[serde(default)]
     pub title_override: Option<String>,
+    /// Last known live cwd reported by the shell.
     #[serde(default)]
     pub cwd_absolute_path: Option<String>,
+    /// Launch directory used to recreate the pane on restore.
     #[serde(default)]
     pub launch_directory: Option<String>,
 }

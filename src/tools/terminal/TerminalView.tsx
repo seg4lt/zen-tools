@@ -35,6 +35,8 @@ import {
   FolderPlus,
   Loader2,
   Pause,
+  Pin,
+  PinOff,
   Plus,
   Trash2,
   type LucideIcon,
@@ -240,13 +242,18 @@ export function TerminalView() {
     activeId,
     activeWorkspaceId,
     workspaces,
+    pinnedPanes,
     ensureBootstrapped,
     createWorkspace,
     renameWorkspace,
     renamePane,
     activateWorkspace,
+    activatePinnedPane,
     deleteWorkspace,
     movePaneToWorkspace,
+    pinPane,
+    unpinPane,
+    reorderPinnedPane,
     focusPane,
     closePane,
     newPane,
@@ -263,6 +270,10 @@ export function TerminalView() {
   const [editingPaneName, setEditingPaneName] = useState("");
   const [draggedPaneId, setDraggedPaneId] = useState<number | null>(null);
   const [dropWorkspaceId, setDropWorkspaceId] = useState<string | null>(null);
+  const [draggedPinnedPersistentId, setDraggedPinnedPersistentId] = useState<
+    string | null
+  >(null);
+  const [dropPinnedIndex, setDropPinnedIndex] = useState<number | null>(null);
   const [deletingWorkspaceId, setDeletingWorkspaceId] = useState<
     string | null
   >(null);
@@ -560,6 +571,11 @@ export function TerminalView() {
     movePaneToWorkspace(draggedPaneId, workspaceId);
   };
 
+  const handlePinnedDrop = (toIndex: number) => {
+    if (draggedPinnedPersistentId == null) return;
+    reorderPinnedPane(draggedPinnedPersistentId, toIndex);
+  };
+
   return (
     <div
       ref={containerRef}
@@ -594,6 +610,74 @@ export function TerminalView() {
             </div>
 
             <div className="terminal-rail__section">
+              {pinnedPanes.length > 0 && (
+                <>
+                  {railMode === "expanded" && (
+                    <span className="terminal-rail__section-title">Pinned</span>
+                  )}
+                  <div className="terminal-tab-list" role="list">
+                    {pinnedPanes.map((pinnedPane, index) => (
+                      <button
+                        key={pinnedPane.persistentId}
+                        type="button"
+                        role="listitem"
+                        draggable={pinnedPanes.length > 1}
+                        title={pinnedPane.title}
+                        aria-pressed={pinnedPane.active}
+                        onClick={() => {
+                          void activatePinnedPane(pinnedPane.persistentId);
+                        }}
+                        onDragStart={(event) => {
+                          event.dataTransfer.effectAllowed = "move";
+                          event.dataTransfer.setData(
+                            "text/plain",
+                            pinnedPane.persistentId,
+                          );
+                          setDraggedPinnedPersistentId(pinnedPane.persistentId);
+                        }}
+                        onDragOver={(event) => {
+                          if (draggedPinnedPersistentId == null) return;
+                          event.preventDefault();
+                          setDropPinnedIndex(index);
+                        }}
+                        onDragLeave={() => {
+                          if (dropPinnedIndex === index) {
+                            setDropPinnedIndex(null);
+                          }
+                        }}
+                        onDrop={(event) => {
+                          event.preventDefault();
+                          handlePinnedDrop(index);
+                          setDraggedPinnedPersistentId(null);
+                          setDropPinnedIndex(null);
+                        }}
+                        onDragEnd={() => {
+                          setDraggedPinnedPersistentId(null);
+                          setDropPinnedIndex(null);
+                        }}
+                        className={cn(
+                          "terminal-tab terminal-pin",
+                          pinnedPane.active && "is-active",
+                          dropPinnedIndex === index && "is-drop-target",
+                        )}
+                      >
+                        <span className="terminal-tab__label">
+                          {railMode === "expanded" ? (
+                            pinnedPane.title
+                          ) : (
+                            paneMiniLabel(pinnedPane.title)
+                          )}
+                        </span>
+                        {railMode === "expanded" ? (
+                          <Pin className="terminal-pin__icon" />
+                        ) : null}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="terminal-rail__separator" />
+                </>
+              )}
+
               {railMode === "expanded" && (
                 <span className="terminal-rail__section-title">Workspaces</span>
               )}
@@ -787,18 +871,49 @@ export function TerminalView() {
                           mini={railMode === "mini"}
                         />
                         {railMode === "expanded" && !editing && (
-                          <span
-                            role="button"
-                            aria-label={`Close ${title}`}
-                            title={`Close ${title}`}
-                            className="terminal-tab__close"
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              void closePane(pane.id);
-                            }}
-                          >
-                            ×
-                          </span>
+                          <>
+                            {pinnedPanes.some(
+                              (pinnedPane) => pinnedPane.paneId === pane.id,
+                            ) ? (
+                              <button
+                                type="button"
+                                aria-label={`Unpin ${title}`}
+                                title={`Unpin ${title}`}
+                                className="terminal-tab__pin"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  unpinPane(pane.id);
+                                }}
+                              >
+                                <PinOff className="size-3" />
+                              </button>
+                            ) : (
+                              <button
+                                type="button"
+                                aria-label={`Pin ${title}`}
+                                title={`Pin ${title}`}
+                                className="terminal-tab__pin"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  pinPane(pane.id);
+                                }}
+                              >
+                                <Pin className="size-3" />
+                              </button>
+                            )}
+                            <span
+                              role="button"
+                              aria-label={`Close ${title}`}
+                              title={`Close ${title}`}
+                              className="terminal-tab__close"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                void closePane(pane.id);
+                              }}
+                            >
+                              ×
+                            </span>
+                          </>
                         )}
                       </button>
                     );

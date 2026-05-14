@@ -80,6 +80,15 @@ export interface TerminalWorkspace {
   lastActivePaneId: number | null;
 }
 
+export interface TerminalPinnedPane {
+  persistentId: string;
+  paneId: number | null;
+  workspaceId: string | null;
+  title: string;
+  active: boolean;
+  live: boolean;
+}
+
 interface State {
   panes: TerminalPane[];
   activeId: number | null;
@@ -87,6 +96,8 @@ interface State {
   workspaces: TerminalWorkspace[];
   /** Flat lookup so focus events can switch workspaces cheaply. */
   paneWorkspaceIds: Record<string, string>;
+  /** Ordered persistent pane ids pinned by the user. */
+  pinnedPaneIds: string[];
   /** Monotonic numbering for default workspace labels. */
   nextWorkspaceNumber: number;
   /** True once bootstrap has adopted/spawned terminal state. */
@@ -101,6 +112,7 @@ type Action =
       workspaces: TerminalWorkspace[];
       activeWorkspaceId: string | null;
       activeId: number | null;
+      pinnedPaneIds: string[];
       nextWorkspaceNumber: number;
     }
   | { type: "add_pane"; pane: TerminalPane; workspaceId: string | null }
@@ -119,7 +131,11 @@ type Action =
   | { type: "rename_workspace"; id: string; name: string }
   | { type: "activate_workspace"; id: string; paneId: number | null }
   | { type: "move_pane"; paneId: number; workspaceId: string }
-  | { type: "delete_workspace"; id: string };
+  | { type: "delete_workspace"; id: string }
+  | { type: "pin_pane"; id: number }
+  | { type: "unpin_pane"; id: number }
+  | { type: "unpin_pane_persistent"; persistentId: string }
+  | { type: "reorder_pinned_pane"; persistentId: string; toIndex: number };
 
 const initial: State = {
   panes: [],
@@ -127,6 +143,7 @@ const initial: State = {
   activeWorkspaceId: null,
   workspaces: [],
   paneWorkspaceIds: {},
+  pinnedPaneIds: [],
   nextWorkspaceNumber: 1,
   bootstrapped: false,
 };
@@ -147,6 +164,13 @@ function normalizeWorkspaceName(name: string, fallback: string): string {
 function normalizePaneOverride(name: string): string | null {
   const trimmed = name.trim();
   return trimmed.length > 0 ? trimmed : null;
+}
+
+function paneDisplayTitle(pane: {
+  ghosttyTitle: string | null | undefined;
+  titleOverride: string | null | undefined;
+}): string {
+  return (pane.titleOverride ?? pane.ghosttyTitle)?.trim() || "shell";
 }
 
 function workspaceForCreate(id: string, name: string): TerminalWorkspace {
@@ -404,6 +428,45 @@ function nextWorkspaceNumberFor(workspaces: TerminalWorkspace[]): number {
   return Math.max(workspaces.length, highestExplicit) + 1;
 }
 
+function removePinnedPaneByRuntimeId(
+  pinnedPaneIds: string[],
+  panes: TerminalPane[],
+  paneId: number,
+): string[] {
+  const persistentId = panes.find((pane) => pane.id === paneId)?.persistentId;
+  if (!persistentId) return pinnedPaneIds;
+  return pinnedPaneIds.filter((item) => item !== persistentId);
+}
+
+function retainPinnedPaneIds(
+  pinnedPaneIds: string[],
+  livePanes: Pick<TerminalPane, "persistentId">[],
+  deferredWorkspaces?: Map<string, DeferredWorkspaceRestore> | null,
+): string[] {
+  const allowedIds = new Set(livePanes.map((pane) => pane.persistentId));
+  for (const workspace of deferredWorkspaces?.values() ?? []) {
+    for (const paneId of workspace.paneIds) {
+      allowedIds.add(paneId);
+    }
+  }
+  return pinnedPaneIds.filter((persistentId) => allowedIds.has(persistentId));
+}
+
+function movePinnedPaneId(
+  pinnedPaneIds: string[],
+  persistentId: string,
+  toIndex: number,
+): string[] {
+  const fromIndex = pinnedPaneIds.indexOf(persistentId);
+  if (fromIndex === -1) return pinnedPaneIds;
+  const boundedIndex = Math.max(0, Math.min(toIndex, pinnedPaneIds.length - 1));
+  if (fromIndex === boundedIndex) return pinnedPaneIds;
+  const next = [...pinnedPaneIds];
+  next.splice(fromIndex, 1);
+  next.splice(boundedIndex, 0, persistentId);
+  return next;
+}
+
 function buildDefaultState(
   panes: TerminalPane[],
   activeId: number | null,
@@ -423,6 +486,7 @@ function buildDefaultState(
     paneWorkspaceIds: Object.fromEntries(
       panes.map((pane) => [paneKey(pane.id), workspaceId]),
     ),
+    pinnedPaneIds: [],
     nextWorkspaceNumber: 2,
     bootstrapped: true,
   };
@@ -465,6 +529,7 @@ function reducer(state: State, action: Action): State {
             workspace.paneIds.map((paneId) => [paneKey(paneId), workspace.id]),
           ),
         ),
+        pinnedPaneIds: action.pinnedPaneIds,
         nextWorkspaceNumber: action.nextWorkspaceNumber,
         bootstrapped: true,
       };
@@ -494,6 +559,7 @@ function reducer(state: State, action: Action): State {
           ...state,
           panes,
           activeId,
+          pinnedPaneIds: state.pinnedPaneIds,
           paneWorkspaceIds: state.paneWorkspaceIds[key]
             ? state.paneWorkspaceIds
             : action.workspaceId
@@ -547,6 +613,7 @@ function reducer(state: State, action: Action): State {
         activeWorkspaceId,
         workspaces,
         paneWorkspaceIds,
+        pinnedPaneIds: state.pinnedPaneIds,
         nextWorkspaceNumber,
       };
     }
@@ -581,13 +648,15 @@ function reducer(state: State, action: Action): State {
 
       return {
         ...state,
-        panes: setPaneActiveFlags(
-          state.panes.filter((pane) => pane.id !== action.id),
-          activeId,
-        ),
+        panes: setPaneActiveFlags(state.panes.filter((pane) => pane.id !== action.id), activeId),
         activeId,
         workspaces,
         paneWorkspaceIds,
+        pinnedPaneIds: removePinnedPaneByRuntimeId(
+          state.pinnedPaneIds,
+          state.panes,
+          action.id,
+        ),
       };
     }
 
@@ -776,6 +845,7 @@ function reducer(state: State, action: Action): State {
         activeId,
         workspaces,
         paneWorkspaceIds,
+        pinnedPaneIds: state.pinnedPaneIds,
       };
     }
 
@@ -834,9 +904,52 @@ function reducer(state: State, action: Action): State {
         activeWorkspaceId,
         workspaces,
         paneWorkspaceIds,
+        pinnedPaneIds: state.pinnedPaneIds.filter((persistentId) => {
+          const pane = state.panes.find((item) => item.persistentId === persistentId);
+          return pane ? !deletedWorkspace.paneIds.includes(pane.id) : true;
+        }),
         nextWorkspaceNumber,
       };
     }
+
+    case "pin_pane": {
+      const pane = state.panes.find((item) => item.id === action.id);
+      if (!pane) return state;
+      if (state.pinnedPaneIds.includes(pane.persistentId)) return state;
+      return {
+        ...state,
+        pinnedPaneIds: [...state.pinnedPaneIds, pane.persistentId],
+      };
+    }
+
+    case "unpin_pane": {
+      const pane = state.panes.find((item) => item.id === action.id);
+      if (!pane) return state;
+      return {
+        ...state,
+        pinnedPaneIds: state.pinnedPaneIds.filter(
+          (persistentId) => persistentId !== pane.persistentId,
+        ),
+      };
+    }
+
+    case "unpin_pane_persistent":
+      return {
+        ...state,
+        pinnedPaneIds: state.pinnedPaneIds.filter(
+          (persistentId) => persistentId !== action.persistentId,
+        ),
+      };
+
+    case "reorder_pinned_pane":
+      return {
+        ...state,
+        pinnedPaneIds: movePinnedPaneId(
+          state.pinnedPaneIds,
+          action.persistentId,
+          action.toIndex,
+        ),
+      };
   }
 }
 
@@ -852,6 +965,7 @@ function normalizePaneSnapshot(
   if (typeof pane.id !== "string" || pane.id.length === 0) return null;
   return {
     id: pane.id,
+    ghosttyTitle: readOptionalString(pane.ghosttyTitle),
     titleOverride: readOptionalString(pane.titleOverride),
     cwdAbsolutePath: readOptionalString(pane.cwdAbsolutePath),
     launchDirectory: readOptionalString(pane.launchDirectory),
@@ -901,6 +1015,9 @@ function normalizeTerminalSession(
     panes,
     workspaces,
     activeWorkspaceId: readOptionalString(session.activeWorkspaceId),
+    pinnedPaneIds: Array.isArray(session.pinnedPaneIds)
+      ? session.pinnedPaneIds.filter((paneId): paneId is string => typeof paneId === "string")
+      : [],
   };
 }
 
@@ -912,6 +1029,7 @@ function buildTerminalSession(
   return {
     panes: state.panes.map((pane) => ({
       id: pane.persistentId,
+      ghosttyTitle: pane.ghosttyTitle,
       titleOverride: pane.titleOverride,
       cwdAbsolutePath: pane.cwdAbsolutePath,
       launchDirectory: pane.cwdAbsolutePath ?? pane.launchDirectory,
@@ -941,6 +1059,11 @@ function buildTerminalSession(
       };
     }),
     activeWorkspaceId: state.activeWorkspaceId,
+    pinnedPaneIds: retainPinnedPaneIds(
+      state.pinnedPaneIds,
+      state.panes,
+      deferredWorkspaces,
+    ),
   };
 }
 
@@ -949,6 +1072,7 @@ interface RestoredState {
   workspaces: TerminalWorkspace[];
   activeWorkspaceId: string | null;
   activeId: number | null;
+  pinnedPaneIds: string[];
   nextWorkspaceNumber: number;
 }
 
@@ -987,8 +1111,8 @@ function buildRestoredState(
         return paneFromInfo(
           {
             id: runtimeId,
-            title: "",
             active: false,
+            title: snapshotPane.ghosttyTitle ?? "",
             cwd_absolute_path:
               snapshotPane.cwdAbsolutePath ?? snapshotPane.launchDirectory ?? null,
             launch_directory: snapshotPane.launchDirectory ?? null,
@@ -1097,6 +1221,9 @@ function buildRestoredState(
     workspaces,
     activeWorkspaceId,
     activeId,
+    pinnedPaneIds: (snapshot.pinnedPaneIds ?? []).filter((persistentId) =>
+      snapshot.panes.some((pane) => pane.id === persistentId),
+    ),
     nextWorkspaceNumber: nextWorkspaceNumberFor(workspaces),
   };
 }
@@ -1132,13 +1259,18 @@ function orderedWorkspacePaneIds(
 }
 
 interface ContextValue extends State {
+  pinnedPanes: TerminalPinnedPane[];
   ensureBootstrapped: () => Promise<void>;
   createWorkspace: () => { id: string; name: string };
   renameWorkspace: (workspaceId: string, name: string) => void;
   renamePane: (paneId: number, name: string) => void;
   activateWorkspace: (workspaceId: string) => Promise<void>;
+  activatePinnedPane: (persistentId: string) => Promise<void>;
   deleteWorkspace: (workspaceId: string) => Promise<boolean>;
   movePaneToWorkspace: (paneId: number, workspaceId: string) => void;
+  pinPane: (paneId: number) => void;
+  unpinPane: (paneId: number) => void;
+  reorderPinnedPane: (persistentId: string, toIndex: number) => void;
   focusPane: (paneId: number) => void;
   closePane: (paneId: number) => Promise<void>;
   newPane: (workingDirectory?: string | null) => Promise<void>;
@@ -1158,6 +1290,61 @@ interface DeferredWorkspaceRestore {
 interface DeferredSessionRestore {
   snapshot: TerminalSessionPreferences;
   workspaces: Map<string, DeferredWorkspaceRestore>;
+}
+
+function buildPinnedPanes(
+  state: State,
+  deferredRestore: DeferredSessionRestore | null,
+): TerminalPinnedPane[] {
+  const panesByPersistentId = new Map(
+    state.panes.map((pane) => [pane.persistentId, pane] as const),
+  );
+  const workspaceIdByPersistentId = new Map<string, string>();
+  for (const workspace of state.workspaces) {
+    for (const paneId of workspace.paneIds) {
+      const pane = state.panes.find((item) => item.id === paneId);
+      if (pane) workspaceIdByPersistentId.set(pane.persistentId, workspace.id);
+    }
+  }
+  const deferredPaneById = new Map(
+    (deferredRestore?.snapshot.panes ?? []).map((pane) => [pane.id, pane] as const),
+  );
+  const deferredWorkspaceIdByPaneId = new Map<string, string>();
+  for (const workspace of deferredRestore?.snapshot.workspaces ?? []) {
+    for (const persistentId of workspace.paneIds) {
+      deferredWorkspaceIdByPaneId.set(persistentId, workspace.id);
+    }
+  }
+  const pinnedPanes: TerminalPinnedPane[] = [];
+  for (const persistentId of state.pinnedPaneIds) {
+    const livePane = panesByPersistentId.get(persistentId);
+    if (livePane) {
+      pinnedPanes.push({
+        persistentId,
+        paneId: livePane.id,
+        workspaceId: workspaceIdByPersistentId.get(persistentId) ?? null,
+        title: paneDisplayTitle(livePane),
+        active: livePane.id === state.activeId,
+        live: true,
+      });
+      continue;
+    }
+    const deferredPane = deferredPaneById.get(persistentId);
+    const deferredWorkspaceId = deferredWorkspaceIdByPaneId.get(persistentId) ?? null;
+    if (!deferredPane || !deferredWorkspaceId) continue;
+    pinnedPanes.push({
+      persistentId,
+      paneId: null,
+      workspaceId: deferredWorkspaceId,
+      title: paneDisplayTitle({
+        titleOverride: deferredPane.titleOverride ?? null,
+        ghosttyTitle: deferredPane.ghosttyTitle ?? null,
+      }),
+      active: false,
+      live: false,
+    });
+  }
+  return pinnedPanes;
 }
 
 export function TerminalStoreProvider({ children }: { children: ReactNode }) {
@@ -1563,11 +1750,59 @@ export function TerminalStoreProvider({ children }: { children: ReactNode }) {
     });
   }, [restoreSession]);
 
+  const activatePinnedPane = useCallback(
+    async (persistentId: string) => {
+      const livePane = stateRef.current.panes.find(
+        (pane) => pane.persistentId === persistentId,
+      );
+      if (livePane) {
+        const workspaceId = stateRef.current.paneWorkspaceIds[paneKey(livePane.id)];
+        if (workspaceId) {
+          await activateWorkspace(workspaceId);
+        }
+        dispatch({ type: "set_active", id: livePane.id });
+        return;
+      }
+
+      const deferredSnapshot = deferredSessionRestore.current?.snapshot;
+      if (!deferredSnapshot) {
+        dispatch({ type: "unpin_pane_persistent", persistentId });
+        return;
+      }
+      const workspaceId =
+        deferredSnapshot.workspaces.find((workspace) =>
+          workspace.paneIds.includes(persistentId),
+        )?.id ?? null;
+      if (!workspaceId) {
+        dispatch({ type: "unpin_pane_persistent", persistentId });
+        return;
+      }
+
+      await activateWorkspace(workspaceId);
+
+      const restoredPane = stateRef.current.panes.find(
+        (pane) => pane.persistentId === persistentId,
+      );
+      if (restoredPane) {
+        dispatch({ type: "set_active", id: restoredPane.id });
+      } else {
+        dispatch({ type: "unpin_pane_persistent", persistentId });
+      }
+    },
+    [activateWorkspace, dispatch],
+  );
+
   const deleteWorkspace = useCallback(async (workspaceId: string) => {
     const workspace = stateRef.current.workspaces.find(
       (item) => item.id === workspaceId,
     );
     if (!workspace) return false;
+    const deferredPinnedPaneIds =
+      deferredSessionRestore.current?.snapshot.workspaces
+        .find((item) => item.id === workspaceId)
+        ?.paneIds.filter((persistentId) =>
+          stateRef.current.pinnedPaneIds.includes(persistentId),
+        ) ?? [];
 
     const results = await Promise.allSettled(
       workspace.paneIds.map((paneId) => terminalCloseTab(paneId)),
@@ -1577,7 +1812,15 @@ export function TerminalStoreProvider({ children }: { children: ReactNode }) {
       return false;
     }
 
+    deferredSessionRestore.current?.workspaces.delete(workspaceId);
+    if (deferredSessionRestore.current?.workspaces.size === 0) {
+      deferredSessionRestore.current = null;
+    }
+
     dispatch({ type: "delete_workspace", id: workspaceId });
+    for (const persistentId of deferredPinnedPaneIds) {
+      dispatch({ type: "unpin_pane_persistent", persistentId });
+    }
     return true;
   }, []);
 
@@ -1587,6 +1830,18 @@ export function TerminalStoreProvider({ children }: { children: ReactNode }) {
     },
     [],
   );
+
+  const pinPane = useCallback((paneId: number) => {
+    dispatch({ type: "pin_pane", id: paneId });
+  }, []);
+
+  const unpinPane = useCallback((paneId: number) => {
+    dispatch({ type: "unpin_pane", id: paneId });
+  }, []);
+
+  const reorderPinnedPane = useCallback((persistentId: string, toIndex: number) => {
+    dispatch({ type: "reorder_pinned_pane", persistentId, toIndex });
+  }, []);
 
   const focusPane = useCallback((paneId: number) => {
     dispatch({ type: "set_active", id: paneId });
@@ -1660,16 +1915,26 @@ export function TerminalStoreProvider({ children }: { children: ReactNode }) {
     );
   }, [theme, state.bootstrapped]);
 
+  const pinnedPanes = useMemo(
+    () => buildPinnedPanes(state, deferredSessionRestore.current),
+    [state],
+  );
+
   const value = useMemo<ContextValue>(
     () => ({
       ...state,
+      pinnedPanes,
       ensureBootstrapped,
       createWorkspace,
       renameWorkspace,
       renamePane,
       activateWorkspace,
+      activatePinnedPane,
       deleteWorkspace,
       movePaneToWorkspace,
+      pinPane,
+      unpinPane,
+      reorderPinnedPane,
       focusPane,
       closePane,
       newPane,
@@ -1678,13 +1943,18 @@ export function TerminalStoreProvider({ children }: { children: ReactNode }) {
     }),
     [
       state,
+      pinnedPanes,
       ensureBootstrapped,
       createWorkspace,
       renameWorkspace,
       renamePane,
       activateWorkspace,
+      activatePinnedPane,
       deleteWorkspace,
       movePaneToWorkspace,
+      pinPane,
+      unpinPane,
+      reorderPinnedPane,
       focusPane,
       closePane,
       newPane,

@@ -182,6 +182,13 @@ body.terminal-route-active main .terminal-chrome * {
   color: var(--term-bar-fg);
 }
 
+.terminal-tab.is-drop-target {
+  outline: 1px solid rgba(134, 183, 255, 0.55);
+  outline-offset: -1px;
+  background: rgba(134, 183, 255, 0.12);
+  color: var(--term-bar-fg);
+}
+
 .terminal-workspace__label,
 .terminal-tab__label {
   flex: 1;
@@ -272,6 +279,7 @@ body.terminal-route-active main .terminal-chrome * {
 }
 
 .terminal-workspace__delete,
+.terminal-tab__pin,
 .terminal-tab__close {
   opacity: 0;
   width: 18px;
@@ -288,15 +296,25 @@ body.terminal-route-active main .terminal-chrome * {
 
 .terminal-workspace:hover .terminal-workspace__delete,
 .terminal-workspace.is-active .terminal-workspace__delete,
+.terminal-tab:hover .terminal-tab__pin,
+.terminal-tab.is-active .terminal-tab__pin,
 .terminal-tab:hover .terminal-tab__close,
 .terminal-tab.is-active .terminal-tab__close {
   opacity: 1;
 }
 
 .terminal-workspace__delete:hover,
+.terminal-tab__pin:hover,
 .terminal-tab__close:hover {
   background: rgba(255, 255, 255, 0.12);
   color: var(--term-bar-fg);
+}
+
+.terminal-pin__icon {
+  width: 12px;
+  height: 12px;
+  flex: 0 0 auto;
+  color: #86b7ff;
 }
 
 .terminal-workspace__input,
