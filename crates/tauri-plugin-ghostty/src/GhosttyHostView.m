@@ -2182,6 +2182,10 @@ void GhosttyInstallEventMonitor(ghostty_surface_t surface) {
                 if (chars.length == 1) {
                     unichar digit = [chars characterAtIndex:0];
                     if (digit >= '1' && digit <= '9') {
+                        if (g_host_key_hook_fn) {
+                            char chord[6] = {'c', 'm', 'd', '-', (char)digit, '\0'};
+                            g_host_key_hook_fn(chord);
+                        }
                         return nil;
                     }
                 }

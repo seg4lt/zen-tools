@@ -131,6 +131,8 @@ type Action =
   | { type: "rename_workspace"; id: string; name: string }
   | { type: "activate_workspace"; id: string; paneId: number | null }
   | { type: "move_pane"; paneId: number; workspaceId: string }
+  | { type: "reorder_workspace"; id: string; toIndex: number }
+  | { type: "reorder_pane"; paneId: number; workspaceId: string; toIndex: number }
   | { type: "delete_workspace"; id: string }
   | { type: "pin_pane"; id: number }
   | { type: "unpin_pane"; id: number }
@@ -464,6 +466,21 @@ function movePinnedPaneId(
   const next = [...pinnedPaneIds];
   next.splice(fromIndex, 1);
   next.splice(boundedIndex, 0, persistentId);
+  return next;
+}
+
+function moveListItem<T>(
+  items: T[],
+  fromIndex: number,
+  toIndex: number,
+): T[] {
+  if (fromIndex === -1) return items;
+  const boundedIndex = Math.max(0, Math.min(toIndex, items.length - 1));
+  if (fromIndex === boundedIndex) return items;
+  const next = [...items];
+  const [item] = next.splice(fromIndex, 1);
+  if (item === undefined) return items;
+  next.splice(boundedIndex, 0, item);
   return next;
 }
 
@@ -846,6 +863,30 @@ function reducer(state: State, action: Action): State {
         workspaces,
         paneWorkspaceIds,
         pinnedPaneIds: state.pinnedPaneIds,
+      };
+    }
+
+    case "reorder_workspace": {
+      const fromIndex = state.workspaces.findIndex(
+        (workspace) => workspace.id === action.id,
+      );
+      return {
+        ...state,
+        workspaces: moveListItem(state.workspaces, fromIndex, action.toIndex),
+      };
+    }
+
+    case "reorder_pane": {
+      return {
+        ...state,
+        workspaces: state.workspaces.map((workspace) => {
+          if (workspace.id !== action.workspaceId) return workspace;
+          const fromIndex = workspace.paneIds.indexOf(action.paneId);
+          return {
+            ...workspace,
+            paneIds: moveListItem(workspace.paneIds, fromIndex, action.toIndex),
+          };
+        }),
       };
     }
 
@@ -1267,7 +1308,9 @@ interface ContextValue extends State {
   activateWorkspace: (workspaceId: string) => Promise<void>;
   activatePinnedPane: (persistentId: string) => Promise<void>;
   deleteWorkspace: (workspaceId: string) => Promise<boolean>;
+  reorderWorkspace: (workspaceId: string, toIndex: number) => void;
   movePaneToWorkspace: (paneId: number, workspaceId: string) => void;
+  reorderPane: (paneId: number, workspaceId: string, toIndex: number) => void;
   pinPane: (paneId: number) => void;
   unpinPane: (paneId: number) => void;
   reorderPinnedPane: (persistentId: string, toIndex: number) => void;
@@ -1824,9 +1867,20 @@ export function TerminalStoreProvider({ children }: { children: ReactNode }) {
     return true;
   }, []);
 
+  const reorderWorkspace = useCallback((workspaceId: string, toIndex: number) => {
+    dispatch({ type: "reorder_workspace", id: workspaceId, toIndex });
+  }, []);
+
   const movePaneToWorkspace = useCallback(
     (paneId: number, workspaceId: string) => {
       dispatch({ type: "move_pane", paneId, workspaceId });
+    },
+    [],
+  );
+
+  const reorderPane = useCallback(
+    (paneId: number, workspaceId: string, toIndex: number) => {
+      dispatch({ type: "reorder_pane", paneId, workspaceId, toIndex });
     },
     [],
   );
@@ -1931,7 +1985,9 @@ export function TerminalStoreProvider({ children }: { children: ReactNode }) {
       activateWorkspace,
       activatePinnedPane,
       deleteWorkspace,
+      reorderWorkspace,
       movePaneToWorkspace,
+      reorderPane,
       pinPane,
       unpinPane,
       reorderPinnedPane,
@@ -1951,7 +2007,9 @@ export function TerminalStoreProvider({ children }: { children: ReactNode }) {
       activateWorkspace,
       activatePinnedPane,
       deleteWorkspace,
+      reorderWorkspace,
       movePaneToWorkspace,
+      reorderPane,
       pinPane,
       unpinPane,
       reorderPinnedPane,

@@ -30,8 +30,6 @@ import {
   AlertTriangle,
   BellDot,
   CheckCircle2,
-  ChevronsLeft,
-  ChevronsRight,
   FolderPlus,
   Loader2,
   Pause,
@@ -66,41 +64,8 @@ const HIDDEN_INSET: ChromeInset = {
   left: 0,
 };
 
-const RAIL_MODE_KEY = "terminal.railMode.v1";
-
-type RailMode = "mini" | "expanded";
-
-function readRailMode(): RailMode {
-  try {
-    const raw = window.localStorage.getItem(RAIL_MODE_KEY);
-    if (raw === "mini" || raw === "expanded") return raw;
-  } catch {
-    /* ignore */
-  }
-  return "expanded";
-}
-
-function writeRailMode(mode: RailMode) {
-  try {
-    window.localStorage.setItem(RAIL_MODE_KEY, mode);
-  } catch {
-    /* ignore */
-  }
-}
-
 function paneTitle(title: string | null | undefined): string {
   return title?.trim() || "shell";
-}
-
-function paneMiniLabel(title: string): string {
-  return paneTitle(title).slice(0, 1).toUpperCase();
-}
-
-function workspaceMiniLabel(name: string, index: number): string {
-  const trimmed = name.trim();
-  const numericSuffix = trimmed.match(/(\d+)$/)?.[1];
-  if (numericSuffix) return numericSuffix.slice(-2);
-  return trimmed.slice(0, 1).toUpperCase() || String(index + 1);
 }
 
 function paneDisplayTitle(pane: {
@@ -250,7 +215,9 @@ export function TerminalView() {
     activateWorkspace,
     activatePinnedPane,
     deleteWorkspace,
+    reorderWorkspace,
     movePaneToWorkspace,
+    reorderPane,
     pinPane,
     unpinPane,
     reorderPinnedPane,
@@ -261,7 +228,6 @@ export function TerminalView() {
     cycleWorkspace,
   } = useTerminalStore();
   const { enabled: dfEnabled, toggle: toggleDF } = useDistractionFree();
-  const [railMode, setRailMode] = useState<RailMode>(() => readRailMode());
   const [editingWorkspaceId, setEditingWorkspaceId] = useState<string | null>(
     null,
   );
@@ -270,10 +236,14 @@ export function TerminalView() {
   const [editingPaneName, setEditingPaneName] = useState("");
   const [draggedPaneId, setDraggedPaneId] = useState<number | null>(null);
   const [dropWorkspaceId, setDropWorkspaceId] = useState<string | null>(null);
+  const [draggedWorkspaceId, setDraggedWorkspaceId] = useState<string | null>(
+    null,
+  );
   const [draggedPinnedPersistentId, setDraggedPinnedPersistentId] = useState<
     string | null
   >(null);
   const [dropPinnedIndex, setDropPinnedIndex] = useState<number | null>(null);
+  const [dropPaneIndex, setDropPaneIndex] = useState<number | null>(null);
   const [deletingWorkspaceId, setDeletingWorkspaceId] = useState<
     string | null
   >(null);
@@ -312,24 +282,7 @@ export function TerminalView() {
       ),
     [panesById, workspaces],
   );
-  const terminalAttention = useMemo(
-    () =>
-      summarizeWorkspaceAttention(
-        {
-          id: "__all__",
-          name: "Terminal",
-          paneIds: panes.map((pane) => pane.id),
-          lastActivePaneId: activeId,
-        },
-        panesById,
-      ),
-    [activeId, panes, panesById],
-  );
   const activeWorkspaceHasPane = activeWorkspacePanes.length > 0;
-
-  useEffect(() => {
-    writeRailMode(railMode);
-  }, [railMode]);
 
   useEffect(() => {
     void ensureBootstrapped();
@@ -415,7 +368,6 @@ export function TerminalView() {
     activeWorkspaceHasPane,
     activeWorkspaceId,
     dfEnabled,
-    railMode,
     workspaces.length,
   ]);
 
@@ -455,11 +407,9 @@ export function TerminalView() {
 
   const handleCreateWorkspace = useCallback(() => {
     const created = createWorkspace();
-    if (railMode === "expanded") {
-      setEditingWorkspaceId(created.id);
-      setEditingWorkspaceName(created.name);
-    }
-  }, [createWorkspace, railMode]);
+    setEditingWorkspaceId(created.id);
+    setEditingWorkspaceName(created.name);
+  }, [createWorkspace]);
 
   const openPaneInActiveWorkspace = useCallback(() => {
     const sourcePane =
@@ -467,6 +417,15 @@ export function TerminalView() {
       activeWorkspacePanes[activeWorkspacePanes.length - 1];
     void newPane(sourcePane?.cwdAbsolutePath ?? sourcePane?.launchDirectory ?? null);
   }, [activeId, activeWorkspacePanes, newPane]);
+
+  const activatePinnedByIndex = useCallback(
+    (index: number) => {
+      const target = pinnedPanes[index];
+      if (!target) return;
+      void activatePinnedPane(target.persistentId);
+    },
+    [activatePinnedPane, pinnedPanes],
+  );
 
   useShortcut("mod+[", () => cyclePane(-1), true, { fireInInputs: true });
   useShortcut("mod+]", () => cyclePane(1), true, { fireInInputs: true });
@@ -480,11 +439,6 @@ export function TerminalView() {
   useShortcut("mod+shift+n", handleCreateWorkspace, true, {
     fireInInputs: true,
   });
-  const toggleRail = useCallback(
-    () => setRailMode((current) => (current === "expanded" ? "mini" : "expanded")),
-    [],
-  );
-  useShortcut("mod+shift+e", toggleRail, true, { fireInInputs: true });
 
   // Keep a ref to each native-key-hook handler so the Tauri `listen`
   // useEffect can safely use [] deps (register ONCE on mount). Without
@@ -497,16 +451,16 @@ export function TerminalView() {
     cycleWorkspace,
     openPaneInActiveWorkspace,
     handleCreateWorkspace,
+    activatePinnedByIndex,
     toggleDF,
-    toggleRail,
   });
   nativeHookHandlers.current = {
     cyclePane,
     cycleWorkspace,
     openPaneInActiveWorkspace,
     handleCreateWorkspace,
+    activatePinnedByIndex,
     toggleDF,
-    toggleRail,
   };
 
   useEffect(() => {
@@ -535,8 +489,32 @@ export function TerminalView() {
         listen("terminal:host-key-hook:cmd-shift-n", () => {
           nativeHookHandlers.current.handleCreateWorkspace();
         }),
-        listen("terminal:host-key-hook:cmd-shift-e", () => {
-          nativeHookHandlers.current.toggleRail();
+        listen("terminal:host-key-hook:cmd-1", () => {
+          nativeHookHandlers.current.activatePinnedByIndex(0);
+        }),
+        listen("terminal:host-key-hook:cmd-2", () => {
+          nativeHookHandlers.current.activatePinnedByIndex(1);
+        }),
+        listen("terminal:host-key-hook:cmd-3", () => {
+          nativeHookHandlers.current.activatePinnedByIndex(2);
+        }),
+        listen("terminal:host-key-hook:cmd-4", () => {
+          nativeHookHandlers.current.activatePinnedByIndex(3);
+        }),
+        listen("terminal:host-key-hook:cmd-5", () => {
+          nativeHookHandlers.current.activatePinnedByIndex(4);
+        }),
+        listen("terminal:host-key-hook:cmd-6", () => {
+          nativeHookHandlers.current.activatePinnedByIndex(5);
+        }),
+        listen("terminal:host-key-hook:cmd-7", () => {
+          nativeHookHandlers.current.activatePinnedByIndex(6);
+        }),
+        listen("terminal:host-key-hook:cmd-8", () => {
+          nativeHookHandlers.current.activatePinnedByIndex(7);
+        }),
+        listen("terminal:host-key-hook:cmd-9", () => {
+          nativeHookHandlers.current.activatePinnedByIndex(8);
         }),
       ]);
       if (cancelled) {
@@ -576,6 +554,26 @@ export function TerminalView() {
     reorderPinnedPane(draggedPinnedPersistentId, toIndex);
   };
 
+  const handleWorkspaceDrop = (toIndex: number) => {
+    if (draggedWorkspaceId == null) return;
+    reorderWorkspace(draggedWorkspaceId, toIndex);
+  };
+
+  const handlePaneReorderDrop = (toIndex: number) => {
+    if (draggedPaneId == null || activeWorkspaceId == null) return;
+    reorderPane(draggedPaneId, activeWorkspaceId, toIndex);
+  };
+
+  useShortcut("mod+1", () => activatePinnedByIndex(0), true, { fireInInputs: true });
+  useShortcut("mod+2", () => activatePinnedByIndex(1), true, { fireInInputs: true });
+  useShortcut("mod+3", () => activatePinnedByIndex(2), true, { fireInInputs: true });
+  useShortcut("mod+4", () => activatePinnedByIndex(3), true, { fireInInputs: true });
+  useShortcut("mod+5", () => activatePinnedByIndex(4), true, { fireInInputs: true });
+  useShortcut("mod+6", () => activatePinnedByIndex(5), true, { fireInInputs: true });
+  useShortcut("mod+7", () => activatePinnedByIndex(6), true, { fireInInputs: true });
+  useShortcut("mod+8", () => activatePinnedByIndex(7), true, { fireInInputs: true });
+  useShortcut("mod+9", () => activatePinnedByIndex(8), true, { fireInInputs: true });
+
   return (
     <div
       ref={containerRef}
@@ -585,36 +583,13 @@ export function TerminalView() {
         {workspaces.length > 0 && (
           <aside
             ref={railRef}
-            className={cn(
-              "terminal-chrome terminal-tab-rail",
-              railMode === "mini" ? "is-mini" : "is-expanded",
-            )}
+            className="terminal-chrome terminal-tab-rail is-expanded"
             aria-label="Terminal workspace rail"
           >
-            <div className="terminal-rail__header">
-              {railMode === "expanded" ? (
-                <TerminalAttentionIndicators summary={terminalAttention} />
-              ) : (
-                <span className="sr-only">Terminal workspaces</span>
-              )}
-              <IconRailButton
-                icon={railMode === "expanded" ? ChevronsLeft : ChevronsRight}
-                label={
-                  railMode === "expanded"
-                    ? "Minimize workspace rail"
-                    : "Expand workspace rail"
-                }
-                className="terminal-rail-toggle"
-                onClick={toggleRail}
-              />
-            </div>
-
             <div className="terminal-rail__section">
               {pinnedPanes.length > 0 && (
                 <>
-                  {railMode === "expanded" && (
-                    <span className="terminal-rail__section-title">Pinned</span>
-                  )}
+                  <span className="terminal-rail__section-title">Pinned</span>
                   <div className="terminal-tab-list" role="list">
                     {pinnedPanes.map((pinnedPane, index) => (
                       <button
@@ -662,15 +637,9 @@ export function TerminalView() {
                         )}
                       >
                         <span className="terminal-tab__label">
-                          {railMode === "expanded" ? (
-                            pinnedPane.title
-                          ) : (
-                            paneMiniLabel(pinnedPane.title)
-                          )}
+                          {pinnedPane.title}
                         </span>
-                        {railMode === "expanded" ? (
-                          <Pin className="terminal-pin__icon" />
-                        ) : null}
+                        <Pin className="terminal-pin__icon" />
                       </button>
                     ))}
                   </div>
@@ -678,11 +647,9 @@ export function TerminalView() {
                 </>
               )}
 
-              {railMode === "expanded" && (
-                <span className="terminal-rail__section-title">Workspaces</span>
-              )}
+              <span className="terminal-rail__section-title">Workspaces</span>
               <div className="terminal-workspace-list" role="list">
-                {workspaces.map((workspace, index) => {
+                {workspaces.map((workspace) => {
                   const active = workspace.id === activeWorkspace?.id;
                   const editing = workspace.id === editingWorkspaceId;
                   const attention = workspaceAttentionById.get(workspace.id) ?? null;
@@ -698,16 +665,22 @@ export function TerminalView() {
                         if (!editing) void activateWorkspace(workspace.id);
                       }}
                       onDoubleClick={() => {
-                        if (railMode === "expanded") {
-                          setEditingWorkspaceId(workspace.id);
-                          setEditingWorkspaceName(workspace.name);
-                        }
+                        setEditingWorkspaceId(workspace.id);
+                        setEditingWorkspaceName(workspace.name);
+                      }}
+                      onDragStart={(event) => {
+                        if (editing) return;
+                        event.dataTransfer.effectAllowed = "move";
+                        event.dataTransfer.setData("text/plain", workspace.id);
+                        setDraggedWorkspaceId(workspace.id);
                       }}
                       onDragOver={(event) => {
-                        if (
-                          draggedPaneId == null ||
-                          workspace.id === activeWorkspaceId
-                        ) {
+                        if (draggedWorkspaceId != null) {
+                          event.preventDefault();
+                          setDropWorkspaceId(workspace.id);
+                          return;
+                        }
+                        if (draggedPaneId == null || workspace.id === activeWorkspaceId) {
                           return;
                         }
                         event.preventDefault();
@@ -720,8 +693,19 @@ export function TerminalView() {
                       }}
                       onDrop={(event) => {
                         event.preventDefault();
-                        handlePaneDrop(workspace.id);
+                        if (draggedWorkspaceId != null) {
+                          handleWorkspaceDrop(
+                            workspaces.findIndex((item) => item.id === workspace.id),
+                          );
+                        } else {
+                          handlePaneDrop(workspace.id);
+                        }
+                        setDraggedWorkspaceId(null);
                         setDraggedPaneId(null);
+                        setDropWorkspaceId(null);
+                      }}
+                      onDragEnd={() => {
+                        setDraggedWorkspaceId(null);
                         setDropWorkspaceId(null);
                       }}
                       className={cn(
@@ -753,17 +737,14 @@ export function TerminalView() {
                           />
                         ) : (
                           <span className="terminal-workspace__name">
-                            {railMode === "expanded"
-                              ? workspace.name
-                              : workspaceMiniLabel(workspace.name, index)}
+                            {workspace.name}
                           </span>
                         )}
                       </span>
                       <TerminalAttentionIndicators
                         summary={attention}
-                        mini={railMode === "mini"}
                       />
-                      {railMode === "expanded" && !editing && (
+                      {!editing && (
                         <>
                           <button
                             type="button"
@@ -789,9 +770,7 @@ export function TerminalView() {
             <div className="terminal-rail__separator" />
 
             <div className="terminal-rail__section terminal-rail__section--grow">
-              {railMode === "expanded" && (
-                <span className="terminal-rail__section-title">Panes</span>
-              )}
+              <span className="terminal-rail__section-title">Panes</span>
               {activeWorkspaceHasPane ? (
                 <div
                   className="terminal-tab-list"
@@ -809,7 +788,7 @@ export function TerminalView() {
                         key={pane.id}
                         type="button"
                         role="tab"
-                        draggable={workspaces.length > 1 && !editing}
+                        draggable={activeWorkspacePanes.length > 1 && !editing}
                         aria-selected={pane.id === activeId}
                         aria-label={title}
                         title={cwdTitle}
@@ -817,10 +796,8 @@ export function TerminalView() {
                           if (!editing) focusPane(pane.id);
                         }}
                         onDoubleClick={() => {
-                          if (railMode === "expanded") {
-                            setEditingPaneId(pane.id);
-                            setEditingPaneName(pane.titleOverride ?? "");
-                          }
+                          setEditingPaneId(pane.id);
+                          setEditingPaneName(pane.titleOverride ?? "");
                         }}
                         onDragStart={(event) => {
                           event.dataTransfer.effectAllowed = "move";
@@ -833,10 +810,37 @@ export function TerminalView() {
                         onDragEnd={() => {
                           setDraggedPaneId(null);
                           setDropWorkspaceId(null);
+                          setDropPaneIndex(null);
+                        }}
+                        onDragOver={(event) => {
+                          if (draggedPaneId == null) return;
+                          event.preventDefault();
+                          setDropPaneIndex(
+                            activeWorkspacePanes.findIndex((item) => item.id === pane.id),
+                          );
+                        }}
+                        onDragLeave={() => {
+                          const index = activeWorkspacePanes.findIndex(
+                            (item) => item.id === pane.id,
+                          );
+                          if (dropPaneIndex === index) {
+                            setDropPaneIndex(null);
+                          }
+                        }}
+                        onDrop={(event) => {
+                          event.preventDefault();
+                          handlePaneReorderDrop(
+                            activeWorkspacePanes.findIndex((item) => item.id === pane.id),
+                          );
+                          setDraggedPaneId(null);
+                          setDropPaneIndex(null);
                         }}
                         className={cn(
                           "terminal-tab",
                           pane.id === activeId && "is-active",
+                          dropPaneIndex ===
+                            activeWorkspacePanes.findIndex((item) => item.id === pane.id) &&
+                            "is-drop-target",
                         )}
                       >
                         <span className="terminal-tab__label">
@@ -860,17 +864,14 @@ export function TerminalView() {
                               onClick={(event) => event.stopPropagation()}
                               className="terminal-pane__input"
                             />
-                          ) : railMode === "expanded" ? (
-                            title
                           ) : (
-                            paneMiniLabel(title)
+                            title
                           )}
                         </span>
                         <TerminalAttentionIndicators
                           summary={attention}
-                          mini={railMode === "mini"}
                         />
-                        {railMode === "expanded" && !editing && (
+                        {!editing && (
                           <>
                             {pinnedPanes.some(
                               (pinnedPane) => pinnedPane.paneId === pane.id,
@@ -920,9 +921,7 @@ export function TerminalView() {
                   })}
                 </div>
               ) : (
-                <div className="terminal-rail__empty">
-                  {railMode === "expanded" ? "No panes yet" : "∅"}
-                </div>
+                <div className="terminal-rail__empty">No panes yet</div>
               )}
             </div>
 
@@ -930,16 +929,14 @@ export function TerminalView() {
               <IconRailButton
                 icon={Plus}
                 label="New pane"
-                expandedLabel={railMode === "expanded" ? "New pane" : undefined}
+                expandedLabel="New pane"
                 className="terminal-tab-add"
                 onClick={openPaneInActiveWorkspace}
               />
               <IconRailButton
                 icon={FolderPlus}
                 label="New workspace"
-                expandedLabel={
-                  railMode === "expanded" ? "New workspace" : undefined
-                }
+                expandedLabel="New workspace"
                 className="terminal-tab-add"
                 onClick={handleCreateWorkspace}
               />

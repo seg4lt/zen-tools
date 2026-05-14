@@ -59,25 +59,12 @@ body.terminal-route-active main .terminal-chrome * {
   min-width: var(--term-rail-width-expanded);
 }
 
-.terminal-rail__header,
 .terminal-rail__section,
 .terminal-rail__footer {
   display: flex;
   flex-direction: column;
 }
 
-.terminal-rail__header {
-  gap: 6px;
-}
-
-.terminal-rail__title-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 6px;
-}
-
-.terminal-rail__title,
 .terminal-rail__section-title {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -103,7 +90,6 @@ body.terminal-route-active main .terminal-chrome * {
   background: var(--term-bar-border);
 }
 
-.terminal-rail-toggle,
 .terminal-tab-add {
   display: inline-flex;
   align-items: center;
@@ -117,16 +103,6 @@ body.terminal-route-active main .terminal-chrome * {
   background: transparent;
   padding: 0;
   font: inherit;
-}
-
-.terminal-rail-toggle {
-  align-self: flex-end;
-  width: 30px;
-  min-width: 30px;
-}
-
-.terminal-tab-rail.is-mini .terminal-rail-toggle {
-  align-self: center;
 }
 
 .terminal-workspace-list,
@@ -163,7 +139,6 @@ body.terminal-route-active main .terminal-chrome * {
 
 .terminal-workspace:hover,
 .terminal-tab:hover,
-.terminal-rail-toggle:hover,
 .terminal-tab-add:hover {
   background: var(--term-tab-bg-hover);
   color: var(--term-bar-fg);
