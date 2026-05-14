@@ -45,7 +45,7 @@ const rootRoute = createRootRoute({
     const pathname = useRouterState({ select: (s) => s.location.pathname });
     const dfActive = dfEnabled && pathname.startsWith("/terminal");
     return (
-      <div className="flex h-screen w-screen flex-col overflow-hidden bg-background text-foreground">
+      <div className="app-root-shell flex h-screen w-screen flex-col overflow-hidden bg-background text-foreground">
         {!isPopover && !dfActive && <TitleBar />}
         {!isPopover && !dfActive && <UpdateBanner />}
         <main className="flex min-h-0 flex-1">

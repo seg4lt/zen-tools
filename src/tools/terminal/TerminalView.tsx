@@ -192,8 +192,18 @@ export function TerminalView() {
 
   useEffect(() => {
     document.body.classList.add("terminal-route-active");
+    const prevDocumentBackground = document.documentElement.style.background;
+    const prevBodyBackground = document.body.style.background;
+    document.documentElement.style.background = "transparent";
+    document.body.style.background = "transparent";
     return () => {
       document.body.classList.remove("terminal-route-active");
+      document.documentElement.style.background = prevDocumentBackground;
+      document.body.style.background = prevBodyBackground;
+      void terminalSetChromeInset(HIDDEN_INSET).catch((e) =>
+        console.error("[terminal] set_chrome_inset (hide) failed:", e),
+      );
+      lastInset.current = { top: -1, right: -1, bottom: -1, left: -1 };
     };
   }, []);
 
@@ -201,7 +211,7 @@ export function TerminalView() {
   useEffect(() => {
     const push = () => {
       const inset =
-        activeWorkspaceHasPane && growthRef.current
+        growthRef.current
           ? (() => {
               const rect = growthRef.current.getBoundingClientRect();
               return {
@@ -243,12 +253,8 @@ export function TerminalView() {
       ro.disconnect();
       window.removeEventListener("resize", push);
       pushInsetRef.current = () => {};
-      lastInset.current = { top: -1, right: -1, bottom: -1, left: -1 };
-      void terminalSetChromeInset(HIDDEN_INSET).catch((e) =>
-        console.error("[terminal] set_chrome_inset (hide) failed:", e),
-      );
     };
-  }, [activeWorkspaceHasPane]);
+  }, [workspaces.length]);
 
   useEffect(() => {
     const id = requestAnimationFrame(() => pushInsetRef.current());

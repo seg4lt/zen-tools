@@ -18,9 +18,15 @@
   --term-rail-width-expanded: 220px;
 }
 
+body.terminal-route-active,
+body.terminal-route-active #root,
+body.terminal-route-active .app-root-shell,
+body.terminal-route-active main {
+  background-color: transparent !important;
+}
+
 body.terminal-route-active main {
   pointer-events: none;
-  background-color: transparent !important;
 }
 
 body.terminal-route-active main .terminal-chrome,
