@@ -39,8 +39,9 @@ import {
   Trash2,
   type LucideIcon,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { useShortcut } from "@zen-tools/keyboard";
 import { cn } from "@zen-tools/ui";
 import { useDistractionFree } from "./store/distraction-free";
 import {
@@ -249,6 +250,8 @@ export function TerminalView() {
     focusPane,
     closePane,
     newPane,
+    cyclePane,
+    cycleWorkspace,
   } = useTerminalStore();
   const { enabled: dfEnabled, toggle: toggleDF } = useDistractionFree();
   const [railMode, setRailMode] = useState<RailMode>(() => readRailMode());
@@ -320,22 +323,6 @@ export function TerminalView() {
   useEffect(() => {
     void ensureBootstrapped();
   }, [ensureBootstrapped]);
-
-  useEffect(() => {
-    let unlisten: (() => void) | null = null;
-    let cancelled = false;
-    void (async () => {
-      const u = await listen("terminal:host-key-hook:cmd-opt-f", () => {
-        toggleDF();
-      });
-      if (cancelled) u();
-      else unlisten = u;
-    })();
-    return () => {
-      cancelled = true;
-      unlisten?.();
-    };
-  }, [toggleDF]);
 
   useEffect(() => {
     if (activeId == null) return;
@@ -455,13 +442,93 @@ export function TerminalView() {
     cancelPaneRename();
   };
 
-  const handleCreateWorkspace = () => {
+  const handleCreateWorkspace = useCallback(() => {
     const created = createWorkspace();
     if (railMode === "expanded") {
       setEditingWorkspaceId(created.id);
       setEditingWorkspaceName(created.name);
     }
+  }, [createWorkspace, railMode]);
+
+  const openPaneInActiveWorkspace = useCallback(() => {
+    const sourcePane =
+      activeWorkspacePanes.find((pane) => pane.id === activeId) ??
+      activeWorkspacePanes[activeWorkspacePanes.length - 1];
+    void newPane(sourcePane?.cwdAbsolutePath ?? sourcePane?.launchDirectory ?? null);
+  }, [activeId, activeWorkspacePanes, newPane]);
+
+  useShortcut("mod+[", () => cyclePane(-1), true, { fireInInputs: true });
+  useShortcut("mod+]", () => cyclePane(1), true, { fireInInputs: true });
+  useShortcut("mod+shift+[", () => void cycleWorkspace(-1), true, {
+    fireInInputs: true,
+  });
+  useShortcut("mod+shift+]", () => void cycleWorkspace(1), true, {
+    fireInInputs: true,
+  });
+  useShortcut("mod+n", openPaneInActiveWorkspace, true, { fireInInputs: true });
+  useShortcut("mod+shift+n", handleCreateWorkspace, true, {
+    fireInInputs: true,
+  });
+
+  // Keep a ref to each native-key-hook handler so the Tauri `listen`
+  // useEffect can safely use [] deps (register ONCE on mount). Without
+  // this pattern, every pane switch re-creates `openPaneInActiveWorkspace`
+  // and `handleCreateWorkspace`, which causes the async listener-setup to
+  // unregister and re-register on every state change — leaving a brief gap
+  // where key events are silently dropped.
+  const nativeHookHandlers = useRef({
+    cyclePane,
+    cycleWorkspace,
+    openPaneInActiveWorkspace,
+    handleCreateWorkspace,
+    toggleDF,
+  });
+  nativeHookHandlers.current = {
+    cyclePane,
+    cycleWorkspace,
+    openPaneInActiveWorkspace,
+    handleCreateWorkspace,
+    toggleDF,
   };
+
+  useEffect(() => {
+    let unlisteners: Array<() => void> = [];
+    let cancelled = false;
+    void (async () => {
+      const subs = await Promise.all([
+        listen("terminal:host-key-hook:cmd-opt-f", () => {
+          nativeHookHandlers.current.toggleDF();
+        }),
+        listen("terminal:host-key-hook:cmd-left-bracket", () => {
+          nativeHookHandlers.current.cyclePane(-1);
+        }),
+        listen("terminal:host-key-hook:cmd-right-bracket", () => {
+          nativeHookHandlers.current.cyclePane(1);
+        }),
+        listen("terminal:host-key-hook:cmd-shift-left-bracket", () => {
+          void nativeHookHandlers.current.cycleWorkspace(-1);
+        }),
+        listen("terminal:host-key-hook:cmd-shift-right-bracket", () => {
+          void nativeHookHandlers.current.cycleWorkspace(1);
+        }),
+        listen("terminal:host-key-hook:cmd-n", () => {
+          nativeHookHandlers.current.openPaneInActiveWorkspace();
+        }),
+        listen("terminal:host-key-hook:cmd-shift-n", () => {
+          nativeHookHandlers.current.handleCreateWorkspace();
+        }),
+      ]);
+      if (cancelled) {
+        for (const unlisten of subs) unlisten();
+      } else {
+        unlisteners = subs;
+      }
+    })();
+    return () => {
+      cancelled = true;
+      for (const unlisten of unlisteners) unlisten();
+    };
+  }, []); // empty: register listeners ONCE, read latest handlers via ref
 
   const handleDeleteWorkspace = async (workspaceId: string) => {
     if (deletingWorkspaceId) return;
@@ -531,7 +598,6 @@ export function TerminalView() {
                 {workspaces.map((workspace, index) => {
                   const active = workspace.id === activeWorkspace?.id;
                   const editing = workspace.id === editingWorkspaceId;
-                  const count = workspace.paneIds.length;
                   const attention = workspaceAttentionById.get(workspace.id) ?? null;
                   return (
                     <button
@@ -612,9 +678,6 @@ export function TerminalView() {
                       />
                       {railMode === "expanded" && !editing && (
                         <>
-                          <span className="terminal-workspace__count">
-                            {count}
-                          </span>
                           <button
                             type="button"
                             aria-label={`Delete ${workspace.name}`}
@@ -751,13 +814,7 @@ export function TerminalView() {
                 label="New pane"
                 expandedLabel={railMode === "expanded" ? "New pane" : undefined}
                 className="terminal-tab-add"
-                onClick={() => {
-                  const sourcePane =
-                    activeWorkspacePanes[activeWorkspacePanes.length - 1];
-                  void newPane(
-                    sourcePane?.cwdAbsolutePath ?? sourcePane?.launchDirectory ?? null,
-                  );
-                }}
+                onClick={openPaneInActiveWorkspace}
               />
               <IconRailButton
                 icon={FolderPlus}

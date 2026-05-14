@@ -207,18 +207,6 @@ body.terminal-route-active main .terminal-chrome * {
   text-transform: uppercase;
 }
 
-.terminal-workspace__count {
-  flex: 0 0 auto;
-  min-width: 18px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.08);
-  padding: 0 6px;
-  text-align: center;
-  font-size: 10px;
-  line-height: 18px;
-  color: var(--term-bar-fg-dim);
-}
-
 .terminal-status-indicators {
   display: inline-flex;
   flex: 0 0 auto;

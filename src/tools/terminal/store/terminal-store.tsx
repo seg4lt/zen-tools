@@ -919,8 +919,10 @@ function buildTerminalSession(state: State): TerminalSessionPreferences {
       paneIds: workspace.paneIds
         .map((paneId) => panesById.get(paneId)?.persistentId ?? null)
         .filter((paneId): paneId is string => paneId != null),
+      // Only save lastActivePaneId if the pane is actually in this workspace.
       lastActivePaneId:
-        workspace.lastActivePaneId != null
+        workspace.lastActivePaneId != null &&
+        workspace.paneIds.includes(workspace.lastActivePaneId)
           ? (panesById.get(workspace.lastActivePaneId)?.persistentId ?? null)
           : null,
     })),
@@ -1006,15 +1008,21 @@ function buildRestoredState(
     const paneIds = workspace.paneIds
       .map((persistentId) => {
         const pane = paneByPersistentId.get(persistentId);
-        if (!pane) return null;
+        if (!pane) {
+          console.warn("[terminal] snapshot pane not mapped to runtime id:", persistentId);
+          return null;
+        }
         assignedPersistentIds.add(persistentId);
         return pane.id;
       })
       .filter((paneId): paneId is number => paneId != null);
-    const lastActivePaneId =
-      workspace.lastActivePaneId != null
-        ? (paneByPersistentId.get(workspace.lastActivePaneId)?.id ?? null)
-        : null;
+    const lastActivePaneId = ((): number | null => {
+      if (workspace.lastActivePaneId == null) return null;
+      const pane = paneByPersistentId.get(workspace.lastActivePaneId);
+      if (!pane) return null;
+      // Only use lastActivePaneId if the pane actually belongs to this workspace.
+      return paneIds.includes(pane.id) ? pane.id : null;
+    })();
     return {
       id: workspace.id,
       name: workspace.name,
@@ -1120,6 +1128,10 @@ interface ContextValue extends State {
   focusPane: (paneId: number) => void;
   closePane: (paneId: number) => Promise<void>;
   newPane: (workingDirectory?: string | null) => Promise<void>;
+  /** Cycle to the next (+1) or previous (-1) pane within the active workspace. */
+  cyclePane: (delta: number) => void;
+  /** Cycle to the next (+1) or previous (-1) workspace, restoring its last active pane. */
+  cycleWorkspace: (delta: number) => Promise<void>;
 }
 
 const TerminalStoreContext = createContext<ContextValue | null>(null);
@@ -1562,6 +1574,45 @@ export function TerminalStoreProvider({ children }: { children: ReactNode }) {
     dispatch({ type: "set_active", id: paneId });
   }, []);
 
+  /**
+   * Advance to the next (+1) or previous (-1) pane within the active workspace,
+   * wrapping around. Always reads fresh state so rapid key presses advance
+   * correctly even before React re-renders.
+   */
+  const cyclePane = useCallback((delta: number) => {
+    const { activeId, activeWorkspaceId, workspaces, panes } = stateRef.current;
+    const activeWorkspace =
+      workspaces.find((w) => w.id === activeWorkspaceId) ?? workspaces[0] ?? null;
+    const paneIds = activeWorkspace?.paneIds ?? [];
+    if (paneIds.length === 0) return;
+    const panesById = new Map(panes.map((p) => [p.id, p]));
+    const activePanes = paneIds
+      .map((id) => panesById.get(id))
+      .filter((p): p is TerminalPane => p != null);
+    if (activePanes.length === 0) return;
+    const currentIndex = activePanes.findIndex((p) => p.id === activeId);
+    const baseIndex = currentIndex >= 0 ? currentIndex : 0;
+    const nextIndex = (baseIndex + delta + activePanes.length) % activePanes.length;
+    dispatch({ type: "set_active", id: activePanes[nextIndex]!.id });
+  }, []);
+
+  /**
+   * Switch to the next (+1) or previous (-1) workspace, wrapping around.
+   * The workspace's last active pane is restored automatically via
+   * `activateWorkspace → chooseWorkspacePane`. Always reads fresh state.
+   */
+  const cycleWorkspace = useCallback(
+    async (delta: number) => {
+      const { workspaces, activeWorkspaceId } = stateRef.current;
+      if (workspaces.length === 0) return;
+      const currentIndex = workspaces.findIndex((w) => w.id === activeWorkspaceId);
+      const baseIndex = currentIndex >= 0 ? currentIndex : 0;
+      const nextIndex = (baseIndex + delta + workspaces.length) % workspaces.length;
+      await activateWorkspace(workspaces[nextIndex]!.id);
+    },
+    [activateWorkspace],
+  );
+
   const closePane = useCallback(async (paneId: number) => {
     try {
       await terminalCloseTab(paneId);
@@ -1604,6 +1655,8 @@ export function TerminalStoreProvider({ children }: { children: ReactNode }) {
       focusPane,
       closePane,
       newPane,
+      cyclePane,
+      cycleWorkspace,
     }),
     [
       state,
@@ -1617,6 +1670,8 @@ export function TerminalStoreProvider({ children }: { children: ReactNode }) {
       focusPane,
       closePane,
       newPane,
+      cyclePane,
+      cycleWorkspace,
     ],
   );
 

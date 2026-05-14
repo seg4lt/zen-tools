@@ -2089,9 +2089,10 @@ static id g_event_monitor = nil;
 // (cmd+opt+f), which the host hides its TitleBar in response to.
 //
 // String values are stable identifiers chosen by this module
-// (currently just "cmd-opt-f"). Hosts that don't care can ignore
-// the callback entirely; the chord is consumed regardless so it
-// doesn't reach ghostty as a stray keystroke.
+// (for example "cmd-opt-f", "cmd-left-bracket", or "cmd-shift-n").
+// Hosts that don't care can ignore the callback entirely; the chord
+// is consumed regardless so it doesn't reach ghostty as a stray
+// keystroke.
 typedef void (*GhosttyHostKeyHookFn)(const char *chord);
 static GhosttyHostKeyHookFn g_host_key_hook_fn = NULL;
 
@@ -2129,8 +2130,7 @@ void GhosttyInstallEventMonitor(ghostty_surface_t surface) {
 
             // Embedding-host passthrough chords. Checked BEFORE the
             // ghostty forward so they never reach ghostty as
-            // unhandled keystrokes. Chord set is intentionally tiny
-            // (one entry today); each new chord is one branch here.
+            // unhandled keystrokes.
             //
             // cmd+opt+f → host distraction-free toggle. Match
             // exactly cmd+opt (no shift / ctrl) so cmd+opt+shift+f
@@ -2164,6 +2164,45 @@ void GhosttyInstallEventMonitor(ghostty_surface_t surface) {
             NSResponder *fr = event.window.firstResponder;
             if (![fr isKindOfClass:[GhosttyHostView class]]) {
                 return event; // pass through to AppKit / WKWebView
+            }
+
+            if (devMods == NSEventModifierFlagCommand) {
+                if ([chars isEqualToString:@"["]) {
+                    if (g_host_key_hook_fn) g_host_key_hook_fn("cmd-left-bracket");
+                    return nil;
+                }
+                if ([chars isEqualToString:@"]"]) {
+                    if (g_host_key_hook_fn) g_host_key_hook_fn("cmd-right-bracket");
+                    return nil;
+                }
+                if ([chars isEqualToString:@"n"]) {
+                    if (g_host_key_hook_fn) g_host_key_hook_fn("cmd-n");
+                    return nil;
+                }
+                if (chars.length == 1) {
+                    unichar digit = [chars characterAtIndex:0];
+                    if (digit >= '1' && digit <= '9') {
+                        return nil;
+                    }
+                }
+            }
+
+            if (devMods == (NSEventModifierFlagCommand | NSEventModifierFlagShift)) {
+                // charactersIgnoringModifiers keeps Shift applied on macOS, so
+                // Shift+[ produces "{" rather than "[". Check both to be safe
+                // across macOS versions and keyboard layouts.
+                if ([chars isEqualToString:@"["] || [chars isEqualToString:@"{"]) {
+                    if (g_host_key_hook_fn) g_host_key_hook_fn("cmd-shift-left-bracket");
+                    return nil;
+                }
+                if ([chars isEqualToString:@"]"] || [chars isEqualToString:@"}"]) {
+                    if (g_host_key_hook_fn) g_host_key_hook_fn("cmd-shift-right-bracket");
+                    return nil;
+                }
+                if ([chars isEqualToString:@"n"]) {
+                    if (g_host_key_hook_fn) g_host_key_hook_fn("cmd-shift-n");
+                    return nil;
+                }
             }
 
             // Look up the CURRENTLY focused pane (not the cached one

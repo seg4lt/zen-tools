@@ -39,10 +39,11 @@ extern "C" {
         fn_ptr: Option<extern "C" fn(kind: i32, arg: i64)>,
     );
 
-    // Embedding-host passthrough chord (currently just cmd+opt+f for
-    // distraction-free toggle). The plugin's NSEvent monitor consumes
-    // the chord and fires this callback with a stable identifier
-    // string. See `GhosttyHostView.h::GhosttyRegisterHostKeyHookCallback`.
+    // Embedding-host passthrough chords (for example cmd+opt+f,
+    // cmd+[ / cmd+], cmd+shift+[ / cmd+shift+], cmd+n, cmd+shift+n).
+    // The plugin's NSEvent monitor consumes the chord and fires this
+    // callback with a stable identifier string. See
+    // `GhosttyHostView.h::GhosttyRegisterHostKeyHookCallback`.
     fn GhosttyRegisterHostKeyHookCallback(
         fn_ptr: Option<extern "C" fn(chord: *const c_char)>,
     );
@@ -310,8 +311,8 @@ pub unsafe fn register_tab_action_callback(
 
 /// Install the embedding-host key-hook callback. Fires when the
 /// NSEvent monitor sees a chord that the host wants to handle
-/// instead of forwarding to ghostty (currently just `cmd+opt+f`,
-/// emitted as the C string `"cmd-opt-f"`). Runs on the main thread.
+/// instead of forwarding to ghostty (for example `cmd+opt+f`,
+/// `cmd+[`, `cmd+shift+]`, or `cmd+shift+n`). Runs on the main thread.
 pub unsafe fn register_host_key_hook_callback(
     fn_ptr: extern "C" fn(chord: *const c_char),
 ) {

@@ -992,12 +992,12 @@ extern "C" fn tab_action_trampoline(kind: i32, arg: i64) {
 /// (see `GhosttyHostView.m::g_host_key_hook_fn`) when it sees a chord
 /// the host wants to handle instead of forwarding to ghostty.
 ///
-/// Currently the only chord is `cmd-opt-f`, used by zen-tools to
-/// toggle distraction-free mode (hides the TitleBar so the terminal
-/// fills the whole window). The Tauri event name is namespaced under
-/// `terminal:host-key-hook:` so future chords get a stable channel
-/// each (`terminal:host-key-hook:cmd-opt-f`,
-/// `terminal:host-key-hook:cmd-shift-x`, …) without overloading
+/// Zen Tools uses this for terminal-scoped native shortcuts such as
+/// `cmd-opt-f`, `cmd-left-bracket`, `cmd-shift-right-bracket`, and
+/// `cmd-shift-n`. The Tauri event name is namespaced under
+/// `terminal:host-key-hook:` so each chord gets a stable channel
+/// (`terminal:host-key-hook:cmd-opt-f`,
+/// `terminal:host-key-hook:cmd-shift-n`, …) without overloading
 /// payload parsing.
 extern "C" fn host_key_hook_trampoline(chord: *const c_char) {
     let app = match APP_HANDLE_FOR_TABS.get() {

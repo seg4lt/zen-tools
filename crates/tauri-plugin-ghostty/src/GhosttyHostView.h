@@ -39,11 +39,10 @@ void GhosttyRemoveEventMonitor(void);
 /// Register a callback that fires when the NSEvent monitor sees a
 /// chord that the embedding host (e.g. zen-tools) wants to handle
 /// instead of forwarding to ghostty. The callback is called with a
-/// stable string identifier for the chord (currently the only one
-/// emitted is "cmd-opt-f", reserved for the host's distraction-free
-/// toggle). Hosts that don't care can leave this unset; the chord is
-/// consumed regardless so it never reaches ghostty as an unhandled
-/// keystroke.
+/// stable string identifier for the chord (for example `cmd-opt-f`,
+/// `cmd-left-bracket`, or `cmd-shift-n`). Hosts that don't care can
+/// leave this unset; the chord is consumed regardless so it never
+/// reaches ghostty as an unhandled keystroke.
 typedef void (*GhosttyHostKeyHookFn)(const char *chord);
 void GhosttyRegisterHostKeyHookCallback(GhosttyHostKeyHookFn fn);
 
