@@ -30,6 +30,9 @@ static void clear_host_view_if_matches(void *expected);
 static void emit_terminal_interaction_event(ghostty_surface_t surface);
 
 @class GhosttyHostView;
+@interface GhosttySplitView : NSSplitView
+@end
+
 // Walk the NSView tree under `root` and append every GhosttyHostView
 // descendant to `out`. Used by the resize / fullscreen handler to
 // re-sync every live ghostty surface in the tree, not just self.
@@ -919,6 +922,24 @@ static void send_mouse_pos(ghostty_surface_t surface, NSView *view, NSEvent *eve
 
 @end
 
+static const void * const kSuppressDividerKey = &kSuppressDividerKey;
+
+@implementation GhosttySplitView
+
+- (CGFloat)dividerThickness {
+    NSNumber *suppressed = objc_getAssociatedObject(self, kSuppressDividerKey);
+    if (suppressed.boolValue) return 0;
+    return [super dividerThickness];
+}
+
+- (void)drawDividerInRect:(NSRect)rect {
+    NSNumber *suppressed = objc_getAssociatedObject(self, kSuppressDividerKey);
+    if (suppressed.boolValue) return;
+    [super drawDividerInRect:rect];
+}
+
+@end
+
 // ---- C entry points -------------------------------------------------------
 
 NSView* GhosttyHostViewCreate(NSRect frame) {
@@ -1009,6 +1030,13 @@ static BOOL is_split_created(NSView *v) {
     return n ? n.boolValue : NO;
 }
 
+// Per-tab zoom bookkeeping. Stored on the tab-root view (the direct
+// child of `g_tab_container`) so each tab can independently remember
+// whether one of its split panes is temporarily expanded to fill the
+// whole tab.
+static const void * const kZoomedHostKey = &kZoomedHostKey;
+static const void * const kZoomSnapshotKey = &kZoomSnapshotKey;
+
 // Forward decl — `collect_hosts` is defined further down with the
 // rest of the split-navigation helpers, but `GhosttyTabClose` (just
 // below) needs it now to walk the closing subtree.
@@ -1016,6 +1044,12 @@ static void collect_hosts(NSView *root, NSMutableArray<GhosttyHostView *> *out);
 
 // Forward declaration — defined in the split-navigation section below.
 static GhosttyHostView *find_first_host_descendant(NSView *root);
+static NSView *tab_root_for_descendant(NSView *view);
+static BOOL tab_has_multiple_panes(NSView *tab_root);
+static void restore_tab_zoom(NSView *tab_root);
+static void clear_tab_zoom_for_descendant(NSView *view);
+static BOOL toggle_tab_zoom_for_host(GhosttyHostView *target);
+static void reapply_tab_zoom_if_needed(NSView *tab_root);
 
 // Ghostty's occlusion API takes a "visible" boolean, not "occluded".
 // Keep the tab-root hidden state and every descendant surface's render
@@ -1163,6 +1197,22 @@ static NSView *root_for_tab_id(int tab_id) {
     return nil;
 }
 
+static NSView *tab_root_for_descendant(NSView *view) {
+    if (!g_tab_container || !view) return nil;
+    NSView *walker = view;
+    while (walker && walker.superview != g_tab_container) {
+        walker = walker.superview;
+    }
+    return walker;
+}
+
+static BOOL tab_has_multiple_panes(NSView *tab_root) {
+    if (!tab_root) return NO;
+    NSMutableArray<GhosttyHostView *> *hosts = [NSMutableArray array];
+    collect_hosts(tab_root, hosts);
+    return hosts.count > 1;
+}
+
 // Compute the tab-container frame given the host contentView bounds and
 // the current insets.
 static NSRect tab_container_frame_in(NSView *contentView) {
@@ -1246,6 +1296,9 @@ static void resync_chrome_and_surfaces(GhosttyHostView *fallback) {
     // Walk the tree and re-sync every live host view (includes
     // split-spawned views the Rust side doesn't track).
     NSMutableArray<GhosttyHostView *> *all = [NSMutableArray array];
+    for (NSView *tab_root in g_tab_container.subviews) {
+        reapply_tab_zoom_if_needed(tab_root);
+    }
     collect_hosts(g_tab_container, all);
     for (GhosttyHostView *host in all) {
         ghostty_surface_t s = [host surface];
@@ -1462,6 +1515,171 @@ static void collect_hosts(NSView *root, NSMutableArray<GhosttyHostView *> *out) 
     for (NSView *sub in root.subviews) collect_hosts(sub, out);
 }
 
+static void collect_splits(NSView *root, NSMutableArray<NSSplitView *> *out) {
+    if ([root isKindOfClass:[NSSplitView class]]) {
+        [out addObject:(NSSplitView *)root];
+    }
+    for (NSView *sub in root.subviews) collect_splits(sub, out);
+}
+
+static void sync_surface_visibility_from_hidden(NSView *root, BOOL visible) {
+    if (!root) return;
+    BOOL selfVisible = visible && !root.hidden;
+    if ([root isKindOfClass:[GhosttyHostView class]]) {
+        ghostty_surface_t s = [(GhosttyHostView *)root surface];
+        if (s) ghostty_surface_set_occlusion(s, selfVisible);
+    }
+    for (NSView *sub in root.subviews) {
+        sync_surface_visibility_from_hidden(sub, selfVisible);
+    }
+}
+
+static void set_subtree_visible(NSView *root, BOOL visible) {
+    if (!root) return;
+    NSMutableArray<GhosttyHostView *> *hosts = [NSMutableArray array];
+    collect_hosts(root, hosts);
+    for (GhosttyHostView *host in hosts) {
+        ghostty_surface_t s = [host surface];
+        if (s) ghostty_surface_set_occlusion(s, visible);
+    }
+    root.hidden = !visible;
+}
+
+static NSArray<NSDictionary *> *snapshot_subtree_layout(NSView *root) {
+    if (!root) return @[];
+    NSMutableArray<NSDictionary *> *out = [NSMutableArray array];
+    NSMutableArray<NSView *> *stack = [NSMutableArray arrayWithObject:root];
+    while (stack.count > 0) {
+        NSView *view = stack.lastObject;
+        [stack removeLastObject];
+        NSMutableDictionary *entry = [@{
+            @"view": [NSValue valueWithNonretainedObject:view],
+            @"hidden": @(view.hidden),
+        } mutableCopy];
+        if ([view isKindOfClass:[NSSplitView class]]) {
+            NSSplitView *split = (NSSplitView *)view;
+            CGFloat axis = split.isVertical ? split.bounds.size.width
+                                            : split.bounds.size.height;
+            NSMutableArray<NSNumber *> *ratios = [NSMutableArray array];
+            for (NSInteger i = 0; i < (NSInteger)split.arrangedSubviews.count - 1; i++) {
+                NSView *child = split.arrangedSubviews[i];
+                CGFloat dividerPosition = split.isVertical
+                    ? NSMaxX(child.frame)
+                    : NSMaxY(child.frame);
+                CGFloat ratio = axis > 0 ? dividerPosition / axis : 0;
+                [ratios addObject:@(ratio)];
+            }
+            entry[@"dividerRatios"] = ratios;
+        }
+        [out addObject:entry];
+        for (NSView *sub in view.subviews) [stack addObject:sub];
+    }
+    return out;
+}
+
+static void restore_subtree_layout(NSArray<NSDictionary *> *snapshot) {
+    NSMutableArray<NSDictionary *> *splitEntries = [NSMutableArray array];
+    for (NSDictionary *entry in snapshot) {
+        NSView *view = [entry[@"view"] nonretainedObjectValue];
+        if (!view) continue;
+        view.hidden = [entry[@"hidden"] boolValue];
+        if ([view isKindOfClass:[NSSplitView class]]) {
+            objc_setAssociatedObject(view, kSuppressDividerKey, @NO,
+                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            [view setNeedsDisplay:YES];
+        }
+        if (entry[@"dividerRatios"]) [splitEntries addObject:entry];
+    }
+    for (NSDictionary *entry in splitEntries) {
+        NSSplitView *split = [entry[@"view"] nonretainedObjectValue];
+        if (![split isKindOfClass:[NSSplitView class]]) continue;
+        [split adjustSubviews];
+        CGFloat axis = split.isVertical ? split.bounds.size.width
+                                        : split.bounds.size.height;
+        NSArray<NSNumber *> *ratios = entry[@"dividerRatios"];
+        for (NSInteger i = 0; i < (NSInteger)ratios.count; i++) {
+            [split setPosition:axis * ratios[i].doubleValue ofDividerAtIndex:i];
+        }
+    }
+}
+
+static void apply_zoom_layout(NSView *tab_root, GhosttyHostView *target) {
+    if (!tab_root || !target) return;
+    NSMutableArray<NSSplitView *> *allSplits = [NSMutableArray array];
+    collect_splits(tab_root, allSplits);
+    for (NSSplitView *split in allSplits) {
+        objc_setAssociatedObject(split, kSuppressDividerKey, @NO,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        [split setNeedsDisplay:YES];
+    }
+    NSView *current = target;
+    while (current && current != tab_root) {
+        NSView *parent = current.superview;
+        if (!parent) break;
+        if ([parent isKindOfClass:[NSSplitView class]]) {
+            objc_setAssociatedObject(parent, kSuppressDividerKey, @YES,
+                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            [parent setNeedsDisplay:YES];
+            for (NSView *child in parent.subviews) {
+                set_subtree_visible(child, child == current);
+            }
+            current.frame = parent.bounds;
+        }
+        current = parent;
+    }
+}
+
+static void restore_tab_zoom(NSView *tab_root) {
+    if (!tab_root) return;
+    BOOL tab_was_visible = !tab_root.hidden;
+    NSArray<NSDictionary *> *snapshot = objc_getAssociatedObject(tab_root, kZoomSnapshotKey);
+    if (snapshot) restore_subtree_layout(snapshot);
+    objc_setAssociatedObject(tab_root, kZoomedHostKey, nil, OBJC_ASSOCIATION_ASSIGN);
+    objc_setAssociatedObject(tab_root, kZoomSnapshotKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    tab_root.hidden = !tab_was_visible;
+    sync_surface_visibility_from_hidden(tab_root, tab_was_visible);
+}
+
+static void clear_tab_zoom_for_descendant(NSView *view) {
+    NSView *tab_root = tab_root_for_descendant(view);
+    GhosttyHostView *zoomed = tab_root
+        ? objc_getAssociatedObject(tab_root, kZoomedHostKey)
+        : nil;
+    if (zoomed) restore_tab_zoom(tab_root);
+}
+
+static BOOL toggle_tab_zoom_for_host(GhosttyHostView *target) {
+    if (!target) return NO;
+    NSView *tab_root = tab_root_for_descendant(target);
+    if (!tab_root || !tab_has_multiple_panes(tab_root)) return NO;
+
+    GhosttyHostView *zoomed = objc_getAssociatedObject(tab_root, kZoomedHostKey);
+    if (zoomed == target) {
+        restore_tab_zoom(tab_root);
+        return YES;
+    }
+
+    if (zoomed) restore_tab_zoom(tab_root);
+    objc_setAssociatedObject(tab_root, kZoomSnapshotKey,
+                             snapshot_subtree_layout(tab_root),
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(tab_root, kZoomedHostKey, target, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    apply_zoom_layout(tab_root, target);
+    [target.window makeFirstResponder:target];
+    return YES;
+}
+
+static void reapply_tab_zoom_if_needed(NSView *tab_root) {
+    if (!tab_root) return;
+    GhosttyHostView *zoomed = objc_getAssociatedObject(tab_root, kZoomedHostKey);
+    if (!zoomed) return;
+    if (![zoomed isKindOfClass:[GhosttyHostView class]]) {
+        restore_tab_zoom(tab_root);
+        return;
+    }
+    apply_zoom_layout(tab_root, zoomed);
+}
+
 // Find the neighbour of `current` in the requested direction.
 static GhosttyHostView *neighbour_pane(GhosttyHostView *current,
                                        ghostty_action_goto_split_e dir) {
@@ -1540,6 +1758,7 @@ static GhosttyHostView *neighbour_pane(GhosttyHostView *current,
 static void perform_goto_split(ghostty_action_goto_split_e dir) {
     NSView *focused = (__bridge NSView *)atomic_load(&g_host_view);
     if (![focused isKindOfClass:[GhosttyHostView class]]) return;
+    clear_tab_zoom_for_descendant(focused);
     GhosttyHostView *target = neighbour_pane((GhosttyHostView *)focused, dir);
     if (target) {
         [target.window makeFirstResponder:target];
@@ -1578,6 +1797,7 @@ static void perform_new_split(NSView *focused,
         NSLog(@"[ghostty] new_split: focused not a host view, ignoring");
         return;
     }
+    clear_tab_zoom_for_descendant(focused);
     GhosttyHostView *focusedHost = (GhosttyHostView *)focused;
     ghostty_surface_t focusedSurface = focusedHost.surface;
     if (!focusedSurface) {
@@ -1641,7 +1861,7 @@ static void perform_new_split(NSView *focused,
     } else {
         // Wrap: replace focused in its parent with a new split view
         // containing focused as the only pane, then we'll add newHost.
-        targetSplit = [[NSSplitView alloc] initWithFrame:focused.frame];
+        targetSplit = [[GhosttySplitView alloc] initWithFrame:focused.frame];
         targetSplit.vertical = wantHorizontal;
         targetSplit.dividerStyle = NSSplitViewDividerStyleThin;
         targetSplit.autoresizingMask = focused.autoresizingMask;
@@ -1912,6 +2132,11 @@ bool GhosttyHandleAction(void *app, void *target, void *action) {
             perform_goto_split(act->action.goto_split);
             return true;
         }
+        case GHOSTTY_ACTION_TOGGLE_SPLIT_ZOOM: {
+            NSView *focused = (__bridge NSView *)atomic_load(&g_host_view);
+            if (![focused isKindOfClass:[GhosttyHostView class]]) return false;
+            return toggle_tab_zoom_for_host((GhosttyHostView *)focused);
+        }
         case GHOSTTY_ACTION_NEW_TAB: {
             NSLog(@"[ghostty] action: NEW_TAB");
             dispatch_tab_action(TAB_ACTION_NEW, 0);
@@ -2001,6 +2226,7 @@ static void perform_close_focused_pane(void) {
         return;
     }
     GhosttyHostView *pane = (GhosttyHostView *)focused;
+    clear_tab_zoom_for_descendant(pane);
     NSView *parent = pane.superview;
 
     // Case 1: parent is an NSSplitView with siblings.
