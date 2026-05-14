@@ -32,6 +32,7 @@ import {
   onTabFocused,
   onTabPwdChanged,
   onTabTitleChanged,
+  onTerminalStatus,
   terminalCloseTab,
   terminalListTabs,
   terminalNew,
@@ -39,7 +40,26 @@ import {
   terminalSetCloseWindowOnLastTab,
   terminalSetColorScheme,
   type PaneInfo,
+  type TerminalStatusEvent,
 } from "../lib/tauri";
+
+export interface TerminalPaneStatus {
+  loading: boolean;
+  progress: number | null;
+  progressState: "set" | "error" | "indeterminate" | "pause" | null;
+  unreadCount: number;
+  lastNoticeKind:
+    | "progress-error"
+    | "bell"
+    | "command-finished"
+    | "desktop-notification"
+    | "child-exited"
+    | "renderer-health"
+    | null;
+  lastNoticeMessage: string | null;
+  lastEventAt: number | null;
+  rendererHealthy: boolean | null;
+}
 
 export interface TerminalPane {
   id: number;
@@ -49,6 +69,7 @@ export interface TerminalPane {
   titleOverride: string | null;
   cwdAbsolutePath: string | null;
   launchDirectory: string | null;
+  status: TerminalPaneStatus;
 }
 
 export interface TerminalWorkspace {
@@ -93,6 +114,7 @@ type Action =
       launchDirectory?: string | null;
     }
   | { type: "rename_pane"; id: number; titleOverride: string }
+  | { type: "apply_status_event"; event: TerminalStatusEvent; receivedAt: number }
   | { type: "create_workspace"; id: string; name: string; activate: boolean }
   | { type: "rename_workspace"; id: string; name: string }
   | { type: "activate_workspace"; id: string; paneId: number | null }
@@ -136,6 +158,201 @@ function workspaceForCreate(id: string, name: string): TerminalWorkspace {
   };
 }
 
+function emptyPaneStatus(): TerminalPaneStatus {
+  return {
+    loading: false,
+    progress: null,
+    progressState: null,
+    unreadCount: 0,
+    lastNoticeKind: null,
+    lastNoticeMessage: null,
+    lastEventAt: null,
+    rendererHealthy: null,
+  };
+}
+
+function clearPaneAttention(status: TerminalPaneStatus): TerminalPaneStatus {
+  if (
+    status.unreadCount === 0 &&
+    status.lastNoticeKind == null &&
+    status.lastNoticeMessage == null
+  ) {
+    return status;
+  }
+  return {
+    ...status,
+    unreadCount: 0,
+    lastNoticeKind: null,
+    lastNoticeMessage: null,
+  };
+}
+
+function formatCommandFinishedNotice(
+  exitCode: number | null,
+  durationNs: number,
+): string {
+  const seconds = durationNs > 0 ? durationNs / 1_000_000_000 : 0;
+  const durationLabel =
+    seconds >= 1 ? `${seconds.toFixed(seconds >= 10 ? 0 : 1)}s` : null;
+  if (exitCode == null) {
+    return durationLabel ? `Command finished in ${durationLabel}` : "Command finished";
+  }
+  if (exitCode === 0) {
+    return durationLabel
+      ? `Command completed in ${durationLabel}`
+      : "Command completed";
+  }
+  return durationLabel
+    ? `Command failed (${exitCode}) after ${durationLabel}`
+    : `Command failed (${exitCode})`;
+}
+
+function formatDesktopNotificationNotice(
+  title: string | null,
+  body: string | null,
+): string {
+  return title?.trim() || body?.trim() || "Terminal notification";
+}
+
+function formatChildExitedNotice(exitCode: number, runtimeMs: number): string {
+  const seconds = runtimeMs > 0 ? runtimeMs / 1_000 : 0;
+  const durationLabel =
+    seconds >= 1 ? `${seconds.toFixed(seconds >= 10 ? 0 : 1)}s` : null;
+  return durationLabel
+    ? `Child exited (${exitCode}) after ${durationLabel}`
+    : `Child exited (${exitCode})`;
+}
+
+function applyStatusEventToPane(
+  pane: TerminalPane,
+  event: TerminalStatusEvent,
+  receivedAt: number,
+): TerminalPane {
+  const status = pane.status;
+  switch (event.kind) {
+    case "progress": {
+      if (event.state === "remove") {
+        return {
+          ...pane,
+          status: {
+            ...status,
+            loading: false,
+            progress: null,
+            progressState: null,
+            lastEventAt: receivedAt,
+          },
+        };
+      }
+      if (event.state === "error") {
+        return {
+          ...pane,
+          status: {
+            ...status,
+            loading: false,
+            progress: event.progress,
+            progressState: "error",
+            unreadCount: status.unreadCount + 1,
+            lastNoticeKind: "progress-error",
+            lastNoticeMessage: "Terminal reported progress error",
+            lastEventAt: receivedAt,
+          },
+        };
+      }
+      return {
+        ...pane,
+        status: {
+          ...status,
+          loading: event.state === "set" || event.state === "indeterminate",
+          progress: event.progress,
+          progressState: event.state,
+          lastEventAt: receivedAt,
+        },
+      };
+    }
+    case "command-finished":
+      return {
+        ...pane,
+        status: {
+          ...status,
+          loading: false,
+          progress: null,
+          progressState: null,
+          unreadCount: status.unreadCount + 1,
+          lastNoticeKind: "command-finished",
+          lastNoticeMessage: formatCommandFinishedNotice(
+            event.exit_code,
+            event.duration_ns,
+          ),
+          lastEventAt: receivedAt,
+        },
+      };
+    case "bell":
+      return {
+        ...pane,
+        status: {
+          ...status,
+          unreadCount: status.unreadCount + 1,
+          lastNoticeKind: "bell",
+          lastNoticeMessage: "Terminal bell",
+          lastEventAt: receivedAt,
+        },
+      };
+    case "interaction":
+      return {
+        ...pane,
+        status: {
+          ...clearPaneAttention(status),
+          lastEventAt: receivedAt,
+        },
+      };
+    case "desktop-notification":
+      return {
+        ...pane,
+        status: {
+          ...status,
+          unreadCount: status.unreadCount + 1,
+          lastNoticeKind: "desktop-notification",
+          lastNoticeMessage: formatDesktopNotificationNotice(
+            event.title,
+            event.body,
+          ),
+          lastEventAt: receivedAt,
+        },
+      };
+    case "child-exited":
+      return {
+        ...pane,
+        status: {
+          ...status,
+          loading: false,
+          progress: null,
+          progressState: null,
+          unreadCount: status.unreadCount + 1,
+          lastNoticeKind: "child-exited",
+          lastNoticeMessage: formatChildExitedNotice(
+            event.exit_code,
+            event.runtime_ms,
+          ),
+          lastEventAt: receivedAt,
+        },
+      };
+    case "renderer-health":
+      return {
+        ...pane,
+        status: {
+          ...status,
+          rendererHealthy: event.healthy,
+          unreadCount: event.healthy ? status.unreadCount : status.unreadCount + 1,
+          lastNoticeKind: event.healthy ? status.lastNoticeKind : "renderer-health",
+          lastNoticeMessage: event.healthy
+            ? status.lastNoticeMessage
+            : "Terminal renderer is unhealthy",
+          lastEventAt: receivedAt,
+        },
+      };
+  }
+}
+
 function paneFromInfo(
   pane: PaneInfo,
   options?: {
@@ -155,6 +372,7 @@ function paneFromInfo(
       options?.cwdAbsolutePath ?? pane.cwd_absolute_path ?? null,
     launchDirectory:
       options?.launchDirectory ?? pane.launch_directory ?? null,
+    status: emptyPaneStatus(),
   };
 }
 
@@ -257,15 +475,16 @@ function reducer(state: State, action: Action): State {
       if (state.panes.some((pane) => pane.id === action.pane.id)) {
         const panes = state.panes.map((pane) =>
           pane.id === action.pane.id
-            ? {
-                ...pane,
-                ghosttyTitle: action.pane.ghosttyTitle,
-                cwdAbsolutePath:
-                  action.pane.cwdAbsolutePath ?? pane.cwdAbsolutePath,
-                launchDirectory:
-                  action.pane.launchDirectory ?? pane.launchDirectory,
-                active: action.pane.active,
-              }
+              ? {
+                  ...pane,
+                  ghosttyTitle: action.pane.ghosttyTitle,
+                  cwdAbsolutePath:
+                    action.pane.cwdAbsolutePath ?? pane.cwdAbsolutePath,
+                  launchDirectory:
+                    action.pane.launchDirectory ?? pane.launchDirectory,
+                  status: pane.status,
+                  active: action.pane.active,
+                }
             : action.pane.active
               ? { ...pane, active: false }
               : pane,
@@ -389,7 +608,11 @@ function reducer(state: State, action: Action): State {
 
       return {
         ...state,
-        panes: setPaneActiveFlags(state.panes, action.id),
+        panes: setPaneActiveFlags(state.panes, action.id).map((pane) =>
+          pane.id === action.id
+            ? { ...pane, status: clearPaneAttention(pane.status) }
+            : pane,
+        ),
         activeId: action.id,
         activeWorkspaceId,
         workspaces,
@@ -436,6 +659,16 @@ function reducer(state: State, action: Action): State {
         ),
       };
 
+    case "apply_status_event":
+      return {
+        ...state,
+        panes: state.panes.map((pane) =>
+          pane.id === action.event.id
+            ? applyStatusEventToPane(pane, action.event, action.receivedAt)
+            : pane,
+        ),
+      };
+
     case "create_workspace": {
       const workspaces = [
         ...state.workspaces,
@@ -476,7 +709,11 @@ function reducer(state: State, action: Action): State {
         ...state,
         activeWorkspaceId: action.id,
         activeId: action.paneId,
-        panes: setPaneActiveFlags(state.panes, action.paneId),
+        panes: setPaneActiveFlags(state.panes, action.paneId).map((pane) =>
+          pane.id === action.paneId
+            ? { ...pane, status: clearPaneAttention(pane.status) }
+            : pane,
+        ),
         workspaces,
       };
     }
@@ -1012,6 +1249,14 @@ export function TerminalStoreProvider({ children }: { children: ReactNode }) {
             cwdAbsolutePath: payload.cwd_absolute_path ?? null,
             launchDirectory:
               payload.launch_directory ?? payload.cwd_absolute_path ?? null,
+          });
+        }),
+        onTerminalStatus((event) => {
+          if (shouldIgnoreLifecycleEvent()) return;
+          dispatch({
+            type: "apply_status_event",
+            event,
+            receivedAt: Date.now(),
           });
         }),
       ]);

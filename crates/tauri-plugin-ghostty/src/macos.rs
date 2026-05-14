@@ -56,6 +56,19 @@ extern "C" {
         fn_ptr: Option<extern "C" fn(app: *mut c_void, soft: bool)>,
     );
 
+    fn GhosttyRegisterTerminalStatusEventCallback(
+        fn_ptr: Option<
+            extern "C" fn(
+                kind: i32,
+                tab_id: i32,
+                arg0: i64,
+                arg1: i64,
+                text0: *const c_char,
+                text1: *const c_char,
+            ),
+        >,
+    );
+
     // Walk every live GhosttyHostView under the tab container and
     // push a color-scheme change to its surface. Catches split-
     // created surfaces that aren't in Rust's `PluginState.surfaces`
@@ -257,6 +270,36 @@ impl TabActionKind {
     }
 }
 
+/// Terminal-native status event kinds emitted by the ObjC action
+/// handler. Keep in sync with `TERMINAL_STATUS_EVENT_*` in
+/// `GhosttyHostView.m`.
+#[repr(i32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalStatusEventKind {
+    Progress = 1,
+    CommandFinished = 2,
+    Bell = 3,
+    Interaction = 4,
+    DesktopNotification = 5,
+    ChildExited = 6,
+    RendererHealth = 7,
+}
+
+impl TerminalStatusEventKind {
+    pub fn from_i32(v: i32) -> Option<Self> {
+        Some(match v {
+            1 => Self::Progress,
+            2 => Self::CommandFinished,
+            3 => Self::Bell,
+            4 => Self::Interaction,
+            5 => Self::DesktopNotification,
+            6 => Self::ChildExited,
+            7 => Self::RendererHealth,
+            _ => return None,
+        })
+    }
+}
+
 /// Install the tab action callback. Called by ghostty's action_cb when
 /// it sees NEW_TAB / CLOSE_TAB / GOTO_TAB. Runs on the main thread.
 pub unsafe fn register_tab_action_callback(
@@ -282,6 +325,24 @@ pub unsafe fn register_reload_config_callback(
     fn_ptr: extern "C" fn(app: *mut c_void, soft: bool),
 ) {
     GhosttyRegisterReloadConfigCallback(Some(fn_ptr));
+}
+
+/// Install the terminal-status callback. Fires when ghostty's action
+/// handler sees terminal-native per-surface status signals such as
+/// progress reports, bell alerts, desktop notifications, command
+/// completion, child exit notices, and renderer-health changes. Runs on
+/// the main thread.
+pub unsafe fn register_terminal_status_event_callback(
+    fn_ptr: extern "C" fn(
+        kind: i32,
+        tab_id: i32,
+        arg0: i64,
+        arg1: i64,
+        text0: *const c_char,
+        text1: *const c_char,
+    ),
+) {
+    GhosttyRegisterTerminalStatusEventCallback(Some(fn_ptr));
 }
 
 /// Push a color-scheme change to every live surface (every

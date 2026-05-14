@@ -30,6 +30,53 @@ pub struct TerminalNewResult {
     pub tab_id: TabId,
 }
 
+const TERMINAL_STATUS_EVENT: &str = "terminal:status";
+
+#[derive(Debug, Serialize, Clone, Copy)]
+#[serde(rename_all = "kebab-case")]
+enum TerminalProgressStateWire {
+    Remove,
+    Set,
+    Error,
+    Indeterminate,
+    Pause,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+enum TerminalStatusPayload {
+    Progress {
+        id: TabId,
+        state: TerminalProgressStateWire,
+        progress: Option<i8>,
+    },
+    CommandFinished {
+        id: TabId,
+        exit_code: Option<i16>,
+        duration_ns: u64,
+    },
+    Bell {
+        id: TabId,
+    },
+    Interaction {
+        id: TabId,
+    },
+    DesktopNotification {
+        id: TabId,
+        title: Option<String>,
+        body: Option<String>,
+    },
+    ChildExited {
+        id: TabId,
+        exit_code: u32,
+        runtime_ms: u64,
+    },
+    RendererHealth {
+        id: TabId,
+        healthy: bool,
+    },
+}
+
 #[tauri::command]
 pub fn terminal_new(
     window: Window<Wry>,
@@ -97,6 +144,7 @@ pub fn terminal_new(
             macos::register_tab_action_callback(tab_action_trampoline);
             macos::register_host_key_hook_callback(host_key_hook_trampoline);
             macos::register_reload_config_callback(reload_config_trampoline);
+            macos::register_terminal_status_event_callback(terminal_status_event_trampoline);
         }
 
         // Allocate the first GhosttyHostView for this terminal.
@@ -500,6 +548,13 @@ fn create_app() -> ghostty_rs::Result<App> {
 ///     default. This significantly reduces worst-case resident
 ///     memory when tools emit image-heavy terminal output.
 ///
+///   * `notify-on-command-finish = always` plus
+///     `notify-on-command-finish-action = no-bell,notify` and
+///     `notify-on-command-finish-after = 0s` — make command-finish
+///     notifications available for every completed command in the
+///     embedded terminal without relying on the user's external
+///     Ghostty config, while avoiding an audible bell spam.
+///
 /// Failure modes are non-fatal: if the temp file can't be written,
 /// or `load_file` fails, the user just keeps ghostty's defaults.
 /// This is purely a polish step and we don't want to block the app
@@ -508,7 +563,10 @@ fn apply_zen_tools_overrides(config: &mut Config) {
     let body = "window-padding-balance = true\n\
 window-padding-y = 0\n\
 scrollback-limit = 2000000\n\
-image-storage-limit = 64000000\n";
+image-storage-limit = 64000000\n\
+notify-on-command-finish = always\n\
+notify-on-command-finish-action = no-bell,notify\n\
+notify-on-command-finish-after = 0s\n";
     let dir = std::env::temp_dir();
     // Bundle-id-namespaced filename so multiple installs / dev
     // builds don't collide on the same file.
@@ -779,6 +837,90 @@ extern "C" fn tab_event_trampoline(kind: i32, tab_id: i32, value: *const c_char)
         launch_directory: launch_directory.as_deref(),
     };
     let _ = app.emit(event, payload);
+}
+
+extern "C" fn terminal_status_event_trampoline(
+    kind: i32,
+    tab_id: i32,
+    arg0: i64,
+    arg1: i64,
+    text0: *const c_char,
+    text1: *const c_char,
+) {
+    let app = match APP_HANDLE_FOR_TABS.get() {
+        Some(a) => a,
+        None => return,
+    };
+
+    let read_cstr = |ptr: *const c_char| -> Option<String> {
+        if ptr.is_null() {
+            None
+        } else {
+            Some(unsafe { CStr::from_ptr(ptr) }.to_string_lossy().into_owned())
+        }
+    };
+
+    let payload = match crate::macos::TerminalStatusEventKind::from_i32(kind) {
+        Some(crate::macos::TerminalStatusEventKind::Progress) => {
+            let state = match arg0 {
+                0 => TerminalProgressStateWire::Remove,
+                1 => TerminalProgressStateWire::Set,
+                2 => TerminalProgressStateWire::Error,
+                3 => TerminalProgressStateWire::Indeterminate,
+                4 => TerminalProgressStateWire::Pause,
+                _ => return,
+            };
+            TerminalStatusPayload::Progress {
+                id: tab_id,
+                state,
+                progress: if arg1 < 0 || arg1 > i8::MAX as i64 {
+                    None
+                } else {
+                    Some(arg1 as i8)
+                },
+            }
+        }
+        Some(crate::macos::TerminalStatusEventKind::CommandFinished) => {
+            TerminalStatusPayload::CommandFinished {
+                id: tab_id,
+                exit_code: if arg0 < 0 || arg0 > i16::MAX as i64 {
+                    None
+                } else {
+                    Some(arg0 as i16)
+                },
+                duration_ns: arg1.max(0) as u64,
+            }
+        }
+        Some(crate::macos::TerminalStatusEventKind::Bell) => {
+            TerminalStatusPayload::Bell { id: tab_id }
+        }
+        Some(crate::macos::TerminalStatusEventKind::Interaction) => {
+            TerminalStatusPayload::Interaction { id: tab_id }
+        }
+        Some(crate::macos::TerminalStatusEventKind::DesktopNotification) => {
+            TerminalStatusPayload::DesktopNotification {
+                id: tab_id,
+                title: read_cstr(text0),
+                body: read_cstr(text1),
+            }
+        }
+        Some(crate::macos::TerminalStatusEventKind::ChildExited) => {
+            TerminalStatusPayload::ChildExited {
+                id: tab_id,
+                exit_code: arg0.max(0) as u32,
+                runtime_ms: arg1.max(0) as u64,
+            }
+        }
+        Some(crate::macos::TerminalStatusEventKind::RendererHealth) => {
+            TerminalStatusPayload::RendererHealth {
+                id: tab_id,
+                healthy: arg0 != 0,
+            }
+        }
+        None => return,
+    };
+
+    let _ = app.emit(TERMINAL_STATUS_EVENT, payload);
 }
 
 extern "C" fn tab_action_trampoline(kind: i32, arg: i64) {

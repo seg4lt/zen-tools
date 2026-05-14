@@ -17,6 +17,7 @@
 #import <objc/runtime.h>
 #import <stdatomic.h>
 #import <dispatch/dispatch.h>
+#import <limits.h>
 
 // Forward declaration — `g_host_view` is a `static _Atomic(void *)`
 // defined further down alongside the other action-state slots, but
@@ -26,6 +27,7 @@
 // expose the conditional-clear via this small helper instead — it's
 // defined after the slot itself further down the file.
 static void clear_host_view_if_matches(void *expected);
+static void emit_terminal_interaction_event(ghostty_surface_t surface);
 
 @class GhosttyHostView;
 // Walk the NSView tree under `root` and append every GhosttyHostView
@@ -579,6 +581,7 @@ static void send_key_event_composing(ghostty_surface_t surface, NSEvent *event,
 
 - (void)keyDown:(NSEvent*)event {
     if (!_surface) { [super keyDown:event]; return; }
+    emit_terminal_interaction_event(_surface);
     ghostty_input_action_e act =
         event.isARepeat ? GHOSTTY_ACTION_REPEAT : GHOSTTY_ACTION_PRESS;
 
@@ -653,6 +656,7 @@ static void send_mouse_pos(ghostty_surface_t surface, NSView *view, NSEvent *eve
     // brings us back so subsequent keys reach the terminal.
     [self.window makeFirstResponder:self];
     if (!_surface) { [super mouseDown:event]; return; }
+    emit_terminal_interaction_event(_surface);
     // Update position FIRST so ghostty's selection-start tracking
     // knows where the click landed, then dispatch the button event.
     send_mouse_pos(_surface, self, event);
@@ -671,6 +675,7 @@ static void send_mouse_pos(ghostty_surface_t surface, NSView *view, NSEvent *eve
 
 - (void)rightMouseDown:(NSEvent*)event {
     if (!_surface) { [super rightMouseDown:event]; return; }
+    emit_terminal_interaction_event(_surface);
     send_mouse_pos(_surface, self, event);
     ghostty_surface_mouse_button(_surface, GHOSTTY_MOUSE_PRESS,
                                  ghostty_button_from_ns(1),
@@ -687,6 +692,7 @@ static void send_mouse_pos(ghostty_surface_t surface, NSView *view, NSEvent *eve
 
 - (void)otherMouseDown:(NSEvent*)event {
     if (!_surface) { [super otherMouseDown:event]; return; }
+    emit_terminal_interaction_event(_surface);
     send_mouse_pos(_surface, self, event);
     ghostty_surface_mouse_button(_surface, GHOSTTY_MOUSE_PRESS,
                                  ghostty_button_from_ns(event.buttonNumber),
@@ -716,6 +722,7 @@ static void send_mouse_pos(ghostty_surface_t surface, NSView *view, NSEvent *eve
 
 - (void)scrollWheel:(NSEvent*)event {
     if (!_surface) { [super scrollWheel:event]; return; }
+    emit_terminal_interaction_event(_surface);
     double dx = (double)event.scrollingDeltaX;
     double dy = (double)event.scrollingDeltaY;
     BOOL precise = event.hasPreciseScrollingDeltas;
@@ -1058,6 +1065,65 @@ static void emit_tab_event(int kind, int tab_id, NSString *value) {
     g_tab_event_fn(kind, tab_id, v);
 }
 
+// Terminal-native status event delivery — Rust installs a callback that
+// normalises the per-tab payload into a single Tauri event stream the
+// frontend can mirror in the workspace rail.
+typedef void (*GhosttyTerminalStatusEventFn)(
+    int kind,
+    int tab_id,
+    long long arg0,
+    long long arg1,
+    const char *text0,
+    const char *text1);
+// kind values map to TERMINAL_STATUS_EVENT_* below; kept in sync with
+// `TerminalStatusEventKind` in macos.rs.
+enum {
+    TERMINAL_STATUS_EVENT_PROGRESS             = 1,
+    TERMINAL_STATUS_EVENT_COMMAND_FINISHED    = 2,
+    TERMINAL_STATUS_EVENT_BELL                = 3,
+    TERMINAL_STATUS_EVENT_INTERACTION         = 4,
+    TERMINAL_STATUS_EVENT_DESKTOP_NOTIFICATION = 5,
+    TERMINAL_STATUS_EVENT_CHILD_EXITED        = 6,
+    TERMINAL_STATUS_EVENT_RENDERER_HEALTH     = 7,
+};
+static GhosttyTerminalStatusEventFn g_terminal_status_event_fn = NULL;
+
+void GhosttyRegisterTerminalStatusEventCallback(GhosttyTerminalStatusEventFn fn) {
+    g_terminal_status_event_fn = fn;
+}
+
+static long long saturating_u64_to_i64(uint64_t value) {
+    return value > (uint64_t)LLONG_MAX ? LLONG_MAX : (long long)value;
+}
+
+static int tab_id_for_surface(ghostty_surface_t surface);
+
+static void emit_terminal_status_event(
+    int kind,
+    int tab_id,
+    long long arg0,
+    long long arg1,
+    NSString *text0,
+    NSString *text1
+) {
+    if (!g_terminal_status_event_fn) return;
+    const char *v0 = text0 ? text0.UTF8String : NULL;
+    const char *v1 = text1 ? text1.UTF8String : NULL;
+    g_terminal_status_event_fn(kind, tab_id, arg0, arg1, v0, v1);
+}
+
+static void emit_terminal_interaction_event(ghostty_surface_t surface) {
+    int tab_id = tab_id_for_surface(surface);
+    if (tab_id <= 0) return;
+    emit_terminal_status_event(
+        TERMINAL_STATUS_EVENT_INTERACTION,
+        tab_id,
+        0,
+        0,
+        nil,
+        nil);
+}
+
 static int tab_id_for_surface(ghostty_surface_t surface) {
     if (!surface || !g_tab_container) return 0;
     for (NSView *child in g_tab_container.subviews) {
@@ -1076,6 +1142,17 @@ static int tab_id_for_surface(ghostty_surface_t surface) {
         if (match) return tab_id_get(child);
     }
     return 0;
+}
+
+static int tab_id_for_target(ghostty_target_s *tgt) {
+    if (!tgt || tgt->tag != GHOSTTY_TARGET_SURFACE) return 0;
+    return tab_id_for_surface(tgt->target.surface);
+}
+
+static int status_tab_id_for_target(ghostty_target_s *tgt) {
+    int tab_id = tab_id_for_target(tgt);
+    if (tab_id != 0) return tab_id;
+    return GhosttyTabActiveId();
 }
 
 static NSView *root_for_tab_id(int tab_id) {
@@ -1708,10 +1785,7 @@ bool GhosttyHandleAction(void *app, void *target, void *action) {
             // Find the tab that owns the surface for this action so we
             // can emit a per-tab title event. The ghostty_target_s
             // gives us the surface; walk up to its tab root.
-            int tab_id = 0;
-            if (tgt && tgt->tag == GHOSTTY_TARGET_SURFACE) {
-                tab_id = tab_id_for_surface(tgt->target.surface);
-            }
+            int tab_id = tab_id_for_target(tgt);
             if (tab_id != 0 && title) {
                 emit_tab_event(TAB_EVENT_TITLE, tab_id, title);
             }
@@ -1726,14 +1800,80 @@ bool GhosttyHandleAction(void *app, void *target, void *action) {
             return true;
         }
         case GHOSTTY_ACTION_PWD: {
-            int tab_id = 0;
-            if (tgt && tgt->tag == GHOSTTY_TARGET_SURFACE) {
-                tab_id = tab_id_for_surface(tgt->target.surface);
-            }
+            int tab_id = tab_id_for_target(tgt);
             const char *pwd_c = act->action.pwd.pwd;
             NSString *pwd = (pwd_c ? [NSString stringWithUTF8String:pwd_c] : nil);
             if (tab_id != 0) {
                 emit_tab_event(TAB_EVENT_PWD, tab_id, pwd);
+            }
+            return true;
+        }
+        case GHOSTTY_ACTION_PROGRESS_REPORT: {
+            int tab_id = status_tab_id_for_target(tgt);
+            if (tab_id != 0) {
+                emit_terminal_status_event(
+                    TERMINAL_STATUS_EVENT_PROGRESS,
+                    tab_id,
+                    (long long)act->action.progress_report.state,
+                    (long long)act->action.progress_report.progress,
+                    nil,
+                    nil);
+            }
+            return true;
+        }
+        case GHOSTTY_ACTION_COMMAND_FINISHED: {
+            int tab_id = status_tab_id_for_target(tgt);
+            if (tab_id != 0) {
+                emit_terminal_status_event(
+                    TERMINAL_STATUS_EVENT_COMMAND_FINISHED,
+                    tab_id,
+                    (long long)act->action.command_finished.exit_code,
+                    saturating_u64_to_i64(act->action.command_finished.duration),
+                    nil,
+                    nil);
+            }
+            return true;
+        }
+        case GHOSTTY_ACTION_DESKTOP_NOTIFICATION: {
+            int tab_id = status_tab_id_for_target(tgt);
+            if (tab_id != 0) {
+                const char *title_c = act->action.desktop_notification.title;
+                const char *body_c = act->action.desktop_notification.body;
+                NSString *title = title_c ? [NSString stringWithUTF8String:title_c] : nil;
+                NSString *body = body_c ? [NSString stringWithUTF8String:body_c] : nil;
+                emit_terminal_status_event(
+                    TERMINAL_STATUS_EVENT_DESKTOP_NOTIFICATION,
+                    tab_id,
+                    0,
+                    0,
+                    title,
+                    body);
+            }
+            return true;
+        }
+        case GHOSTTY_ACTION_SHOW_CHILD_EXITED: {
+            int tab_id = status_tab_id_for_target(tgt);
+            if (tab_id != 0) {
+                emit_terminal_status_event(
+                    TERMINAL_STATUS_EVENT_CHILD_EXITED,
+                    tab_id,
+                    (long long)act->action.child_exited.exit_code,
+                    saturating_u64_to_i64(act->action.child_exited.timetime_ms),
+                    nil,
+                    nil);
+            }
+            return true;
+        }
+        case GHOSTTY_ACTION_RENDERER_HEALTH: {
+            int tab_id = status_tab_id_for_target(tgt);
+            if (tab_id != 0) {
+                emit_terminal_status_event(
+                    TERMINAL_STATUS_EVENT_RENDERER_HEALTH,
+                    tab_id,
+                    act->action.renderer_health == GHOSTTY_RENDERER_HEALTH_HEALTHY ? 1 : 0,
+                    0,
+                    nil,
+                    nil);
             }
             return true;
         }
@@ -1746,6 +1886,16 @@ bool GhosttyHandleAction(void *app, void *target, void *action) {
             return true;
         }
         case GHOSTTY_ACTION_RING_BELL: {
+            int tab_id = status_tab_id_for_target(target);
+            if (tab_id > 0) {
+                emit_terminal_status_event(
+                    TERMINAL_STATUS_EVENT_BELL,
+                    tab_id,
+                    0,
+                    0,
+                    nil,
+                    nil);
+            }
             NSBeep();
             return true;
         }

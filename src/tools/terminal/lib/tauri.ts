@@ -14,9 +14,11 @@
  *      many — we don't want closing the last pane to kill the app).
  *
  * Every command goes through Tauri's plugin namespacing
- * (`plugin:ghostty|...`). The plugin emits four lifecycle events
- * (`tab:created`, `tab:focused`, `tab:closed`, `tab:title-changed`)
- * which the React store mirrors.
+ * (`plugin:ghostty|...`). The plugin emits tab lifecycle events
+ * (`tab:created`, `tab:focused`, `tab:closed`, `tab:title-changed`,
+ * `tab:pwd-changed`) plus a normalized terminal-status stream
+ * (`terminal:status`) for progress/loading, completion, bell/notification
+ * alerts, child-exit notices, and renderer-health changes.
  */
 
 import { invoke } from "@tauri-apps/api/core";
@@ -58,6 +60,52 @@ export interface ChromeInset {
   /** Distance in CSS points from the window's left edge. */
   left: number;
 }
+
+export type TerminalProgressState =
+  | "remove"
+  | "set"
+  | "error"
+  | "indeterminate"
+  | "pause";
+
+export type TerminalStatusEvent =
+  | {
+      id: number;
+      kind: "progress";
+      state: TerminalProgressState;
+      progress: number | null;
+    }
+  | {
+      id: number;
+      kind: "command-finished";
+      exit_code: number | null;
+      duration_ns: number;
+    }
+  | {
+      id: number;
+      kind: "bell";
+    }
+  | {
+      id: number;
+      kind: "interaction";
+    }
+  | {
+      id: number;
+      kind: "desktop-notification";
+      title: string | null;
+      body: string | null;
+    }
+  | {
+      id: number;
+      kind: "child-exited";
+      exit_code: number;
+      runtime_ms: number;
+    }
+  | {
+      id: number;
+      kind: "renderer-health";
+      healthy: boolean;
+    };
 
 /**
  * One-time bootstrap. Creates the GhosttyApp (process-singleton),
@@ -229,5 +277,14 @@ export async function onTabPwdChanged(
   return listen<TabEventPayload>(
     "tab:pwd-changed",
     (e: TauriEvent<TabEventPayload>) => handler(e.payload),
+  );
+}
+
+export async function onTerminalStatus(
+  handler: (event: TerminalStatusEvent) => void,
+): Promise<() => void> {
+  return listen<TerminalStatusEvent>(
+    "terminal:status",
+    (e: TauriEvent<TerminalStatusEvent>) => handler(e.payload),
   );
 }

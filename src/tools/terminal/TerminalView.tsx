@@ -27,9 +27,14 @@
  */
 
 import {
+  AlertTriangle,
+  BellDot,
+  CheckCircle2,
   FolderPlus,
+  Loader2,
   PanelLeftClose,
   PanelLeftOpen,
+  Pause,
   Plus,
   Trash2,
   type LucideIcon,
@@ -38,7 +43,11 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { cn } from "@zen-tools/ui";
 import { useDistractionFree } from "./store/distraction-free";
-import { useTerminalStore } from "./store/terminal-store";
+import {
+  useTerminalStore,
+  type TerminalPane,
+  type TerminalWorkspace,
+} from "./store/terminal-store";
 import {
   terminalFocusTab,
   terminalSetChromeInset,
@@ -102,6 +111,128 @@ function isPaneInfo<T>(pane: T | undefined): pane is T {
   return pane != null;
 }
 
+interface TerminalAttentionSummary {
+  loading: boolean;
+  paused: boolean;
+  actionRequired: boolean;
+  completed: boolean;
+  unreadCount: number;
+  unhealthy: boolean;
+  progress: number | null;
+  label: string;
+}
+
+function summarizePaneAttention(
+  pane: TerminalPane,
+): TerminalAttentionSummary | null {
+  const { status } = pane;
+  const paused = status.progressState === "pause";
+  const unhealthy = status.rendererHealthy === false;
+  const actionRequired =
+    status.lastNoticeKind === "desktop-notification" ||
+    status.lastNoticeKind === "child-exited";
+  const completed = status.lastNoticeKind === "command-finished";
+  const label = actionRequired
+    ? (status.lastNoticeMessage ?? "Action required")
+    : unhealthy
+      ? "Renderer unhealthy"
+      : status.loading
+      ? status.progress != null
+        ? `Loading ${status.progress}%`
+        : "Loading"
+      : completed
+        ? (status.lastNoticeMessage ?? "Command finished")
+      : paused
+        ? "Paused"
+        : status.lastNoticeMessage ??
+          (status.unreadCount > 0
+            ? `${status.unreadCount} terminal notifications`
+            : "");
+  if (
+    !status.loading &&
+    !paused &&
+    status.unreadCount === 0 &&
+    !unhealthy &&
+    !actionRequired &&
+    !completed
+  ) {
+    return null;
+  }
+  return {
+    loading: status.loading,
+    paused,
+    actionRequired,
+    completed,
+    unreadCount: status.unreadCount,
+    unhealthy,
+    progress: status.progress,
+    label,
+  };
+}
+
+function summarizeWorkspaceAttention(
+  workspace: TerminalWorkspace,
+  panesById: Map<number, TerminalPane>,
+): TerminalAttentionSummary | null {
+  let loading = 0;
+  let paused = 0;
+  let actionRequired = 0;
+  let completed = 0;
+  let unreadCount = 0;
+  let unhealthy = 0;
+  let maxProgress: number | null = null;
+  for (const paneId of workspace.paneIds) {
+    const pane = panesById.get(paneId);
+    if (!pane) continue;
+    const summary = summarizePaneAttention(pane);
+    if (!summary) continue;
+    if (summary.loading) loading += 1;
+    if (summary.paused) paused += 1;
+    if (summary.actionRequired) actionRequired += 1;
+    if (summary.completed) completed += 1;
+    if (summary.unhealthy) unhealthy += 1;
+    unreadCount += summary.unreadCount;
+    if (summary.progress != null) {
+      maxProgress =
+        maxProgress == null ? summary.progress : Math.max(maxProgress, summary.progress);
+    }
+  }
+  if (
+    loading === 0 &&
+    paused === 0 &&
+    actionRequired === 0 &&
+    completed === 0 &&
+    unreadCount === 0 &&
+    unhealthy === 0
+  ) {
+    return null;
+  }
+  const label =
+    actionRequired > 0
+      ? `Action required in ${actionRequired} pane${actionRequired === 1 ? "" : "s"}`
+      : unhealthy > 0
+      ? `Renderer unhealthy in ${unhealthy} pane${unhealthy === 1 ? "" : "s"}`
+      : loading > 0
+        ? maxProgress != null && loading === 1
+          ? `Loading ${maxProgress}%`
+          : `Loading in ${loading} pane${loading === 1 ? "" : "s"}`
+        : completed > 0
+          ? `Completed in ${completed} pane${completed === 1 ? "" : "s"}`
+        : paused > 0
+          ? `Paused in ${paused} pane${paused === 1 ? "" : "s"}`
+          : `${unreadCount} terminal notification${unreadCount === 1 ? "" : "s"}`;
+  return {
+    loading: loading > 0,
+    paused: paused > 0,
+    actionRequired: actionRequired > 0,
+    completed: completed > 0,
+    unreadCount,
+    unhealthy: unhealthy > 0,
+    progress: maxProgress,
+    label,
+  };
+}
+
 export function TerminalView() {
   const {
     panes,
@@ -156,6 +287,29 @@ export function TerminalView() {
   const activeWorkspacePanes = useMemo(
     () => (activeWorkspace?.paneIds ?? []).map((id) => panesById.get(id)).filter(isPaneInfo),
     [activeWorkspace, panesById],
+  );
+  const workspaceAttentionById = useMemo(
+    () =>
+      new Map(
+        workspaces.map((workspace) => [
+          workspace.id,
+          summarizeWorkspaceAttention(workspace, panesById),
+        ]),
+      ),
+    [panesById, workspaces],
+  );
+  const terminalAttention = useMemo(
+    () =>
+      summarizeWorkspaceAttention(
+        {
+          id: "__all__",
+          name: "Terminal",
+          paneIds: panes.map((pane) => pane.id),
+          lastActivePaneId: activeId,
+        },
+        panesById,
+      ),
+    [activeId, panes, panesById],
   );
   const activeWorkspaceHasPane = activeWorkspacePanes.length > 0;
 
@@ -346,7 +500,10 @@ export function TerminalView() {
           >
             <div className="terminal-rail__header">
               {railMode === "expanded" ? (
-                <span className="terminal-rail__title">Terminal</span>
+                <div className="terminal-rail__title-row">
+                  <span className="terminal-rail__title">Terminal</span>
+                  <TerminalAttentionIndicators summary={terminalAttention} />
+                </div>
               ) : (
                 <span className="sr-only">Terminal workspaces</span>
               )}
@@ -375,6 +532,7 @@ export function TerminalView() {
                   const active = workspace.id === activeWorkspace?.id;
                   const editing = workspace.id === editingWorkspaceId;
                   const count = workspace.paneIds.length;
+                  const attention = workspaceAttentionById.get(workspace.id) ?? null;
                   return (
                     <button
                       key={workspace.id}
@@ -448,6 +606,10 @@ export function TerminalView() {
                           </span>
                         )}
                       </span>
+                      <TerminalAttentionIndicators
+                        summary={attention}
+                        mini={railMode === "mini"}
+                      />
                       {railMode === "expanded" && !editing && (
                         <>
                           <span className="terminal-workspace__count">
@@ -491,6 +653,7 @@ export function TerminalView() {
                     const editing = pane.id === editingPaneId;
                     const cwdTitle =
                       pane.cwdAbsolutePath ?? pane.launchDirectory ?? title;
+                    const attention = summarizePaneAttention(pane);
                     return (
                       <button
                         key={pane.id}
@@ -553,6 +716,10 @@ export function TerminalView() {
                             paneMiniLabel(title)
                           )}
                         </span>
+                        <TerminalAttentionIndicators
+                          summary={attention}
+                          mini={railMode === "mini"}
+                        />
                         {railMode === "expanded" && !editing && (
                           <span
                             role="button"
@@ -631,6 +798,54 @@ export function TerminalView() {
         </div>
       </div>
     </div>
+  );
+}
+
+function TerminalAttentionIndicators({
+  summary,
+  mini = false,
+}: {
+  summary: TerminalAttentionSummary | null;
+  mini?: boolean;
+}) {
+  if (!summary) return null;
+  if (mini) {
+    return (
+      <span
+        aria-hidden
+        title={summary.label}
+        className={cn(
+          "terminal-status-dot",
+          summary.loading && "is-loading",
+          summary.paused && "is-paused",
+          summary.actionRequired && "is-action-required",
+          summary.completed && "is-completed",
+          summary.unhealthy && "is-unhealthy",
+          summary.unreadCount > 0 && !summary.loading && !summary.unhealthy && "is-notice",
+        )}
+      />
+    );
+  }
+  return (
+    <span className="terminal-status-indicators" title={summary.label}>
+      {summary.loading ? (
+        <Loader2 className="terminal-status-icon is-loading" />
+      ) : summary.paused ? (
+        <Pause className="terminal-status-icon" />
+      ) : null}
+      {summary.actionRequired || summary.unhealthy ? (
+        <AlertTriangle className="terminal-status-icon is-unhealthy" />
+      ) : null}
+      {summary.completed && !summary.loading && !summary.actionRequired ? (
+        <CheckCircle2 className="terminal-status-icon is-completed" />
+      ) : null}
+      {summary.unreadCount > 0 ? (
+        <span className="terminal-status-badge">
+          <BellDot className="size-3" />
+          <span>{summary.unreadCount > 99 ? "99+" : summary.unreadCount}</span>
+        </span>
+      ) : null}
+    </span>
   );
 }
 

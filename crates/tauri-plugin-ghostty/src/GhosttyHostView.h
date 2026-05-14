@@ -63,6 +63,27 @@ void GhosttyRegisterHostKeyHookCallback(GhosttyHostKeyHookFn fn);
 typedef void (*GhosttyReloadConfigFn)(void *app, bool soft);
 void GhosttyRegisterReloadConfigCallback(GhosttyReloadConfigFn fn);
 
+/// Register a callback that fires when ghostty emits terminal-native
+/// status events that the embedding host may want to surface in its
+/// own chrome (for example progress/loading, command completion,
+/// bell alerts, desktop notifications, child-exit notices, and
+/// renderer health).
+///
+/// The callback receives:
+///   - `kind`: event discriminator (kept in sync with `macos.rs`)
+///   - `tab_id`: owning tab, or 0 when the target could not be resolved
+///   - `arg0` / `arg1`: event-specific numeric data
+///   - `text0` / `text1`: optional UTF-8 strings
+typedef void (*GhosttyTerminalStatusEventFn)(
+    int kind,
+    int tab_id,
+    long long arg0,
+    long long arg1,
+    const char * _Nullable text0,
+    const char * _Nullable text1);
+void GhosttyRegisterTerminalStatusEventCallback(
+    GhosttyTerminalStatusEventFn _Nullable fn);
+
 /// Push a color-scheme change to every live `GhosttyHostView` under
 /// the tab container — including split-created surfaces that the
 /// Rust side never sees. Walks the actual NSView tree, so it
