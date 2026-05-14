@@ -43,6 +43,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { useShortcut } from "@zen-tools/keyboard";
 import { cn } from "@zen-tools/ui";
+import { DragHandle } from "@/components/drag-handle";
 import { useDistractionFree } from "./store/distraction-free";
 import {
   useTerminalStore,
@@ -65,6 +66,18 @@ const HIDDEN_INSET: ChromeInset = {
 };
 
 const COMPACT_RAIL_WINDOW_WIDTH = 960;
+const DEFAULT_RAIL_WIDTH = 220;
+const MIN_RAIL_WIDTH = 180;
+const MAX_RAIL_WIDTH = 420;
+const RAIL_WIDTH_STORAGE_KEY = "terminal.rail.width";
+
+function readInitialRailWidth(): number {
+  if (typeof window === "undefined") return DEFAULT_RAIL_WIDTH;
+  const raw = window.localStorage.getItem(RAIL_WIDTH_STORAGE_KEY);
+  const parsed = raw ? Number(raw) : NaN;
+  if (!Number.isFinite(parsed)) return DEFAULT_RAIL_WIDTH;
+  return Math.min(MAX_RAIL_WIDTH, Math.max(MIN_RAIL_WIDTH, parsed));
+}
 
 function paneTitle(title: string | null | undefined): string {
   return title?.trim() || "shell";
@@ -264,6 +277,7 @@ export function TerminalView() {
     null,
   );
   const [railCompactAuto, setRailCompactAuto] = useState(false);
+  const [railWidth, setRailWidth] = useState(() => readInitialRailWidth());
   const railCompact = railCompactOverride ?? railCompactAuto;
   const containerRef = useRef<HTMLDivElement | null>(null);
   const railRef = useRef<HTMLElement | null>(null);
@@ -331,6 +345,10 @@ export function TerminalView() {
   }, []);
 
   const pushInsetRef = useRef<() => void>(() => {});
+  useEffect(() => {
+    window.localStorage.setItem(RAIL_WIDTH_STORAGE_KEY, String(railWidth));
+  }, [railWidth]);
+
   useEffect(() => {
     const push = () => {
       const compact = window.innerWidth <= COMPACT_RAIL_WINDOW_WIDTH;
@@ -617,15 +635,21 @@ export function TerminalView() {
     >
       <div className="flex min-h-0 flex-1">
         {workspaces.length > 0 && (
-          <aside
-            ref={railRef}
-            className={cn(
-              "terminal-chrome terminal-tab-rail",
-              railCompact ? "is-mini" : "is-expanded",
-            )}
-            aria-label="Terminal workspace rail"
-          >
-            <div className="terminal-rail__section">
+          <>
+            <aside
+              ref={railRef}
+              style={
+                railCompact
+                  ? undefined
+                  : { width: railWidth, minWidth: railWidth }
+              }
+              className={cn(
+                "terminal-chrome terminal-tab-rail",
+                railCompact ? "is-mini" : "is-expanded",
+              )}
+              aria-label="Terminal workspace rail"
+            >
+              <div className="terminal-rail__section">
               {pinnedPanes.length > 0 && (
                 <>
                   {!railCompact ? (
@@ -690,9 +714,19 @@ export function TerminalView() {
                 </>
               )}
 
-              {!railCompact ? (
-                <span className="terminal-rail__section-title">Workspaces</span>
-              ) : null}
+                <div className="terminal-rail__section-header">
+                  {!railCompact ? (
+                    <span className="terminal-rail__section-title">Workspaces</span>
+                  ) : (
+                    <span className="sr-only">Workspaces</span>
+                  )}
+                  <IconRailButton
+                    icon={FolderPlus}
+                    label="New workspace"
+                    className="terminal-section-action"
+                    onClick={handleCreateWorkspace}
+                  />
+                </div>
               <div className="terminal-workspace-list" role="list">
                 {workspaces.map((workspace, index) => {
                   const active = workspace.id === activeWorkspace?.id;
@@ -815,12 +849,22 @@ export function TerminalView() {
               </div>
             </div>
 
-            <div className="terminal-rail__separator" />
+              <div className="terminal-rail__separator" />
 
-            <div className="terminal-rail__section terminal-rail__section--grow">
-              {!railCompact ? (
-                <span className="terminal-rail__section-title">Panes</span>
-              ) : null}
+              <div className="terminal-rail__section terminal-rail__section--grow">
+                <div className="terminal-rail__section-header">
+                  {!railCompact ? (
+                    <span className="terminal-rail__section-title">Panes</span>
+                  ) : (
+                    <span className="sr-only">Panes</span>
+                  )}
+                  <IconRailButton
+                    icon={Plus}
+                    label="New pane"
+                    className="terminal-section-action"
+                    onClick={openPaneInActiveWorkspace}
+                  />
+                </div>
               {activeWorkspaceHasPane ? (
                 <div
                   className="terminal-tab-list"
@@ -974,25 +1018,18 @@ export function TerminalView() {
               ) : (
                 <div className="terminal-rail__empty">No panes yet</div>
               )}
-            </div>
-
-            <div className="terminal-rail__footer">
-              <IconRailButton
-                icon={Plus}
-                label="New pane"
-                expandedLabel={railCompact ? undefined : "New pane"}
-                className="terminal-tab-add"
-                onClick={openPaneInActiveWorkspace}
+              </div>
+            </aside>
+            {!railCompact ? (
+              <DragHandle
+                direction="x"
+                initial={railWidth}
+                min={MIN_RAIL_WIDTH}
+                max={MAX_RAIL_WIDTH}
+                onResize={setRailWidth}
               />
-              <IconRailButton
-                icon={FolderPlus}
-                label="New workspace"
-                expandedLabel={railCompact ? undefined : "New workspace"}
-                className="terminal-tab-add"
-                onClick={handleCreateWorkspace}
-              />
-            </div>
-          </aside>
+            ) : null}
+          </>
         )}
 
         <div className="relative min-h-0 flex-1">
@@ -1082,13 +1119,11 @@ function TerminalAttentionIndicators({
 function IconRailButton({
   icon: Icon,
   label,
-  expandedLabel,
   className,
   onClick,
 }: {
   icon: LucideIcon;
   label: string;
-  expandedLabel?: string;
   className?: string;
   onClick: () => void;
 }) {
@@ -1101,9 +1136,6 @@ function IconRailButton({
       onClick={onClick}
     >
       <Icon className="size-3.5" />
-      {expandedLabel ? (
-        <span className="terminal-tab-add__label">{expandedLabel}</span>
-      ) : null}
     </button>
   );
 }
