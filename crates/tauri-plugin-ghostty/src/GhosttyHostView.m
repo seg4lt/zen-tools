@@ -2199,11 +2199,11 @@ void GhosttyInstallEventMonitor(ghostty_surface_t surface) {
                     if (g_host_key_hook_fn) g_host_key_hook_fn("cmd-shift-right-bracket");
                     return nil;
                 }
-                if ([chars isEqualToString:@"n"]) {
+                if ([chars isEqualToString:@"n"] || [chars isEqualToString:@"N"]) {
                     if (g_host_key_hook_fn) g_host_key_hook_fn("cmd-shift-n");
                     return nil;
                 }
-                if ([chars isEqualToString:@"e"]) {
+                if ([chars isEqualToString:@"e"] || [chars isEqualToString:@"E"]) {
                     if (g_host_key_hook_fn) g_host_key_hook_fn("cmd-shift-e");
                     return nil;
                 }
