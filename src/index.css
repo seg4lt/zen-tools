@@ -146,6 +146,13 @@ body,
   text-rendering: optimizeLegibility;
 }
 
+body.markdown-terminal-active,
+body.markdown-terminal-active #root,
+body.markdown-terminal-active .app-root-shell,
+body.markdown-terminal-active main {
+  background-color: transparent !important;
+}
+
 /* Editable surfaces (CodeMirror's contenteditable) must always allow
    text selection regardless of any ancestor's `user-select: none` —
    otherwise a stuck inline body style or a Tailwind `select-none`

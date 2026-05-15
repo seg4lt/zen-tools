@@ -32,6 +32,13 @@ import {
   type ReactNode,
 } from "react";
 import { markdownTauri, type MarkdownVaultDto } from "../lib/tauri";
+import {
+  onTabClosed as onTerminalTabClosed,
+  onTabPwdChanged as onTerminalTabPwdChanged,
+  onTabTitleChanged as onTerminalTabTitleChanged,
+  onTerminalStatus,
+  type TerminalStatusEvent,
+} from "@/tools/terminal/lib/tauri";
 import { MarkdownWorkspaceProvider } from "./markdown-workspace";
 
 export interface OpenFileState {
@@ -42,7 +49,28 @@ export interface OpenFileState {
 
 /** What sort of editor a tab needs. Drives both the icon in the tab
  *  strip and the component the view layer mounts in the body. */
-export type TabKind = "markdown" | "file" | "excalidraw" | "html";
+export type TabKind = "markdown" | "file" | "excalidraw" | "html" | "terminal";
+
+export interface MarkdownTerminalTabStatus {
+  loading: boolean;
+  paused: boolean;
+  actionRequired: boolean;
+  completed: boolean;
+  unreadCount: number;
+  unhealthy: boolean;
+  progress: number | null;
+  lastNoticeMessage: string | null;
+}
+
+export interface TerminalTabState {
+  phase: "pending" | "ready" | "error";
+  paneId: number | null;
+  title: string;
+  launchDirectory: string | null;
+  cwdAbsolutePath: string | null;
+  status: MarkdownTerminalTabStatus;
+  errorMessage: string | null;
+}
 
 /** One entry in the tab strip — own copy of the doc + dirty flag so
  *  the user can switch away mid-edit and come back to their changes. */
@@ -63,6 +91,8 @@ export interface TabState {
    *  `"excalidraw"` for drawings. Set once at `openFile` time — the
    *  path doesn't change the tab kind even if the file is later renamed. */
   kind: TabKind;
+  /** Present only for Ghostty-backed terminal tabs. */
+  terminal: TerminalTabState | null;
 }
 
 /**
@@ -130,7 +160,7 @@ export function activeTab(state: MarkdownState): TabState | null {
  *  rewriting every consumer at once. */
 export function currentFile(state: MarkdownState): OpenFileState | null {
   const tab = activeTab(state);
-  if (!tab) return null;
+  if (!tab || tab.kind === "terminal") return null;
   return { path: tab.path, doc: tab.doc, dirty: tab.dirty };
 }
 
@@ -138,6 +168,141 @@ let tabIdCounter = 0;
 function nextTabId(): string {
   tabIdCounter += 1;
   return `tab-${Date.now()}-${tabIdCounter}`;
+}
+
+function emptyTerminalTabStatus(): MarkdownTerminalTabStatus {
+  return {
+    loading: false,
+    paused: false,
+    actionRequired: false,
+    completed: false,
+    unreadCount: 0,
+    unhealthy: false,
+    progress: null,
+    lastNoticeMessage: null,
+  };
+}
+
+function formatCommandFinishedNotice(
+  exitCode: number | null,
+  durationNs: number,
+): string {
+  const seconds = durationNs > 0 ? durationNs / 1_000_000_000 : 0;
+  const durationLabel =
+    seconds >= 1 ? `${seconds.toFixed(seconds >= 10 ? 0 : 1)}s` : null;
+  if (exitCode == null) {
+    return durationLabel ? `Command finished in ${durationLabel}` : "Command finished";
+  }
+  if (exitCode === 0) {
+    return durationLabel ? `Command completed in ${durationLabel}` : "Command completed";
+  }
+  return durationLabel
+    ? `Command failed (${exitCode}) after ${durationLabel}`
+    : `Command failed (${exitCode})`;
+}
+
+function formatDesktopNotificationNotice(
+  title: string | null,
+  body: string | null,
+): string {
+  return title?.trim() || body?.trim() || "Terminal notification";
+}
+
+function applyTerminalTabStatus(
+  current: MarkdownTerminalTabStatus,
+  event: TerminalStatusEvent,
+): MarkdownTerminalTabStatus {
+  switch (event.kind) {
+    case "progress":
+      if (event.state === "remove") {
+        return {
+          ...current,
+          loading: false,
+          paused: false,
+          completed: false,
+          progress: null,
+        };
+      }
+      if (event.state === "error") {
+        return {
+          ...current,
+          loading: false,
+          paused: false,
+          completed: false,
+          progress: event.progress,
+          unreadCount: current.unreadCount + 1,
+          lastNoticeMessage: "Command failed",
+        };
+      }
+      return {
+        ...current,
+        loading: event.state === "set" || event.state === "indeterminate",
+        paused: event.state === "pause",
+        completed: false,
+        progress: event.progress,
+      };
+    case "desktop-notification":
+      return {
+        ...current,
+        actionRequired: true,
+        completed: false,
+        unreadCount: current.unreadCount + 1,
+        lastNoticeMessage: formatDesktopNotificationNotice(event.title, event.body),
+      };
+    case "child-exited":
+      return {
+        ...current,
+        actionRequired: true,
+        completed: false,
+        unreadCount: current.unreadCount + 1,
+        lastNoticeMessage: `Shell exited (${event.exit_code})`,
+      };
+    case "bell":
+      return {
+        ...current,
+        unreadCount: current.unreadCount + 1,
+      };
+    case "interaction":
+      return {
+        ...current,
+        actionRequired: false,
+        completed: false,
+        unreadCount: 0,
+      };
+    case "command-finished":
+      return {
+        ...current,
+        loading: false,
+        paused: false,
+        completed: true,
+        unreadCount: current.unreadCount + 1,
+        lastNoticeMessage: formatCommandFinishedNotice(
+          event.exit_code,
+          event.duration_ns,
+        ),
+      };
+    case "renderer-health":
+      return {
+        ...current,
+        unhealthy: !event.healthy,
+      };
+  }
+}
+
+function clearTerminalTabAttention(status: MarkdownTerminalTabStatus): MarkdownTerminalTabStatus {
+  if (
+    status.unreadCount === 0 &&
+    !status.actionRequired &&
+    !status.completed
+  ) {
+    return status;
+  }
+  return {
+    ...status,
+    actionRequired: false,
+    completed: false,
+    unreadCount: 0,
+  };
 }
 
 export type MarkdownAction =
@@ -182,7 +347,41 @@ export type MarkdownAction =
   | { type: "startRename"; path: string; seed: string }
   | { type: "startCreate"; parentDir: string; childKind: "file" | "folder" }
   | { type: "cancelEditing" }
-  | { type: "renamedFile"; oldPath: string; newPath: string };
+  | { type: "renamedFile"; oldPath: string; newPath: string }
+  | {
+      type: "createPendingTerminalTab";
+      id: string;
+      launchDirectory: string | null;
+      title: string;
+    }
+  | {
+      type: "attachTerminalTabSuccess";
+      id: string;
+      paneId: number;
+      launchDirectory: string | null;
+      cwdAbsolutePath?: string | null;
+      title?: string | null;
+    }
+  | {
+      type: "attachTerminalTabFailure";
+      id: string;
+      errorMessage: string;
+    }
+  | {
+      type: "syncTerminalTitle";
+      paneId: number;
+      title: string;
+      cwdAbsolutePath?: string | null;
+      launchDirectory?: string | null;
+    }
+  | {
+      type: "syncTerminalPwd";
+      paneId: number;
+      cwdAbsolutePath: string | null;
+      launchDirectory?: string | null;
+    }
+  | { type: "applyTerminalStatus"; event: TerminalStatusEvent }
+  | { type: "terminalClosed"; paneId: number };
 
 function reducer(state: MarkdownState, action: MarkdownAction): MarkdownState {
   switch (action.type) {
@@ -242,6 +441,7 @@ function reducer(state: MarkdownState, action: MarkdownAction): MarkdownState {
         doc: action.doc,
         dirty: false,
         kind: action.kind ?? "markdown",
+        terminal: null,
       };
       return {
         ...state,
@@ -253,9 +453,24 @@ function reducer(state: MarkdownState, action: MarkdownAction): MarkdownState {
     }
 
     case "selectTab": {
-      if (!state.tabs.some((t) => t.id === action.id)) return state;
+      const selected = state.tabs.find((t) => t.id === action.id);
+      if (!selected) return state;
       return {
         ...state,
+        tabs:
+          selected.kind === "terminal"
+            ? state.tabs.map((tab) =>
+                tab.id === action.id && tab.terminal
+                  ? {
+                      ...tab,
+                      terminal: {
+                        ...tab.terminal,
+                        status: clearTerminalTabAttention(tab.terminal.status),
+                      },
+                    }
+                  : tab,
+              )
+            : state.tabs,
         activeTabId: action.id,
         pendingGotoLine: action.gotoLine ?? null,
       };
@@ -431,6 +646,198 @@ function reducer(state: MarkdownState, action: MarkdownAction): MarkdownState {
       if (!changed) return state;
       return { ...state, tabs };
     }
+
+    case "createPendingTerminalTab": {
+      const existing = state.tabs.find((tab) => tab.id === action.id);
+      if (existing?.kind === "terminal" && existing.terminal) {
+        return {
+          ...state,
+          tabs: state.tabs.map((tab): TabState => {
+            if (tab.id !== action.id || tab.kind !== "terminal" || !tab.terminal) {
+              return tab;
+            }
+            return {
+              ...tab,
+              path: action.launchDirectory ?? tab.path,
+              terminal: {
+                ...tab.terminal,
+                phase: "pending",
+                paneId: null,
+                title: action.title.trim() || tab.terminal.title || "shell",
+                launchDirectory: action.launchDirectory,
+                cwdAbsolutePath: action.launchDirectory,
+                status: emptyTerminalTabStatus(),
+                errorMessage: null,
+              },
+            };
+          }),
+          activeTabId: action.id,
+        };
+      }
+      const tab: TabState = {
+        id: action.id,
+        path: action.launchDirectory ?? `terminal://${action.id}`,
+        doc: "",
+        dirty: false,
+        kind: "terminal",
+        terminal: {
+          phase: "pending",
+          paneId: null,
+          title: action.title.trim() || "shell",
+          launchDirectory: action.launchDirectory,
+          cwdAbsolutePath: action.launchDirectory,
+          status: emptyTerminalTabStatus(),
+          errorMessage: null,
+        },
+      };
+      return {
+        ...state,
+        tabs: [...state.tabs, tab],
+        activeTabId: action.id,
+      };
+    }
+
+    case "attachTerminalTabSuccess": {
+      let changed = false;
+      const tabs = state.tabs.map((tab): TabState => {
+        if (tab.id !== action.id || tab.kind !== "terminal" || !tab.terminal) return tab;
+        changed = true;
+        const cwd = action.cwdAbsolutePath ?? action.launchDirectory ?? null;
+        const title = action.title?.trim() || tab.terminal.title || "shell";
+        return {
+          ...tab,
+          path: cwd ?? action.launchDirectory ?? tab.path,
+          terminal: {
+            ...tab.terminal,
+            phase: "ready",
+            paneId: action.paneId,
+            title,
+            launchDirectory: action.launchDirectory,
+            cwdAbsolutePath: cwd,
+            status: emptyTerminalTabStatus(),
+            errorMessage: null,
+          },
+        };
+      });
+      return changed ? { ...state, tabs, activeTabId: action.id } : state;
+    }
+
+    case "attachTerminalTabFailure": {
+      let changed = false;
+      const tabs = state.tabs.map((tab): TabState => {
+        if (tab.id !== action.id || tab.kind !== "terminal" || !tab.terminal) return tab;
+        changed = true;
+        return {
+          ...tab,
+          terminal: {
+            ...tab.terminal,
+            phase: "error",
+            paneId: null,
+            status: {
+              ...emptyTerminalTabStatus(),
+              unhealthy: true,
+              lastNoticeMessage: action.errorMessage,
+            },
+            errorMessage: action.errorMessage,
+          },
+        };
+      });
+      return changed ? { ...state, tabs, activeTabId: action.id } : state;
+    }
+
+    case "syncTerminalTitle": {
+      let changed = false;
+      const tabs = state.tabs.map((tab) => {
+        if (
+          tab.kind !== "terminal" ||
+          tab.terminal?.phase !== "ready" ||
+          tab.terminal.paneId !== action.paneId
+        ) {
+          return tab;
+        }
+        changed = true;
+        const cwdAbsolutePath =
+          action.cwdAbsolutePath === undefined
+            ? tab.terminal.cwdAbsolutePath
+            : action.cwdAbsolutePath;
+        const launchDirectory =
+          action.launchDirectory === undefined
+            ? tab.terminal.launchDirectory
+            : action.launchDirectory;
+        return {
+          ...tab,
+          path: cwdAbsolutePath ?? launchDirectory ?? tab.path,
+          terminal: {
+            ...tab.terminal,
+            title: action.title.trim() || "shell",
+            cwdAbsolutePath,
+            launchDirectory,
+          },
+        };
+      });
+      return changed ? { ...state, tabs } : state;
+    }
+
+    case "syncTerminalPwd": {
+      let changed = false;
+      const tabs = state.tabs.map((tab) => {
+        if (
+          tab.kind !== "terminal" ||
+          tab.terminal?.phase !== "ready" ||
+          tab.terminal.paneId !== action.paneId
+        ) {
+          return tab;
+        }
+        changed = true;
+        const launchDirectory =
+          action.launchDirectory === undefined
+            ? tab.terminal.launchDirectory
+            : action.launchDirectory;
+        return {
+          ...tab,
+          path: action.cwdAbsolutePath ?? launchDirectory ?? tab.path,
+          terminal: {
+            ...tab.terminal,
+            cwdAbsolutePath: action.cwdAbsolutePath,
+            launchDirectory,
+          },
+        };
+      });
+      return changed ? { ...state, tabs } : state;
+    }
+
+    case "applyTerminalStatus": {
+      let changed = false;
+      const tabs = state.tabs.map((tab) => {
+        if (
+          tab.kind !== "terminal" ||
+          tab.terminal?.phase !== "ready" ||
+          tab.terminal.paneId !== action.event.id
+        ) {
+          return tab;
+        }
+        changed = true;
+        return {
+          ...tab,
+          terminal: {
+            ...tab.terminal,
+            status: applyTerminalTabStatus(tab.terminal.status, action.event),
+          },
+        };
+      });
+      return changed ? { ...state, tabs } : state;
+    }
+
+    case "terminalClosed": {
+      const existing = state.tabs.find(
+        (tab) =>
+          tab.kind === "terminal" &&
+          tab.terminal?.phase === "ready" &&
+          tab.terminal.paneId === action.paneId,
+      );
+      if (!existing) return state;
+      return reducer(state, { type: "closeTab", id: existing.id });
+    }
   }
 }
 
@@ -472,6 +879,47 @@ export function MarkdownStoreProvider({ children }: { children: ReactNode }) {
     })();
     return () => {
       alive = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    let unlisteners: Array<() => void> = [];
+    void (async () => {
+      const listeners = await Promise.all([
+        onTerminalTabTitleChanged((payload) => {
+          dispatch({
+            type: "syncTerminalTitle",
+            paneId: payload.id,
+            title: payload.title ?? "",
+            cwdAbsolutePath: payload.cwd_absolute_path,
+            launchDirectory: payload.launch_directory,
+          });
+        }),
+        onTerminalTabPwdChanged((payload) => {
+          dispatch({
+            type: "syncTerminalPwd",
+            paneId: payload.id,
+            cwdAbsolutePath: payload.cwd_absolute_path ?? null,
+            launchDirectory: payload.launch_directory,
+          });
+        }),
+        onTerminalStatus((event) => {
+          dispatch({ type: "applyTerminalStatus", event });
+        }),
+        onTerminalTabClosed((payload) => {
+          dispatch({ type: "terminalClosed", paneId: payload.id });
+        }),
+      ]);
+      if (cancelled) {
+        for (const unlisten of listeners) unlisten();
+      } else {
+        unlisteners = listeners;
+      }
+    })();
+    return () => {
+      cancelled = true;
+      for (const unlisten of unlisteners) unlisten();
     };
   }, []);
 

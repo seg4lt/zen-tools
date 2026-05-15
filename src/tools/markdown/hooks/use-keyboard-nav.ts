@@ -19,12 +19,15 @@ import { useEffect, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { useShortcut } from "@zen-tools/keyboard/registry";
+import { terminalCloseTab } from "@/tools/terminal/lib/tauri";
 import { useMarkdownStore } from "../store/markdown-store";
+import { useOpenTerminalTab } from "./use-open-terminal-tab";
 import { useVaults } from "./use-vaults";
 
 export function useMarkdownKeyboardNav() {
   const { state, dispatch } = useMarkdownStore();
   const { addVault } = useVaults();
+  const { openTerminalTab } = useOpenTerminalTab();
 
   // Cmd+P → Files mode.  When already open in any mode, re-pressing
   // closes (so Cmd+P is a true toggle); when open *and* in Content
@@ -70,6 +73,16 @@ export function useMarkdownKeyboardNav() {
   // adding a vault.  Also fire in editor — adding a vault from inside
   // a doc is reasonable.
   useShortcut(
+    "mod+t",
+    (e) => {
+      e.preventDefault();
+      void openTerminalTab();
+    },
+    true,
+    { fireInInputs: true },
+  );
+
+  useShortcut(
     "mod+shift+o",
     () => {
       void addVault();
@@ -87,7 +100,15 @@ export function useMarkdownKeyboardNav() {
     "mod+w",
     (e) => {
       e.preventDefault();
-      if (state.activeTabId) {
+      const active = state.tabs.find((tab) => tab.id === state.activeTabId);
+      if (
+        active?.kind === "terminal" &&
+        active.terminal?.paneId != null
+      ) {
+        void terminalCloseTab(active.terminal.paneId).catch((err) =>
+          console.error("[markdown] close terminal tab failed", err),
+        );
+      } else if (state.activeTabId) {
         dispatch({ type: "closeTab", id: state.activeTabId });
       }
     },
@@ -107,9 +128,11 @@ export function useMarkdownKeyboardNav() {
   // `activeTabId` is captured in a ref so the listener can close the
   // *current* active tab even if the state changed since the effect ran.
   const activeTabIdRef = useRef(state.activeTabId);
+  const tabsRef = useRef(state.tabs);
   const dispatchRef = useRef(dispatch);
   useEffect(() => {
     activeTabIdRef.current = state.activeTabId;
+    tabsRef.current = state.tabs;
     dispatchRef.current = dispatch;
   });
 
@@ -117,7 +140,15 @@ export function useMarkdownKeyboardNav() {
     let unlisten: (() => void) | null = null;
     (async () => {
       unlisten = await listen<null>("app:close-requested", () => {
-        if (activeTabIdRef.current) {
+        const active = tabsRef.current.find((tab) => tab.id === activeTabIdRef.current);
+        if (
+          active?.kind === "terminal" &&
+          active.terminal?.paneId != null
+        ) {
+          void terminalCloseTab(active.terminal.paneId).catch((err) =>
+            console.error("[markdown] close terminal tab failed", err),
+          );
+        } else if (activeTabIdRef.current) {
           dispatchRef.current({ type: "closeTab", id: activeTabIdRef.current });
         } else {
           void invoke("app_hide_main_window");
@@ -135,6 +166,18 @@ export function useMarkdownKeyboardNav() {
     "mod+alt+t",
     (e) => {
       e.preventDefault();
+      const activeId = state.activeTabId;
+      const terminalTabsToClose = state.tabs.filter(
+        (tab) =>
+          tab.id !== activeId &&
+          tab.kind === "terminal" &&
+          tab.terminal?.paneId != null,
+      );
+      for (const tab of terminalTabsToClose) {
+        void terminalCloseTab(tab.terminal!.paneId!).catch((err) =>
+          console.error("[markdown] close other terminal tab failed", err),
+        );
+      }
       dispatch({ type: "closeOtherTabs" });
     },
     true,

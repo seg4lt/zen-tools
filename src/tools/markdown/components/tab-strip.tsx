@@ -26,7 +26,17 @@
  */
 
 import { useLayoutEffect, useMemo, useRef } from "react";
-import { Code as CodeIcon, FileText, PenLine, X } from "lucide-react";
+import {
+  AlertTriangle,
+  BellDot,
+  CheckCircle2,
+  Code as CodeIcon,
+  FileTerminal,
+  FileText,
+  Loader2,
+  PenLine,
+  X,
+} from "lucide-react";
 import { Button } from "@zen-tools/ui";
 import { cn } from "@zen-tools/ui";
 import type { TabState } from "../store/markdown-store";
@@ -54,15 +64,22 @@ export function TabStrip({
   const subtitles = useMemo(() => {
     const counts = new Map<string, number>();
     for (const tab of tabs) {
-      const name = tabLabel(tab.path).toLowerCase();
+      const name = tabLabel(tab).toLowerCase();
       counts.set(name, (counts.get(name) ?? 0) + 1);
     }
     const out = new Map<string, string>();
     for (const tab of tabs) {
-      const name = tabLabel(tab.path).toLowerCase();
+      const name = tabLabel(tab).toLowerCase();
       if ((counts.get(name) ?? 0) > 1) {
-        const segs = tab.path.split("/").filter(Boolean);
-        out.set(tab.id, segs.length >= 2 ? segs[segs.length - 2] : "");
+        if (tab.kind === "terminal") {
+          const dir =
+            tab.terminal?.cwdAbsolutePath ?? tab.terminal?.launchDirectory ?? null;
+          const segs = dir?.split("/").filter(Boolean) ?? [];
+          out.set(tab.id, segs.length >= 1 ? segs[segs.length - 1] ?? "" : "");
+        } else {
+          const segs = tab.path.split("/").filter(Boolean);
+          out.set(tab.id, segs.length >= 2 ? segs[segs.length - 2] : "");
+        }
       }
     }
     return out;
@@ -111,13 +128,17 @@ interface TabProps {
 }
 
 function Tab({ tab, active, subtitle, onSelect, onClose }: TabProps) {
-  const name = tabLabel(tab.path);
+  const name = tabLabel(tab);
   const Icon =
-    tab.kind === "excalidraw"
+    tab.kind === "terminal"
+      ? FileTerminal
+      : tab.kind === "excalidraw"
       ? PenLine
       : tab.kind === "html"
         ? CodeIcon
         : FileText;
+  const terminalStatus = tab.terminal?.status ?? null;
+  const terminalPhase = tab.terminal?.phase ?? null;
   return (
     <div
       role="tab"
@@ -142,7 +163,9 @@ function Tab({ tab, active, subtitle, onSelect, onClose }: TabProps) {
       <Icon
         className={cn(
           "size-3.5 shrink-0",
-          active && tab.kind === "excalidraw"
+          active && tab.kind === "terminal"
+            ? "text-sky-500/90"
+            : active && tab.kind === "excalidraw"
             ? "text-violet-500/90"
             : active && tab.kind === "html"
               ? "text-orange-500/90"
@@ -173,6 +196,10 @@ function Tab({ tab, active, subtitle, onSelect, onClose }: TabProps) {
         />
       ) : null}
 
+      {terminalPhase && terminalStatus ? (
+        <TerminalStatusBadge phase={terminalPhase} status={terminalStatus} />
+      ) : null}
+
       <Button
         type="button"
         variant="ghost"
@@ -196,6 +223,80 @@ function Tab({ tab, active, subtitle, onSelect, onClose }: TabProps) {
   );
 }
 
-function tabLabel(path: string): string {
-  return basename(path);
+function tabLabel(tab: TabState): string {
+  if (tab.kind === "terminal") {
+    return tab.terminal?.title?.trim() || "shell";
+  }
+  return basename(tab.path);
+}
+
+function TerminalStatusBadge({
+  phase,
+  status,
+}: {
+  phase: NonNullable<TabState["terminal"]>["phase"];
+  status: NonNullable<TabState["terminal"]>["status"];
+}) {
+  if (phase === "pending") {
+    return (
+      <span title="Starting terminal">
+        <Loader2 className="size-3 shrink-0 animate-spin text-sky-500" />
+      </span>
+    );
+  }
+  if (phase === "error") {
+    return (
+      <span title={status.lastNoticeMessage ?? "Terminal failed to start"}>
+        <AlertTriangle className="size-3 shrink-0 text-red-500" />
+      </span>
+    );
+  }
+  if (status.actionRequired) {
+    return (
+      <span title="Action required">
+        <AlertTriangle className="size-3 shrink-0 text-orange-500" />
+      </span>
+    );
+  }
+  if (status.unhealthy) {
+    return (
+      <span title="Renderer unhealthy">
+        <AlertTriangle className="size-3 shrink-0 text-red-500" />
+      </span>
+    );
+  }
+  if (status.loading || status.paused) {
+    return (
+      <span title={status.loading ? "Command running" : "Command paused"}>
+        <Loader2
+          className={cn(
+            "size-3 shrink-0",
+            status.loading ? "animate-spin text-sky-500" : "text-amber-500",
+          )}
+        />
+      </span>
+    );
+  }
+  if (status.completed) {
+    return (
+      <span title="Command completed">
+        <CheckCircle2 className="size-3 shrink-0 text-emerald-500" />
+      </span>
+    );
+  }
+  if (status.unreadCount > 0) {
+    return (
+      <span
+        className="inline-flex h-4 min-w-4 shrink-0 items-center justify-center rounded-full bg-sky-500/15 px-1 text-[10px] font-medium text-sky-700 dark:text-sky-300"
+        title={status.lastNoticeMessage ?? "Terminal notification"}
+      >
+        {status.unreadCount > 9 ? "9+" : status.unreadCount}
+      </span>
+    );
+  }
+  return (
+    <span title="Terminal tab">
+      <BellDot className="size-3 shrink-0 text-muted-foreground/40" />
+    </span>
+  );
 }

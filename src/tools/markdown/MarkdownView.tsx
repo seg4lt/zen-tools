@@ -17,6 +17,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { useNavigate } from "@tanstack/react-router";
 import { Keyboard, Loader2, PanelLeftOpen, Save } from "lucide-react";
 import { Button } from "@zen-tools/ui";
 import { DragHandle } from "@/components/drag-handle";
@@ -53,6 +54,7 @@ import { useAutoSave } from "@/hooks/use-auto-save";
 import { markdownTauri } from "./lib/tauri";
 import { useVaults } from "./hooks/use-vaults";
 import { useMarkdownKeyboardNav } from "./hooks/use-keyboard-nav";
+import { useOpenTerminalTab } from "./hooks/use-open-terminal-tab";
 import {
   basename,
   basenameNoExt,
@@ -60,6 +62,19 @@ import {
   normalizePath,
 } from "./lib/tauri";
 import { useTheme } from "@/hooks/use-theme";
+import {
+  terminalCloseTab,
+  terminalFocusTab,
+  terminalSetChromeInset,
+  type ChromeInset,
+} from "@/tools/terminal/lib/tauri";
+
+const HIDDEN_TERMINAL_INSET: ChromeInset = {
+  top: 99_999,
+  right: 0,
+  bottom: 0,
+  left: 0,
+};
 
 export function MarkdownView() {
   // Wire up Cmd+O / Cmd+Shift+O at this level so the listener
@@ -68,7 +83,9 @@ export function MarkdownView() {
 
   const { state, dispatch } = useMarkdownStore();
   const { openFile, saveCurrent, resolveWikilink } = useOpenFile();
+  const { retryTerminalTab } = useOpenTerminalTab();
   const { addVault, refresh: refreshVaults } = useVaults();
+  const navigate = useNavigate();
   // One editor handle per leaf. Each split has its own CodeMirror
   // instance — separate cursor, scroll, and undo history.
   const leafHandlesRef = useRef<Map<string, MarkdownEditorHandle>>(new Map());
@@ -170,8 +187,11 @@ export function MarkdownView() {
   // `activeTab(state)` call.
   const tab = tabForLeaf(workspace.focusedLeafId);
   const isExcalidraw = tab?.kind === "excalidraw";
+  const isTerminalTab = tab?.kind === "terminal";
   const { theme } = useTheme();
   const isDark = theme === "dark";
+  const terminalHostRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+  const [terminalHostVersion, setTerminalHostVersion] = useState(0);
 
   // Push a jump-list entry whenever the focused leaf's active tab
   // changes — captures both palette / sidebar file switches and
@@ -530,6 +550,75 @@ export function MarkdownView() {
   const [sidebarWidth, setSidebarWidth] = useState(256);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
+  useEffect(() => {
+    return () => {
+      document.body.classList.remove("markdown-terminal-active");
+      void terminalSetChromeInset(HIDDEN_TERMINAL_INSET).catch((err) =>
+        console.error("[markdown] hide terminal inset failed", err),
+      );
+    };
+  }, []);
+
+  useEffect(() => {
+    if (
+      tab?.kind !== "terminal" ||
+      !tab.terminal ||
+      tab.terminal.phase !== "ready" ||
+      tab.terminal.paneId == null
+    ) {
+      document.body.classList.remove("markdown-terminal-active");
+      void terminalSetChromeInset(HIDDEN_TERMINAL_INSET).catch((err) =>
+        console.error("[markdown] hide terminal inset failed", err),
+      );
+      return;
+    }
+    document.body.classList.add("markdown-terminal-active");
+    const host = terminalHostRefs.current.get(workspace.focusedLeafId);
+    if (!host) return;
+
+    void terminalFocusTab(tab.terminal.paneId).catch((err) =>
+      console.error("[markdown] focus terminal tab failed", err),
+    );
+
+    let frame = 0;
+    const pushInset = () => {
+      frame = 0;
+      const rect = host.getBoundingClientRect();
+      const inset = {
+        top: Math.max(0, Math.round(rect.top)),
+        left: Math.max(0, Math.round(rect.left)),
+        right: Math.max(0, Math.round(window.innerWidth - rect.right)),
+        bottom: Math.max(0, Math.round(window.innerHeight - rect.bottom)),
+      } satisfies ChromeInset;
+      void terminalSetChromeInset(inset).catch((err) =>
+        console.error("[markdown] set terminal inset failed", err),
+      );
+    };
+    const schedulePush = () => {
+      if (frame !== 0) return;
+      frame = requestAnimationFrame(pushInset);
+    };
+
+    schedulePush();
+    const observer = new ResizeObserver(schedulePush);
+    observer.observe(host);
+    window.addEventListener("resize", schedulePush);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", schedulePush);
+      if (frame !== 0) cancelAnimationFrame(frame);
+      if (document.body.classList.contains("markdown-terminal-active")) {
+        document.body.classList.remove("markdown-terminal-active");
+      }
+    };
+  }, [
+    tab?.id,
+    tab?.kind,
+    tab?.terminal?.paneId,
+    workspace.focusedLeafId,
+    terminalHostVersion,
+  ]);
+
   return (
     <div className="flex h-full min-h-0 w-full flex-col">
       <div className="flex h-9 shrink-0 items-center gap-2 border-b bg-card/60 px-3">
@@ -546,13 +635,15 @@ export function MarkdownView() {
             {/* Preserve the historical `foo.md` label for true `.md`
              * files, but show the full basename for drawings and
              * non-`.md` text files so their real suffix stays visible. */}
-            {tab.kind === "markdown" && /\.md$/i.test(tab.path)
+            {tab.kind === "terminal"
+              ? tab.terminal?.title ?? "shell"
+              : tab.kind === "markdown" && /\.md$/i.test(tab.path)
               ? `${basenameNoExt(tab.path)}.md`
               : basename(tab.path)}
           </span>
         ) : null}
         <div className="ml-auto flex items-center gap-1">
-          {tab ? (
+          {tab && tab.kind !== "terminal" ? (
             <Button
               size="xs"
               variant="ghost"
@@ -567,7 +658,7 @@ export function MarkdownView() {
           {/* Vim mode applies only to CodeMirror-based text editors —
            *  hide the toggle in the Excalidraw drawing pane where
            *  the chrome would just be confusing. */}
-          {!isExcalidraw && (
+          {!isExcalidraw && !isTerminalTab && (
             <Button
               size="xs"
               variant="ghost"
@@ -688,6 +779,16 @@ export function MarkdownView() {
                         }
                       }}
                       onCloseTab={(tabId) => {
+                        const closing = state.tabs.find((tab) => tab.id === tabId);
+                        if (
+                          closing?.kind === "terminal" &&
+                          closing.terminal?.paneId != null
+                        ) {
+                          void terminalCloseTab(closing.terminal.paneId).catch((err) =>
+                            console.error("[markdown] close terminal tab failed", err),
+                          );
+                          return;
+                        }
                         dispatch({ type: "closeTab", id: tabId });
                       }}
                       onChange={onLeafChange}
@@ -704,6 +805,24 @@ export function MarkdownView() {
                       onWikilinkOpen={onWikilinkOpen}
                       onLinkOpen={onLinkOpen}
                       onImageSaved={onImageSaved}
+                      onRetryTerminal={() => {
+                        if (leafTab?.kind !== "terminal") return;
+                        void retryTerminalTab(leafTab.id);
+                      }}
+                      onOpenTerminalTool={() => {
+                        void navigate({ to: "/terminal" });
+                      }}
+                      registerTerminalHost={(el) => {
+                        const current = terminalHostRefs.current.get(leafId) ?? null;
+                        if (el) {
+                          terminalHostRefs.current.set(leafId, el);
+                        } else {
+                          terminalHostRefs.current.delete(leafId);
+                        }
+                        if (current !== el) {
+                          setTerminalHostVersion((value) => value + 1);
+                        }
+                      }}
                       registerHandle={(h) => {
                         if (h) leafHandlesRef.current.set(leafId, h);
                         else leafHandlesRef.current.delete(leafId);
@@ -762,6 +881,9 @@ interface MarkdownLeafShellProps {
   onWikilinkOpen: (label: string) => void;
   onLinkOpen: (url: string) => void;
   onImageSaved: () => void;
+  onRetryTerminal: () => void;
+  onOpenTerminalTool: () => void;
+  registerTerminalHost: (el: HTMLDivElement | null) => void;
   registerHandle: (handle: MarkdownEditorHandle | null) => void;
 }
 
@@ -786,10 +908,14 @@ function MarkdownLeafShell({
   onWikilinkOpen,
   onLinkOpen,
   onImageSaved,
+  onRetryTerminal,
+  onOpenTerminalTool,
+  registerTerminalHost,
   registerHandle,
 }: MarkdownLeafShellProps) {
   const handleRef = useRef<MarkdownEditorHandle | null>(null);
   const lastTabIdRef = useRef<string | null>(null);
+  const terminalHostRef = useRef<HTMLDivElement | null>(null);
 
   // Register on mount, unregister on unmount, so the parent can
   // address this leaf's editor (jump-list scroll, focus, etc.).
@@ -798,6 +924,11 @@ function MarkdownLeafShell({
     return () => registerHandle(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    registerTerminalHost(terminalHostRef.current);
+    return () => registerTerminalHost(null);
+  }, [registerTerminalHost]);
 
   // Pump this leaf's tab content into its editor whenever the tab
   // id or doc changes. `setValue` is a no-op when content already
@@ -808,6 +939,10 @@ function MarkdownLeafShell({
   useEffect(() => {
     const handle = handleRef.current;
     if (!handle) return;
+    if (leafTab?.kind === "terminal") {
+      lastTabIdRef.current = leafTab.id;
+      return;
+    }
     if (!leafTab) {
       handle.setValue("");
       lastTabIdRef.current = null;
@@ -831,7 +966,7 @@ function MarkdownLeafShell({
   // pull DOM focus into its editor so subsequent keystrokes land
   // here.
   useEffect(() => {
-    if (focused) handleRef.current?.focus();
+    if (focused && leafTab?.kind !== "terminal") handleRef.current?.focus();
   }, [focused]);
 
   // Wrap the parent's `(leafId, doc)` callbacks into the editor's
@@ -865,7 +1000,28 @@ function MarkdownLeafShell({
         onClose={onCloseTab}
       />
       <div className="min-h-0 min-w-0 flex-1">
-        {leafTab?.kind === "html" ? (
+        {leafTab?.kind === "terminal" ? (
+          leafTab.terminal?.phase === "ready" ? (
+            <div
+              ref={terminalHostRef}
+              className="h-full w-full bg-transparent pointer-events-none"
+            />
+          ) : leafTab.terminal?.phase === "error" ? (
+            <TerminalTabErrorState
+              message={leafTab.terminal.errorMessage ?? "Failed to start terminal"}
+              onRetry={onRetryTerminal}
+              onOpenTerminalTool={onOpenTerminalTool}
+            />
+          ) : (
+            <TerminalTabPendingState
+              label={
+                leafTab.terminal?.launchDirectory ??
+                leafTab.terminal?.cwdAbsolutePath ??
+                null
+              }
+            />
+          )
+        ) : leafTab?.kind === "html" ? (
           <HtmlEditor
             imperativeRef={handleRef}
             value={leafTab.doc}
@@ -908,6 +1064,49 @@ function MarkdownLeafShell({
             onImageSaved={onImageSaved}
           />
         )}
+      </div>
+    </div>
+  );
+}
+
+function TerminalTabPendingState({ label }: { label: string | null }) {
+  return (
+    <div className="flex h-full w-full items-center justify-center bg-background/70">
+      <div className="flex max-w-sm flex-col items-center gap-2 text-center">
+        <Loader2 className="size-5 animate-spin text-sky-500" />
+        <div className="text-sm font-medium">Starting terminal…</div>
+        {label ? (
+          <div className="max-w-full truncate text-xs text-muted-foreground">
+            {label}
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function TerminalTabErrorState({
+  message,
+  onRetry,
+  onOpenTerminalTool,
+}: {
+  message: string;
+  onRetry: () => void;
+  onOpenTerminalTool: () => void;
+}) {
+  return (
+    <div className="flex h-full w-full items-center justify-center bg-background">
+      <div className="flex max-w-md flex-col items-center gap-3 rounded-lg border bg-card px-5 py-6 text-center shadow-sm">
+        <div className="text-sm font-medium">Terminal failed to start</div>
+        <div className="text-xs text-muted-foreground">{message}</div>
+        <div className="flex items-center gap-2">
+          <Button size="sm" onClick={onRetry}>
+            Retry
+          </Button>
+          <Button size="sm" variant="outline" onClick={onOpenTerminalTool}>
+            Open Terminal Tool
+          </Button>
+        </div>
       </div>
     </div>
   );

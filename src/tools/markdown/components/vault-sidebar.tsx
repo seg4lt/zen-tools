@@ -57,6 +57,7 @@ import {
   useMarkdownStore,
 } from "../store/markdown-store";
 import {
+  dirname,
   isHtmlPath,
   isMarkdownPath,
   isExcalidrawPath,
@@ -65,6 +66,7 @@ import {
   type MarkdownFileItem,
   type MarkdownVaultDto,
 } from "../lib/tauri";
+import { useOpenTerminalTab } from "../hooks/use-open-terminal-tab";
 import { useVaults } from "../hooks/use-vaults";
 import { useFileOps } from "../hooks/use-file-ops";
 
@@ -238,6 +240,7 @@ function VaultBlock({ root, vault, tree, onRemove }: VaultBlockProps) {
   const { state, dispatch } = useMarkdownStore();
   const { refresh } = useVaults();
   const { movePath } = useFileOps();
+  const { openTerminalTab } = useOpenTerminalTab();
   const open = isExpanded(state.expanded, `vault:${root}`);
   const name = vault?.name ?? root.split("/").filter(Boolean).slice(-1)[0] ?? root;
 
@@ -356,6 +359,11 @@ function VaultBlock({ root, vault, tree, onRemove }: VaultBlockProps) {
           >
             <FolderPlus />
             <span>New folder</span>
+          </ContextMenuItem>
+          <ContextMenuSeparator />
+          <ContextMenuItem onSelect={() => void openTerminalTab(root)}>
+            <FolderOpen />
+            <span>Open Terminal Here</span>
           </ContextMenuItem>
           <ContextMenuSeparator />
           <ContextMenuItem onSelect={() => void copyToClipboard(root)}>
@@ -612,6 +620,7 @@ function TreeRow({ node }: TreeRowProps) {
 function RowContextMenu({ node }: { node: TreeNode }) {
   const { state, dispatch } = useMarkdownStore();
   const { deletePath } = useFileOps();
+  const { openTerminalTab } = useOpenTerminalTab();
   const { item } = node;
   const isDir = item.isDir;
 
@@ -669,6 +678,13 @@ function RowContextMenu({ node }: { node: TreeNode }) {
           <ContextMenuSeparator />
         </>
       ) : null}
+      <ContextMenuItem
+        onSelect={() => void openTerminalTab(isDir ? item.path : dirname(item.path))}
+      >
+        <FolderOpen />
+        <span>Open Terminal Here</span>
+      </ContextMenuItem>
+      <ContextMenuSeparator />
       <ContextMenuItem onSelect={onRename}>
         <Pencil />
         <span>Rename…</span>
