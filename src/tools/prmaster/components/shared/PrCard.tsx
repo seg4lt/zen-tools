@@ -145,6 +145,8 @@ export function PrCard({
   onSelect,
 }: Props) {
   const { pr, detail, reviews, requestedReviewers, reviewDecision } = enriched;
+  const authorLogin = pr.author?.login ?? null;
+  const showTitleAuthor = variant !== "mine" && authorLogin;
   const headRef = detail?.headRefName ?? null;
   const baseRef = detail?.baseRefName ?? null;
   const fileCount = detail?.files?.nodes?.length ?? null;
@@ -200,7 +202,7 @@ export function PrCard({
         {/* ── Row 1: avatar + title + right-side status cluster ── */}
         <div className="flex items-start gap-2">
           <Avatar
-            login={pr.author?.login ?? ""}
+            login={authorLogin ?? ""}
             isBot={pr.author?.is_bot ?? false}
             size={20}
           />
@@ -216,9 +218,14 @@ export function PrCard({
               "line-clamp-2 flex-1 text-sm font-medium leading-snug",
               pr.isDraft && "text-muted-foreground",
             )}
-            title={pr.title}
+            title={showTitleAuthor ? `${pr.title} by @${authorLogin}` : pr.title}
           >
             {pr.title}
+            {showTitleAuthor && (
+              <span className="ml-2 whitespace-nowrap font-mono text-[11px] font-normal text-muted-foreground">
+                @{authorLogin}
+              </span>
+            )}
           </span>
 
           {/* Right cluster: CI badge → mergeable → decision. Order
@@ -269,9 +276,7 @@ export function PrCard({
             <span className="text-muted-foreground">#{pr.number}</span>
           </span>
 
-          {pr.author?.login && (
-            <span className="font-mono">@{pr.author.login}</span>
-          )}
+          {authorLogin && <span className="font-mono">@{authorLogin}</span>}
 
           {headRef && baseRef && (
             <span
