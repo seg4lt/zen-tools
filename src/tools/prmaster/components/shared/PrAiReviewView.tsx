@@ -40,6 +40,7 @@ import {
   RotateCw,
   ScrollText,
   Square,
+  X,
 } from "lucide-react";
 import {
   prmasterTauri,
@@ -75,6 +76,7 @@ interface LoadedRun {
   events: AiReviewEvent[];
   findings: AiReviewFinding[];
   overallSummary: string;
+  changeSummary: string[];
   prompt: string;
   legacyHtml: string | null;
   model: string;
@@ -99,6 +101,8 @@ export function PrAiReviewView({ pr }: Props) {
   const [busy, setBusy] = useState(false);
   const [loaded, setLoaded] = useState<LoadedRun | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>("log");
+  const [promptDraft, setPromptDraft] = useState<string | null>(null);
+  const [promptError, setPromptError] = useState<string | null>(null);
   const [history, setHistory] = useState<AiReviewRunSummary[]>([]);
   const [postingIds, setPostingIds] = useState<Set<string>>(new Set());
   const [postedIds, setPostedIds] = useState<Set<string>>(new Set());
@@ -240,10 +244,36 @@ export function PrAiReviewView({ pr }: Props) {
     };
   }, [key, slot.liveRunId]);
 
-  const onStart = useCallback(async () => {
+  const openPromptEditor = useCallback(async () => {
     if (!headSha) return;
     setBusy(true);
     setMissingRepo(null);
+    setPromptError(null);
+    try {
+      const prompt = await prmasterTauri.aiReviewPreviewPrompt({
+        pr: ref,
+        headSha,
+        headBranch: pr.detail?.headRefName ?? null,
+        baseBranch: pr.detail?.baseRefName ?? null,
+      });
+      setPromptDraft(prompt);
+    } catch (e) {
+      const msg = formatErr(e);
+      if (msg.toLowerCase().includes("local clone not registered")) {
+        setMissingRepo(`${ref.owner}/${ref.repo}`);
+      } else {
+        setPromptError(msg);
+      }
+    } finally {
+      setBusy(false);
+    }
+  }, [headSha, pr.detail?.baseRefName, pr.detail?.headRefName, ref]);
+
+  const onStart = useCallback(async (promptOverride: string) => {
+    if (!headSha) return;
+    setBusy(true);
+    setMissingRepo(null);
+    setPromptError(null);
     try {
       const resp = await prmasterTauri.aiReviewStart({
         pr: ref,
@@ -251,9 +281,11 @@ export function PrAiReviewView({ pr }: Props) {
         headBranch: pr.detail?.headRefName ?? null,
         baseBranch: pr.detail?.baseRefName ?? null,
         model: model || null,
+        promptOverride,
       });
       writeStoredModel(model);
       aiReviewStore.startRun(key, resp.run_id);
+      setPromptDraft(null);
       setLoaded(null);
       setViewMode("log");
     } catch (e) {
@@ -261,10 +293,7 @@ export function PrAiReviewView({ pr }: Props) {
       if (msg.toLowerCase().includes("local clone not registered")) {
         setMissingRepo(`${ref.owner}/${ref.repo}`);
       } else {
-        aiReviewStore.appendEvent("__local__", {
-          kind: "error",
-          message: msg,
-        });
+        setPromptError(msg);
       }
     } finally {
       setBusy(false);
@@ -357,8 +386,8 @@ export function PrAiReviewView({ pr }: Props) {
   const onRerun = useCallback(() => {
     setLoaded(null);
     setViewMode("log");
-    void onStart();
-  }, [onStart]);
+    void openPromptEditor();
+  }, [openPromptEditor]);
 
   if (missingRepo) {
     return (
@@ -451,11 +480,11 @@ export function PrAiReviewView({ pr }: Props) {
             <Button
               size="xs"
               variant="default"
-              onClick={() => void onStart()}
+              onClick={() => void openPromptEditor()}
               disabled={!headSha || busy}
             >
               <Play className="size-3" />
-              {busy ? "Starting…" : "Start review"}
+              {busy ? "Loading…" : "Start review"}
             </Button>
           )}
         </div>
@@ -468,12 +497,25 @@ export function PrAiReviewView({ pr }: Props) {
       )}
 
       <div className="min-h-0 flex-1">
-        {isLive ? (
+        {promptDraft !== null && !isLive ? (
+          <PromptEditor
+            value={promptDraft}
+            error={promptError}
+            busy={busy}
+            onChange={setPromptDraft}
+            onCancel={() => {
+              setPromptDraft(null);
+              setPromptError(null);
+            }}
+            onGo={() => void onStart(promptDraft)}
+          />
+        ) : isLive ? (
           <AiReviewLogPane events={logEvents} />
         ) : loaded && viewMode === "report" ? (
           <AiReviewReportView
             findings={loaded.findings}
             overallSummary={loaded.overallSummary}
+            changeSummary={loaded.changeSummary}
             model={loaded.model}
             costUsd={loaded.costUsd}
             finishedAtMs={loaded.finishedAtMs}
@@ -569,6 +611,7 @@ function reportRespToLoaded(
     events: resp.events ?? [],
     findings: resp.findings,
     overallSummary: resp.overall_summary,
+    changeSummary: resp.change_summary ?? [],
     prompt: resp.prompt,
     legacyHtml: resp.html,
     model: resp.model,
@@ -576,6 +619,61 @@ function reportRespToLoaded(
     finishedAtMs: resp.finished_at_ms,
     headSha: resp.head_sha,
   };
+}
+
+function PromptEditor({
+  value,
+  error,
+  busy,
+  onChange,
+  onCancel,
+  onGo,
+}: {
+  value: string;
+  error: string | null;
+  busy: boolean;
+  onChange: (next: string) => void;
+  onCancel: () => void;
+  onGo: () => void;
+}) {
+  return (
+    <div className="flex h-full min-h-0 flex-col rounded-md border bg-card/40">
+      <div className="flex shrink-0 items-center justify-between gap-3 border-b px-3 py-2">
+        <div className="min-w-0">
+          <div className="text-sm font-medium">Review prompt</div>
+          <div className="text-[11px] text-muted-foreground">
+            Edit the prompt for this run, then click Go.
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          <Button size="xs" variant="ghost" onClick={onCancel} disabled={busy}>
+            <X className="size-3" />
+            Cancel
+          </Button>
+          <Button
+            size="xs"
+            variant="default"
+            onClick={onGo}
+            disabled={busy || value.trim().length === 0}
+          >
+            <Play className="size-3" />
+            {busy ? "Starting..." : "Go"}
+          </Button>
+        </div>
+      </div>
+      {error && (
+        <div className="border-b border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+          {error}
+        </div>
+      )}
+      <textarea
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        spellCheck={false}
+        className="min-h-0 flex-1 resize-none bg-background/70 p-3 font-mono text-[11px] leading-relaxed outline-none"
+      />
+    </div>
+  );
 }
 
 function statusBadgeClass(status: string): string {

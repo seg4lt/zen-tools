@@ -482,7 +482,14 @@ export const prmasterTauri = {
     headBranch: string | null;
     baseBranch: string | null;
     model: string | null;
+    promptOverride?: string | null;
   }) => invoke<AiReviewStartResp>("prmaster_ai_review_start", params),
+  aiReviewPreviewPrompt: (params: {
+    pr: PrRef;
+    headSha: string;
+    headBranch: string | null;
+    baseBranch: string | null;
+  }) => invoke<string>("prmaster_ai_review_preview_prompt", params),
   aiReviewStatus: (runId: string) =>
     invoke<AiReviewStatusResp | null>("prmaster_ai_review_status", { runId }),
   aiReviewCancel: (runId: string) =>
@@ -673,6 +680,8 @@ export interface AiReviewReportResp {
   events: AiReviewEvent[];
   /** One-sentence verdict copied from `report.json`'s `summary`. */
   overall_summary: string;
+  /** High-level bullet summary copied from `report.json`'s `change_summary`. */
+  change_summary: string[];
   /** The exact prompt the run sent to `claude -p`. */
   prompt: string;
   pr: { owner: string; repo: string; number: number };

@@ -33,6 +33,8 @@ interface Props {
   findings: AiReviewFinding[];
   /** One-sentence overall verdict from the run. */
   overallSummary: string;
+  /** High-level bullets summarizing what changed in the PR. */
+  changeSummary: string[];
   /** Resolved Claude model the run used. */
   model: string;
   /** Reported cost in USD. */
@@ -86,6 +88,7 @@ export function AiReviewReportView(props: Props) {
     <div className="flex h-full min-h-0 flex-col gap-2 overflow-hidden">
       <ReportHeader
         overallSummary={props.overallSummary}
+        changeSummary={props.changeSummary}
         model={props.model}
         costUsd={props.costUsd}
         finishedAtMs={props.finishedAtMs}
@@ -133,6 +136,7 @@ export function AiReviewReportView(props: Props) {
 
 function ReportHeader({
   overallSummary,
+  changeSummary,
   model,
   costUsd,
   finishedAtMs,
@@ -147,6 +151,7 @@ function ReportHeader({
   onShowLog,
 }: {
   overallSummary: string;
+  changeSummary: string[];
   model: string;
   costUsd: number | null;
   finishedAtMs: number | null;
@@ -175,6 +180,13 @@ function ReportHeader({
               <Sparkles className="mr-1 inline-block size-3 align-[-2px] text-blue-500" />
               {overallSummary}
             </p>
+          )}
+          {changeSummary.length > 0 && (
+            <ul className="mt-1 list-disc space-y-0.5 pl-4 text-[11px] leading-snug text-muted-foreground">
+              {changeSummary.map((item, i) => (
+                <li key={`${i}-${item}`}>{item}</li>
+              ))}
+            </ul>
           )}
           <div className="mt-1 flex flex-wrap items-center gap-2 text-[10px] text-muted-foreground">
             <span className="font-mono">head {headSha.slice(0, 12)}</span>

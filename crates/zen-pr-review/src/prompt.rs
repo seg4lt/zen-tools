@@ -226,6 +226,10 @@ generate HTML).
 SCHEMA:
 {{
   "summary": "one sentence overall verdict",
+  "change_summary": [
+    "high-level bullet describing what changed",
+    "another high-level bullet describing changed behavior, APIs, data flow, tests, or UI"
+  ],
   "head_sha": "{head_sha}",
   "base_sha": "{base_sha_label}",
   "findings": [
@@ -247,6 +251,7 @@ SCHEMA:
 }}
 
 FIELD RULES — read carefully, the host UI depends on every one of these:
+- `change_summary` is required. Provide 3-6 concise, high-level bullet strings that summarize what the PR changes before discussing findings. Focus on user-visible behavior, important implementation shifts, data/model changes, tests, and operational impact. Do not mention line numbers here.
 - `path` is relative to the worktree root (so e.g. `src/foo/bar.rs`). NEVER use absolute paths.
 - `side` is "RIGHT" for findings on new/changed code (the common case), "LEFT" only for lines that the PR removed.
 - `start_line` / `end_line` are the 1-based, inclusive line range of the **finding itself** (not the context). They anchor the GitHub inline review comment when the user clicks "Post inline comment".

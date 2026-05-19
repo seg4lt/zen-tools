@@ -66,6 +66,10 @@ pub struct RunRecord {
     /// persisted before this field existed.
     #[serde(default)]
     pub overall_summary: String,
+    /// High-level bullet summary of what changed in the PR. Copied
+    /// from `report.json`'s `change_summary`; empty for older runs.
+    #[serde(default)]
+    pub change_summary: Vec<String>,
     /// The exact prompt text sent to `claude -p`. Surfaced via the
     /// "View prompt" disclosure on the report view so the user can
     /// audit what the model was asked to do.
@@ -142,6 +146,9 @@ pub struct ReportPayload {
     /// One-sentence overall verdict.
     #[serde(default)]
     pub summary: String,
+    /// High-level bullet summary of the changes in the PR.
+    #[serde(default)]
+    pub change_summary: Vec<String>,
     /// Head SHA Claude reviewed against (sanity check).
     #[serde(default)]
     pub head_sha: String,
@@ -285,6 +292,7 @@ mod tests {
             report_html_path: None,
             report_json_path: Some("/tmp/r.json".into()),
             overall_summary: String::new(),
+            change_summary: Vec::new(),
             prompt: String::new(),
             findings: Vec::new(),
             events: Vec::new(),

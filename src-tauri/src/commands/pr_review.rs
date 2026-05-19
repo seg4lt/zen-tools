@@ -181,6 +181,9 @@ pub struct AiReviewReportResp {
     pub events: Vec<AiReviewEvent>,
     /// One-sentence verdict copied from `report.json`'s `summary`.
     pub overall_summary: String,
+    /// High-level bullet summary copied from `report.json`'s
+    /// `change_summary`.
+    pub change_summary: Vec<String>,
     /// The exact prompt the run sent to `claude -p`. Surfaced via the
     /// "View prompt" disclosure so the user can audit what the model
     /// was asked to do.
@@ -211,6 +214,7 @@ pub async fn prmaster_ai_review_start(
     head_branch: Option<String>,
     base_branch: Option<String>,
     model: Option<String>,
+    prompt_override: Option<String>,
 ) -> AppResult<AiReviewStartResp> {
     let settings = config
         .get::<PrMasterSettings>(PRMASTER_SETTINGS_KEY)?
@@ -249,14 +253,18 @@ pub async fn prmaster_ai_review_start(
     // pass a `base_sha` because the frontend doesn't currently know it
     // — the prompt template instructs Claude to derive it itself via
     // `git merge-base origin/<base_branch> HEAD` inside the worktree.
-    let prompt_text = zen_pr_review::prompt::build_review_prompt(
-        None,
-        head_sha.as_str(),
-        head_branch.as_deref(),
-        base_branch.as_deref(),
-        None,
-        &handles.worktree_path.to_string_lossy(),
-    );
+    let prompt_text = prompt_override
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| {
+            zen_pr_review::prompt::build_review_prompt(
+                None,
+                head_sha.as_str(),
+                head_branch.as_deref(),
+                base_branch.as_deref(),
+                None,
+                &handles.worktree_path.to_string_lossy(),
+            )
+        });
 
     // Spin up the channel that bridges `ReviewEngine::run` events into
     // Tauri events. The receiver task lives until the sender drops at
@@ -321,6 +329,41 @@ pub async fn prmaster_ai_review_start(
     })
 }
 
+/// Build the default prompt for a proposed AI review run without
+/// starting Claude. The worktree path is deterministic for
+/// `(repo, PR number, head SHA)`, so this preview matches the prompt
+/// `prmaster_ai_review_start` would build if the user clicks Go
+/// unchanged.
+#[tauri::command]
+pub async fn prmaster_ai_review_preview_prompt(
+    app: AppHandle,
+    config: State<'_, UserConfig>,
+    pr: PrRef,
+    head_sha: String,
+    head_branch: Option<String>,
+    base_branch: Option<String>,
+) -> AppResult<String> {
+    let settings = config
+        .get::<PrMasterSettings>(PRMASTER_SETTINGS_KEY)?
+        .unwrap_or_default();
+    let worktrees_root = resolve_worktrees_root(&app, &settings)?;
+    let worktree_path = zen_pr_review::worktree::worktree_path(
+        &worktrees_root,
+        &pr.owner,
+        &pr.repo,
+        pr.number,
+        &head_sha,
+    );
+    Ok(zen_pr_review::prompt::build_review_prompt(
+        None,
+        head_sha.as_str(),
+        head_branch.as_deref(),
+        base_branch.as_deref(),
+        None,
+        &worktree_path.to_string_lossy(),
+    ))
+}
+
 /// Snapshot the live registry for `run_id`. Used by the frontend on
 /// re-mount to replay events that were already delivered.
 #[tauri::command]
@@ -382,6 +425,7 @@ pub async fn prmaster_ai_review_get_report(
         findings: record.findings,
         events: record.events,
         overall_summary: record.overall_summary,
+        change_summary: record.change_summary,
         prompt: record.prompt,
         head_sha: record.summary.head_sha.clone(),
         model: record.summary.model.clone(),
@@ -668,4 +712,3 @@ pub async fn prmaster_ai_review_cleanup_merged(
     }
     Ok(purged)
 }
-
