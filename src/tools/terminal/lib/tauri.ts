@@ -148,8 +148,9 @@ export function terminalListTabs() {
  * Push the HTML chrome insets to native side. The `top`/`right`/
  * `bottom`/`left` values are CSS-point distances from the window edges
  * — i.e. `top: 50` means "leave the top 50pt of the window to HTML;
- * the terminal NSView starts at y=50". On macOS CSS points map 1:1
- * to AppKit points, so no scaling is needed.
+ * the terminal NSView starts at y=50". Values come from
+ * `getBoundingClientRect()` in the webview's layout coordinate space;
+ * the native side multiplies by the current webview zoom factor.
  *
  * Used in two ways:
  *
@@ -171,6 +172,17 @@ export function terminalSetChromeInset(inset: ChromeInset) {
     right: inset.right,
     bottom: inset.bottom,
     left: inset.left,
+  });
+}
+
+/**
+ * Mirror the WKWebView page zoom factor to the native Ghostty layer.
+ * The NSView sibling is not scaled by WebKit, so native code multiplies
+ * chrome insets by this factor and scales ghostty font-size to match.
+ */
+export function terminalSetWebviewContentZoom(zoom: number) {
+  return invoke<void>("plugin:ghostty|terminal_set_webview_content_zoom", {
+    zoom,
   });
 }
 

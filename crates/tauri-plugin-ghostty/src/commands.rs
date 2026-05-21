@@ -106,11 +106,21 @@ pub fn terminal_new(
         .scale_factor()
         .map_err(|e| format!("scale_factor: {e}"))?;
 
+    let webview_zoom = {
+        let inner = state.inner.lock();
+        inner.webview_content_zoom
+    };
+    let font_size = config
+        .font_size
+        .filter(|&f| f > 0.0)
+        .map(|_| surface_font_size(&config, webview_zoom))
+        .unwrap_or(0.0);
+
     let surface_cfg = SurfaceConfig {
         scale_factor: scale,
-        // 0.0 means "use ghostty's config default" — keeps every pane
-        // and every tab spawned later at the same starting font size.
-        font_size: config.font_size.unwrap_or(0.0),
+        // 0.0 means "use ghostty's config default" (including our
+        // webview-zoom font-size override when app zoom != 1.0).
+        font_size,
         working_directory: launch_directory.clone(),
         command: config.command.clone(),
         initial_input: None,
@@ -458,6 +468,33 @@ pub fn terminal_set_chrome_inset(
     Ok(())
 }
 
+/// Mirror the WKWebView page zoom factor so the native Ghostty layer
+/// stays aligned with the HTML chrome (insets + font size).
+#[tauri::command]
+pub fn terminal_set_webview_content_zoom(
+    window: Window<Wry>,
+    app_handle: AppHandle<Wry>,
+    state: State<'_, PluginState>,
+    zoom: f64,
+) -> Result<(), String> {
+    let zoom = if zoom.is_finite() && zoom > 0.0 { zoom } else { 1.0 };
+    {
+        let mut inner = state.inner.lock();
+        if (inner.webview_content_zoom - zoom).abs() < f64::EPSILON {
+            return Ok(());
+        }
+        inner.webview_content_zoom = zoom;
+    }
+
+    run_on_main(&window, move |_| unsafe {
+        macos::tab_container_set_webview_content_zoom(zoom);
+    })
+    .map_err(|e| format!("run_on_main: {e}"))?;
+
+    push_font_zoom_config(&app_handle, zoom);
+    Ok(())
+}
+
 #[tauri::command]
 pub fn terminal_set_close_window_on_last_tab(
     state: State<'_, PluginState>,
@@ -505,7 +542,7 @@ fn create_app() -> ghostty_rs::Result<App> {
 
     let mut config = Config::new()?;
     config.load_default_files();
-    apply_zen_tools_overrides(&mut config);
+    apply_zen_tools_overrides(&mut config, 1.0);
     config.finalize();
 
     // v1 callbacks: ghostty's wakeup is a no-op for now (we'll wire it
@@ -563,16 +600,8 @@ fn create_app() -> ghostty_rs::Result<App> {
 /// or `load_file` fails, the user just keeps ghostty's defaults.
 /// This is purely a polish step and we don't want to block the app
 /// from starting on a bad I/O day.
-fn apply_zen_tools_overrides(config: &mut Config) {
-    let body = "window-padding-balance = true\n\
-window-padding-x = 0\n\
-window-padding-y = 0\n\
-window-padding-color = extend-always\n\
-scrollback-limit = 2000000\n\
-image-storage-limit = 64000000\n\
-notify-on-command-finish = always\n\
-notify-on-command-finish-action = no-bell,notify\n\
-notify-on-command-finish-after = 0s\n";
+fn apply_zen_tools_overrides(config: &mut Config, webview_zoom: f64) {
+    let body = zen_tools_override_body(webview_zoom);
     let dir = std::env::temp_dir();
     // Bundle-id-namespaced filename so multiple installs / dev
     // builds don't collide on the same file.
@@ -592,6 +621,103 @@ notify-on-command-finish-after = 0s\n";
             "ghostty: failed to load padding override file; using defaults"
         );
     }
+}
+
+/// Ghostty's upstream default when the user hasn't set `font-size`.
+const GHOSTTY_DEFAULT_FONT_PT: f32 = 13.0;
+
+fn zen_tools_override_body(webview_zoom: f64) -> String {
+    let mut body = String::from(
+        "window-padding-balance = true\n\
+window-padding-x = 0\n\
+window-padding-y = 0\n\
+window-padding-color = extend-always\n\
+scrollback-limit = 2000000\n\
+image-storage-limit = 64000000\n\
+notify-on-command-finish = always\n\
+notify-on-command-finish-action = no-bell,notify\n\
+notify-on-command-finish-after = 0s\n",
+    );
+    // When the WKWebView is zoomed, scale ghostty's font so terminal
+    // text matches the HTML chrome. At 1.0 we omit font-size so the
+    // user's ~/.config/ghostty/config wins.
+    if (webview_zoom - 1.0).abs() > f64::EPSILON {
+        let base = read_user_font_size_pt();
+        let scaled = (f64::from(base) * webview_zoom) as f32;
+        body.push_str(&format!("font-size = {scaled}\n"));
+    }
+    body
+}
+
+fn read_user_font_size_pt() -> f32 {
+    let home = match std::env::var("HOME") {
+        Ok(h) => h,
+        Err(_) => return GHOSTTY_DEFAULT_FONT_PT,
+    };
+    let candidates = [
+        format!("{home}/.config/ghostty/config"),
+        format!("{home}/Library/Application Support/com.mitchellh.ghostty/config"),
+    ];
+    for path in candidates {
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        if let Some(size) = parse_font_size_from_config(&text) {
+            return size;
+        }
+    }
+    GHOSTTY_DEFAULT_FONT_PT
+}
+
+fn parse_font_size_from_config(text: &str) -> Option<f32> {
+    for line in text.lines() {
+        let line = line.split('#').next()?.trim();
+        let (key, value) = line.split_once('=')?;
+        let key = key.trim();
+        if key != "font-size" && key != "font_size" {
+            continue;
+        }
+        let value = value.trim().trim_matches('"');
+        let size: f32 = value.parse().ok()?;
+        if size > 0.0 {
+            return Some(size);
+        }
+    }
+    None
+}
+
+/// Rebuild ghostty config with the current webview zoom and push it
+/// to every live surface. No-op if the app hasn't bootstrapped yet.
+fn push_font_zoom_config(app_handle: &AppHandle<Wry>, webview_zoom: f64) {
+    let app_handle = app_handle.clone();
+    let _ = app_handle.clone().run_on_main_thread(move || {
+        let state = app_handle.state::<PluginState>();
+        let inner = state.inner.lock();
+        let app = match inner.app.as_ref() {
+            Some(a) => a,
+            None => return,
+        };
+
+        let mut config = match Config::new() {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(?e, "ghostty: webview zoom config rebuild failed");
+                return;
+            }
+        };
+        config.load_default_files();
+        apply_zen_tools_overrides(&mut config, webview_zoom);
+        config.finalize();
+        app.update_config(&config);
+    });
+}
+
+fn surface_font_size(config: &TerminalNewConfig, webview_zoom: f64) -> f32 {
+    let base = config
+        .font_size
+        .filter(|&f| f > 0.0)
+        .unwrap_or_else(read_user_font_size_pt);
+    (f64::from(base) * webview_zoom) as f32
 }
 
 /// Set `GHOSTTY_RESOURCES_DIR` once per process so ghostty can resolve
@@ -705,10 +831,16 @@ fn spawn_tab_native(
         .app
         .as_ref()
         .ok_or_else(|| "ghostty app missing".to_string())?;
+    let webview_zoom = inner.webview_content_zoom;
+    let font_size = config
+        .font_size
+        .filter(|&f| f > 0.0)
+        .map(|_| surface_font_size(&config, webview_zoom))
+        .unwrap_or(0.0);
 
     let surface_cfg = SurfaceConfig {
         scale_factor: scale,
-        font_size: config.font_size.unwrap_or(0.0),
+        font_size,
         working_directory: working_directory.clone(),
         command: config.command,
         initial_input: None,
@@ -1065,6 +1197,8 @@ extern "C" fn reload_config_trampoline(_app_ptr: *mut std::ffi::c_void, _soft: b
             }
         };
 
+        let webview_zoom = inner.webview_content_zoom;
+
         let mut config = match Config::new() {
             Ok(c) => c,
             Err(e) => {
@@ -1073,6 +1207,7 @@ extern "C" fn reload_config_trampoline(_app_ptr: *mut std::ffi::c_void, _soft: b
             }
         };
         config.load_default_files();
+        apply_zen_tools_overrides(&mut config, webview_zoom);
         config.finalize();
         app.update_config(&config);
         // `config` drops here, freeing the underlying ghostty_config_t.

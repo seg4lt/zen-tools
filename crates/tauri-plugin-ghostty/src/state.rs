@@ -33,7 +33,6 @@ pub struct PluginState {
     pub inner: Mutex<Inner>,
 }
 
-#[derive(Default)]
 pub struct Inner {
     pub app: Option<App>,
     /// All surfaces ever spawned, by id. Removed (and dropped) on tab
@@ -45,6 +44,23 @@ pub struct Inner {
     /// tab, do we close the window? Default true (matches macOS).
     /// Settable by an embedding host via `terminal_set_close_window_on_last_tab`.
     pub close_window_on_last_tab: bool,
+    /// Whole-app WKWebView zoom (`webview.setZoom`). Used to scale
+    /// chrome insets and ghostty font-size so the native terminal
+    /// layer tracks the HTML chrome.
+    pub webview_content_zoom: f64,
+}
+
+impl Default for Inner {
+    fn default() -> Self {
+        Self {
+            app: None,
+            surfaces: HashMap::new(),
+            next_surface_id: 0,
+            tabs: Vec::new(),
+            close_window_on_last_tab: false,
+            webview_content_zoom: 1.0,
+        }
+    }
 }
 
 impl Inner {

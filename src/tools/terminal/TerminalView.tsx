@@ -44,6 +44,7 @@ import { listen } from "@tauri-apps/api/event";
 import { useShortcut } from "@zen-tools/keyboard";
 import { cn } from "@zen-tools/ui";
 import { DragHandle } from "@/components/drag-handle";
+import { useAppZoom } from "@/hooks/use-app-zoom";
 import { useDistractionFree } from "./store/distraction-free";
 import {
   useTerminalStore,
@@ -254,6 +255,7 @@ export function TerminalView() {
     cycleWorkspace,
   } = useTerminalStore();
   const { enabled: dfEnabled, toggle: toggleDF } = useDistractionFree();
+  const { zoom: appZoom } = useAppZoom();
   const [editingWorkspaceId, setEditingWorkspaceId] = useState<string | null>(
     null,
   );
@@ -399,6 +401,11 @@ export function TerminalView() {
       pushInsetRef.current = () => {};
     };
   }, [workspaces.length]);
+
+  useEffect(() => {
+    lastInset.current = { top: -1, right: -1, bottom: -1, left: -1 };
+    pushInsetRef.current();
+  }, [appZoom]);
 
   useEffect(() => {
     const id = requestAnimationFrame(() => pushInsetRef.current());

@@ -188,6 +188,13 @@ NSView *GhosttyTabContainerEnsure(NSView *contentView);
 /// resized accordingly. Safe to call on every HTML resize tick.
 void GhosttyTabContainerSetChromeInset(double top, double right, double bottom, double left);
 
+/// Mirror the WKWebView page zoom factor (`webview.setZoom`). The
+/// native tab container is NOT scaled by WebKit, so chrome insets
+/// measured via `getBoundingClientRect()` must be multiplied by this
+/// factor when mapping CSS layout space → window points. Also
+/// triggers a surface geometry resync.
+void GhosttyTabContainerSetWebviewContentZoom(double zoom);
+
 /// Add a root view as a new tab. Hides the previously active tab,
 /// makes the new tab visible, assigns + returns a stable tab id.
 int GhosttyTabAdd(NSView *root);

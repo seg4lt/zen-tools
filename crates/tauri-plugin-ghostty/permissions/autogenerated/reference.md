@@ -13,6 +13,7 @@ Default permissions for the ghostty terminal plugin.
 - `allow-terminal-close-tab`
 - `allow-terminal-list-tabs`
 - `allow-terminal-set-chrome-inset`
+- `allow-terminal-set-webview-content-zoom`
 - `allow-terminal-set-close-window-on-last-tab`
 - `allow-terminal-set-traffic-lights-hidden`
 
@@ -242,6 +243,19 @@ Allows enumerating currently mounted tabs.
 <td>
 
 Allows the HTML side to push its measured chrome insets so the native tab content area is sized correctly.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`ghostty:allow-terminal-set-webview-content-zoom`
+
+</td>
+<td>
+
+Mirrors WKWebView page zoom to the native Ghostty layer so chrome insets and font size stay aligned with the HTML UI.
 
 </td>
 </tr>

@@ -15,6 +15,7 @@ permissions = [
     "allow-terminal-close-tab",
     "allow-terminal-list-tabs",
     "allow-terminal-set-chrome-inset",
+    "allow-terminal-set-webview-content-zoom",
     "allow-terminal-set-close-window-on-last-tab",
     "allow-terminal-set-traffic-lights-hidden",
 ]
@@ -63,6 +64,11 @@ commands.allow = ["terminal_list_tabs"]
 identifier = "allow-terminal-set-chrome-inset"
 description = "Allows the HTML side to push its measured chrome insets so the native tab content area is sized correctly."
 commands.allow = ["terminal_set_chrome_inset"]
+
+[[permission]]
+identifier = "allow-terminal-set-webview-content-zoom"
+description = "Mirrors WKWebView page zoom to the native Ghostty layer so chrome insets and font size stay aligned with the HTML UI."
+commands.allow = ["terminal_set_webview_content_zoom"]
 
 [[permission]]
 identifier = "allow-terminal-set-close-window-on-last-tab"

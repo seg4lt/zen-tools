@@ -1075,7 +1075,12 @@ static void tab_id_set(NSView *v, int id_) {
                              OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 // HTML chrome insets in points. Updated via GhosttyTabContainerSetChromeInset.
+// These are measured in the WKWebView's CSS/layout coordinate space.
 static CGFloat g_inset_top = 0, g_inset_right = 0, g_inset_bottom = 0, g_inset_left = 0;
+// Whole-app webview zoom (`webview.setZoom`). The NSView sibling is NOT
+// scaled by WKWebView, so chrome insets must be multiplied by this factor
+// when converting CSS rects → window points.
+static CGFloat g_webview_content_zoom = 1.0;
 
 // Tab event delivery — Rust installs a callback that emits Tauri events.
 typedef void (*GhosttyTabEventFn)(int kind, int tab_id, const char *value);
@@ -1217,10 +1222,16 @@ static BOOL tab_has_multiple_panes(NSView *tab_root) {
 // the current insets.
 static NSRect tab_container_frame_in(NSView *contentView) {
     NSRect b = contentView.bounds;
-    return NSMakeRect(g_inset_left,
-                      g_inset_bottom,
-                      MAX(0, b.size.width  - g_inset_left - g_inset_right),
-                      MAX(0, b.size.height - g_inset_top  - g_inset_bottom));
+    CGFloat z = g_webview_content_zoom;
+    if (z <= 0) z = 1.0;
+    CGFloat left = g_inset_left * z;
+    CGFloat right = g_inset_right * z;
+    CGFloat top = g_inset_top * z;
+    CGFloat bottom = g_inset_bottom * z;
+    return NSMakeRect(left,
+                      bottom,
+                      MAX(0, b.size.width  - left - right),
+                      MAX(0, b.size.height - top  - bottom));
 }
 
 // Ensure the tab container exists as a subview of `contentView`. Returns
@@ -1247,6 +1258,22 @@ void GhosttyTabContainerSetChromeInset(double top, double right, double bottom, 
     NSView *parent = g_tab_container.superview;
     if (!parent) return;
     g_tab_container.frame = tab_container_frame_in(parent);
+}
+
+void GhosttyTabContainerSetWebviewContentZoom(double zoom) {
+    if (zoom <= 0) zoom = 1.0;
+    g_webview_content_zoom = (CGFloat)zoom;
+    if (!g_tab_container) return;
+    NSView *parent = g_tab_container.superview;
+    if (!parent) return;
+    g_tab_container.frame = tab_container_frame_in(parent);
+    // Re-push surface sizes — the container just changed geometry.
+    GhosttyHostView *any = nil;
+    for (NSView *tab_root in g_tab_container.subviews) {
+        any = find_first_host_descendant(tab_root);
+        if (any) break;
+    }
+    if (any) resync_chrome_and_surfaces(any);
 }
 
 // Resize-handler back end. Implements the work for

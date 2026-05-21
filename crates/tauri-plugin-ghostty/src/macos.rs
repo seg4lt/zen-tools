@@ -27,6 +27,7 @@ extern "C" {
     // Tab APIs.
     fn GhosttyTabContainerEnsure(content_view: *mut AnyObject) -> *mut AnyObject;
     fn GhosttyTabContainerSetChromeInset(top: f64, right: f64, bottom: f64, left: f64);
+    fn GhosttyTabContainerSetWebviewContentZoom(zoom: f64);
     fn GhosttyTabAdd(root: *mut AnyObject) -> i32;
     fn GhosttyTabFocus(tab_id: i32) -> bool;
     fn GhosttyTabClose(tab_id: i32, was_last: *mut bool) -> bool;
@@ -241,6 +242,11 @@ pub unsafe fn tab_active_id() -> i32 {
 /// Update the HTML chrome insets (in points). Safe to call repeatedly.
 pub unsafe fn tab_container_set_chrome_inset(top: f64, right: f64, bottom: f64, left: f64) {
     GhosttyTabContainerSetChromeInset(top, right, bottom, left);
+}
+
+/// Mirror WKWebView page zoom so native chrome insets stay aligned.
+pub unsafe fn tab_container_set_webview_content_zoom(zoom: f64) {
+    GhosttyTabContainerSetWebviewContentZoom(zoom);
 }
 
 /// Install the tab event callback. Calls land on the main thread.

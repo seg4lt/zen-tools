@@ -19,6 +19,7 @@ import {
   getPreferences,
   savePreferences,
 } from "@zen-tools/ipc";
+import { terminalSetWebviewContentZoom } from "@/tools/terminal/lib/tauri";
 
 const ZOOM_STEP = 0.1;
 const ZOOM_MIN = 0.5;
@@ -64,6 +65,9 @@ export function useAppZoom(): UseAppZoomResult {
         const wv = getCurrentWebview();
         if (cancelled) return;
         await wv.setZoom(zoom);
+        if (cancelled) return;
+        // Keep the native Ghostty NSView aligned with webview zoom.
+        await terminalSetWebviewContentZoom(zoom);
       } catch (err) {
         // Outside Tauri (e.g. running plain Vite), `getCurrentWebview`
         // throws. Fall back to CSS `zoom` so a browser preview still
