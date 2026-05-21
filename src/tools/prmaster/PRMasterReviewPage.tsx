@@ -41,12 +41,17 @@ import {
   enrichedId,
   usePrMasterStore,
 } from "./store/prmaster-store";
+import {
+  reviewSessionStore,
+  useReviewSession,
+  type ReviewTab,
+} from "./store/review-session-store";
 import { prRefFor, type EnrichedPullRequest } from "./lib/tauri";
+import { prKey } from "./store/ai-review-store";
 
 const VIEW_MODE_KEY = "prmaster.reviewViewMode";
 
 /** Top-level tab on the review page. */
-type ReviewTab = "files" | "comments" | "ai-review";
 
 /** Read the user's last selected view mode from localStorage. Falls
  *  back to `"unified"` when never set / storage unavailable / value
@@ -81,6 +86,8 @@ export function PRMasterReviewPage() {
   const owner = params.owner;
   const repo = params.repo;
   const number = Number.parseInt(params.number, 10);
+  const sessionKey = prKey(owner, repo, Number.isFinite(number) ? number : 0);
+  const session = useReviewSession(sessionKey);
 
   const navigate = useNavigate();
   const { state, dispatch } = usePrMasterStore();
@@ -99,10 +106,16 @@ export function PRMasterReviewPage() {
   );
 
   // Top-level tab: Files (the diff workspace) vs Comments (the
-  // general PR-level conversation). Defaults to Files since that's
-  // the primary review surface; not persisted because each PR visit
-  // should start on the diff.
-  const [tab, setTab] = useState<ReviewTab>("files");
+  // general PR-level conversation). Persisted per PR so switching
+  // tools mid-review doesn't drop the user's place.
+  const tab = session.tab;
+  const setTab = useCallback(
+    (next: ReviewTab) => {
+      if (reviewSessionStore.getSlot(sessionKey).tab === next) return;
+      reviewSessionStore.patch(sessionKey, { tab: next });
+    },
+    [sessionKey],
+  );
 
   const onChangeMode = useCallback((next: DiffViewMode) => {
     setViewMode(next);

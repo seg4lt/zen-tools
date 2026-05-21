@@ -2,6 +2,7 @@ import { AlertTriangle, BellDot, CheckCircle2, Loader2 } from "lucide-react";
 import { Link } from "@tanstack/react-router";
 import { cn } from "@zen-tools/ui";
 import type { Tool } from "@/config/tools";
+import { readLastPrmasterRoute } from "@/hooks/use-last-route";
 
 export interface ToolPillAttention {
   loading: boolean;
@@ -27,9 +28,10 @@ interface ToolPillProps {
 export function ToolPill({ tool, active, attention }: ToolPillProps) {
   const Icon = tool.icon;
   const title = [tool.description, attention?.label].filter(Boolean).join(" — ");
+  const to = tool.id === "prmaster" ? readLastPrmasterRoute() : tool.route;
   return (
     <Link
-      to={tool.route}
+      to={to}
       title={title}
       className={cn(
         "flex h-7 items-center gap-1.5 rounded-md px-2.5 text-xs font-medium",

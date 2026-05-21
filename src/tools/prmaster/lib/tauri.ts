@@ -490,6 +490,9 @@ export const prmasterTauri = {
     headBranch: string | null;
     baseBranch: string | null;
   }) => invoke<string>("prmaster_ai_review_preview_prompt", params),
+  /** Deterministic detached worktree path for `(pr, headSha)`. */
+  aiReviewResolveWorktreePath: (pr: PrRef, headSha: string) =>
+    invoke<string>("prmaster_ai_review_resolve_worktree_path", { pr, headSha }),
   aiReviewStatus: (runId: string) =>
     invoke<AiReviewStatusResp | null>("prmaster_ai_review_status", { runId }),
   aiReviewCancel: (runId: string) =>
@@ -665,6 +668,7 @@ export interface AiReviewStatusResp {
   started_at_ms: number;
   finished_at_ms: number | null;
   cost_usd: number | null;
+  worktree_path: string | null;
 }
 
 export interface AiReviewReportResp {

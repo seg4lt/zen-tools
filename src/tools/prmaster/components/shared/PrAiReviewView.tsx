@@ -33,8 +33,11 @@ import {
   useState,
 } from "react";
 import { Button, cn } from "@zen-tools/ui";
+import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import {
   Brain,
+  Check,
+  Copy,
   ListChecks,
   Play,
   RotateCw,
@@ -59,6 +62,11 @@ import {
   prKey,
   useAiReviewState,
 } from "../../store/ai-review-store";
+import {
+  reviewSessionStore,
+  useReviewSession,
+  type AiReviewViewMode,
+} from "../../store/review-session-store";
 import { AiReviewLogPane } from "./AiReviewLogPane";
 import { AiReviewMissingRepo } from "./AiReviewMissingRepo";
 import { AiReviewModelPicker } from "./AiReviewModelPicker";
@@ -87,12 +95,16 @@ interface LoadedRun {
 
 /** Which body view is active when there's a loaded run. The user can
  *  flip between them via the header toggle; we never auto-flip. */
-type ViewMode = "log" | "report";
+type ViewMode = AiReviewViewMode;
 
 export function PrAiReviewView({ pr }: Props) {
-  const ref: PrRef = useMemo(() => prRefFor(pr.pr), [pr.pr]);
+  const ref: PrRef = useMemo(
+    () => prRefFor(pr.pr),
+    [pr.pr.repository.nameWithOwner, pr.pr.number],
+  );
   const key = prKey(ref.owner, ref.repo, ref.number);
   const slot = useAiReviewState(key);
+  const session = useReviewSession(key);
 
   const [headSha, setHeadSha] = useState<string | null>(null);
   const [diffError, setDiffError] = useState<string | null>(null);
@@ -100,13 +112,24 @@ export function PrAiReviewView({ pr }: Props) {
   const [missingRepo, setMissingRepo] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [loaded, setLoaded] = useState<LoadedRun | null>(null);
-  const [viewMode, setViewMode] = useState<ViewMode>("log");
+  const viewMode = session.aiViewMode;
+  const setViewMode = useCallback(
+    (next: ViewMode) => {
+      if (reviewSessionStore.getSlot(key).aiViewMode === next) return;
+      reviewSessionStore.patch(key, { aiViewMode: next });
+    },
+    [key],
+  );
+  const [worktreePath, setWorktreePath] = useState<string | null>(
+    () => slot.worktreePath,
+  );
   const [promptDraft, setPromptDraft] = useState<string | null>(null);
   const [promptError, setPromptError] = useState<string | null>(null);
   const [history, setHistory] = useState<AiReviewRunSummary[]>([]);
   const [postingIds, setPostingIds] = useState<Set<string>>(new Set());
   const [postedIds, setPostedIds] = useState<Set<string>>(new Set());
   const subscribedRef = useRef(false);
+  const prevRunStatusRef = useRef(slot.status);
 
   // Subscribe once globally to the Tauri event channel.
   useEffect(() => {
@@ -140,6 +163,32 @@ export function PrAiReviewView({ pr }: Props) {
     };
   }, [pr.detail?.baseRefName, pr.detail?.headRefName, ref]);
 
+  // Resolve the deterministic worktree path for this PR + head SHA.
+  useEffect(() => {
+    if (!headSha) return;
+    let alive = true;
+    void (async () => {
+      try {
+        const path = await prmasterTauri.aiReviewResolveWorktreePath(ref, headSha);
+        if (!alive) return;
+        setWorktreePath(path);
+        aiReviewStore.setWorktreePath(key, path);
+      } catch (e) {
+        // eslint-disable-next-line no-console
+        console.warn("[ai-review] worktree path resolve failed:", formatErr(e));
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [headSha, key, ref]);
+
+  useEffect(() => {
+    if (slot.worktreePath) {
+      setWorktreePath(slot.worktreePath);
+    }
+  }, [slot.worktreePath]);
+
   const refreshHistory = useCallback(async () => {
     try {
       const runs = await prmasterTauri.aiReviewListRuns(ref);
@@ -156,32 +205,46 @@ export function PrAiReviewView({ pr }: Props) {
   // On head-sha resolve: hydrate history and, if the newest run
   // targets the current head SHA, lazily load its **log view** (we
   // never auto-flip to the findings report — the user opts in via
-  // the header toggle).
+  // the header toggle). Restores the user's last-loaded run + view
+  // mode when they switch tools and come back.
   useEffect(() => {
     if (!headSha) return;
     let alive = true;
     void (async () => {
       const runs = await refreshHistory();
       if (!alive) return;
+      const saved = reviewSessionStore.getSlot(key);
+      const savedRun = saved.loadedRunId
+        ? runs.find((r) => r.run_id === saved.loadedRunId)
+        : null;
       const cached = pickCachedRun(runs, headSha);
-      if (cached) {
+      const target = savedRun ?? cached;
+      if (target) {
         try {
-          const resp = await prmasterTauri.aiReviewGetReport(cached.run_id);
+          const resp = await prmasterTauri.aiReviewGetReport(target.run_id);
           if (!alive) return;
-          setLoaded(reportRespToLoaded(cached.run_id, resp));
-          setViewMode("log");
+          setLoaded(reportRespToLoaded(target.run_id, resp));
+          if (!savedRun && cached) {
+            reviewSessionStore.patch(key, {
+              loadedRunId: cached.run_id,
+              aiViewMode: "log",
+            });
+          }
         } catch (e) {
           // eslint-disable-next-line no-console
           console.warn("[ai-review] cached report fetch failed:", formatErr(e));
         }
       } else {
         setLoaded(null);
+        if (reviewSessionStore.getSlot(key).loadedRunId !== null) {
+          reviewSessionStore.patch(key, { loadedRunId: null });
+        }
       }
     })();
     return () => {
       alive = false;
     };
-  }, [headSha, refreshHistory]);
+  }, [headSha, key, refreshHistory]);
 
   // When a live run finishes, refresh history **and** silently load
   // the just-finished run into `loaded` — but keep `viewMode` on
@@ -191,7 +254,10 @@ export function PrAiReviewView({ pr }: Props) {
   // History panel, which is overkill for the run that just ended.
   useEffect(() => {
     if (!headSha) return;
+    const prevStatus = prevRunStatusRef.current;
+    prevRunStatusRef.current = slot.status;
     if (slot.status !== "done") return;
+    const statusJustFinished = prevStatus !== "done";
     let alive = true;
     void (async () => {
       const runs = await refreshHistory();
@@ -202,7 +268,10 @@ export function PrAiReviewView({ pr }: Props) {
         const resp = await prmasterTauri.aiReviewGetReport(cached.run_id);
         if (!alive) return;
         setLoaded(reportRespToLoaded(cached.run_id, resp));
-        setViewMode("log");
+        reviewSessionStore.patch(key, {
+          loadedRunId: cached.run_id,
+          aiViewMode: "log",
+        });
       } catch (e) {
         // eslint-disable-next-line no-console
         console.warn(
@@ -211,13 +280,14 @@ export function PrAiReviewView({ pr }: Props) {
         );
       }
     })();
-    // Reset post-confirmation state for the new run.
-    setPostedIds(new Set());
-    setPostingIds(new Set());
+    if (statusJustFinished) {
+      setPostedIds(new Set());
+      setPostingIds(new Set());
+    }
     return () => {
       alive = false;
     };
-  }, [headSha, refreshHistory, slot.status]);
+  }, [headSha, key, refreshHistory, slot.status]);
 
   // If a live run exists in the registry (e.g. user navigated away and
   // back), replay its events into the store.
@@ -234,7 +304,11 @@ export function PrAiReviewView({ pr }: Props) {
           status.status,
           status.events,
           status.report_path,
+          status.worktree_path,
         );
+        if (status.worktree_path) {
+          setWorktreePath(status.worktree_path);
+        }
       } catch {
         // ignore — the live event stream will recover the buffer
       }
@@ -284,10 +358,11 @@ export function PrAiReviewView({ pr }: Props) {
         promptOverride,
       });
       writeStoredModel(model);
-      aiReviewStore.startRun(key, resp.run_id);
+      aiReviewStore.startRun(key, resp.run_id, resp.worktree_path);
+      setWorktreePath(resp.worktree_path);
       setPromptDraft(null);
       setLoaded(null);
-      setViewMode("log");
+      reviewSessionStore.patch(key, { loadedRunId: null, aiViewMode: "log" });
     } catch (e) {
       const msg = formatErr(e);
       if (msg.toLowerCase().includes("local clone not registered")) {
@@ -348,7 +423,7 @@ export function PrAiReviewView({ pr }: Props) {
       try {
         const resp = await prmasterTauri.aiReviewGetReport(runId);
         setLoaded(reportRespToLoaded(runId, resp));
-        setViewMode(mode);
+        reviewSessionStore.patch(key, { loadedRunId: runId, aiViewMode: mode });
         // New run loaded → reset session-local post tracking so the
         // user can re-post (idempotency is GitHub's problem; we just
         // don't pretend a previous run's posts apply here).
@@ -359,7 +434,7 @@ export function PrAiReviewView({ pr }: Props) {
         console.error("[ai-review] open run failed:", formatErr(e));
       }
     },
-    [],
+    [key],
   );
 
   /** History row → Open report. */
@@ -385,9 +460,9 @@ export function PrAiReviewView({ pr }: Props) {
 
   const onRerun = useCallback(() => {
     setLoaded(null);
-    setViewMode("log");
+    reviewSessionStore.patch(key, { loadedRunId: null, aiViewMode: "log" });
     void openPromptEditor();
-  }, [openPromptEditor]);
+  }, [key, openPromptEditor]);
 
   if (missingRepo) {
     return (
@@ -425,6 +500,9 @@ export function PrAiReviewView({ pr }: Props) {
             <span className="font-mono text-[10px] text-muted-foreground">
               head {headSha.slice(0, 12)}
             </span>
+          )}
+          {worktreePath && (
+            <WorktreePathChip path={worktreePath} />
           )}
           {slot.status !== "idle" && (
             <span
@@ -819,4 +897,38 @@ function writeStoredModel(value: string): void {
   } catch {
     /* ignore */
   }
+}
+
+/** Click-to-copy full worktree path chip. */
+function WorktreePathChip({ path }: { path: string }) {
+  const [copied, setCopied] = useState(false);
+  const onCopy = useCallback(async () => {
+    try {
+      await writeText(path);
+    } catch {
+      try {
+        await navigator.clipboard.writeText(path);
+      } catch {
+        return;
+      }
+    }
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1200);
+  }, [path]);
+
+  return (
+    <button
+      type="button"
+      onClick={() => void onCopy()}
+      className="inline-flex max-w-[min(28rem,45vw)] items-center gap-1 rounded border border-border/40 bg-background/40 px-1.5 py-px font-mono text-[10px] text-muted-foreground transition-colors hover:border-border hover:text-foreground"
+      title={copied ? "Copied!" : path}
+    >
+      <span className="truncate">{path}</span>
+      {copied ? (
+        <Check className="size-2.5 shrink-0 text-emerald-500" />
+      ) : (
+        <Copy className="size-2.5 shrink-0 opacity-70" />
+      )}
+    </button>
+  );
 }

@@ -47,6 +47,8 @@ export interface PrReviewSlot {
   costUsd: number | null;
   /** Wall-clock duration in ms (mirrors backend's `duration_ms`). */
   durationMs: number | null;
+  /** Absolute path to the detached worktree for the live / latest run. */
+  worktreePath: string | null;
 }
 
 /** Build a stable key for `(owner, repo, number)`. Same shape the
@@ -63,6 +65,7 @@ const emptySlot: PrReviewSlot = {
   reportPath: null,
   costUsd: null,
   durationMs: null,
+  worktreePath: null,
 };
 
 type Listener = () => void;
@@ -95,12 +98,13 @@ export const aiReviewStore = {
   /** Replace (or seed) the per-PR runs index. Called on tab open. */
   setRuns(key: string, runs: AiReviewRunSummary[]): void {
     const slot = state.slots.get(key) ?? emptySlot;
+    if (slot.runs === runs) return;
     state.slots.set(key, { ...slot, runs });
     notify();
   },
 
   /** Mark a new live run, replacing any prior live state. */
-  startRun(key: string, runId: string): void {
+  startRun(key: string, runId: string, worktreePath?: string | null): void {
     const slot = state.slots.get(key) ?? emptySlot;
     state.slots.set(key, {
       ...slot,
@@ -110,6 +114,7 @@ export const aiReviewStore = {
       reportPath: null,
       costUsd: null,
       durationMs: null,
+      worktreePath: worktreePath ?? slot.worktreePath,
     });
     state.runIdToPrKey.set(runId, key);
     notify();
@@ -122,6 +127,7 @@ export const aiReviewStore = {
     status: AiReviewStatusKind,
     events: AiReviewEvent[],
     reportPath: string | null,
+    worktreePath?: string | null,
   ): void {
     const slot = state.slots.get(key) ?? emptySlot;
     state.slots.set(key, {
@@ -130,6 +136,7 @@ export const aiReviewStore = {
       status,
       events: [...events],
       reportPath,
+      worktreePath: worktreePath ?? slot.worktreePath,
     });
     state.runIdToPrKey.set(runId, key);
     notify();
@@ -165,6 +172,14 @@ export const aiReviewStore = {
     if (!key) return;
     const slot = state.slots.get(key) ?? emptySlot;
     state.slots.set(key, { ...slot, status: "cancelled", liveRunId: null });
+    notify();
+  },
+
+  /** Remember the resolved worktree path for this PR (live or idle). */
+  setWorktreePath(key: string, worktreePath: string | null): void {
+    const slot = state.slots.get(key) ?? emptySlot;
+    if (slot.worktreePath === worktreePath) return;
+    state.slots.set(key, { ...slot, worktreePath });
     notify();
   },
 

@@ -31,6 +31,7 @@ import {
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { highlight, type Token } from "../../lib/highlight";
 import type { AiReviewFinding } from "../../lib/tauri";
+import { hasActionableSuggestion } from "../../lib/finding-suggestion";
 
 interface Props {
   finding: AiReviewFinding;
@@ -86,7 +87,7 @@ export function AiReviewFindingCard({
           highlightLines={[finding.start_line, finding.end_line]}
           accent="current"
         />
-        {finding.suggested && finding.suggested.trim() !== "" && (
+        {hasActionableSuggestion(finding) && (
           <Snippet
             label="Suggested"
             code={finding.suggested}
@@ -520,11 +521,17 @@ function CommentAction({
       )}
       <div className="flex items-center justify-between gap-2">
         <span className="text-[9.5px] text-muted-foreground">
-          GitHub Markdown · use{" "}
-          <code className="rounded bg-muted px-1 font-mono text-[9px]">
-            ```suggestion
-          </code>{" "}
-          for one-click apply
+          GitHub Markdown
+          {draft.includes("```suggestion") && (
+            <>
+              {" "}
+              · use{" "}
+              <code className="rounded bg-muted px-1 font-mono text-[9px]">
+                ```suggestion
+              </code>{" "}
+              for one-click apply
+            </>
+          )}
         </span>
         <div className="flex items-center gap-1">
           <button

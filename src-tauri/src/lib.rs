@@ -577,6 +577,7 @@ pub fn run() {
             commands::prmaster::prmaster_fetch_repos,
             // prmaster — AI code review tab
             commands::pr_review::prmaster_ai_review_preview_prompt,
+            commands::pr_review::prmaster_ai_review_resolve_worktree_path,
             commands::pr_review::prmaster_ai_review_start,
             commands::pr_review::prmaster_ai_review_status,
             commands::pr_review::prmaster_ai_review_cancel,

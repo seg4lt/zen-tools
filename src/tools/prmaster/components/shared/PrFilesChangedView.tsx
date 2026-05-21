@@ -44,6 +44,11 @@ import {
   prDiffQueryOptions,
   prReviewCommentsQueryOptions,
 } from "../../lib/queries";
+import { prKey } from "../../store/ai-review-store";
+import {
+  reviewSessionStore,
+  useReviewSession,
+} from "../../store/review-session-store";
 import { usePrMasterStore } from "../../store/prmaster-store";
 import { PrFileTree } from "./PrFileTree";
 
@@ -61,6 +66,8 @@ interface LocalComment extends InlineComment {
 
 export function PrFilesChangedView({ pr, viewMode }: Props) {
   const ref = prRefFor(pr.pr);
+  const sessionKey = prKey(ref.owner, ref.repo, ref.number);
+  const session = useReviewSession(sessionKey);
   const baseRef = pr.detail?.baseRefName ?? null;
   const headRef = pr.detail?.headRefName ?? null;
 
@@ -85,10 +92,30 @@ export function PrFilesChangedView({ pr, viewMode }: Props) {
   const diff = diffQuery.data ?? null;
   const reviewComments = commentsQuery.data ?? [];
 
-  const [selectedPath, setSelectedPath] = useState<string | null>(null);
+  const [selectedPath, setSelectedPath] = useState<string | null>(
+    () => session.selectedPath,
+  );
+  const selectPath = useCallback(
+    (path: string | null) => {
+      setSelectedPath(path);
+      if (path !== null) {
+        reviewSessionStore.patch(sessionKey, { selectedPath: path });
+      }
+    },
+    [sessionKey],
+  );
   const [comments, setComments] = useState<LocalComment[]>([]);
-  // UI: tree visibility.
-  const [treeOpen, setTreeOpen] = useState(true);
+  // UI: tree visibility — persisted per PR.
+  const treeOpen = session.treeOpen;
+  const setTreeOpen = useCallback(
+    (next: boolean | ((prev: boolean) => boolean)) => {
+      const current = reviewSessionStore.getSlot(sessionKey).treeOpen;
+      const value = typeof next === "function" ? next(current) : next;
+      if (value === current) return;
+      reviewSessionStore.patch(sessionKey, { treeOpen: value });
+    },
+    [sessionKey],
+  );
   // Resizable file-tree width. Persisted in localStorage so the
   // user's preferred split survives navigation. Clamped on read so a
   // bad stored value (or a screen that shrank since last session)
@@ -184,12 +211,19 @@ export function PrFilesChangedView({ pr, viewMode }: Props) {
   // when the path still exists.
   useEffect(() => {
     if (!diff) return;
-    setSelectedPath((cur) => {
-      if (cur && diff.files.some((f) => f.path === cur)) return cur;
+    const stored = reviewSessionStore.getSlot(sessionKey).selectedPath;
+    let next: string | null = null;
+    if (stored && diff.files.some((f) => f.path === stored)) {
+      next = stored;
+    } else {
       const first = diff.files.find((f) => !f.binary && f.patch);
-      return first?.path ?? diff.files[0]?.path ?? null;
-    });
-  }, [diff]);
+      next = first?.path ?? diff.files[0]?.path ?? null;
+    }
+    setSelectedPath((cur) => (cur === next ? cur : next));
+    if (next !== null) {
+      reviewSessionStore.patch(sessionKey, { selectedPath: next });
+    }
+  }, [diff, sessionKey]);
 
   // Refresh button — fire both refetches in parallel. Each query's
   // own `isFetching` powers the toolbar status; we don't need a
@@ -586,7 +620,7 @@ export function PrFilesChangedView({ pr, viewMode }: Props) {
               <PrFileTree
                 files={diff.files}
                 selectedPath={selectedPath}
-                onSelect={setSelectedPath}
+                onSelect={selectPath}
                 commentsByPath={commentsByPath}
               />
             </div>

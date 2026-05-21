@@ -160,6 +160,8 @@ pub struct AiReviewStatusResp {
     pub finished_at_ms: Option<i64>,
     /// Cost in USD when the CLI reported one.
     pub cost_usd: Option<f64>,
+    /// Detached worktree path Claude is running inside.
+    pub worktree_path: Option<String>,
 }
 
 /// Wire shape returned by `prmaster_ai_review_get_report`. Drives the
@@ -364,6 +366,29 @@ pub async fn prmaster_ai_review_preview_prompt(
     ))
 }
 
+/// Resolve the deterministic detached worktree path for `(pr, head_sha)`.
+/// Same location `prmaster_ai_review_start` would create.
+#[tauri::command]
+pub async fn prmaster_ai_review_resolve_worktree_path(
+    app: AppHandle,
+    config: State<'_, UserConfig>,
+    pr: PrRef,
+    head_sha: String,
+) -> AppResult<String> {
+    let settings = config
+        .get::<PrMasterSettings>(PRMASTER_SETTINGS_KEY)?
+        .unwrap_or_default();
+    let worktrees_root = resolve_worktrees_root(&app, &settings)?;
+    let worktree_path = zen_pr_review::worktree::worktree_path(
+        &worktrees_root,
+        &pr.owner,
+        &pr.repo,
+        pr.number,
+        &head_sha,
+    );
+    Ok(worktree_path.to_string_lossy().into_owned())
+}
+
 /// Snapshot the live registry for `run_id`. Used by the frontend on
 /// re-mount to replay events that were already delivered.
 #[tauri::command]
@@ -386,6 +411,7 @@ pub async fn prmaster_ai_review_status(
         started_at_ms: snap.started_at_ms,
         finished_at_ms: snap.finished_at_ms,
         cost_usd: snap.cost_usd,
+        worktree_path: Some(snap.worktree_path),
     }))
 }
 
@@ -573,6 +599,20 @@ pub async fn prmaster_ai_review_post_finding(
 /// `suggestion` block).
 ///
 /// [suggested-change syntax]: https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/reviewing-changes-in-pull-requests/incorporating-feedback-in-your-pull-request
+/// Returns `true` when `suggested` carries a concrete fix worth
+/// surfacing as a GitHub suggestion block or UI "Suggested" section.
+fn has_actionable_suggestion(f: &Finding) -> bool {
+    let suggested = f.suggested.trim();
+    if suggested.is_empty() {
+        return false;
+    }
+    // Repeating the current snippet verbatim isn't a suggestion.
+    if suggested == f.current.trim() {
+        return false;
+    }
+    true
+}
+
 fn format_finding_body(f: &Finding) -> String {
     let mut out = String::new();
     if !f.title.is_empty() {
@@ -585,7 +625,7 @@ fn format_finding_body(f: &Finding) -> String {
         out.push('\n');
     }
     let suggested = f.suggested.trim();
-    if !suggested.is_empty() {
+    if has_actionable_suggestion(f) {
         if !out.is_empty() {
             out.push('\n');
         }
@@ -677,6 +717,14 @@ mod tests {
         let body = format_finding_body(&finding("medium", ""));
         assert!(!body.contains("```suggestion"));
         assert!(!body.contains("```"));
+    }
+
+    #[test]
+    fn unchanged_suggestion_omits_block() {
+        let mut f = finding("medium", "asdfasdfasdfasdf\n");
+        f.suggested = f.current.clone();
+        let body = format_finding_body(&f);
+        assert!(!body.contains("```suggestion"));
     }
 }
 

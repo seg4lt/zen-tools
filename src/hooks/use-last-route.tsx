@@ -14,6 +14,9 @@ import { useEffect } from "react";
 import { useRouterState } from "@tanstack/react-router";
 
 export const LAST_ROUTE_KEY = "zen-tools.last-route";
+/** Last route under `/prmaster/*` — used by the PRMaster tool pill so
+ *  switching away and back returns to an in-progress review page. */
+export const PRMASTER_LAST_ROUTE_KEY = "zen-tools.prmaster-last-route";
 
 export function useLastRoute(): void {
   const pathname = useRouterState({
@@ -24,6 +27,9 @@ export function useLastRoute(): void {
     if (typeof pathname !== "string" || pathname.length === 0) return;
     try {
       localStorage.setItem(LAST_ROUTE_KEY, pathname);
+      if (pathname.startsWith("/prmaster")) {
+        localStorage.setItem(PRMASTER_LAST_ROUTE_KEY, pathname);
+      }
     } catch {
       // localStorage may be disabled (private mode etc.); silently skip.
     }
@@ -43,4 +49,16 @@ export function readLastRoute(): string | null {
   } catch {
     return null;
   }
+}
+
+/** Route the PRMaster tool pill should navigate to. Falls back to the
+ *  list shell when the user has never opened PRMaster this session. */
+export function readLastPrmasterRoute(): string {
+  try {
+    const raw = localStorage.getItem(PRMASTER_LAST_ROUTE_KEY);
+    if (raw && raw.startsWith("/prmaster")) return raw;
+  } catch {
+    // ignore
+  }
+  return "/prmaster";
 }

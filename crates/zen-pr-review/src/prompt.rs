@@ -244,7 +244,7 @@ SCHEMA:
       "language": "rust",
       "snippet_start_line": 117,
       "current": "<the snippet, including 3-5 lines of CONTEXT above and below the finding>",
-      "suggested": "<the rewritten snippet OR an explicit '(remove these lines)' / empty string when not applicable>",
+      "suggested": "<optional: rewritten snippet, '(remove these lines)', or empty string when no concrete fix>",
       "rationale": "Why this matters. Reference specific identifiers and call-sites. 2-5 sentences."
     }}
   ]
@@ -257,7 +257,11 @@ FIELD RULES — read carefully, the host UI depends on every one of these:
 - `start_line` / `end_line` are the 1-based, inclusive line range of the **finding itself** (not the context). They anchor the GitHub inline review comment when the user clicks "Post inline comment".
 - `snippet_start_line` is the 1-based line number of the **first line of the `current` snippet**. This is typically `start_line - 3` (because you must include 3-5 lines of context above the finding) but may be 1 if the finding is at the top of the file.
 - `current` MUST include 3-5 lines of context above AND below the actual problem so the reviewer can see the surrounding code without leaving the report. Do not paste the entire file; keep it focused. Verbatim from the source — preserve indentation exactly.
-- `suggested` should be a drop-in replacement for `current`'s problem region (with the same surrounding context), OR the literal string "(remove these lines)" when the fix is deletion, OR "" when there is no concrete suggestion.
+- `suggested` is **optional**. Include it ONLY when you have a concrete, actionable code fix the author could apply in one click (a drop-in replacement, a deletion, or a small rewrite). Leave it as `""` when:
+  - the finding is informational, architectural, or needs human judgment (e.g. "add tests", "consider refactoring", "missing error handling" without a single obvious fix);
+  - the best guidance is prose-only in `rationale`;
+  - you would just repeat the `current` snippet unchanged.
+  When provided, it should be a drop-in replacement for `current`'s problem region (with the same surrounding context), OR the literal string "(remove these lines)" when the fix is deletion.
 - `language` is a lowercase identifier the renderer maps to a syntax highlighter: `"rust"`, `"ts"`, `"js"`, `"tsx"`, `"jsx"`, `"python"`, `"go"`, `"java"`, `"c"`, `"cpp"`, `"css"`, `"html"`, `"json"`, `"yaml"`, `"toml"`, `"sql"`, `"bash"`, `"sh"`, `"md"`. Use the closest match for the file extension; leave empty if unsure.
 - `rationale` should reference specific identifiers, call-sites, or external constraints — not vague advice. Aim for 2-5 sentences. Skip generic platitudes.
 - `id` is a stable kebab-case slug like `crit-tokio-spawn-leak-runner-rs-114`. Used as a stable handle by the host UI.
