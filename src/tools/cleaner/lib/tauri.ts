@@ -33,6 +33,8 @@ export interface CleanerTreeNode {
   depth: number;
   /** Absolute path on disk (empty for sections). */
   path: string;
+  /** When set, delete via `ollama rm` instead of `rm -rf`. */
+  ollamaModel?: string | null;
   /** Children in display order. Leaves are empty. */
   children: CleanerTreeNode[];
   /** Repo only: bytes a `git clean -fxd` would reclaim. */
@@ -108,6 +110,8 @@ export interface CleanerRunActionItem {
   label: string;
   /** Absolute path to act on. */
   path: string;
+  /** When set, delete via `ollama rm` instead of `rm -rf`. */
+  ollamaModel?: string | null;
   /** "clean" or "delete" — globals only support "delete". */
   action: "clean" | "delete";
 }

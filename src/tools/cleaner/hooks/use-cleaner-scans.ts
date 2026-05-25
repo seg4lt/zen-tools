@@ -118,6 +118,7 @@ export function useCleanerScans() {
         kind: node.kind as "repo" | "globalPath",
         label: node.label,
         path: node.path,
+        ollamaModel: node.ollamaModel ?? null,
         action: action as Exclude<CleanerNodeAction, "none">,
       });
     }

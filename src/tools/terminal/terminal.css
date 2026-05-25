@@ -218,8 +218,20 @@ body.terminal-route-active main .terminal-chrome * {
 }
 
 .terminal-status-icon.is-loading {
-  animation: terminal-spin 1s linear infinite;
   color: var(--term-accent);
+  font-size: 12px;
+}
+
+.terminal-status-icon.is-paused {
+  color: var(--term-pause);
+}
+
+.terminal-status-icon.is-completed {
+  color: var(--term-success);
+}
+
+.terminal-status-icon.is-alert {
+  color: var(--term-warn);
 }
 
 .terminal-status-icon.is-unhealthy {

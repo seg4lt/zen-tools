@@ -1,16 +1,16 @@
-import { AlertTriangle, BellDot, CheckCircle2, Loader2 } from "lucide-react";
+import { AlertTriangle, BellDot, Check, Pause } from "lucide-react";
 import { Link } from "@tanstack/react-router";
 import { cn } from "@zen-tools/ui";
 import type { Tool } from "@/config/tools";
 import { readLastPrmasterRoute } from "@/hooks/use-last-route";
+import { BrailleSpinner } from "@/tools/terminal/components/braille-spinner";
+import type { TerminalDisplayState } from "@/tools/terminal/lib/attention";
 
 export interface ToolPillAttention {
-  loading: boolean;
-  actionRequired: boolean;
-  completed: boolean;
-  unread: boolean;
-  unhealthy: boolean;
+  displayState: TerminalDisplayState;
   label: string;
+  actionRequired: boolean;
+  unhealthy: boolean;
 }
 
 interface ToolPillProps {
@@ -42,19 +42,20 @@ export function ToolPill({ tool, active, attention }: ToolPillProps) {
       )}
     >
       <Icon className="size-3.5" />
+      {attention?.displayState === "loading" ? (
+        <BrailleSpinner className="text-xs text-sky-500" />
+      ) : attention?.displayState === "paused" ? (
+        <Pause className="size-3 text-amber-500" />
+      ) : attention?.displayState === "alert" ? (
+        attention.actionRequired || attention.unhealthy ? (
+          <AlertTriangle className="size-3 text-amber-500" />
+        ) : (
+          <BellDot className="size-3 text-orange-500" />
+        )
+      ) : attention?.displayState === "completed" ? (
+        <Check className="size-3 text-emerald-500" strokeWidth={3} />
+      ) : null}
       {tool.label}
-      {attention?.loading ? (
-        <Loader2 className="size-3 animate-spin text-sky-500" />
-      ) : null}
-      {attention?.actionRequired || attention?.unhealthy ? (
-        <AlertTriangle className="size-3 text-amber-500" />
-      ) : null}
-      {attention?.completed && !attention?.loading && !attention?.actionRequired ? (
-        <CheckCircle2 className="size-3 text-emerald-500" />
-      ) : null}
-      {!attention?.loading && attention?.unread ? (
-        <BellDot className="size-3 text-foreground/80" />
-      ) : null}
     </Link>
   );
 }

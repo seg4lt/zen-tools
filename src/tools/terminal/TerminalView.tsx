@@ -29,9 +29,8 @@
 import {
   AlertTriangle,
   BellDot,
-  CheckCircle2,
+  Check,
   FolderPlus,
-  Loader2,
   Pause,
   Pin,
   PinOff,
@@ -39,6 +38,12 @@ import {
   Trash2,
   type LucideIcon,
 } from "lucide-react";
+import { BrailleSpinner } from "./components/braille-spinner";
+import {
+  summarizePaneAttention,
+  summarizeWorkspaceAttention,
+  type TerminalAttentionSummary,
+} from "./lib/attention";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { useShortcut } from "@zen-tools/keyboard";
@@ -104,128 +109,6 @@ function paneDisplayTitle(pane: {
 
 function isPaneInfo<T>(pane: T | undefined): pane is T {
   return pane != null;
-}
-
-interface TerminalAttentionSummary {
-  loading: boolean;
-  paused: boolean;
-  actionRequired: boolean;
-  completed: boolean;
-  unreadCount: number;
-  unhealthy: boolean;
-  progress: number | null;
-  label: string;
-}
-
-function summarizePaneAttention(
-  pane: TerminalPane,
-): TerminalAttentionSummary | null {
-  const { status } = pane;
-  const paused = status.progressState === "pause";
-  const unhealthy = status.rendererHealthy === false;
-  const actionRequired =
-    status.lastNoticeKind === "desktop-notification" ||
-    status.lastNoticeKind === "child-exited";
-  const completed = status.lastNoticeKind === "command-finished";
-  const label = actionRequired
-    ? (status.lastNoticeMessage ?? "Action required")
-    : unhealthy
-      ? "Renderer unhealthy"
-      : status.loading
-      ? status.progress != null
-        ? `Loading ${status.progress}%`
-        : "Loading"
-      : completed
-        ? (status.lastNoticeMessage ?? "Command finished")
-      : paused
-        ? "Paused"
-        : status.lastNoticeMessage ??
-          (status.unreadCount > 0
-            ? `${status.unreadCount} terminal notifications`
-            : "");
-  if (
-    !status.loading &&
-    !paused &&
-    status.unreadCount === 0 &&
-    !unhealthy &&
-    !actionRequired &&
-    !completed
-  ) {
-    return null;
-  }
-  return {
-    loading: status.loading,
-    paused,
-    actionRequired,
-    completed,
-    unreadCount: status.unreadCount,
-    unhealthy,
-    progress: status.progress,
-    label,
-  };
-}
-
-function summarizeWorkspaceAttention(
-  workspace: TerminalWorkspace,
-  panesById: Map<number, TerminalPane>,
-): TerminalAttentionSummary | null {
-  let loading = 0;
-  let paused = 0;
-  let actionRequired = 0;
-  let completed = 0;
-  let unreadCount = 0;
-  let unhealthy = 0;
-  let maxProgress: number | null = null;
-  for (const paneId of workspace.paneIds) {
-    const pane = panesById.get(paneId);
-    if (!pane) continue;
-    const summary = summarizePaneAttention(pane);
-    if (!summary) continue;
-    if (summary.loading) loading += 1;
-    if (summary.paused) paused += 1;
-    if (summary.actionRequired) actionRequired += 1;
-    if (summary.completed) completed += 1;
-    if (summary.unhealthy) unhealthy += 1;
-    unreadCount += summary.unreadCount;
-    if (summary.progress != null) {
-      maxProgress =
-        maxProgress == null ? summary.progress : Math.max(maxProgress, summary.progress);
-    }
-  }
-  if (
-    loading === 0 &&
-    paused === 0 &&
-    actionRequired === 0 &&
-    completed === 0 &&
-    unreadCount === 0 &&
-    unhealthy === 0
-  ) {
-    return null;
-  }
-  const label =
-    actionRequired > 0
-      ? `Action required in ${actionRequired} pane${actionRequired === 1 ? "" : "s"}`
-      : unhealthy > 0
-      ? `Renderer unhealthy in ${unhealthy} pane${unhealthy === 1 ? "" : "s"}`
-      : loading > 0
-        ? maxProgress != null && loading === 1
-          ? `Loading ${maxProgress}%`
-          : `Loading in ${loading} pane${loading === 1 ? "" : "s"}`
-        : completed > 0
-          ? `Completed in ${completed} pane${completed === 1 ? "" : "s"}`
-        : paused > 0
-          ? `Paused in ${paused} pane${paused === 1 ? "" : "s"}`
-          : `${unreadCount} terminal notification${unreadCount === 1 ? "" : "s"}`;
-  return {
-    loading: loading > 0,
-    paused: paused > 0,
-    actionRequired: actionRequired > 0,
-    completed: completed > 0,
-    unreadCount,
-    unhealthy: unhealthy > 0,
-    progress: maxProgress,
-    label,
-  };
 }
 
 export function TerminalView() {
@@ -311,10 +194,10 @@ export function TerminalView() {
       new Map(
         workspaces.map((workspace) => [
           workspace.id,
-          summarizeWorkspaceAttention(workspace, panesById),
+          summarizeWorkspaceAttention(workspace, panesById, activeId),
         ]),
       ),
-    [panesById, workspaces],
+    [activeId, panesById, workspaces],
   );
   const activeWorkspaceHasPane = activeWorkspacePanes.length > 0;
 
@@ -800,6 +683,7 @@ export function TerminalView() {
                         dropWorkspaceId === workspace.id && "is-drop-target",
                       )}
                     >
+                      <TerminalAttentionIndicators summary={attention} />
                       <span className="terminal-workspace__label">
                         {editing ? (
                           <input
@@ -829,10 +713,6 @@ export function TerminalView() {
                           </span>
                         )}
                       </span>
-                      <TerminalAttentionIndicators
-                        summary={attention}
-                        mini={railCompact}
-                      />
                       {!railCompact && !editing && (
                         <>
                           <button
@@ -883,7 +763,10 @@ export function TerminalView() {
                     const editing = pane.id === editingPaneId;
                     const cwdTitle =
                       pane.cwdAbsolutePath ?? pane.launchDirectory ?? title;
-                    const attention = summarizePaneAttention(pane);
+                    const attention = summarizePaneAttention(
+                      pane,
+                      pane.id === activeId,
+                    );
                     return (
                       <button
                         key={pane.id}
@@ -944,6 +827,7 @@ export function TerminalView() {
                             "is-drop-target",
                         )}
                       >
+                        <TerminalAttentionIndicators summary={attention} />
                         <span className="terminal-tab__label">
                           {editing ? (
                             <input
@@ -969,10 +853,6 @@ export function TerminalView() {
                             railCompact ? paneCompactLabel(title) : title
                           )}
                         </span>
-                        <TerminalAttentionIndicators
-                          summary={attention}
-                          mini={railCompact}
-                        />
                         {!railCompact && !editing && (
                           <>
                             {pinnedPanes.some(
@@ -1070,54 +950,25 @@ export function TerminalView() {
 
 function TerminalAttentionIndicators({
   summary,
-  mini = false,
 }: {
   summary: TerminalAttentionSummary | null;
-  mini?: boolean;
 }) {
   if (!summary) return null;
-  if (mini) {
-    return (
-      <span
-        aria-hidden
-        title={summary.label}
-        className="terminal-status-stack"
-      >
-        {summary.loading ? (
-          <Loader2 className="terminal-status-stack__primary is-loading" />
-        ) : summary.paused ? (
-          <Pause className="terminal-status-stack__primary is-paused" />
-        ) : summary.actionRequired || summary.unhealthy ? (
-          <AlertTriangle className="terminal-status-stack__primary is-unhealthy" />
-        ) : summary.completed ? (
-          <CheckCircle2 className="terminal-status-stack__primary is-completed" />
-        ) : null}
-        {summary.unreadCount > 0 ? (
-          <span className="terminal-status-stack__notice">
-            <BellDot className="terminal-status-stack__notice-icon" />
-          </span>
-        ) : null}
-      </span>
-    );
-  }
+
   return (
     <span className="terminal-status-indicators" title={summary.label}>
-      {summary.loading ? (
-        <Loader2 className="terminal-status-icon is-loading" />
-      ) : summary.paused ? (
-        <Pause className="terminal-status-icon" />
-      ) : null}
-      {summary.actionRequired || summary.unhealthy ? (
-        <AlertTriangle className="terminal-status-icon is-unhealthy" />
-      ) : null}
-      {summary.completed && !summary.loading && !summary.actionRequired ? (
-        <CheckCircle2 className="terminal-status-icon is-completed" />
-      ) : null}
-      {summary.unreadCount > 0 ? (
-        <span className="terminal-status-badge">
-          <BellDot className="size-3" />
-          <span>{summary.unreadCount > 99 ? "99+" : summary.unreadCount}</span>
-        </span>
+      {summary.displayState === "loading" ? (
+        <BrailleSpinner className="terminal-status-icon is-loading" />
+      ) : summary.displayState === "paused" ? (
+        <Pause className="terminal-status-icon is-paused" />
+      ) : summary.displayState === "alert" ? (
+        summary.actionRequired || summary.unhealthy ? (
+          <AlertTriangle className="terminal-status-icon is-unhealthy" />
+        ) : (
+          <BellDot className="terminal-status-icon is-alert" />
+        )
+      ) : summary.displayState === "completed" ? (
+        <Check className="terminal-status-icon is-completed" strokeWidth={3} />
       ) : null}
     </span>
   );

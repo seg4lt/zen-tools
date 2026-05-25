@@ -295,7 +295,14 @@ function rebuildAggregated(
   const globalsRoots = trees[GLOBALS_KEY] ?? [];
   const sortedGlobals = globalsRoots.map((root) => {
     if (root.kind !== "section") return root;
-    const children = [...root.children];
+    const children = [...root.children].map((child) => {
+      if (child.kind === "section" && child.children.length > 0) {
+        const nested = [...child.children];
+        sortLeaves(nested, sort);
+        return { ...child, children: nested };
+      }
+      return child;
+    });
     sortLeaves(children, sort);
     return { ...root, children };
   });

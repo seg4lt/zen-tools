@@ -73,6 +73,8 @@ pub struct TreeNode {
     pub children: Vec<TreeNode>,
     /// Backing path on disk.
     pub path: PathBuf,
+    /// When set, delete via `ollama rm` instead of `rm -rf`.
+    pub ollama_model: Option<String>,
     /// Total size in bytes (global paths only).
     pub size: Option<u64>,
     /// `true` once the size estimator has finished — `size` may still be `None`.
@@ -105,6 +107,7 @@ impl TreeNode {
             depth,
             children: Vec::new(),
             path,
+            ollama_model: None,
             size: None,
             size_done: false,
             clean_size: None,
@@ -148,6 +151,19 @@ pub struct GlobalTreeEntry {
     pub is_dir: bool,
     /// Pre-computed size, if already known.
     pub size: Option<u64>,
+    /// When set, delete via `ollama rm` instead of `rm -rf`.
+    pub ollama_model: Option<String>,
+}
+
+/// Nested global grouping (e.g. individual Ollama models).
+#[derive(Debug, Clone)]
+pub struct GlobalTreeGroup {
+    /// Stable group id (e.g. `ollama`).
+    pub id: String,
+    /// Display label.
+    pub label: String,
+    /// Leaf entries rendered under the group.
+    pub entries: Vec<GlobalTreeEntry>,
 }
 
 /// Top-level tree the UI binds to.
@@ -166,7 +182,11 @@ impl Tree {
     /// Build a fresh tree from `repo_paths` (under one folder) and the
     /// global entries.  Either or both may be empty — empty sections are
     /// omitted entirely.
-    pub fn build(repo_paths: Vec<PathBuf>, global_entries: Vec<GlobalTreeEntry>) -> Self {
+    pub fn build(
+        repo_paths: Vec<PathBuf>,
+        global_entries: Vec<GlobalTreeEntry>,
+        global_groups: Vec<GlobalTreeGroup>,
+    ) -> Self {
         let mut tree = Self::new();
         if !repo_paths.is_empty() {
             let mut repo_section = TreeNode::new(
@@ -201,7 +221,7 @@ impl Tree {
             tree.roots.push(repo_section);
         }
 
-        if !global_entries.is_empty() {
+        if !global_entries.is_empty() || !global_groups.is_empty() {
             let mut global_section = TreeNode::new(
                 "globals".to_string(),
                 "Global Dev Files".to_string(),
@@ -212,18 +232,22 @@ impl Tree {
             );
 
             for entry in global_entries {
-                let id = format!("globals/{}", entry.path.to_string_lossy());
-                let mut node = TreeNode::new(
-                    id,
-                    entry.label,
-                    NodeKind::GlobalPath,
-                    entry.is_dir,
+                global_section.children.push(global_entry_node(&entry, 1));
+            }
+
+            for group in global_groups {
+                let mut group_node = TreeNode::new(
+                    format!("globals/{}", group.id),
+                    group.label,
+                    NodeKind::Section,
+                    true,
                     1,
-                    entry.path,
+                    PathBuf::new(),
                 );
-                node.size = entry.size;
-                node.size_done = entry.size.is_some();
-                global_section.children.push(node);
+                for entry in group.entries {
+                    group_node.children.push(global_entry_node(&entry, 2));
+                }
+                global_section.children.push(group_node);
             }
 
             tree.roots.push(global_section);
@@ -260,10 +284,12 @@ impl Tree {
 
     /// Global-target lookup by absolute path.
     pub fn get_global_node_mut_by_path(&mut self, target_path: &Path) -> Option<&mut TreeNode> {
-        self.roots
-            .iter_mut()
-            .flat_map(|root| root.children.iter_mut())
-            .find(|node| node.kind == NodeKind::GlobalPath && node.path == target_path)
+        for root in &mut self.roots {
+            if let Some(node) = find_global_by_path(root, target_path) {
+                return Some(node);
+            }
+        }
+        None
     }
 
     /// Apply a finished repo estimate to its node. Returns `false` if the
@@ -297,6 +323,39 @@ impl Tree {
         node.size_done = true;
         true
     }
+}
+
+fn find_global_by_path<'a>(
+    node: &'a mut TreeNode,
+    target_path: &Path,
+) -> Option<&'a mut TreeNode> {
+    if node.kind == NodeKind::GlobalPath && node.path == target_path {
+        return Some(node);
+    }
+
+    for child in &mut node.children {
+        if let Some(found) = find_global_by_path(child, target_path) {
+            return Some(found);
+        }
+    }
+
+    None
+}
+
+fn global_entry_node(entry: &GlobalTreeEntry, depth: usize) -> TreeNode {
+    let id = format!("globals/{}", entry.path.to_string_lossy());
+    let mut node = TreeNode::new(
+        id,
+        entry.label.clone(),
+        NodeKind::GlobalPath,
+        entry.is_dir,
+        depth,
+        entry.path.clone(),
+    );
+    node.ollama_model = entry.ollama_model.clone();
+    node.size = entry.size;
+    node.size_done = entry.size.is_some();
+    node
 }
 
 fn find_node_mut<'a>(node: &'a mut TreeNode, id: &str) -> Option<&'a mut TreeNode> {

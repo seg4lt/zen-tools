@@ -6,11 +6,38 @@
 //! parallel by rayon when bulk-running.
 
 use rayon::prelude::*;
+use serde::Deserialize;
 use std::env;
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+/// One locally installed Ollama model discovered from manifest files.
+#[derive(Debug, Clone)]
+pub struct OllamaModelTarget {
+    /// Display label, e.g. `gemma4:31b`.
+    pub label: String,
+    /// Model ref accepted by `ollama rm`, e.g. `gemma4:31b`.
+    pub model_ref: String,
+    /// Absolute path to the manifest file on disk.
+    pub manifest_path: PathBuf,
+    /// Sum of manifest layer sizes when readable.
+    pub size: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OllamaManifest {
+    #[serde(default)]
+    config: Option<OllamaManifestBlob>,
+    #[serde(default)]
+    layers: Vec<OllamaManifestBlob>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OllamaManifestBlob {
+    size: u64,
+}
 
 /// Which side-effect to apply to a target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,6 +99,13 @@ pub enum RepoCommand {
         /// Path to delete.
         path: PathBuf,
     },
+    /// Remove an Ollama model via `ollama rm`.
+    OllamaDelete {
+        /// Display label, used in result messages.
+        label: String,
+        /// Model ref accepted by `ollama rm`.
+        model_ref: String,
+    },
 }
 
 impl RepoCommand {
@@ -83,6 +117,9 @@ impl RepoCommand {
             }
             Self::GlobalDelete { label, path } => {
                 format!("[delete] {} ({})", label, path.display())
+            }
+            Self::OllamaDelete { label, model_ref } => {
+                format!("[delete] {label} ({model_ref})")
             }
         }
     }
@@ -97,6 +134,7 @@ pub fn run_repo_command(command: &RepoCommand) -> Result<String, String> {
             RepoCommandKind::Delete => delete_path(repo_path),
         },
         RepoCommand::GlobalDelete { path, .. } => delete_path(path),
+        RepoCommand::OllamaDelete { model_ref, .. } => delete_ollama_model(model_ref),
     };
 
     result.map(|_| display)
@@ -204,6 +242,8 @@ pub fn discover_global_cleanup_targets() -> Vec<GlobalCleanupTarget> {
         ("Mise cache", home.join(".cache/mise")),
         ("Mise config", home.join(".config/mise")),
         ("Homebrew cache", library.join("Caches/Homebrew")),
+        ("Ollama cache (macOS)", library.join("Caches/ollama")),
+        ("Ollama cache (macOS app)", library.join("Caches/com.electron.ollama")),
     ];
 
     let mut targets: Vec<_> = candidates
@@ -224,6 +264,128 @@ pub fn discover_global_cleanup_targets() -> Vec<GlobalCleanupTarget> {
 
     targets.sort_by(|a, b| a.path.cmp(&b.path));
     targets
+}
+
+/// Resolve the Ollama models directory (`OLLAMA_MODELS` or `~/.ollama/models`).
+pub fn ollama_models_dir() -> Option<PathBuf> {
+    if let Ok(path) = env::var("OLLAMA_MODELS") {
+        let trimmed = path.trim();
+        if !trimmed.is_empty() {
+            return Some(PathBuf::from(trimmed));
+        }
+    }
+
+    env::var_os("HOME").map(|home| PathBuf::from(home).join(".ollama").join("models"))
+}
+
+/// Discover every installed Ollama model under the manifests directory.
+pub fn discover_ollama_models() -> Vec<OllamaModelTarget> {
+    let Some(models_dir) = ollama_models_dir() else {
+        return Vec::new();
+    };
+    let manifests_root = models_dir.join("manifests");
+    if !manifests_root.is_dir() {
+        return Vec::new();
+    }
+
+    let mut models = Vec::new();
+    collect_ollama_models(&manifests_root, &manifests_root, &mut models);
+    models.sort_by(|a, b| a.label.cmp(&b.label));
+    models
+}
+
+fn collect_ollama_models(
+    manifests_root: &Path,
+    dir: &Path,
+    out: &mut Vec<OllamaModelTarget>,
+) {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_ollama_models(manifests_root, &path, out);
+            continue;
+        }
+        if !path.is_file() {
+            continue;
+        }
+
+        let Some(model_ref) = ollama_model_ref_from_manifest(manifests_root, &path) else {
+            continue;
+        };
+
+        out.push(OllamaModelTarget {
+            label: model_ref.clone(),
+            model_ref,
+            size: estimate_ollama_manifest_size(&path),
+            manifest_path: path,
+        });
+    }
+}
+
+fn ollama_model_ref_from_manifest(manifests_root: &Path, manifest_path: &Path) -> Option<String> {
+    let rel = manifest_path.strip_prefix(manifests_root).ok()?;
+    let mut parts: Vec<String> = rel
+        .components()
+        .map(|part| part.as_os_str().to_string_lossy().into_owned())
+        .collect();
+
+    if parts.len() < 2 {
+        return None;
+    }
+
+    let tag = parts.pop()?;
+    let model = parts.pop()?;
+
+    if parts.last().is_some_and(|part| part == "library") {
+        parts.pop();
+        parts.pop(); // registry host
+        return Some(format!("{model}:{tag}"));
+    }
+
+    if !parts.is_empty() {
+        parts.pop(); // registry host
+    }
+
+    let namespace = parts.join("/");
+    if namespace.is_empty() {
+        Some(format!("{model}:{tag}"))
+    } else {
+        Some(format!("{namespace}/{model}:{tag}"))
+    }
+}
+
+fn estimate_ollama_manifest_size(manifest_path: &Path) -> Option<u64> {
+    let raw = fs::read_to_string(manifest_path).ok()?;
+    let manifest: OllamaManifest = serde_json::from_str(&raw).ok()?;
+    let mut total = manifest.config.map(|blob| blob.size).unwrap_or(0);
+    for layer in manifest.layers {
+        total = total.saturating_add(layer.size);
+    }
+    Some(total)
+}
+
+fn delete_ollama_model(model_ref: &str) -> Result<(), String> {
+    let output = Command::new("ollama")
+        .arg("rm")
+        .arg(model_ref)
+        .output()
+        .map_err(|e| format!("Failed to run ollama rm: {e}"))?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if stderr.is_empty() {
+            Err(format!("ollama rm exited with status {}", output.status))
+        } else {
+            Err(stderr)
+        }
+    }
 }
 
 /// Recursively sum the size of `path`. Returns `None` if the path can't

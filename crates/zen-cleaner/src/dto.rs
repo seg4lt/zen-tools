@@ -23,6 +23,9 @@ pub struct TreeNodeDto {
     pub depth: usize,
     /// Absolute filesystem path (empty for sections).
     pub path: String,
+    /// When set, delete via `ollama rm` instead of `rm -rf`.
+    #[serde(default)]
+    pub ollama_model: Option<String>,
     /// Children in order. Sections list their leaves; leaves are empty.
     pub children: Vec<TreeNodeDto>,
     /// Repo only: bytes a `git clean -fxd` would reclaim.
@@ -50,6 +53,7 @@ impl From<&TreeNode> for TreeNodeDto {
             is_dir: node.is_dir,
             depth: node.depth,
             path: node.path.to_string_lossy().to_string(),
+            ollama_model: node.ollama_model.clone(),
             children: node.children.iter().map(TreeNodeDto::from).collect(),
             clean_size: node.clean_size,
             delete_size: node.delete_size,
@@ -156,6 +160,9 @@ pub struct RunActionItem {
     pub label: String,
     /// Absolute path the action targets.
     pub path: String,
+    /// When set, delete via `ollama rm` instead of `rm -rf`.
+    #[serde(default)]
+    pub ollama_model: Option<String>,
     /// Action to perform.
     pub action: RunActionKind,
 }

@@ -33,10 +33,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex as StdMutex;
 use std::time::{Duration, Instant};
 use zen_cleaner::{
-    discover_global_cleanup_targets, estimate_path_size, estimate_repo_savings,
-    find_git_repos_streaming, run_repo_commands, GlobalTreeEntry, NodeKind, RepoCommand,
-    RepoCommandKind, RunActionItem, RunActionKind, RunFailureDto, RunResultDto, ScanResultDto,
-    SizeProgressDto, SizeUpdateDto, Tree, TreeNode, TreeNodeDto,
+    discover_global_cleanup_targets, discover_ollama_models, estimate_path_size,
+    estimate_repo_savings, find_git_repos_streaming, run_repo_commands, GlobalTreeEntry,
+    GlobalTreeGroup, NodeKind, RepoCommand, RepoCommandKind, RunActionItem, RunActionKind,
+    RunFailureDto, RunResultDto, ScanResultDto, SizeProgressDto, SizeUpdateDto, Tree, TreeNode,
+    TreeNodeDto,
 };
 
 /// Throttle between successive `cleaner:scan-progress` emissions.  Small
@@ -242,6 +243,7 @@ fn tree_from_dto_roots(roots: &[TreeNodeDto]) -> Tree {
 
     let mut repo_paths: Vec<PathBuf> = Vec::new();
     let mut global_entries: Vec<GlobalTreeEntry> = Vec::new();
+    let mut global_groups: Vec<GlobalTreeGroup> = Vec::new();
     for root in roots {
         if root.kind != "section" {
             continue;
@@ -249,39 +251,62 @@ fn tree_from_dto_roots(roots: &[TreeNodeDto]) -> Tree {
         for child in &root.children {
             match child.kind.as_str() {
                 "repo" => repo_paths.push(PathBuf::from(&child.path)),
-                "globalPath" => global_entries.push(GlobalTreeEntry {
-                    label: child.label.clone(),
-                    path: PathBuf::from(&child.path),
-                    is_dir: child.is_dir,
-                    size: child.size,
-                }),
+                "globalPath" => global_entries.push(global_entry_from_dto(child)),
+                "section" if child.id == "globals/ollama" => {
+                    global_groups.push(GlobalTreeGroup {
+                        id: "ollama".to_string(),
+                        label: child.label.clone(),
+                        entries: child
+                            .children
+                            .iter()
+                            .filter(|node| node.kind == "globalPath")
+                            .map(global_entry_from_dto)
+                            .collect(),
+                    });
+                }
                 _ => {}
             }
         }
     }
-    let mut tree = Tree::build(repo_paths, global_entries);
+    let mut tree = Tree::build(repo_paths, global_entries, global_groups);
 
     // Layer back the cached repo size estimates.
     for root in roots {
-        for child in &root.children {
-            if child.kind == "repo" {
-                if let Some(node) = tree.get_repo_node_mut_by_path(&PathBuf::from(&child.path)) {
-                    node.clean_size = child.clean_size;
-                    node.delete_size = child.delete_size;
-                    if child.size_done {
-                        node.repo_estimate_status =
-                            Some(zen_cleaner::RepoEstimateStatus { clean_done: true, delete_done: true });
-                    }
-                }
-            } else if child.kind == "globalPath" {
-                if let Some(node) = tree.get_global_node_mut_by_path(&PathBuf::from(&child.path)) {
-                    node.size = child.size;
-                    node.size_done = child.size_done;
-                }
-            }
-        }
+        hydrate_tree_sizes_from_dto(&mut tree, root);
     }
     tree
+}
+
+fn global_entry_from_dto(child: &TreeNodeDto) -> GlobalTreeEntry {
+    GlobalTreeEntry {
+        label: child.label.clone(),
+        path: PathBuf::from(&child.path),
+        is_dir: child.is_dir,
+        size: child.size,
+        ollama_model: child.ollama_model.clone(),
+    }
+}
+
+fn hydrate_tree_sizes_from_dto(tree: &mut Tree, node: &TreeNodeDto) {
+    if node.kind == "repo" {
+        if let Some(repo_node) = tree.get_repo_node_mut_by_path(&PathBuf::from(&node.path)) {
+            repo_node.clean_size = node.clean_size;
+            repo_node.delete_size = node.delete_size;
+            if node.size_done {
+                repo_node.repo_estimate_status =
+                    Some(zen_cleaner::RepoEstimateStatus { clean_done: true, delete_done: true });
+            }
+        }
+    } else if node.kind == "globalPath" {
+        if let Some(global_node) = tree.get_global_node_mut_by_path(&PathBuf::from(&node.path)) {
+            global_node.size = node.size;
+            global_node.size_done = node.size_done;
+        }
+    }
+
+    for child in &node.children {
+        hydrate_tree_sizes_from_dto(tree, child);
+    }
 }
 
 // ────────────────────────────────────────────────────────────────────────
@@ -386,7 +411,7 @@ fn run_scan_worker(
         };
 
         if let Some(sorted) = snapshot {
-            let mut progress_tree = Tree::build(sorted.clone(), Vec::new());
+            let mut progress_tree = Tree::build(sorted.clone(), Vec::new(), Vec::new());
             preserve_repo_sizes(&mut progress_tree, &old_roots_clone);
             let roots: Vec<TreeNodeDto> =
                 progress_tree.roots.iter().map(TreeNodeDto::from).collect();
@@ -407,7 +432,7 @@ fn run_scan_worker(
     let mut repos = repos.into_inner().unwrap();
     repos.sort();
     let repo_count = repos.len();
-    let mut tree = Tree::build(repos.clone(), Vec::new());
+    let mut tree = Tree::build(repos.clone(), Vec::new(), Vec::new());
     preserve_repo_sizes(&mut tree, &old_roots);
     let roots: Vec<TreeNodeDto> = tree.roots.iter().map(TreeNodeDto::from).collect();
     cleaner.lock().trees.insert(folder.clone(), tree);
@@ -501,6 +526,7 @@ pub async fn cleaner_discover_globals(
     state: tauri::State<'_, Mutex<AppState>>,
 ) -> AppResult<TreeNodeDto> {
     let targets = discover_global_cleanup_targets();
+    let ollama_models = discover_ollama_models();
     let entries: Vec<GlobalTreeEntry> = targets
         .iter()
         .map(|t| GlobalTreeEntry {
@@ -508,10 +534,29 @@ pub async fn cleaner_discover_globals(
             path: t.path.clone(),
             is_dir: t.is_dir,
             size: t.size,
+            ollama_model: None,
         })
         .collect();
+    let ollama_groups = if ollama_models.is_empty() {
+        Vec::new()
+    } else {
+        vec![GlobalTreeGroup {
+            id: "ollama".to_string(),
+            label: "Ollama".to_string(),
+            entries: ollama_models
+                .iter()
+                .map(|model| GlobalTreeEntry {
+                    label: model.label.clone(),
+                    path: model.manifest_path.clone(),
+                    is_dir: false,
+                    size: model.size,
+                    ollama_model: Some(model.model_ref.clone()),
+                })
+                .collect(),
+        }]
+    };
 
-    let tree = Tree::build(Vec::new(), entries);
+    let tree = Tree::build(Vec::new(), entries, ollama_groups);
     let section = tree
         .roots
         .first()
@@ -522,12 +567,18 @@ pub async fn cleaner_discover_globals(
     cleaner.lock().globals = Some(tree);
 
     let app_for_worker = app.clone();
-    let target_paths: Vec<PathBuf> = targets.iter().map(|t| t.path.clone()).collect();
+    let mut size_jobs: Vec<(PathBuf, Option<u64>)> = targets
+        .iter()
+        .map(|t| (t.path.clone(), None))
+        .collect();
+    for model in &ollama_models {
+        size_jobs.push((model.manifest_path.clone(), model.size));
+    }
     let cleaner_worker = cleaner.clone();
     std::thread::Builder::new()
         .name("cleaner-globals-sizes".into())
         .spawn(move || {
-            let total = target_paths.len();
+            let total = size_jobs.len();
             if total > 0 {
                 let _ = app_for_worker.emit(
                     "cleaner:size-progress",
@@ -540,8 +591,8 @@ pub async fn cleaner_discover_globals(
                 );
             }
             let completed = AtomicUsize::new(0);
-            target_paths.par_iter().for_each(|path| {
-                let size = estimate_path_size(path);
+            size_jobs.par_iter().for_each(|(path, preset_size)| {
+                let size = (*preset_size).or_else(|| estimate_path_size(path));
                 let id = format!("globals/{}", path.to_string_lossy());
 
                 if let Some(tree) = cleaner_worker.lock().globals.as_mut() {
@@ -615,9 +666,16 @@ pub async fn cleaner_run_actions(items: Vec<RunActionItem>) -> AppResult<RunResu
                         item.label
                     )));
                 }
-                RepoCommand::GlobalDelete {
-                    label: item.label.clone(),
-                    path,
+                if let Some(model_ref) = item.ollama_model.clone() {
+                    RepoCommand::OllamaDelete {
+                        label: item.label.clone(),
+                        model_ref,
+                    }
+                } else {
+                    RepoCommand::GlobalDelete {
+                        label: item.label.clone(),
+                        path,
+                    }
                 }
             }
             other => {

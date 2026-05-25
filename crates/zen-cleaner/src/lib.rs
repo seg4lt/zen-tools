@@ -18,8 +18,9 @@ pub mod git;
 pub mod tree;
 
 pub use deletion::{
-    discover_global_cleanup_targets, estimate_path_size, estimate_repo_savings, run_repo_command,
-    run_repo_commands, GlobalCleanupTarget, RepoCommand, RepoCommandKind, RepoSavingsEstimate,
+    discover_global_cleanup_targets, discover_ollama_models, estimate_path_size,
+    estimate_repo_savings, run_repo_command, run_repo_commands, GlobalCleanupTarget,
+    OllamaModelTarget, RepoCommand, RepoCommandKind, RepoSavingsEstimate,
 };
 pub use dto::{
     GlobalsSectionDto, RunActionItem, RunActionKind, RunFailureDto, RunResultDto, ScanResultDto,
@@ -27,5 +28,6 @@ pub use dto::{
 };
 pub use git::{find_git_repos, find_git_repos_streaming};
 pub use tree::{
-    format_size, GlobalTreeEntry, NodeAction, NodeKind, RepoEstimateStatus, Tree, TreeNode,
+    format_size, GlobalTreeEntry, GlobalTreeGroup, NodeAction, NodeKind, RepoEstimateStatus, Tree,
+    TreeNode,
 };
