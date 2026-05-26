@@ -51,11 +51,7 @@ import { cn } from "@zen-tools/ui";
 import { DragHandle } from "@/components/drag-handle";
 import { useAppZoom } from "@/hooks/use-app-zoom";
 import { useDistractionFree } from "./store/distraction-free";
-import {
-  useTerminalStore,
-  type TerminalPane,
-  type TerminalWorkspace,
-} from "./store/terminal-store";
+import { useTerminalStore } from "./store/terminal-store";
 import {
   terminalFocusTab,
   terminalSetChromeInset,
