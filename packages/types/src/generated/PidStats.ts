@@ -23,6 +23,11 @@ pgid: number,
  */
 name: string, 
 /**
+ * Full command line, argv joined with spaces. Falls back to `name`
+ * when macOS refuses the process arguments.
+ */
+command: string,
+/**
  * Which monitored root this PID is associated with. For ancestors and
  * descendants alike, this is the user-selected target.
  */

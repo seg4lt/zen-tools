@@ -3,7 +3,8 @@
  *
  * Per `root_pid`, the table renders three sections stacked top-to-bottom:
  *   1. Ancestors (dimmed) — root-most first → direct parent.
- *   2. Target row (the rollup, bold). Click to collapse the descendant subtree.
+ *   2. Target row (the rollup, bold). Click the row to show the command;
+ *      click the chevron to collapse the descendant subtree.
  *   3. Descendants (when expanded) — DFS order, indented by depth.
  *
  * Port of `frontend/src/components/tree_table.rs`.
@@ -57,6 +58,7 @@ export interface TreeTableProps {
 
 export function TreeTable({ latest, activeTarget }: TreeTableProps) {
   const [collapsed, setCollapsed] = useState<Set<number>>(new Set());
+  const [selectedPid, setSelectedPid] = useState<number | null>(null);
 
   const groups = useMemo(() => {
     if (!latest) return [];
@@ -88,6 +90,29 @@ export function TreeTable({ latest, activeTarget }: TreeTableProps) {
       return next;
     });
   };
+
+  const toggleCommand = (pid: number) => {
+    setSelectedPid((prev) => (prev === pid ? null : pid));
+  };
+
+  const commandRow = (row: PidStats, key: string, padEm = 0) =>
+    selectedPid === row.pid ? (
+      <tr key={key} className="bg-muted/20">
+        <td colSpan={6} className="px-2 pb-2 pt-1">
+          <div
+            className="h-24 overflow-y-auto rounded border border-border/70 bg-background/80 px-2 py-1.5 font-mono text-xs leading-relaxed text-foreground"
+            style={{ marginLeft: padEm ? `${padEm}em` : undefined }}
+          >
+            <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+              Command
+            </div>
+            <div className="whitespace-pre-wrap break-all [overflow-wrap:anywhere]">
+              {row.command || row.name}
+            </div>
+          </div>
+        </td>
+      </tr>
+    ) : null;
 
   return (
     <div className="h-full overflow-y-auto px-1">
@@ -145,13 +170,17 @@ export function TreeTable({ latest, activeTarget }: TreeTableProps) {
                   <span className="text-muted-foreground"> #{pid}</span>
                 </td>
               </tr>,
-              ...g.ancestors.map((a) => {
+              ...g.ancestors.flatMap((a) => {
                 const padEm = (maxAncDistance - a.depth) * 0.8 + 0.4;
-                return (
+                return [
                   <tr
                     key={`${pid}-a-${a.pid}`}
-                    title="Ancestor — context only, not in totals"
-                    className="text-muted-foreground"
+                    title="Click to show full command. Ancestor — context only, not in totals"
+                    onClick={() => toggleCommand(a.pid)}
+                    className={cn(
+                      "cursor-pointer text-muted-foreground hover:bg-muted/30",
+                      selectedPid === a.pid && "bg-muted/30 text-foreground",
+                    )}
                   >
                     <td className="py-1" style={{ paddingLeft: `${padEm}em` }}>
                       <span className="mr-1">↑</span>
@@ -162,21 +191,36 @@ export function TreeTable({ latest, activeTarget }: TreeTableProps) {
                     <td className="px-2 py-1 tabular-nums">{fmtBytes(a.phys_footprint)}</td>
                     <td className="px-2 py-1 tabular-nums">{fmtBytes(a.rss)}</td>
                     <td className="px-2 py-1 tabular-nums">{a.threads}</td>
-                  </tr>
-                );
+                  </tr>,
+                  commandRow(a, `${pid}-a-${a.pid}-cmd`, padEm),
+                ];
               }),
               <tr
                 key={`${pid}-t`}
-                onClick={() => hasChildren && toggle(pid)}
+                onClick={() => targetRow && toggleCommand(targetRow.pid)}
                 className={cn(
                   "border-t bg-card/40 font-medium",
-                  hasChildren && "cursor-pointer hover:bg-muted/40",
+                  "cursor-pointer hover:bg-muted/40",
+                  targetRow && selectedPid === targetRow.pid && "bg-muted/40",
                 )}
+                title="Click to show full command"
               >
                 <td className="px-2 py-1">
-                  <span className="inline-flex w-4 justify-center text-muted-foreground">
+                  <button
+                    type="button"
+                    className={cn(
+                      "inline-flex size-4 items-center justify-center rounded text-muted-foreground",
+                      hasChildren && "hover:bg-muted hover:text-foreground",
+                    )}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      if (hasChildren) toggle(pid);
+                    }}
+                    aria-label={isOpen ? "Collapse process tree" : "Expand process tree"}
+                    disabled={!hasChildren}
+                  >
                     {Chevron ? <Chevron className="size-3.5" /> : null}
-                  </span>{" "}
+                  </button>{" "}
                   {targetRow?.name ?? `pid ${pid}`}
                   {g.procCount > 1 && (
                     <span className="ml-2 text-xs font-normal text-muted-foreground">
@@ -184,7 +228,9 @@ export function TreeTable({ latest, activeTarget }: TreeTableProps) {
                     </span>
                   )}
                 </td>
-                <td className="px-2 py-1 text-muted-foreground">{pid}</td>
+                <td className="px-2 py-1 text-muted-foreground">
+                  {targetRow?.pid ?? pid}
+                </td>
                 <td className="px-2 py-1 tabular-nums" style={{ color: cpuSeverity(selfCpu) }}>
                   {fmtCpu(selfCpu)}
                 </td>
@@ -203,13 +249,22 @@ export function TreeTable({ latest, activeTarget }: TreeTableProps) {
                   {treeThreads}
                 </td>
               </tr>,
+              targetRow ? commandRow(targetRow, `${pid}-t-cmd`) : null,
               ...(isOpen
-                ? g.descendants.map((d) => {
+                ? g.descendants.flatMap((d) => {
                     const depth = Math.max(1, d.depth);
                     const padEm = depth * 1.6 + 0.4;
                     const viaPgid = d.ppid === 1 && d.pgid > 1 && d.pgid !== d.pid;
-                    return (
-                      <tr key={`${pid}-d-${d.pid}`}>
+                    return [
+                      <tr
+                        key={`${pid}-d-${d.pid}`}
+                        onClick={() => toggleCommand(d.pid)}
+                        className={cn(
+                          "cursor-pointer hover:bg-muted/30",
+                          selectedPid === d.pid && "bg-muted/30",
+                        )}
+                        title="Click to show full command"
+                      >
                         <td className="py-1" style={{ paddingLeft: `${padEm}em` }}>
                           <span className="mr-1 text-muted-foreground">
                             {viaPgid ? "↳" : "└─"}
@@ -231,8 +286,9 @@ export function TreeTable({ latest, activeTarget }: TreeTableProps) {
                         <td className="px-2 py-1 tabular-nums">{fmtBytes(d.phys_footprint)}</td>
                         <td className="px-2 py-1 tabular-nums text-muted-foreground">{fmtBytes(d.rss)}</td>
                         <td className="px-2 py-1 tabular-nums text-muted-foreground">{d.threads}</td>
-                      </tr>
-                    );
+                      </tr>,
+                      commandRow(d, `${pid}-d-${d.pid}-cmd`, padEm),
+                    ];
                   })
                 : []),
             ];

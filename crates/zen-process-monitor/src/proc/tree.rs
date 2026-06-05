@@ -40,6 +40,8 @@ pub struct ProcInfo {
     pub resp_pid: i32,
     /// Executable name.
     pub name: String,
+    /// Full command line, argv joined with spaces.
+    pub command: String,
 }
 
 extern "C" {
@@ -91,6 +93,75 @@ pub(crate) fn comm_to_string(comm: &[i8]) -> String {
         .to_string()
 }
 
+/// Read the process command line via `KERN_PROCARGS2`.
+///
+/// The buffer starts with `argc`, followed by the executable path and then
+/// NUL-separated argv strings. This mirrors the source used by tools such as
+/// `ps -ww -o command`.
+pub(crate) fn command_line(pid: i32) -> Option<String> {
+    let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid as libc::c_int];
+    // SAFETY: `sysconf` is a pure libc query. Fall back to the common macOS
+    // default when it fails.
+    let arg_max = unsafe { libc::sysconf(libc::_SC_ARG_MAX) };
+    let mut size: libc::size_t = if arg_max > 0 {
+        arg_max as usize
+    } else {
+        262_144
+    };
+    let mut buf = vec![0_u8; size as usize];
+
+    // SAFETY: `mib` and `buf` are valid for the duration of the call; sysctl
+    // writes at most `size` bytes into `buf` and updates `size`.
+    let rc = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            mib.len() as libc::c_uint,
+            buf.as_mut_ptr() as *mut libc::c_void,
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if rc != 0 || size < std::mem::size_of::<libc::c_int>() as libc::size_t {
+        return None;
+    }
+
+    buf.truncate(size as usize);
+    let argc = i32::from_ne_bytes(buf.get(0..4)?.try_into().ok()?).max(0) as usize;
+    if argc == 0 {
+        return None;
+    }
+
+    let mut idx = std::mem::size_of::<libc::c_int>();
+    while idx < buf.len() && buf[idx] != 0 {
+        idx += 1;
+    }
+    while idx < buf.len() && buf[idx] == 0 {
+        idx += 1;
+    }
+
+    let mut args = Vec::with_capacity(argc);
+    while idx < buf.len() && args.len() < argc {
+        let start = idx;
+        while idx < buf.len() && buf[idx] != 0 {
+            idx += 1;
+        }
+        if idx > start {
+            let arg = String::from_utf8_lossy(&buf[start..idx]).into_owned();
+            args.push(arg);
+        }
+        while idx < buf.len() && buf[idx] == 0 {
+            idx += 1;
+        }
+    }
+
+    if args.is_empty() {
+        None
+    } else {
+        Some(args.join(" "))
+    }
+}
+
 /// Read pid+ppid+name for every process the caller can see. Sorted by pid.
 pub fn list_all() -> Result<Vec<ProcInfo>, String> {
     let pids = pids_by_type(ProcFilter::All).map_err(|e| e.to_string())?;
@@ -112,6 +183,7 @@ pub fn list_all() -> Result<Vec<ProcInfo>, String> {
         if name.is_empty() {
             name = comm_to_string(&info.pbi_comm);
         }
+        let command = command_line(pid).unwrap_or_else(|| name.clone());
         let pid_i32 = info.pbi_pid as i32;
         out.push(ProcInfo {
             pid: pid_i32,
@@ -119,6 +191,7 @@ pub fn list_all() -> Result<Vec<ProcInfo>, String> {
             pgid: info.pbi_pgid as i32,
             resp_pid: responsible_for(pid_i32),
             name,
+            command,
         });
     }
     out.sort_by_key(|p| p.pid);
@@ -186,11 +259,7 @@ pub fn descendants_of(root_pid: i32, all: &[ProcInfo]) -> Vec<(ProcInfo, u32)> {
         }
         let parent = if members.contains(&p.ppid) && p.ppid != p.pid {
             p.ppid
-        } else if p.pgid > 0
-            && p.pgid != p.pid
-            && p.pgid != root_pid
-            && members.contains(&p.pgid)
-        {
+        } else if p.pgid > 0 && p.pgid != p.pid && p.pgid != root_pid && members.contains(&p.pgid) {
             p.pgid
         } else {
             root_pid

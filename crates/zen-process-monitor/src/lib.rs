@@ -64,9 +64,14 @@ pub fn list_processes() -> Result<Vec<ProcSummary>> {
                 pid: p.pid,
                 ppid: p.ppid,
                 name: p.name,
+                command: p.command,
             })
             .collect();
-        out.sort_by(|a, b| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()));
+        out.sort_by(|a, b| {
+            a.name
+                .to_ascii_lowercase()
+                .cmp(&b.name.to_ascii_lowercase())
+        });
         Ok(out)
     }
     #[cfg(not(target_os = "macos"))]

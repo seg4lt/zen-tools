@@ -15,4 +15,9 @@ ppid: number,
 /**
  * Executable name (`pbi_name`, falling back to `pbi_comm`).
  */
-name: string, };
+name: string,
+/**
+ * Full command line, argv joined with spaces. Falls back to `name`
+ * when macOS refuses the process arguments.
+ */
+command: string, };

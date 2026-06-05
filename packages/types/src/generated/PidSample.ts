@@ -26,6 +26,11 @@ pgid: number,
  */
 name: string, 
 /**
+ * Full command line, argv joined with spaces. Falls back to `name`
+ * when macOS refuses the process arguments.
+ */
+command: string,
+/**
  * Sum of user+system CPU ticks (proc_taskinfo.pti_total_user + pti_total_system).
  */
 cpu_ticks: number, 

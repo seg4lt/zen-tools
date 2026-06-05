@@ -82,6 +82,11 @@ pub struct SamplerState {
     /// Last sample for each PID, used to compute deltas.
     #[cfg(target_os = "macos")]
     prev_per_pid: std::collections::HashMap<i32, PidSample>,
+    /// Stable identity captured for each selected root PID. When a root
+    /// exits, the sampler uses this to find a restarted process with the
+    /// same command line and keep the original target card alive.
+    #[cfg(target_os = "macos")]
+    target_identities: std::collections::HashMap<i32, TargetIdentity>,
     /// Wall-clock instant of the last sample. CPU% denominator.
     #[cfg(target_os = "macos")]
     prev_wall: Option<std::time::Instant>,
@@ -97,6 +102,8 @@ impl SamplerState {
             poll_interval_ms: DEFAULT_POLL_MS,
             #[cfg(target_os = "macos")]
             prev_per_pid: std::collections::HashMap::new(),
+            #[cfg(target_os = "macos")]
+            target_identities: std::collections::HashMap::new(),
             #[cfg(target_os = "macos")]
             prev_wall: None,
             history: VecDeque::with_capacity(HISTORY_LEN),
@@ -114,18 +121,25 @@ impl SamplerState {
     /// Drop a PID from the target list.
     pub fn remove_target(&mut self, pid: i32) {
         self.target_pids.retain(|&p| p != pid);
+        #[cfg(target_os = "macos")]
+        self.target_identities.remove(&pid);
         self.reset_deltas();
     }
 
     /// Replace the target list wholesale.
     pub fn set_targets(&mut self, pids: Vec<i32>) {
         self.target_pids = pids;
+        #[cfg(target_os = "macos")]
+        self.target_identities
+            .retain(|pid, _| self.target_pids.contains(pid));
         self.reset_deltas();
     }
 
     /// Stop monitoring everything.
     pub fn clear_targets(&mut self) {
         self.target_pids.clear();
+        #[cfg(target_os = "macos")]
+        self.target_identities.clear();
         self.reset_deltas();
     }
 
@@ -222,6 +236,36 @@ struct TreeEntry {
 }
 
 #[cfg(target_os = "macos")]
+#[derive(Clone, Debug)]
+struct TargetIdentity {
+    name: String,
+    command: String,
+}
+
+#[cfg(target_os = "macos")]
+fn resolve_root_pid(
+    target_pid: i32,
+    all: &[crate::proc::tree::ProcInfo],
+    identities: &std::collections::HashMap<i32, TargetIdentity>,
+) -> Option<i32> {
+    if all.iter().any(|p| p.pid == target_pid) {
+        return Some(target_pid);
+    }
+
+    let identity = identities.get(&target_pid)?;
+    all.iter()
+        .filter(|p| {
+            if !identity.command.is_empty() && identity.command != identity.name {
+                p.command == identity.command
+            } else {
+                p.name == identity.name
+            }
+        })
+        .map(|p| p.pid)
+        .min()
+}
+
+#[cfg(target_os = "macos")]
 fn collect_sample(roots: &[i32], state: &SharedState) -> Sample {
     use crate::proc::{cpu, stats, tree};
     use std::collections::{HashMap, HashSet};
@@ -243,15 +287,24 @@ fn collect_sample(roots: &[i32], state: &SharedState) -> Sample {
     let mut entries: Vec<TreeEntry> = Vec::new();
     let mut seen: HashSet<i32> = HashSet::new();
     let mut ended_roots: Vec<i32> = Vec::new();
+    let identities = {
+        let s = state.lock();
+        s.target_identities.clone()
+    };
 
     for &root in roots {
-        let walk = tree::descendants_of(root, &all);
+        let Some(current_root) = resolve_root_pid(root, &all, &identities) else {
+            ended_roots.push(root);
+            continue;
+        };
+
+        let walk = tree::descendants_of(current_root, &all);
         if walk.is_empty() {
             ended_roots.push(root);
             continue;
         }
 
-        let mut ancestors = tree::ancestors_of(root, &all);
+        let mut ancestors = tree::ancestors_of(current_root, &all);
         ancestors.reverse();
         let max_distance = ancestors.len() as u32;
         for (idx, anc) in ancestors.into_iter().enumerate() {
@@ -323,6 +376,7 @@ fn collect_sample(roots: &[i32], state: &SharedState) -> Sample {
             ppid: sample.ppid,
             pgid: sample.pgid,
             name: sample.name.clone(),
+            command: sample.command.clone(),
             root_pid: entry.root_pid,
             depth: entry.depth,
             is_ancestor: entry.is_ancestor,
@@ -340,6 +394,24 @@ fn collect_sample(roots: &[i32], state: &SharedState) -> Sample {
             total.phys_footprint = total.phys_footprint.saturating_add(sample.phys_footprint);
             total.proc_count += 1;
             total.threads = total.threads.saturating_add(sample.threads);
+        }
+    }
+
+    for root in roots {
+        if ended_roots.contains(root) {
+            continue;
+        }
+        if let Some(root_row) = per_pid
+            .iter()
+            .find(|row| row.root_pid == *root && row.depth == 0 && !row.is_ancestor)
+        {
+            s.target_identities.insert(
+                *root,
+                TargetIdentity {
+                    name: root_row.name.clone(),
+                    command: root_row.command.clone(),
+                },
+            );
         }
     }
 
@@ -362,5 +434,56 @@ fn collect_sample(roots: &[i32], _state: &SharedState) -> Sample {
         ts: now_ms(),
         ended_roots: roots.to_vec(),
         ..Default::default()
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::{resolve_root_pid, TargetIdentity};
+    use crate::proc::tree::ProcInfo;
+    use std::collections::HashMap;
+
+    fn proc_info(pid: i32, name: &str, command: &str) -> ProcInfo {
+        ProcInfo {
+            pid,
+            ppid: 1,
+            pgid: pid,
+            resp_pid: pid,
+            name: name.to_string(),
+            command: command.to_string(),
+        }
+    }
+
+    #[test]
+    fn resolve_root_prefers_live_original_pid() {
+        let all = vec![
+            proc_info(42, "node", "node server.js"),
+            proc_info(99, "node", "node server.js"),
+        ];
+        let mut identities = HashMap::new();
+        identities.insert(
+            42,
+            TargetIdentity {
+                name: "node".into(),
+                command: "node server.js".into(),
+            },
+        );
+
+        assert_eq!(resolve_root_pid(42, &all, &identities), Some(42));
+    }
+
+    #[test]
+    fn resolve_root_finds_restarted_pid_by_command() {
+        let all = vec![proc_info(99, "node", "node server.js")];
+        let mut identities = HashMap::new();
+        identities.insert(
+            42,
+            TargetIdentity {
+                name: "node".into(),
+                command: "node server.js".into(),
+            },
+        );
+
+        assert_eq!(resolve_root_pid(42, &all, &identities), Some(99));
     }
 }

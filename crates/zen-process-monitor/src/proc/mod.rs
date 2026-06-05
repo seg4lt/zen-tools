@@ -24,6 +24,9 @@ pub struct ProcSummary {
     pub ppid: i32,
     /// Executable name (`pbi_name`, falling back to `pbi_comm`).
     pub name: String,
+    /// Full command line, argv joined with spaces. Falls back to `name`
+    /// when macOS refuses the process arguments.
+    pub command: String,
 }
 
 /// One row of per-PID stats, raw counters (not deltas, not percentages).
@@ -43,6 +46,9 @@ pub struct PidSample {
     pub pgid: i32,
     /// Executable name.
     pub name: String,
+    /// Full command line, argv joined with spaces. Falls back to `name`
+    /// when macOS refuses the process arguments.
+    pub command: String,
     /// Sum of user+system CPU ticks (proc_taskinfo.pti_total_user + pti_total_system).
     #[ts(type = "number")]
     pub cpu_ticks: u64,
@@ -76,6 +82,9 @@ pub struct PidStats {
     pub pgid: i32,
     /// Executable name.
     pub name: String,
+    /// Full command line, argv joined with spaces. Falls back to `name`
+    /// when macOS refuses the process arguments.
+    pub command: String,
     /// Which monitored root this PID is associated with. For ancestors and
     /// descendants alike, this is the user-selected target.
     pub root_pid: i32,

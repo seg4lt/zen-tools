@@ -134,8 +134,9 @@ export function MiniMonitorApp() {
       entry.rss += p.rss;
       entry.mem += p.phys_footprint;
       entry.n += 1;
-      // The root row has pid === root_pid; capture its name as the label.
-      if (p.pid === p.root_pid) entry.name = p.name;
+      // The root row has depth 0. After a restart its live PID can differ
+      // from the stable root_pid selected by the user.
+      if (p.depth === 0) entry.name = p.name;
       byRoot.set(p.root_pid, entry);
     }
 

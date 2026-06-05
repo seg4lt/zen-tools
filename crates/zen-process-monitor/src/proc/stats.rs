@@ -16,6 +16,7 @@ pub fn read(pid: i32) -> Option<PidSample> {
     if name.is_empty() {
         name = tree::comm_to_string(&tai.pbsd.pbi_comm);
     }
+    let command = tree::command_line(pid).unwrap_or_else(|| name.clone());
 
     let phys_footprint = pidrusage::<RUsageInfoV4>(pid)
         .map(|r| r.ri_phys_footprint)
@@ -26,6 +27,7 @@ pub fn read(pid: i32) -> Option<PidSample> {
         ppid: tai.pbsd.pbi_ppid as i32,
         pgid: tai.pbsd.pbi_pgid as i32,
         name,
+        command,
         cpu_ticks: tai.ptinfo.pti_total_user + tai.ptinfo.pti_total_system,
         rss: tai.ptinfo.pti_resident_size,
         vsize: tai.ptinfo.pti_virtual_size,

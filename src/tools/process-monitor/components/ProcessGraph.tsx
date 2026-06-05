@@ -30,21 +30,30 @@ export function ProcessGraph({
   // Latest non-ancestor target row for this root — name + proc count + ended state.
   const meta = useMemo(() => {
     const last = history[history.length - 1];
-    if (!last) return { name: null as string | null, count: 0, ended: false };
+    if (!last) {
+      return {
+        name: null as string | null,
+        livePid: null as number | null,
+        count: 0,
+        ended: false,
+      };
+    }
     let name: string | null = null;
+    let livePid: number | null = null;
     let count = 0;
     let foundRoot = false;
     for (const r of last.per_pid) {
       if (r.root_pid === rootPid && !r.is_ancestor) {
         if (r.depth === 0) {
           name = r.name;
+          livePid = r.pid;
           foundRoot = true;
         }
         count += 1;
       }
     }
     const listedEnded = last.ended_roots.includes(rootPid);
-    return { name, count, ended: !foundRoot || listedEnded };
+    return { name, livePid, count, ended: !foundRoot || listedEnded };
   }, [history, rootPid]);
 
   const cpuSeries = useMemo(
@@ -105,7 +114,7 @@ export function ProcessGraph({
           {headerName}
         </span>
         <span className="text-xs text-muted-foreground">
-          #{rootPid}
+          #{meta.livePid ?? rootPid}
           {meta.count > 1 ? ` · ${meta.count} procs` : ""}
         </span>
         <button
