@@ -17,12 +17,12 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
-use tokio::sync::Notify;
 
 use crate::error::{ReviewError, ReviewResult};
 use crate::events::{classify_line, AiReviewEvent};
+use crate::state::Cancellation;
 
 /// Hard wall-clock cap for a single review (30 minutes). Tuned for
 /// substantial PRs without leaving a runaway session burning cost
@@ -40,6 +40,9 @@ pub struct RunOutcome {
     pub cost_usd: Option<f64>,
     /// Captured stderr (truncated).
     pub stderr_tail: String,
+    /// Final textual result returned by Claude. Review reports are parsed from
+    /// this trusted transport instead of allowing the model to write files.
+    pub result_text: String,
 }
 
 /// Trait so the runner can emit events without depending on the
@@ -69,19 +72,32 @@ pub async fn spawn_claude<S: EventSink>(
     worktree: PathBuf,
     prompt: String,
     model: Option<String>,
-    cancel: Arc<Notify>,
+    cancel: Arc<Cancellation>,
     sink: S,
 ) -> ReviewResult<RunOutcome> {
+    // Claude permission rules use a double-leading slash for absolute paths.
+    // Restrict every read/search tool to this detached worktree so malicious
+    // repository instructions cannot make the reviewer inspect host secrets.
+    let root = worktree.to_string_lossy();
+    let scoped_tools = format!(
+        "Read(/{root}/**) Grep(/{root}/**) Glob(/{root}/**)"
+    );
     let mut args: Vec<String> = vec![
         "-p".into(),
-        prompt,
         "--output-format".into(),
         "stream-json".into(),
         "--verbose".into(),
         "--allowedTools".into(),
-        "Read Grep Glob Bash WebFetch".into(),
+        scoped_tools,
+        "--tools".into(),
+        "Read,Grep,Glob".into(),
         "--disallowedTools".into(),
-        "Edit Write MultiEdit NotebookEdit".into(),
+        "Edit Write MultiEdit NotebookEdit Bash WebFetch WebSearch".into(),
+        "--safe-mode".into(),
+        "--no-session-persistence".into(),
+        "--strict-mcp-config".into(),
+        "--permission-mode".into(),
+        "dontAsk".into(),
     ];
     if let Some(m) = model.as_deref() {
         if !m.is_empty() {
@@ -101,7 +117,7 @@ pub async fn spawn_claude<S: EventSink>(
     cmd.args(&args)
         .current_dir(&worktree)
         .env("PATH", &path)
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
@@ -142,18 +158,33 @@ pub async fn spawn_claude<S: EventSink>(
         })
     });
 
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(MAX_RUN_SECS);
+    // Prompts can contain large diffs. Send through stdin instead of argv so
+    // macOS ARG_MAX cannot reject otherwise-valid reviews. Stderr draining is
+    // already active, and delivery shares the cancellation/deadline budget.
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| ReviewError::Other("claude child has no stdin pipe".into()))?;
+    if let Err(e) = write_prompt_supervised(&mut stdin, &prompt, &cancel, deadline).await {
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+        return Err(e);
+    }
+
     let mut reader = BufReader::new(stdout).lines();
-    let timeout = tokio::time::sleep(Duration::from_secs(MAX_RUN_SECS));
+    let timeout = tokio::time::sleep_until(deadline);
     tokio::pin!(timeout);
 
     let mut last_cost: Option<f64> = None;
     let mut last_duration_ms: u64 = 0;
     let mut stderr_tail = String::new();
+    let mut result_text = String::new();
 
     let exit_status = loop {
         tokio::select! {
             biased;
-            _ = cancel.notified() => {
+            _ = cancel.cancelled() => {
                 tracing::info!("ai-review: cancel received; killing claude child");
                 let _ = child.kill().await;
                 let _ = child.wait().await;
@@ -180,6 +211,15 @@ pub async fn spawn_claude<S: EventSink>(
             line = reader.next_line() => {
                 match line {
                     Ok(Some(text)) => {
+                        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
+                            if value.get("type").and_then(|v| v.as_str()) == Some("result") {
+                                result_text = value
+                                    .get("result")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                            }
+                        }
                         for event in classify_line(&text) {
                             if let AiReviewEvent::Done { cost_usd, duration_ms, .. } = &event {
                                 last_cost = *cost_usd;
@@ -228,7 +268,26 @@ pub async fn spawn_claude<S: EventSink>(
         duration_ms,
         cost_usd: last_cost,
         stderr_tail,
+        result_text,
     })
+}
+
+async fn write_prompt_supervised<W: tokio::io::AsyncWrite + Unpin>(
+    writer: &mut W,
+    prompt: &str,
+    cancel: &Cancellation,
+    deadline: tokio::time::Instant,
+) -> ReviewResult<()> {
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => Err(ReviewError::Cancelled),
+        _ = tokio::time::sleep_until(deadline) => Err(ReviewError::Timeout { secs: MAX_RUN_SECS }),
+        result = async {
+            writer.write_all(prompt.as_bytes()).await?;
+            writer.shutdown().await?;
+            Ok::<(), std::io::Error>(())
+        } => result.map_err(ReviewError::Io),
+    }
 }
 
 /// Compute the same PATH list `zen_shell::ShellExecutor::new` uses, so
@@ -253,4 +312,32 @@ fn augmented_path() -> String {
     ];
     parts.push(std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin:/usr/sbin:/sbin".into()));
     parts.join(":")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn blocked_prompt_writer_observes_cancellation() {
+        let (mut writer, _reader) = tokio::io::duplex(1);
+        let cancel = Arc::new(Cancellation::default());
+        let trigger = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            trigger.cancel();
+        });
+        let result = tokio::time::timeout(
+            Duration::from_millis(200),
+            write_prompt_supervised(
+                &mut writer,
+                &"x".repeat(1024),
+                &cancel,
+                tokio::time::Instant::now() + Duration::from_secs(10),
+            ),
+        )
+        .await
+        .expect("cancelled writer must not hang");
+        assert!(matches!(result, Err(ReviewError::Cancelled)));
+    }
 }

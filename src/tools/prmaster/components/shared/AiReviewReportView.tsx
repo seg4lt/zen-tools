@@ -24,8 +24,15 @@ import {
   ListChecks,
   ScrollText,
   Sparkles,
+  CheckCircle2,
+  XCircle,
+  MinusCircle,
 } from "lucide-react";
-import type { AiReviewFinding, AiReviewRunSummary } from "../../lib/tauri";
+import type {
+  AiReviewFinding,
+  AiReviewRunSummary,
+  AiReviewVerificationCheck,
+} from "../../lib/tauri";
 import { AiReviewFindingCard } from "./AiReviewFindingCard";
 
 interface Props {
@@ -35,6 +42,8 @@ interface Props {
   overallSummary: string;
   /** High-level bullets summarizing what changed in the PR. */
   changeSummary: string[];
+  /** Bounded static checks attempted by the verifier. */
+  verificationChecks: AiReviewVerificationCheck[];
   /** Resolved Claude model the run used. */
   model: string;
   /** Reported cost in USD. */
@@ -89,6 +98,7 @@ export function AiReviewReportView(props: Props) {
       <ReportHeader
         overallSummary={props.overallSummary}
         changeSummary={props.changeSummary}
+        verificationChecks={props.verificationChecks}
         model={props.model}
         costUsd={props.costUsd}
         finishedAtMs={props.finishedAtMs}
@@ -137,6 +147,7 @@ export function AiReviewReportView(props: Props) {
 function ReportHeader({
   overallSummary,
   changeSummary,
+  verificationChecks,
   model,
   costUsd,
   finishedAtMs,
@@ -152,6 +163,7 @@ function ReportHeader({
 }: {
   overallSummary: string;
   changeSummary: string[];
+  verificationChecks: AiReviewVerificationCheck[];
   model: string;
   costUsd: number | null;
   finishedAtMs: number | null;
@@ -187,6 +199,9 @@ function ReportHeader({
                 <li key={`${i}-${item}`}>{item}</li>
               ))}
             </ul>
+          )}
+          {verificationChecks.length > 0 && (
+            <VerificationChecks checks={verificationChecks} />
           )}
           <div className="mt-1 flex flex-wrap items-center gap-2 text-[10px] text-muted-foreground">
             <span className="font-mono">head {headSha.slice(0, 12)}</span>
@@ -255,6 +270,45 @@ function ReportHeader({
       {openPanel === "prompt" && <PromptPanel prompt={prompt} />}
       {openPanel === "raw" && legacyHtml && <RawHtmlPanel html={legacyHtml} />}
     </header>
+  );
+}
+
+function VerificationChecks({
+  checks,
+}: {
+  checks: AiReviewVerificationCheck[];
+}) {
+  return (
+    <div className="mt-1.5 flex flex-wrap gap-1">
+      {checks.map((check, index) => {
+        const status = check.status.toLowerCase();
+        const Icon =
+          status === "passed"
+            ? CheckCircle2
+            : status === "failed"
+              ? XCircle
+              : MinusCircle;
+        const tone =
+          status === "passed"
+            ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
+            : status === "failed"
+              ? "border-destructive/40 bg-destructive/10 text-destructive"
+              : "border-border bg-muted/40 text-muted-foreground";
+        return (
+          <span
+            key={`${check.name}-${index}`}
+            title={check.summary}
+            className={cn(
+              "inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px]",
+              tone,
+            )}
+          >
+            <Icon className="size-2.5" />
+            {check.name || "verification check"}
+          </span>
+        );
+      })}
+    </div>
   );
 }
 

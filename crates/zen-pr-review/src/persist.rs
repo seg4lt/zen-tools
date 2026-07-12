@@ -13,7 +13,8 @@
 //! and the iframe can lazily fetch through the existing
 //! `read_file_content` Tauri command if we ever need that path.
 
-use std::path::{Path, PathBuf};
+use std::collections::HashSet;
+use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use zen_storage::KvStore;
@@ -70,6 +71,9 @@ pub struct RunRecord {
     /// from `report.json`'s `change_summary`; empty for older runs.
     #[serde(default)]
     pub change_summary: Vec<String>,
+    /// Static checks attempted by the adversarial verification pass.
+    #[serde(default)]
+    pub verification_checks: Vec<VerificationCheck>,
     /// The exact prompt text sent to `claude -p`. Surfaced via the
     /// "View prompt" disclosure on the report view so the user can
     /// audit what the model was asked to do.
@@ -138,6 +142,29 @@ pub struct Finding {
     /// Why this matters.
     #[serde(default)]
     pub rationale: String,
+    /// Verifier-assigned confidence (`high`, `medium`, or `low`).
+    #[serde(default)]
+    pub confidence: String,
+    /// Concrete repository facts supporting the finding.
+    #[serde(default)]
+    pub evidence: Vec<String>,
+    /// Concrete trigger, execution path, and incorrect outcome.
+    #[serde(default)]
+    pub failure_scenario: String,
+}
+
+/// One bounded static check attempted during verification.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VerificationCheck {
+    /// Command or logical check name.
+    #[serde(default)]
+    pub name: String,
+    /// `passed`, `failed`, or `skipped`.
+    #[serde(default)]
+    pub status: String,
+    /// Concise result or reason the check could not run.
+    #[serde(default)]
+    pub summary: String,
 }
 
 /// Top-level shape of `report.json`.
@@ -155,6 +182,9 @@ pub struct ReportPayload {
     /// Base SHA Claude reviewed against (sanity check).
     #[serde(default)]
     pub base_sha: String,
+    /// Static checks performed by the independent verifier.
+    #[serde(default)]
+    pub verification_checks: Vec<VerificationCheck>,
     /// Findings, in author-preferred order.
     #[serde(default)]
     pub findings: Vec<Finding>,
@@ -234,6 +264,162 @@ pub fn parse_report_json(path: &Path) -> ReviewResult<ReportPayload> {
     Ok(payload)
 }
 
+/// Parse a report returned through Claude's final text result.
+pub fn parse_report_text(raw: &str) -> ReviewResult<ReportPayload> {
+    if raw.trim().is_empty() {
+        return Err(ReviewError::Other("Claude returned an empty report result".into()));
+    }
+    Ok(serde_json::from_str(raw.trim())?)
+}
+
+/// Persist a host-parsed report. The model never receives filesystem write
+/// tools; only this trusted code writes the report artefact.
+pub fn write_report_json(path: &Path, payload: &ReportPayload) -> ReviewResult<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let bytes = serde_json::to_vec_pretty(payload)?;
+    std::fs::write(path, bytes)?;
+    Ok(())
+}
+
+/// Enforce the adversarial verifier's output contract before the host labels a
+/// run successful. A syntactically valid first-pass report must never be
+/// mistaken for a verified report when the second pass failed to overwrite it.
+pub fn validate_verified_report(
+    payload: &ReportPayload,
+    expected_head: &str,
+    trusted_diff: &str,
+) -> ReviewResult<()> {
+    if payload.head_sha != expected_head {
+        return Err(ReviewError::Other(format!(
+            "verified report head SHA mismatch: expected {expected_head}, got {:?}",
+            payload.head_sha
+        )));
+    }
+    if payload.verification_checks.is_empty() {
+        return Err(ReviewError::Other(
+            "verifier produced no verification_checks (include skipped checks with reasons)".into(),
+        ));
+    }
+    for check in &payload.verification_checks {
+        if check.name.trim().is_empty()
+            || !matches!(check.status.as_str(), "passed" | "failed" | "skipped")
+            || check.summary.trim().is_empty()
+        {
+            return Err(ReviewError::Other(format!(
+                "invalid verification check in verified report: {:?}",
+                check.name
+            )));
+        }
+    }
+    let changed_lines = changed_lines_from_diff(trusted_diff);
+    for finding in &payload.findings {
+        let path = Path::new(&finding.path);
+        if finding.id.trim().is_empty()
+            || finding.title.trim().is_empty()
+            || finding.rationale.trim().is_empty()
+            || finding.current.trim().is_empty()
+            || finding.start_line == 0
+            || finding.end_line < finding.start_line
+            || path.is_absolute()
+            || path.components().any(|c| matches!(c, Component::ParentDir))
+            || !matches!(finding.severity.as_str(), "critical" | "high" | "medium" | "low")
+            || !matches!(finding.side.as_str(), "LEFT" | "RIGHT")
+            || finding
+                .snippet_start_line
+                .is_some_and(|line| line == 0 || line > finding.start_line)
+        {
+            return Err(ReviewError::Other(format!(
+                "verified finding {:?} has malformed identity, path, severity, side, or line data",
+                finding.id
+            )));
+        }
+        if finding.failure_scenario.trim().is_empty()
+            || finding.evidence.is_empty()
+            || finding.evidence.iter().any(|e| e.trim().is_empty())
+        {
+            return Err(ReviewError::Other(format!(
+                "verified finding {:?} lacks evidence or a failure scenario",
+                finding.id
+            )));
+        }
+        if !matches!(finding.confidence.as_str(), "high" | "medium") {
+            return Err(ReviewError::Other(format!(
+                "verified finding {:?} has unsupported confidence {:?}",
+                finding.id, finding.confidence
+            )));
+        }
+        if matches!(finding.severity.as_str(), "critical" | "high")
+            && (finding.confidence != "high" || finding.evidence.len() < 2)
+        {
+            return Err(ReviewError::Other(format!(
+                "critical/high finding {:?} did not meet the verification quality gate",
+                finding.id
+            )));
+        }
+        let anchored = (finding.start_line..=finding.end_line).any(|line| {
+            changed_lines.contains(&(finding.path.clone(), finding.side.clone(), line))
+        });
+        if !anchored {
+            return Err(ReviewError::Other(format!(
+                "verified finding {:?} is not anchored to a changed diff line",
+                finding.id
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn changed_lines_from_diff(diff: &str) -> HashSet<(String, String, u32)> {
+    let mut changed = HashSet::new();
+    let mut old_path = String::new();
+    let mut new_path = String::new();
+    let mut old_line = 0u32;
+    let mut new_line = 0u32;
+    for line in diff.lines() {
+        if let Some(next) = line.strip_prefix("--- a/") {
+            old_path = next.to_string();
+            continue;
+        }
+        if let Some(next) = line.strip_prefix("+++ b/") {
+            new_path = next.to_string();
+            continue;
+        }
+        if line.starts_with("@@ ") {
+            let mut parts = line.split_whitespace();
+            let _at = parts.next();
+            old_line = parts
+                .next()
+                .and_then(|part| part.strip_prefix('-'))
+                .and_then(|range| range.split(',').next())
+                .and_then(|n| n.parse().ok())
+                .unwrap_or(0);
+            new_line = parts
+                .next()
+                .and_then(|part| part.strip_prefix('+'))
+                .and_then(|range| range.split(',').next())
+                .and_then(|n| n.parse().ok())
+                .unwrap_or(0);
+            continue;
+        }
+        if old_line == 0 && new_line == 0 {
+            continue;
+        }
+        if line.starts_with('+') && !line.starts_with("+++") {
+            changed.insert((new_path.clone(), "RIGHT".into(), new_line));
+            new_line = new_line.saturating_add(1);
+        } else if line.starts_with('-') && !line.starts_with("---") {
+            changed.insert((old_path.clone(), "LEFT".into(), old_line));
+            old_line = old_line.saturating_add(1);
+        } else if !line.starts_with('\\') {
+            old_line = old_line.saturating_add(1);
+            new_line = new_line.saturating_add(1);
+        }
+    }
+    changed
+}
+
 /// Copy the worktree-local `report.json` into the reports dir at
 /// `<reports_root>/<run_id>.json`. Also copies `report.html` if it
 /// happens to be present (older Claude prompts wrote one; the
@@ -293,10 +479,56 @@ mod tests {
             report_json_path: Some("/tmp/r.json".into()),
             overall_summary: String::new(),
             change_summary: Vec::new(),
+            verification_checks: Vec::new(),
             prompt: String::new(),
             findings: Vec::new(),
             events: Vec::new(),
         }
+    }
+
+    #[test]
+    fn verified_report_requires_checks_and_matching_head() {
+        let mut payload = ReportPayload {
+            summary: "ok".into(),
+            change_summary: vec![],
+            head_sha: "head-1".into(),
+            base_sha: "base".into(),
+            verification_checks: vec![],
+            findings: vec![],
+        };
+        let diff = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\n";
+        assert!(validate_verified_report(&payload, "head-1", diff).is_err());
+        payload.verification_checks.push(VerificationCheck {
+            name: "cargo check".into(),
+            status: "passed".into(),
+            summary: "completed successfully".into(),
+        });
+        assert!(validate_verified_report(&payload, "different-head", diff).is_err());
+        assert!(validate_verified_report(&payload, "head-1", diff).is_ok());
+
+        payload.findings.push(Finding {
+            id: "high-a-rs-1".into(),
+            severity: "high".into(),
+            title: "Concrete regression".into(),
+            path: "a.rs".into(),
+            start_line: 1,
+            end_line: 1,
+            side: "RIGHT".into(),
+            current: "new".into(),
+            snippet_start_line: Some(1),
+            suggested: String::new(),
+            language: "rust".into(),
+            rationale: "The changed value violates the caller contract.".into(),
+            confidence: "high".into(),
+            evidence: vec!["caller expects old".into(), "diff changes the value".into()],
+            failure_scenario: "call → changed value → incorrect result".into(),
+        });
+        assert!(validate_verified_report(&payload, "head-1", diff).is_ok());
+        payload.findings[0].path = "../secret".into();
+        assert!(validate_verified_report(&payload, "head-1", diff).is_err());
+        payload.findings[0].path = "a.rs".into();
+        payload.findings[0].evidence[0] = " ".into();
+        assert!(validate_verified_report(&payload, "head-1", diff).is_err());
     }
 
     #[test]
