@@ -47,7 +47,7 @@ import type { OrderedExcalidrawElement } from "@excalidraw/excalidraw/element/ty
 import type { AppState, BinaryFiles } from "@excalidraw/excalidraw/types";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { Loader2 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 interface ExcalidrawEditorProps {
   /** Absolute path of the open `*.excalidraw.svg` *or*
@@ -63,6 +63,8 @@ interface ExcalidrawEditorProps {
    *  `writeFile` (text, used for the SVG path) and a `Uint8Array`
    *  through `writeBytes` (binary, used for the PNG path). */
   onSave: (data: string | Uint8Array) => void;
+  /** Called 500 ms after the last user edit with the serialized scene. */
+  onAutoSave: (data: string | Uint8Array) => void;
   /** `"dark"` or `"light"` — passed straight through to Excalidraw. */
   theme: "light" | "dark";
 }
@@ -78,6 +80,7 @@ export default function ExcalidrawEditor({
   path,
   onDirty,
   onSave,
+  onAutoSave,
   theme,
 }: ExcalidrawEditorProps) {
   const [initialData, setInitialData] = useState<
@@ -88,6 +91,59 @@ export default function ExcalidrawEditor({
   const apiRef = useRef<ExcalidrawImperativeAPI | null>(null);
   const sceneRef = useRef<LiveScene | null>(null);
   const dirtiedRef = useRef(false);
+  const readyRef = useRef(false);
+  const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const onAutoSaveRef = useRef(onAutoSave);
+
+  useEffect(() => {
+    onAutoSaveRef.current = onAutoSave;
+  }, [onAutoSave]);
+
+  const serializeScene = useCallback(
+    async (scene: LiveScene): Promise<string | Uint8Array> => {
+      const isPng = path.toLowerCase().endsWith(".excalidraw.png");
+      const exportAppState = {
+        ...scene.appState,
+        exportEmbedScene: true,
+      };
+      if (isPng) {
+        const blob = await exportToBlob({
+          elements: scene.elements,
+          appState: exportAppState,
+          files: scene.files,
+          mimeType: "image/png",
+        });
+        return new Uint8Array(await blob.arrayBuffer());
+      }
+      const svgEl = await exportToSvg({
+        elements: scene.elements,
+        appState: exportAppState,
+        files: scene.files,
+      });
+      return new XMLSerializer().serializeToString(svgEl);
+    },
+    [path],
+  );
+
+  // Excalidraw fires onChange while restoring initialData. Give that
+  // mount-time callback a frame to settle so opening a drawing never
+  // counts as an edit or schedules an overwrite.
+  useEffect(() => {
+    readyRef.current = false;
+    if (initialData === undefined) return;
+    const frame = requestAnimationFrame(() => {
+      readyRef.current = true;
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [initialData, path]);
+
+  useEffect(() => {
+    return () => {
+      if (autoSaveTimerRef.current !== null) {
+        clearTimeout(autoSaveTimerRef.current);
+      }
+    };
+  }, []);
 
   // ────────────────────────────────────────────────────────────────
   // Load the file's bytes off disk and turn them into an Excalidraw
@@ -153,7 +209,6 @@ export default function ExcalidrawEditor({
   // wins the race.  Bound only while this editor is mounted.
   // ────────────────────────────────────────────────────────────────
   useEffect(() => {
-    const isPng = path.toLowerCase().endsWith(".excalidraw.png");
     const handler = async (e: KeyboardEvent) => {
       const isSave =
         (e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === "s";
@@ -163,40 +218,14 @@ export default function ExcalidrawEditor({
       e.preventDefault();
       e.stopPropagation();
       try {
-        // `exportEmbedScene: true` writes the scene JSON into a
-        // metadata block (a `<metadata>` element for SVG, a `tEXt`
-        // chunk for PNG) so the file round-trips through
-        // `loadFromBlob`.  The flag lives on `appState`, not the
-        // top-level export options.
-        const exportAppState = {
-          ...scene.appState,
-          exportEmbedScene: true,
-        };
-        if (isPng) {
-          const blob = await exportToBlob({
-            elements: scene.elements,
-            appState: exportAppState,
-            files: scene.files,
-            mimeType: "image/png",
-          });
-          const bytes = new Uint8Array(await blob.arrayBuffer());
-          onSave(bytes);
-        } else {
-          const svgEl = await exportToSvg({
-            elements: scene.elements,
-            appState: exportAppState,
-            files: scene.files,
-          });
-          const svg = new XMLSerializer().serializeToString(svgEl);
-          onSave(svg);
-        }
+        onSave(await serializeScene(scene));
       } catch (err) {
         console.error("[excalidraw] export failed", err);
       }
     };
     window.addEventListener("keydown", handler, true);
     return () => window.removeEventListener("keydown", handler, true);
-  }, [onSave, path]);
+  }, [onSave, path, serializeScene]);
 
   // ────────────────────────────────────────────────────────────────
   // Render
@@ -223,11 +252,26 @@ export default function ExcalidrawEditor({
         }}
         theme={theme}
         onChange={(elements, appState, files) => {
-          sceneRef.current = { elements, appState, files };
+          const scene = { elements, appState, files };
+          sceneRef.current = scene;
+          if (!readyRef.current) return;
           if (!dirtiedRef.current) {
             dirtiedRef.current = true;
             onDirty();
           }
+          if (autoSaveTimerRef.current !== null) {
+            clearTimeout(autoSaveTimerRef.current);
+          }
+          autoSaveTimerRef.current = setTimeout(() => {
+            autoSaveTimerRef.current = null;
+            const latest = sceneRef.current;
+            if (!latest) return;
+            void serializeScene(latest)
+              .then((data) => onAutoSaveRef.current(data))
+              .catch((err) =>
+                console.error("[excalidraw] auto-save failed", err),
+              );
+          }, 500);
         }}
       />
     </div>

@@ -70,7 +70,7 @@ export const TOOLS: readonly Tool[] = [
   },
   {
     id: "markdown",
-    label: "Markdown",
+    label: "Explorer",
     icon: FileText,
     route: "/markdown",
     description: "Obsidian-lite vault editor with vim, paste-to-image, wikilinks",

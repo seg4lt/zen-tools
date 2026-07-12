@@ -10,7 +10,7 @@ selectable from a segmented-pill in the title bar:
   process trees, with a menu-bar popover.
 - **Cleaner** — Disk-space cleaner: parallel git-repo discovery,
   dev-tool cache enumeration, bulk `git clean` / `rm -rf`.
-- **Markdown** — Obsidian-lite vault editor: live-preview CodeMirror
+- **Explorer** — Obsidian-lite vault editor: live-preview CodeMirror
   extension, wikilinks, mermaid diagrams, Excalidraw drawings, image
   paste, content + file search.
 - **Database Explorer** — DataGrip-lite: Postgres + MSSQL, schema

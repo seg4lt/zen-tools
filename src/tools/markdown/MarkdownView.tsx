@@ -287,6 +287,7 @@ export function MarkdownView() {
     key: !isExcalidraw && tab ? tab.path : null,
     content: tab?.doc ?? "",
     dirty: tab?.dirty ?? false,
+    debounceMs: 500,
     save: useCallback(
       async (path: string, content: string) => {
         await markdownTauri.writeFile(path, content);
@@ -739,6 +740,7 @@ export function MarkdownView() {
                   // string or PNG `Uint8Array` depending on the
                   // file's extension — `saveCurrent` routes both.
                   onSave={(data) => void saveCurrent(data)}
+                  onAutoSave={(data) => void saveCurrent(data)}
                 />
               </Suspense>
             ) : (
