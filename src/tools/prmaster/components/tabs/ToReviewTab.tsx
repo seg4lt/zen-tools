@@ -6,6 +6,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import {
+  enrichedId,
   loadToReview,
   usePrMasterStore,
 } from "../../store/prmaster-store";
@@ -22,6 +23,9 @@ export function ToReviewTab() {
   const { state, dispatch } = usePrMasterStore();
   const [filter, setFilter] = useState<PrFilterState>(emptyFilterState);
   const [savedFilters, setSavedFilters] = useState<NotificationFilter[]>([]);
+  const [watchedRows, setWatchedRows] = useState<typeof state.toReview>([]);
+  const [watchLoading, setWatchLoading] = useState(false);
+  const [watchError, setWatchError] = useState<string | null>(null);
 
   useEffect(() => {
     if (
@@ -32,6 +36,36 @@ export function ToReviewTab() {
       void loadToReview(dispatch);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  async function loadWatchedAuthors() {
+    setWatchError(null);
+    try {
+      const settings = await prmasterTauri.getSettings();
+      const authors = settings.watched_authors ?? [];
+      if (authors.length === 0) {
+        setWatchedRows([]);
+        return;
+      }
+      setWatchLoading(true);
+      const results = await Promise.all(
+        authors.map((author) => prmasterTauri.getOpenPrsByAuthor(author)),
+      );
+      setWatchedRows(results.flat());
+    } catch (err) {
+      setWatchError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setWatchLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    void loadWatchedAuthors();
+    // Settings can be changed in the full window while this tab remains
+    // mounted. Re-read the saved watchlist when the app regains focus.
+    const onFocus = () => void loadWatchedAuthors();
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
   }, []);
 
   useEffect(() => {
@@ -49,23 +83,42 @@ export function ToReviewTab() {
     };
   }, []);
 
+  const queueRows = useMemo(() => {
+    // Active review requests take precedence; watched-author PRs append only
+    // when they are not already in that queue. This is the merge point that
+    // prevents a watched teammate's PR from appearing twice.
+    const seen = new Set(state.toReview.map(enrichedId));
+    return [
+      ...state.toReview,
+      ...watchedRows.filter((row) => {
+        const id = enrichedId(row);
+        if (seen.has(id)) return false;
+        seen.add(id);
+        return true;
+      }),
+    ];
+  }, [state.toReview, watchedRows]);
+
   const filteredRows = useMemo(
-    () => applyPrFilters(state.toReview, filter, savedFilters),
-    [state.toReview, filter, savedFilters],
+    () => applyPrFilters(queueRows, filter, savedFilters),
+    [queueRows, filter, savedFilters],
   );
 
   return (
     <EnrichedListView
-      title="To Review"
+      title="Review Queue"
       variant="to-review"
       rows={filteredRows}
-      loading={state.loading.toReview}
-      error={state.errors.toReview}
-      emptyText="No PRs are awaiting your review."
-      onRefresh={() => void loadToReview(dispatch)}
+      loading={watchLoading || state.loading.toReview}
+      error={watchError ?? state.errors.toReview}
+      emptyText="No PRs are awaiting your review or being watched."
+      onRefresh={() => {
+        void loadToReview(dispatch);
+        void loadWatchedAuthors();
+      }}
       filterBar={
         <PrFilterBar
-          rows={state.toReview}
+          rows={queueRows}
           state={filter}
           onChange={setFilter}
         />

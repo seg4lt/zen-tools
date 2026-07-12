@@ -673,6 +673,23 @@ impl PrMasterEngine {
         Ok(self.refresh_lists_if_stale().await?.to_review.clone())
     }
 
+    /// Open PRs authored by a specified user. This team-member watchlist is
+    /// independent of review assignment and leaves the current user's cached
+    /// queue, badge, and notifications untouched.
+    pub async fn list_open_prs_by_author(
+        &self,
+        author: &str,
+    ) -> GhResult<Vec<EnrichedPullRequest>> {
+        let author = author.trim().trim_start_matches('@');
+        if author.is_empty() {
+            return Err(zen_github::GhError::Unexpected(
+                "author login cannot be empty".into(),
+            ));
+        }
+        let prs = self.inner.gh.search_authored_by(author).await?;
+        self.inner.gh.enrich(prs).await
+    }
+
     /// "Done" / Reviewed bucket.
     pub async fn list_reviewed(&self) -> GhResult<Vec<EnrichedPullRequest>> {
         Ok(self.refresh_lists_if_stale().await?.reviewed.clone())

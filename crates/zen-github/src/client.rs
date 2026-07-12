@@ -240,6 +240,34 @@ impl GhClient {
         .await
     }
 
+    /// Open PRs authored by `author`.
+    ///
+    /// This intentionally does not use the PRMaster snapshot cache: it is
+    /// used for the optional team-member watchlist, where a user can inspect
+    /// another person's open PRs without changing their own queue or badge.
+    pub async fn search_authored_by(
+        &self,
+        author: &str,
+    ) -> GhResult<Vec<PullRequest>> {
+        let label = format!("search prs --author {author}");
+        self.search_prs(
+            &label,
+            &[
+                "search",
+                "prs",
+                "--author",
+                author,
+                "--state",
+                "open",
+                "--limit",
+                "100",
+                "--json",
+                SEARCH_JSON_FIELDS,
+            ],
+        )
+        .await
+    }
+
     /// Open PRs the current user has reviewed.
     pub async fn search_reviewed(&self) -> GhResult<Vec<PullRequest>> {
         self.search_prs(
@@ -1408,4 +1436,3 @@ const PR_FRAGMENT: &str = r#"      headRefName
       files(first: 100) {
         nodes { path }
       }"#;
-

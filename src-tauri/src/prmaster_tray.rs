@@ -12,17 +12,14 @@
 //! SwiftUI `Label(...)` layout 1-to-1.
 //!
 //! Click handling:
-//! * **Left-click** toggles the popover window (frameless 500×700 declared
-//!   in `tauri.conf.json`).
-//! * **Right-click** shows the menu: `Open PRMaster` (focuses the main
-//!   window at `/prmaster`) and `Quit`.
+//! * **Left-click** focuses the main PRMaster window at `/prmaster`.
+//! * **Right-click** shows the same `Open PRMaster` / `Quit` menu.
 
 use tauri::{
     image::Image,
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    webview::WebviewWindowBuilder,
-    AppHandle, Manager, PhysicalPosition, PhysicalSize, Rect, WebviewUrl,
+    AppHandle, Manager,
 };
 
 use crate::state::AppState;
@@ -30,13 +27,6 @@ use crate::state::AppState;
 /// Stable id for the PRMaster tray. Distinct from the zen-tools tray id
 /// in [`crate::tray`] so they coexist.
 pub const PRMASTER_TRAY_ID: &str = "prmaster";
-
-/// Stable label for the PRMaster popover. The window is **not** declared
-/// in `tauri.conf.json`; it's built on demand by [`toggle_popover`] and
-/// destroyed on dismiss/blur. Pre-declaring + hiding leaks the
-/// WKWebView's `WebContent` subprocess for the lifetime of the app, so
-/// we mirror flowstate's popout pattern: lazy build + always destroy.
-pub const POPOVER_LABEL: &str = "prmaster-popover";
 
 /// Embedded template PNG. Renders the macOS SF Symbol
 /// `arrow.triangle.pull` (the same glyph the Swift PRMaster app uses
@@ -61,8 +51,7 @@ pub fn init(app: &AppHandle) -> tauri::Result<()> {
         .icon_as_template(true)
         .tooltip("PRMaster")
         .menu(&menu)
-        // Left-click → toggle popover (we capture the click ourselves);
-        // right-click falls through to the menu.
+        // Left-click is our primary interaction; right-click opens the menu.
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {
             "prmaster_open_main" => focus_main_window_at_prmaster(app),
@@ -73,23 +62,11 @@ pub fn init(app: &AppHandle) -> tauri::Result<()> {
             if let TrayIconEvent::Click {
                 button,
                 button_state,
-                position,
-                rect,
                 ..
             } = event
             {
                 if button == MouseButton::Left && button_state == MouseButtonState::Up {
-                    // Run the toggle synchronously on the main thread
-                    // so it always wins the race against the popover's
-                    // async blur handler (which goes through an IPC
-                    // round-trip and lands tens of ms later). If we
-                    // spawn this onto the async runtime, blur lands
-                    // first → destroys the popover → toggle finds no
-                    // window → builds a new one, and "click tray to
-                    // dismiss" is broken.
-                    if let Err(e) = toggle_popover(tray.app_handle(), position, rect) {
-                        tracing::warn!(?e, "toggle_popover failed");
-                    }
+                    focus_main_window_at_prmaster(tray.app_handle());
                 }
             }
         })
@@ -116,10 +93,6 @@ pub fn tear_down(app: &AppHandle) {
         let mut s = state_arc.blocking_lock();
         s.prmaster_tray = None;
     }
-    // Destroy the popover too — the user can't summon it without the
-    // tray, and it shouldn't linger (with its WKWebView subprocess) if
-    // it happens to be visible at toggle-off.
-    destroy_popover(app);
 }
 
 /// Update the badge title shown next to the tray icon. Pass an empty string
@@ -152,82 +125,8 @@ fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
     Menu::with_items(app, &[&open, &sep, &quit])
 }
 
-/// Toggle the popover. If one already exists, treat the click as a
-/// dismiss gesture and tear it down (frees the WKWebView immediately).
-/// Otherwise build a fresh popover positioned under the tray icon.
-///
-/// **Synchronous on purpose** — the JS-side blur handler races us via
-/// IPC, and a sync toggle always wins. See call site for the rationale.
-fn toggle_popover(
-    app: &AppHandle,
-    click_pos: PhysicalPosition<f64>,
-    icon_rect: Rect,
-) -> tauri::Result<()> {
-    if app.get_webview_window(POPOVER_LABEL).is_some() {
-        destroy_popover(app);
-        return Ok(());
-    }
-
-    let window = build_popover(app)?;
-
-    let size = window.outer_size().unwrap_or_else(|_| PhysicalSize {
-        width: 500,
-        height: 700,
-    });
-
-    // Approximate the icon's pixel size from its physical Rect so the
-    // popover can centre under it. Tauri 2 reports `rect.size` as the
-    // logical-or-physical `Size` enum; both variants give us width/height.
-    let (icon_w, icon_h) = match icon_rect.size {
-        tauri::Size::Physical(s) => (s.width as i32, s.height as i32),
-        tauri::Size::Logical(s) => (s.width as i32, s.height as i32),
-    };
-
-    let target_x = (click_pos.x as i32 + icon_w / 2) - (size.width as i32 / 2);
-    let target_y = (click_pos.y as i32) + icon_h + 4;
-
-    let _ = window.set_position(PhysicalPosition {
-        x: target_x.max(0),
-        y: target_y.max(0),
-    });
-    let _ = window.show();
-    let _ = window.set_focus();
-
-    Ok(())
-}
-
-/// Build a fresh PRMaster popover window. Mirrors the declaration that
-/// used to live in `tauri.conf.json` (same dimensions, same chrome) but
-/// is constructed on demand so the WKWebView's `WebContent` subprocess
-/// only exists while the user is actually looking at the popover.
-fn build_popover(app: &AppHandle) -> tauri::Result<tauri::WebviewWindow> {
-    // The PRMaster popover loads the main app shell at `/`; the React
-    // router checks the window label via `isPrmasterPopover()` and
-    // redirects to `/prmaster`. That keeps a single bundle.
-    WebviewWindowBuilder::new(app, POPOVER_LABEL, WebviewUrl::App("/".into()))
-        .title("PRMaster")
-        .inner_size(500.0, 700.0)
-        .resizable(false)
-        .decorations(false)
-        .skip_taskbar(true)
-        .always_on_top(true)
-        .focused(false)
-        .visible(false)
-        .build()
-}
-
-/// Destroy the popover (tearing down its WKWebView). Used by Tauri
-/// commands and by the JS focus-loss listener inside `PRMasterShell`.
-/// Idempotent.
-pub fn destroy_popover(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window(POPOVER_LABEL) {
-        if let Err(e) = window.destroy() {
-            tracing::warn!(error = %e, "prmaster popover destroy failed");
-        }
-    }
-}
-
-fn focus_main_window_at_prmaster(app: &AppHandle) {
+/// Focus the main window and navigate to the PRMaster route.
+pub fn focus_main_window_at_prmaster(app: &AppHandle) {
     if let Some(win) = app.get_webview_window("main") {
         let _ = win.unminimize();
         let _ = win.show();

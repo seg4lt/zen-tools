@@ -10,7 +10,7 @@
 //! this module without churning existing signatures.
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, State};
 use tokio::sync::Mutex;
 
 use zen_github::{
@@ -106,6 +106,26 @@ pub async fn prmaster_get_to_review(
         engine(&s)
     };
     Ok(engine.list_to_review().await?)
+}
+
+/// Open PRs authored by a specified GitHub user. This team-member watchlist
+/// is an ad-hoc lookup; it does not replace the signed-in user's queue.
+#[tauri::command]
+pub async fn prmaster_get_open_prs_by_author(
+    state: State<'_, Mutex<AppState>>,
+    author: String,
+) -> AppResult<Vec<EnrichedPullRequest>> {
+    let author = author.trim().trim_start_matches('@').to_string();
+    if author.is_empty() {
+        return Err(crate::error::AppError::BadRequest(
+            "Enter a GitHub username.".into(),
+        ));
+    }
+    let engine = {
+        let s = state.lock().await;
+        engine(&s)
+    };
+    Ok(engine.list_open_prs_by_author(&author).await?)
 }
 
 /// Open PRs the current user has reviewed, enriched (drives the **Done**
@@ -470,17 +490,6 @@ pub async fn prmaster_delete_filter(
         .map_err(|e| crate::error::AppError::Other(format!("filter store: {e}")))
 }
 
-/// Destroy the menu-bar popover window. Called by the popover shell on
-/// `blur` so the WKWebView's `WebContent` subprocess is freed when the
-/// user clicks away (the next tray click rebuilds it). Renamed from
-/// `prmaster_hide_popover` — the JS side still invokes the old name
-/// during a transitional period; both routes through the same destroy.
-#[tauri::command]
-pub async fn prmaster_hide_popover(app: AppHandle) -> AppResult<()> {
-    crate::prmaster_tray::destroy_popover(&app);
-    Ok(())
-}
-
 /// Update the menu-bar tray badge text. Pass an empty string to clear it.
 /// The 5-minute background refresh loop in `lib.rs` calls this via the
 /// broadcast bridge; surfacing it as a command also lets the frontend
@@ -722,15 +731,6 @@ pub async fn prmaster_quit_app(app: AppHandle) -> AppResult<()> {
 /// background-agent / accessory mode).
 #[tauri::command]
 pub async fn prmaster_open_full_window(app: AppHandle) -> AppResult<()> {
-    if let Some(win) = app.get_webview_window("main") {
-        let _ = win.unminimize();
-        let _ = win.show();
-        let _ = win.set_focus();
-    }
-    #[cfg(target_os = "macos")]
-    {
-        use tauri::ActivationPolicy;
-        let _ = app.set_activation_policy(ActivationPolicy::Regular);
-    }
+    crate::prmaster_tray::focus_main_window_at_prmaster(&app);
     Ok(())
 }

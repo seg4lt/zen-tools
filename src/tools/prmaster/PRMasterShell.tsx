@@ -1,14 +1,6 @@
 /**
  * PRMaster — top-level shell.
  *
- * Tab inventories:
- *
- *   - **Compact** (menu-bar popover): Review · Done · Mine.
- *   - **Full** (main window): adds Filters · AI · API · Settings.
- *
- * Window detection happens via `getCurrentWindow().label`; the popover
- * also dismisses on blur (mirrors macOS `NSPopover` behaviour).
- *
  * Keyboard nav: `1` / `2` / `3` jump to the first three tabs;
  * `←` / `→` cycle through every visible tab.
  *
@@ -28,7 +20,6 @@ import {
   Sparkles,
   User,
 } from "lucide-react";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@zen-tools/ui";
 import { cn } from "@zen-tools/ui";
 import { AiSummaryTab } from "./components/tabs/AiSummaryTab";
@@ -38,7 +29,6 @@ import { MineTab } from "./components/tabs/MineTab";
 import { ReviewedTab } from "./components/tabs/ReviewedTab";
 import { SettingsTab } from "./components/tabs/SettingsTab";
 import { ToReviewTab } from "./components/tabs/ToReviewTab";
-import { prmasterTauri } from "./lib/tauri";
 import { useAiSummaryStore } from "./store/ai-summary-store";
 import { usePrMasterStore } from "./store/prmaster-store";
 
@@ -62,24 +52,10 @@ const TABS: TabDef[] = [
 ];
 
 export function PRMasterShell() {
-  // Detect on mount once — the window label can't change at runtime.
-  const [isCompact] = useState(() => {
-    try {
-      return getCurrentWindow().label === "prmaster-popover";
-    } catch {
-      return false;
-    }
-  });
-
-  // Tabs are controlled so the popover-reopen handler can snap us back
-  // to Review without unmounting the rest of the tree.
   const [tab, setTab] = useState(DEFAULT_TAB);
   const { state, dispatch } = usePrMasterStore();
 
-  const visible = useMemo(
-    () => TABS.filter((t) => !t.fullOnly || !isCompact),
-    [isCompact],
-  );
+  const visible = useMemo(() => TABS, []);
 
   // Tab badge counts — only the three PR list tabs report a count;
   // Filters / AI / API / Settings stay numberless. A count of zero
@@ -99,33 +75,6 @@ export function PRMasterShell() {
     },
     [state.toReview.length, state.reviewed.length, state.mine.length],
   );
-
-  // Popover lifecycle (compact mode only):
-  //   - On focus loss → ask the backend to hide the popover (matches
-  //     the macOS `NSPopover` dismissal model).
-  //   - On focus gain → treat that as "the user just reopened the
-  //     popover" and reset the in-memory UI: jump back to Review and
-  //     drop any half-opened detail panel. The first mount also fires
-  //     this branch but the values are already at their defaults so
-  //     it's a no-op visually.
-  useEffect(() => {
-    if (!isCompact) return;
-    const win = getCurrentWindow();
-    let unlisten: (() => void) | null = null;
-    (async () => {
-      unlisten = await win.onFocusChanged(({ payload: focused }) => {
-        if (!focused) {
-          void prmasterTauri.hidePopover();
-        } else {
-          setTab(DEFAULT_TAB);
-          dispatch({ type: "select", id: null });
-        }
-      });
-    })();
-    return () => {
-      unlisten?.();
-    };
-  }, [isCompact, dispatch]);
 
   // Keyboard navigation. `1`-`3` jump to the first three tabs (the
   // list tabs); arrows cycle through every visible tab. We only act
@@ -194,17 +143,15 @@ export function PRMasterShell() {
               />
             ))}
           </TabsList>
-          {!isCompact && (
-            <span className="ml-auto flex items-center gap-2 text-xs text-muted-foreground">
-              {state.currentUser && (
-                <span className="font-mono">@{state.currentUser}</span>
-              )}
-              <span>
-                <GitPullRequest className="mr-1 inline size-3" />
-                PRMaster
-              </span>
+          <span className="ml-auto flex items-center gap-2 text-xs text-muted-foreground">
+            {state.currentUser && (
+              <span className="font-mono">@{state.currentUser}</span>
+            )}
+            <span>
+              <GitPullRequest className="mr-1 inline size-3" />
+              PRMaster
             </span>
-          )}
+          </span>
         </div>
 
         <TabsContent value="to-review" className="flex min-h-0 flex-1 flex-col">
@@ -216,22 +163,18 @@ export function PRMasterShell() {
         <TabsContent value="mine" className="flex min-h-0 flex-1 flex-col">
           <MineTab />
         </TabsContent>
-        {!isCompact && (
-          <>
-            <TabsContent value="filters" className="flex min-h-0 flex-1 flex-col">
-              <FiltersTab />
-            </TabsContent>
-            <TabsContent value="ai" className="flex min-h-0 flex-1 flex-col">
-              <AiSummaryTab />
-            </TabsContent>
-            <TabsContent value="api" className="flex min-h-0 flex-1 flex-col">
-              <ApiStatsTab />
-            </TabsContent>
-            <TabsContent value="settings" className="flex min-h-0 flex-1 flex-col">
-              <SettingsTab />
-            </TabsContent>
-          </>
-        )}
+        <TabsContent value="filters" className="flex min-h-0 flex-1 flex-col">
+          <FiltersTab />
+        </TabsContent>
+        <TabsContent value="ai" className="flex min-h-0 flex-1 flex-col">
+          <AiSummaryTab />
+        </TabsContent>
+        <TabsContent value="api" className="flex min-h-0 flex-1 flex-col">
+          <ApiStatsTab />
+        </TabsContent>
+        <TabsContent value="settings" className="flex min-h-0 flex-1 flex-col">
+          <SettingsTab />
+        </TabsContent>
       </Tabs>
     </div>
   );

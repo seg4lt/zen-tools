@@ -111,6 +111,9 @@ pub struct PrMasterSettings {
     /// author name / email — so `"alice"` matches both
     /// `Alice Smith <alice@…>` and `alice@github.com`.
     pub extra_authors: Vec<String>,
+    /// GitHub usernames whose open PRs the user wants to follow in the
+    /// team-member watchlist. This is independent of review assignment.
+    pub watched_authors: Vec<String>,
     /// Override base directory for AI Review worktrees. When `None`
     /// (default), worktrees go under
     /// `<app_data>/prmaster/ai-review/worktrees/`. When set, they
@@ -146,6 +149,7 @@ impl Default for PrMasterSettings {
             cached_repos_at_ms: None,
             repo_mappings: Vec::new(),
             extra_authors: Vec::new(),
+            watched_authors: Vec::new(),
             ai_review_worktrees_dir: None,
         }
     }

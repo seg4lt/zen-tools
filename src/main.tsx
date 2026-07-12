@@ -48,7 +48,6 @@ const root = (() => {
       return <MiniMonitorApp />;
     case "dictation-hud":
       return <DictationHudApp />;
-    case "prmaster-popover":
     case "main":
     default:
       return <App />;

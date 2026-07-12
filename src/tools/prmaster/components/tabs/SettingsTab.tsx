@@ -341,6 +341,15 @@ export function SettingsTab() {
                 />
               </Section>
 
+              <Section title="Team PR watchlist" wide>
+                <WatchedAuthorsEditor
+                  authors={settings.watched_authors ?? []}
+                  onChange={(watched_authors) =>
+                    void persist({ ...settings, watched_authors })
+                  }
+                />
+              </Section>
+
               <Section title="AI Review worktrees" wide>
                 <AiReviewWorktreesEditor
                   value={settings.ai_review_worktrees_dir ?? null}
@@ -886,6 +895,72 @@ function ExtraAuthorsEditor({
           }
         }}
         placeholder="alice@example.com, bob, charlie@old-job.com"
+        className="h-8 font-mono"
+      />
+    </div>
+  );
+}
+
+/** Saved GitHub logins whose open pull requests join the Review Queue even
+ * when the signed-in user has no review request on them. */
+function WatchedAuthorsEditor({
+  authors,
+  onChange,
+}: {
+  authors: string[];
+  onChange: (next: string[]) => void;
+}) {
+  const [draft, setDraft] = useState("");
+
+  function commit() {
+    const parsed = draft
+      .split(",")
+      .map((value) => value.trim().replace(/^@/, ""))
+      .filter(Boolean);
+    const next = mergeAuthors(authors, parsed);
+    if (next.length !== authors.length) onChange(next);
+    setDraft("");
+  }
+
+  return (
+    <div className="grid gap-2">
+      <p className="text-xs text-muted-foreground">
+        Open PRs authored by these GitHub users appear in your Review Queue,
+        even when you are not a requested reviewer. If a PR also requests your
+        review, it appears once.
+      </p>
+      {authors.length > 0 && (
+        <div className="flex flex-wrap gap-1.5">
+          {authors.map((author) => (
+            <Badge
+              key={author}
+              variant="secondary"
+              className="gap-1 pr-1 font-mono text-[11px]"
+            >
+              <span>@{author}</span>
+              <button
+                type="button"
+                onClick={() => onChange(authors.filter((value) => value !== author))}
+                className="cursor-pointer rounded-full p-0.5 hover:bg-muted-foreground/20"
+                aria-label={`Stop watching @${author}`}
+              >
+                <Trash2 className="size-2.5" />
+              </button>
+            </Badge>
+          ))}
+        </div>
+      )}
+      <Input
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === ",") {
+            e.preventDefault();
+            commit();
+          }
+        }}
+        placeholder="@alice, @bob"
         className="h-8 font-mono"
       />
     </div>

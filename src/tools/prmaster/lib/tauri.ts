@@ -340,6 +340,8 @@ export interface PrMasterSettings {
    *  against author name AND email work — e.g. `"alice"` matches
    *  both `Alice Smith <alice@…>` and `alice@github.com`. */
   extra_authors: string[];
+  /** GitHub authors saved to the PR team-member watchlist. */
+  watched_authors: string[];
   /** Override base directory for AI Review worktrees. `null` /
    *  empty → `<app_data>/prmaster/ai-review/worktrees/`. Otherwise
    *  worktrees go under `<value>/zen-tools-ai-review/`. */
@@ -373,6 +375,9 @@ export const prmasterTauri = {
   ghStatus: () => invoke<GhStatus>("prmaster_get_gh_status"),
   getMine: () => invoke<EnrichedPullRequest[]>("prmaster_get_mine"),
   getToReview: () => invoke<EnrichedPullRequest[]>("prmaster_get_to_review"),
+  /** Ad-hoc open-PR watchlist for another GitHub user. */
+  getOpenPrsByAuthor: (author: string) =>
+    invoke<EnrichedPullRequest[]>("prmaster_get_open_prs_by_author", { author }),
   getReviewed: () => invoke<EnrichedPullRequest[]>("prmaster_get_reviewed"),
   /**
    * Every inline review comment on `pr` (sourced from the REST
@@ -451,7 +456,6 @@ export const prmasterTauri = {
   deleteFilter: (id: string) => invoke<void>("prmaster_delete_filter", { id }),
   testFilterNotification: (id: string) =>
     invoke<void>("prmaster_test_filter_notification", { id }),
-  hidePopover: () => invoke<void>("prmaster_hide_popover"),
   setBadge: (badge: string) => invoke<void>("prmaster_set_badge", { badge }),
   openFullWindow: () => invoke<void>("prmaster_open_full_window"),
   quit: () => invoke<void>("prmaster_quit_app"),

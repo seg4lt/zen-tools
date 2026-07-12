@@ -26,15 +26,9 @@ import { TerminalShell } from "@/tools/terminal/TerminalShell";
 import { useDistractionFree } from "@/tools/terminal/store/distraction-free";
 import { readLastRoute } from "@/hooks/use-last-route";
 import { useToolOrder } from "@/hooks/use-tool-order";
-import { isPrmasterPopover } from "@/lib/window-kind";
 
 const rootRoute = createRootRoute({
   component: () => {
-    // The PRMaster menu-bar popover (a frameless 500x700 window declared
-    // in `tauri.conf.json`) renders the same React tree as the main
-    // window — it just skips the TitleBar so the popover is pure tool
-    // chrome. We detect it by Tauri window label (set in the config).
-    const isPopover = isPrmasterPopover();
     // Distraction-free mode (cmd+opt+f from inside /terminal) hides
     // the TitleBar so the terminal NSView fills the whole window.
     // The flag is gated to the /terminal route below — if the user
@@ -45,8 +39,8 @@ const rootRoute = createRootRoute({
     const dfActive = dfEnabled && pathname.startsWith("/terminal");
     return (
       <div className="app-root-shell flex h-screen w-screen flex-col overflow-hidden bg-background text-foreground">
-        {!isPopover && !dfActive && <TitleBar />}
-        {!isPopover && !dfActive && <UpdateBanner />}
+        {!dfActive && <TitleBar />}
+        {!dfActive && <UpdateBanner />}
         <main className="flex min-h-0 flex-1">
           <AppProviders>
             <FocusRouteListener />
@@ -61,22 +55,10 @@ const rootRoute = createRootRoute({
 });
 
 /**
- * Listens for the `prmaster:focus-route` Tauri event (emitted by the
- * permanent menu-bar tray's "Open PRMaster" item and by the global
- * ⌥⌘⇧P hotkey) and navigates the main window's router accordingly.
- * The popover window also receives the event but ignores it — its
- * router URL is set at window creation and the window itself stays
- * scoped to PRMaster.
- */
-/**
  * Renders its children when the named tool is enabled; redirects to
  * the first enabled tool (or `/`) when the tool is disabled. Lets the
  * user re-enable a tool from /settings and then navigate back to it
  * without a page reload.
- *
- * The PRMaster popover window is exempt: the popover is a dedicated
- * single-tool surface and only appears when PRMaster is enabled (the
- * tray icon that summons it is itself gated on the same flag).
  */
 function DisabledGuard({
   toolId,
@@ -91,19 +73,17 @@ function DisabledGuard({
 
   useEffect(() => {
     if (!isLoaded || !isDisabled) return;
-    if (isPrmasterPopover()) return;
     const fallback = tools[0]?.route ?? "/";
     void navigate({ to: fallback });
   }, [isDisabled, isLoaded, navigate, tools]);
 
-  if (isDisabled && !isPrmasterPopover()) return null;
+  if (isDisabled) return null;
   return <>{children}</>;
 }
 
 function FocusRouteListener() {
   const navigate = useNavigate();
   useEffect(() => {
-    if (isPrmasterPopover()) return;
     let unlisten: (() => void) | null = null;
     (async () => {
       unlisten = await listen<string>("prmaster:focus-route", (event) => {
@@ -125,8 +105,6 @@ function FocusRouteListener() {
   return null;
 }
 
-/**
- * Listens for the generic `app:focus-first-tool` Tauri event and
 /**
  * Listens for the `app:focus-first-tool` Tauri event and navigates to the
  * user's first enabled tool. Fired by the dictation menu-bar tray's
@@ -150,7 +128,6 @@ function FirstToolListener() {
   }, [tools]);
 
   useEffect(() => {
-    if (isPrmasterPopover()) return;
     let unlisten: (() => void) | null = null;
     (async () => {
       unlisten = await listen<null>("app:focus-first-tool", () => {
@@ -184,7 +161,6 @@ function CloseRequestedListener() {
   }, [pathname]);
 
   useEffect(() => {
-    if (isPrmasterPopover()) return;
     let unlisten: (() => void) | null = null;
     (async () => {
       unlisten = await listen<null>("app:close-requested", () => {
@@ -206,14 +182,6 @@ const indexRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/",
   beforeLoad: () => {
-    // The PRMaster menu-bar popover loads the main shell at `/` so the
-    // Vite dev server serves it (Vite returns 404 for an explicit
-    // `/index.html` request) — redirect that window straight to
-    // `/prmaster` regardless of the last-route fallback used by the
-    // main window.
-    if (isPrmasterPopover()) {
-      throw redirect({ to: "/prmaster" });
-    }
     // Resume on the last route the user was viewing (sync read from
     // localStorage; see use-last-route.tsx). Falls back to the HTTP
     // runner's requests view on first launch / cleared storage / when
