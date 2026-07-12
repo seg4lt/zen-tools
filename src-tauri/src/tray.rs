@@ -1,10 +1,7 @@
 //! The unified Zen Tools menu-bar tray.
 //!
-//! One always-on tray icon for the app — perf, process-monitor,
-//! dictation. It's created once at startup and lives the lifetime
-//! of the process — closing the main window flips the activation
-//! policy to Accessory but the tray stays so the user always has a
-//! visible signal the app is running, plus a way back in.
+//! Process-Monitor's temporary menu-bar tray. It exists only while
+//! Process Monitor has one or more active targets.
 //!
 //! **PRMaster has its own tray** ([`crate::prmaster_tray`]) — the
 //! two trays coexist because PRMaster is a distinct always-on
@@ -60,11 +57,7 @@ const TRAY_ICON_PNG: &[u8] = include_bytes!("../icons/tray-icon.png");
 
 // ── Public API ──────────────────────────────────────────────────────
 
-/// Build the tray once at app startup. Idempotent — calling twice is
-/// harmless; the second call sees the existing tray and returns. The
-/// caller is responsible for invoking this from the main thread
-/// (Tauri's `setup()` already is, so passing `app.handle()` from
-/// there works).
+/// Build the tray when Process Monitor becomes active. Idempotent.
 pub fn init(app: &AppHandle) -> tauri::Result<()> {
     if app.tray_by_id(TRAY_ID).is_some() {
         return Ok(());
@@ -143,6 +136,26 @@ struct MenuState {
 
 async fn update_inner(app: &AppHandle) -> tauri::Result<()> {
     let state = read_state(app).await;
+    if !state.pm_active {
+        let app = app.clone();
+        app.clone().run_on_main_thread(move || {
+            destroy_pm_popover(&app);
+            let _ = app.remove_tray_by_id(TRAY_ID);
+            let state = app.state::<Mutex<AppState>>();
+            state.blocking_lock().tray = None;
+        })?;
+        return Ok(());
+    }
+
+    if app.tray_by_id(TRAY_ID).is_none() {
+        let app = app.clone();
+        app.clone().run_on_main_thread(move || {
+            if let Err(e) = init(&app) {
+                tracing::warn!(?e, "process-monitor tray init failed");
+            }
+        })?;
+    }
+
     let menu = build_menu(app, &state)?;
     if let Some(tray) = app.tray_by_id(TRAY_ID) {
         tray.set_menu(Some(menu))?;
@@ -256,7 +269,7 @@ fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
         "stop_perf" => stop_perf_test(app),
         "stop_pm" => clear_pm_targets(app),
         "disable_dictation" => disable_dictation(app),
-        "quit" => app.exit(0),
+        "quit" => crate::exit_app(app),
         _ => {}
     }
 }
@@ -407,4 +420,3 @@ fn disable_dictation(app: &AppHandle) {
         }
     });
 }
-

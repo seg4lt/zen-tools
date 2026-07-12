@@ -20,10 +20,21 @@ pub mod user_config;
 use commands::markdown_index::MarkdownIndexRegistry;
 use commands::runs::{load_runs, RunHistory};
 use state::AppState;
-use std::sync::Arc;
+use std::sync::{atomic::{AtomicBool, Ordering}, Arc};
 use tauri::{Emitter, Manager};
 use tokio::sync::Mutex;
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
+
+/// The event loop can request an app exit after macOS closes its final visible
+/// window. Keep that from terminating the status-bar app unless an explicit
+/// Quit action set this gate first.
+static EXPLICIT_APP_EXIT: AtomicBool = AtomicBool::new(false);
+
+/// Exit only after marking the request as an explicit user Quit action.
+pub fn exit_app(app: &tauri::AppHandle) {
+    EXPLICIT_APP_EXIT.store(true, Ordering::SeqCst);
+    app.exit(0);
+}
 
 /// Build the `tauri-plugin-global-shortcut` plugin with the always-on
 /// hotkey handlers baked in. Two chords are wired up here:
@@ -133,13 +144,21 @@ pub fn run() {
         // `prevent_close()` (mandatory — must come BEFORE destroy or
         // the default hide races us) followed by `destroy()` so the
         // WKWebView and its subprocess are actually freed.
-        // The main window stays on the existing
-        // hide-window + Accessory-activation path (registered below in
-        // `setup`) so closing it keeps the background agent alive.
+        // The main window is hidden directly here as well. Doing this in
+        // the native close callback avoids a frontend IPC round-trip, which
+        // could let macOS close the last window and terminate the process.
         .on_window_event(|window, event| {
             #[cfg(target_os = "macos")]
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                if window.label() != "main" {
+                if window.label() == "main" {
+                    api.prevent_close();
+                    if let Err(e) = window.hide() {
+                        tracing::warn!(error = %e, "main window hide on close failed");
+                    }
+                    let _ = window.app_handle().set_activation_policy(
+                        tauri::ActivationPolicy::Accessory,
+                    );
+                } else {
                     api.prevent_close();
                     if let Err(e) = window.destroy() {
                         tracing::warn!(
@@ -319,16 +338,6 @@ pub fn run() {
                 }
             });
 
-            // ── Unified menu-bar tray ─────────────────────────────────
-            // One tray for the whole app — see `crate::tray`. Built
-            // once here, lives the lifetime of the process. The menu
-            // adapts to current state (perf running, PM active,
-            // PRMaster enabled, dictation enabled) via fire-and-forget
-            // `tray::update` calls from each tool's command paths.
-            if let Err(e) = tray::init(app.handle()) {
-                tracing::warn!(?e, "tray::init failed; menu-bar will not be available");
-            }
-
             // ── PRMaster: broadcast bridge + 5-min poll + global hotkey,
             // but only if the user hasn't disabled the app from the
             // settings list. Disabled tools should be completely silent
@@ -358,40 +367,6 @@ pub fn run() {
                 use tauri_plugin_global_shortcut::GlobalShortcutExt;
                 if let Err(e) = app.global_shortcut().register(terminal_chord()) {
                     tracing::warn!(?e, "terminal global-shortcut register failed; ⌥⌘⇧T disabled");
-                }
-            }
-
-            // Background-agent lifecycle: closing the main window
-            // never exits the app. The unified menu-bar tray (see
-            // `crate::tray`) is permanent for the lifetime of the
-            // process and provides "Show Zen Tools" and "Quit" so
-            // the user always has a way back in / a way to exit.
-            // Closing → hide window + flip to Accessory (no Dock
-            // icon). The only exit path is the tray's "Quit Zen
-            // Tools" menu item.
-            //
-            // Re-opening from the hidden state happens via the tray
-            // menu's "Show Zen Tools" item, the PRMaster hotkey, the
-            // `prmaster_open_full_window` command, the
-            // `RunEvent::Reopen` handler below (Dock-icon click), or
-            // the right-⌘ tap-then-hold dictation gesture.
-            #[cfg(target_os = "macos")]
-            {
-                let app_handle = app.handle().clone();
-                if let Some(main) = app.get_webview_window("main") {
-                    main.on_window_event(move |event| {
-                        if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                            // Always prevent the native close so the background
-                            // agent stays alive. Emit `app:close-requested` and
-                            // let the frontend decide what to do:
-                            //   * markdown route with open tabs → close the
-                            //     active tab (no window action)
-                            //   * everything else → invoke `app_hide_main_window`
-                            //     which hides the window + flips to Accessory.
-                            api.prevent_close();
-                            let _ = app_handle.emit("app:close-requested", ());
-                        }
-                    });
                 }
             }
 
@@ -638,6 +613,12 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {
+            if let tauri::RunEvent::ExitRequested { ref api, .. } = event {
+                if !EXPLICIT_APP_EXIT.load(Ordering::SeqCst) {
+                    api.prevent_exit();
+                    return;
+                }
+            }
             // macOS Dock-icon click after the user closed the main
             // window. Without this handler the click is a no-op:
             // CloseRequested hid the window and dropped the Dock

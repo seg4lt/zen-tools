@@ -722,7 +722,7 @@ pub async fn prmaster_fetch_repos(
 /// the menu-bar tray's "Quit PRMaster" item.
 #[tauri::command]
 pub async fn prmaster_quit_app(app: AppHandle) -> AppResult<()> {
-    app.exit(0);
+    crate::exit_app(&app);
     Ok(())
 }
 

@@ -55,7 +55,7 @@ pub fn init(app: &AppHandle) -> tauri::Result<()> {
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {
             "prmaster_open_main" => focus_main_window_at_prmaster(app),
-            "prmaster_quit" => app.exit(0),
+            "prmaster_quit" => crate::exit_app(app),
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {
