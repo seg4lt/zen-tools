@@ -52,7 +52,6 @@ import {
   type AiReviewFinding,
   type AiReviewReportResp,
   type AiReviewRunSummary,
-  type AiReviewVerificationCheck,
   type EnrichedPullRequest,
   type PrDiff,
   type PrRef,
@@ -86,7 +85,6 @@ interface LoadedRun {
   findings: AiReviewFinding[];
   overallSummary: string;
   changeSummary: string[];
-  verificationChecks: AiReviewVerificationCheck[];
   prompt: string;
   legacyHtml: string | null;
   model: string;
@@ -229,7 +227,7 @@ export function PrAiReviewView({ pr }: Props) {
           if (!savedRun && cached) {
             reviewSessionStore.patch(key, {
               loadedRunId: cached.run_id,
-              aiViewMode: "report",
+              aiViewMode: "log",
             });
           }
         } catch (e) {
@@ -272,7 +270,7 @@ export function PrAiReviewView({ pr }: Props) {
         setLoaded(reportRespToLoaded(cached.run_id, resp));
         reviewSessionStore.patch(key, {
           loadedRunId: cached.run_id,
-          aiViewMode: "report",
+          aiViewMode: "log",
         });
       } catch (e) {
         // eslint-disable-next-line no-console
@@ -538,6 +536,7 @@ export function PrAiReviewView({ pr }: Props) {
             <ViewModeToggle
               value={viewMode}
               onChange={setViewMode}
+              hasFindings={loaded.findings.length > 0}
             />
           )}
           {isLive ? (
@@ -595,7 +594,6 @@ export function PrAiReviewView({ pr }: Props) {
             findings={loaded.findings}
             overallSummary={loaded.overallSummary}
             changeSummary={loaded.changeSummary}
-            verificationChecks={loaded.verificationChecks}
             model={loaded.model}
             costUsd={loaded.costUsd}
             finishedAtMs={loaded.finishedAtMs}
@@ -632,14 +630,18 @@ export function PrAiReviewView({ pr }: Props) {
   );
 }
 
-/** Two-button segmented toggle for the page header. Reports remain useful
- * with zero findings because they include the verifier's executed checks. */
+/** Two-button segmented toggle for the page header. The Report
+ *  button is disabled with a tooltip when the run produced zero
+ *  findings — there's nothing to render — but the user can still
+ *  flip to the log to see what Claude did. */
 function ViewModeToggle({
   value,
   onChange,
+  hasFindings,
 }: {
   value: ViewMode;
   onChange: (next: ViewMode) => void;
+  hasFindings: boolean;
 }) {
   return (
     <div className="inline-flex h-6 items-center rounded-md border border-border/60 bg-background/50 p-0.5 text-[10.5px]">
@@ -660,14 +662,16 @@ function ViewModeToggle({
       <button
         type="button"
         onClick={() => onChange("report")}
+        disabled={!hasFindings}
         className={cn(
           "flex items-center gap-1 rounded px-2 py-0.5 transition-colors",
           value === "report"
             ? "bg-card text-foreground shadow-sm"
             : "text-muted-foreground hover:text-foreground",
+          !hasFindings && "cursor-not-allowed opacity-50 hover:text-muted-foreground",
         )}
         aria-pressed={value === "report"}
-        title="Show verified findings and checks"
+        title={hasFindings ? "Show severity-grouped findings" : "No findings to show"}
       >
         <ListChecks className="size-3" />
         Report
@@ -686,7 +690,6 @@ function reportRespToLoaded(
     findings: resp.findings,
     overallSummary: resp.overall_summary,
     changeSummary: resp.change_summary ?? [],
-    verificationChecks: resp.verification_checks ?? [],
     prompt: resp.prompt,
     legacyHtml: resp.html,
     model: resp.model,

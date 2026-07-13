@@ -36,7 +36,6 @@ use zen_github::PrRef;
 use zen_pr_review::{
     AiReviewEvent, Finding, PrKey, RunStatus, RunSummary, StartInputs,
 };
-use zen_pr_review::persist::VerificationCheck;
 use zen_prmaster::PrMasterSettings;
 
 use crate::error::{AppError, AppResult};
@@ -187,8 +186,6 @@ pub struct AiReviewReportResp {
     /// High-level bullet summary copied from `report.json`'s
     /// `change_summary`.
     pub change_summary: Vec<String>,
-    /// Static checks attempted by the adversarial verifier.
-    pub verification_checks: Vec<VerificationCheck>,
     /// The exact prompt the run sent to `claude -p`. Surfaced via the
     /// "View prompt" disclosure so the user can audit what the model
     /// was asked to do.
@@ -307,7 +304,6 @@ pub async fn prmaster_ai_review_start(
         let local_repo_for_run = local_repo.clone();
         let reports_root = app_root.join("reports");
         let cancel = handles.cancel.clone();
-        let base_branch_for_run = base_branch.clone();
         tokio::spawn(async move {
             let res = review
                 .run(
@@ -317,7 +313,6 @@ pub async fn prmaster_ai_review_start(
                     reports_root,
                     kv,
                     prompt_text,
-                    base_branch_for_run,
                     model_for_run,
                     cancel,
                     tx,
@@ -457,7 +452,6 @@ pub async fn prmaster_ai_review_get_report(
         events: record.events,
         overall_summary: record.overall_summary,
         change_summary: record.change_summary,
-        verification_checks: record.verification_checks,
         prompt: record.prompt,
         head_sha: record.summary.head_sha.clone(),
         model: record.summary.model.clone(),

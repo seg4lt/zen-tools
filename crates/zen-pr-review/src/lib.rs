@@ -29,7 +29,6 @@ pub mod worktree;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
 use tokio::sync::mpsc;
 use zen_storage::KvStore;
@@ -38,7 +37,7 @@ pub use crate::error::{ReviewError, ReviewResult};
 pub use crate::events::AiReviewEvent;
 pub use crate::persist::{Finding, ReportPayload, RunRecord, RunSummary};
 pub use crate::runner::{spawn_claude, EventSink, RunOutcome, MAX_RUN_SECS};
-pub use crate::state::{Cancellation, PrKey, RunEntry, RunRegistry, RunStatus};
+pub use crate::state::{PrKey, RunEntry, RunRegistry, RunStatus};
 
 /// Cheap-to-clone (`Arc`-backed) review controller. Holds the in-memory
 /// run registry; the SQLite store and reports root are passed in per
@@ -91,7 +90,7 @@ pub struct StartHandles {
     /// Cancel notifier — handed back so the caller can drive
     /// [`ReviewEngine::run`] (cancellation is also reachable via
     /// [`ReviewEngine::cancel`] from a later command call).
-    pub cancel: Arc<Cancellation>,
+    pub cancel: Arc<tokio::sync::Notify>,
 }
 
 impl ReviewEngine {
@@ -176,202 +175,35 @@ impl ReviewEngine {
         reports_root: PathBuf,
         kv: KvStore,
         prompt_text: String,
-        base_branch: Option<String>,
         model: Option<String>,
-        cancel: Arc<Cancellation>,
+        cancel: Arc<tokio::sync::Notify>,
         event_tx: mpsc::UnboundedSender<(String, AiReviewEvent)>,
     ) -> ReviewResult<()> {
         let run_id_owned = run_id.to_string();
         let registry = self.inner.registry.clone();
-        let expected_head_sha = self
-            .inner
-            .registry
-            .snapshot(run_id)
-            .map(|entry| entry.head_sha)
-            .unwrap_or_else(|| "HEAD".into());
-        let trusted_diff = match trusted_git_diff(
-            &worktree_path,
-            base_branch.as_deref().unwrap_or("main"),
-            &expected_head_sha,
-            &cancel,
-        )
-        .await
-        {
-            Ok(diff) => diff,
-            Err(e) => {
-                let status = if matches!(&e, ReviewError::Cancelled) {
-                    RunStatus::Cancelled
-                } else {
-                    RunStatus::Error
-                };
-                let event = AiReviewEvent::Error {
-                    message: format!("Unable to compute trusted PR diff: {e}"),
-                };
-                registry.append_event(&run_id_owned, event.clone());
-                let _ = event_tx.send((run_id_owned.clone(), event));
-                self.finalize(
-                    run_id,
-                    status,
-                    None,
-                    None,
-                    String::new(),
-                    Vec::new(),
-                    Vec::new(),
-                    prompt_text.clone(),
-                    Vec::new(),
-                    None,
-                    None,
-                    &reports_root,
-                    &kv,
-                    &local_repo,
-                    &worktree_path,
-                )
-                .await;
-                return Err(e);
-            }
-        };
-        let analysis_prompt = format!(
-            "{prompt_text}\n\nTRUSTED HOST DIFF\n-----------------\n{trusted_diff}"
-        );
-        // Persist both phase prompts for auditability. The verifier prompt is
-        // appended only after the first-pass JSON has been parsed.
-        let mut prompt_text_for_record = format!(
-            "ANALYSIS PASS\n=============\n{analysis_prompt}"
-        );
+        // Keep a copy of the prompt for the persisted RunRecord so the
+        // "View prompt" disclosure on the report view can show it.
+        let prompt_text_for_record = prompt_text.clone();
 
         // Build a sink that fans events into both the registry and the
         // outbound mpsc channel. The mpsc sender is `Clone`, so we can
         // hand a copy to the runner without lifetime gymnastics.
-        let phase_event = AiReviewEvent::Text {
-            text: "Phase 1/2: analyzing the change and forming review hypotheses…".into(),
-        };
-        registry.append_event(&run_id_owned, phase_event.clone());
-        let _ = event_tx.send((run_id_owned.clone(), phase_event));
-
-        let tx_analysis = event_tx.clone();
-        let registry_analysis = registry.clone();
-        let run_id_analysis = run_id_owned.clone();
-        let analysis_sink = move |event: AiReviewEvent| {
-            // Claude emits its own result event. The host owns lifecycle and
-            // must not mark the run done before the verifier finishes.
-            if matches!(event, AiReviewEvent::Done { .. }) {
-                return;
-            }
-            registry_analysis.append_event(&run_id_analysis, event.clone());
-            let _ = tx_analysis.send((run_id_analysis.clone(), event));
+        let tx_for_runner = event_tx.clone();
+        let registry_for_runner = registry.clone();
+        let run_id_for_runner = run_id_owned.clone();
+        let runner_sink = move |event: AiReviewEvent| {
+            registry_for_runner.append_event(&run_id_for_runner, event.clone());
+            let _ = tx_for_runner.send((run_id_for_runner.clone(), event));
         };
 
-        let analysis_outcome = runner::spawn_claude(
+        let outcome = runner::spawn_claude(
             worktree_path.clone(),
-            analysis_prompt,
+            prompt_text,
             model.clone(),
-            cancel.clone(),
-            analysis_sink,
+            cancel,
+            runner_sink,
         )
         .await;
-
-        let outcome = match analysis_outcome {
-            Ok(analysis) if analysis.success => {
-                if cancel.is_cancelled() {
-                    self.finalize(
-                        run_id,
-                        RunStatus::Cancelled,
-                        None,
-                        None,
-                        String::new(),
-                        Vec::new(),
-                        Vec::new(),
-                        prompt_text_for_record.clone(),
-                        Vec::new(),
-                        analysis.cost_usd,
-                        Some(analysis.duration_ms),
-                        &reports_root,
-                        &kv,
-                        &local_repo,
-                        &worktree_path,
-                    )
-                    .await;
-                    return Err(ReviewError::Cancelled);
-                }
-                let first_pass = match persist::parse_report_text(&analysis.result_text) {
-                    Ok(report) => report,
-                    Err(e) => {
-                        let event = AiReviewEvent::Error {
-                            message: format!("Analysis pass returned invalid report JSON: {e}"),
-                        };
-                        registry.append_event(&run_id_owned, event.clone());
-                        let _ = event_tx.send((run_id_owned.clone(), event));
-                        self.finalize(
-                            run_id,
-                            RunStatus::Error,
-                            None,
-                            None,
-                            String::new(),
-                            Vec::new(),
-                            Vec::new(),
-                            prompt_text_for_record.clone(),
-                            Vec::new(),
-                            analysis.cost_usd,
-                            Some(analysis.duration_ms),
-                            &reports_root,
-                            &kv,
-                            &local_repo,
-                            &worktree_path,
-                        )
-                        .await;
-                        return Err(e);
-                    }
-                };
-                let first_pass_json = serde_json::to_string_pretty(&first_pass)?;
-                let verification_prompt = prompt::build_verification_prompt(
-                    &expected_head_sha,
-                    &trusted_diff,
-                    &first_pass_json,
-                );
-                prompt_text_for_record.push_str(
-                    "\n\nADVERSARIAL VERIFICATION PASS\n=============================\n",
-                );
-                prompt_text_for_record.push_str(&verification_prompt);
-                let phase_event = AiReviewEvent::Text {
-                    text: "Phase 2/2: adversarially verifying findings with static evidence…".into(),
-                };
-                registry.append_event(&run_id_owned, phase_event.clone());
-                let _ = event_tx.send((run_id_owned.clone(), phase_event));
-
-                let tx_verifier = event_tx.clone();
-                let registry_verifier = registry.clone();
-                let run_id_verifier = run_id_owned.clone();
-                let verifier_sink = move |event: AiReviewEvent| {
-                    if matches!(event, AiReviewEvent::Done { .. }) {
-                        return;
-                    }
-                    registry_verifier.append_event(&run_id_verifier, event.clone());
-                    let _ = tx_verifier.send((run_id_verifier.clone(), event));
-                };
-                match runner::spawn_claude(
-                    worktree_path.clone(),
-                    verification_prompt,
-                    model.clone(),
-                    cancel,
-                    verifier_sink,
-                )
-                .await
-                {
-                    Ok(verification) => Ok(runner::RunOutcome {
-                        success: verification.success,
-                        duration_ms: analysis.duration_ms.saturating_add(verification.duration_ms),
-                        cost_usd: match (analysis.cost_usd, verification.cost_usd) {
-                            (Some(a), Some(b)) => Some(a + b),
-                            (a, b) => a.or(b),
-                        },
-                        stderr_tail: verification.stderr_tail,
-                        result_text: verification.result_text,
-                    }),
-                    Err(e) => Err(e),
-                }
-            }
-            other => other,
-        };
 
         // Helper closure that mirrors the runner's fan-out pattern for
         // post-run events (Done / Error emitted by us, not Claude).
@@ -384,38 +216,8 @@ impl ReviewEngine {
             Ok(out) if out.success => {
                 let html_src = worktree_path.join(prompt::REPORT_HTML_REL);
                 let json_src = worktree_path.join(prompt::REPORT_JSON_REL);
-                let report_payload = match persist::parse_report_text(&out.result_text) {
-                    Ok(p) => match persist::validate_verified_report(
-                        &p,
-                        &expected_head_sha,
-                        &trusted_diff,
-                    ) {
-                        Ok(()) => p,
-                        Err(e) => {
-                            emit(AiReviewEvent::Error {
-                                message: format!("Verifier output failed quality validation: {e}"),
-                            });
-                            self.finalize(
-                                run_id,
-                                RunStatus::Error,
-                                None,
-                                None,
-                                String::new(),
-                                Vec::new(),
-                                Vec::new(),
-                                prompt_text_for_record.clone(),
-                                Vec::new(),
-                                out.cost_usd,
-                                Some(out.duration_ms),
-                                &reports_root,
-                                &kv,
-                                &local_repo,
-                                &worktree_path,
-                            )
-                            .await;
-                            return Err(e);
-                        }
-                    },
+                let report_payload = match persist::parse_report_json(&json_src) {
+                    Ok(p) => p,
                     Err(e) => {
                         emit(AiReviewEvent::Error {
                             message: format!("Failed to parse report.json: {e}"),
@@ -426,7 +228,6 @@ impl ReviewEngine {
                             None,
                             None,
                             String::new(),
-                            Vec::new(),
                             Vec::new(),
                             prompt_text_for_record.clone(),
                             Vec::new(),
@@ -441,30 +242,6 @@ impl ReviewEngine {
                         return Err(e);
                     }
                 };
-                if let Err(e) = persist::write_report_json(&json_src, &report_payload) {
-                    emit(AiReviewEvent::Error {
-                        message: format!("Failed to persist verified report JSON: {e}"),
-                    });
-                    self.finalize(
-                        run_id,
-                        RunStatus::Error,
-                        None,
-                        None,
-                        String::new(),
-                        Vec::new(),
-                        Vec::new(),
-                        prompt_text_for_record.clone(),
-                        Vec::new(),
-                        out.cost_usd,
-                        Some(out.duration_ms),
-                        &reports_root,
-                        &kv,
-                        &local_repo,
-                        &worktree_path,
-                    )
-                    .await;
-                    return Err(e);
-                }
                 let (dst_html_opt, dst_json) = match persist::persist_report_files(
                     run_id,
                     &html_src,
@@ -482,7 +259,6 @@ impl ReviewEngine {
                             None,
                             None,
                             String::new(),
-                            Vec::new(),
                             Vec::new(),
                             String::new(),
                             Vec::new(),
@@ -517,7 +293,6 @@ impl ReviewEngine {
                     Some(report_path),
                     report_payload.summary.clone(),
                     report_payload.change_summary.clone(),
-                    report_payload.verification_checks.clone(),
                     prompt_text_for_record.clone(),
                     report_payload.findings,
                     out.cost_usd,
@@ -544,7 +319,6 @@ impl ReviewEngine {
                     None,
                     String::new(),
                     Vec::new(),
-                    Vec::new(),
                     prompt_text_for_record.clone(),
                     Vec::new(),
                     out.cost_usd,
@@ -565,7 +339,6 @@ impl ReviewEngine {
                     None,
                     String::new(),
                     Vec::new(),
-                    Vec::new(),
                     prompt_text_for_record.clone(),
                     Vec::new(),
                     None,
@@ -585,7 +358,6 @@ impl ReviewEngine {
                     None,
                     None,
                     String::new(),
-                    Vec::new(),
                     Vec::new(),
                     prompt_text_for_record.clone(),
                     Vec::new(),
@@ -695,7 +467,6 @@ impl ReviewEngine {
         report_json_path: Option<String>,
         overall_summary: String,
         change_summary: Vec<String>,
-        verification_checks: Vec<persist::VerificationCheck>,
         prompt_text: String,
         findings: Vec<Finding>,
         cost_usd: Option<f64>,
@@ -733,7 +504,6 @@ impl ReviewEngine {
                 report_json_path,
                 overall_summary,
                 change_summary,
-                verification_checks,
                 prompt: prompt_text,
                 findings,
                 events,
@@ -760,95 +530,6 @@ fn parse_slug(slug: &str) -> Option<PrKey> {
         repo: repo.to_string(),
         number,
     })
-}
-
-/// Compute the review diff with argv-safe Git invocations owned by the host.
-/// No branch name is interpolated into a shell command, and model tools never
-/// receive permission to execute repository code.
-async fn trusted_git_diff(
-    worktree: &Path,
-    base_branch: &str,
-    head_sha: &str,
-    cancel: &Cancellation,
-) -> ReviewResult<String> {
-    const MAX_DIFF_BYTES: usize = 350_000;
-    let base_ref = format!("origin/{base_branch}");
-    let merge_base = trusted_git_output(
-        worktree,
-        &["merge-base", &base_ref, head_sha],
-        cancel,
-    )
-    .await;
-    let base_sha = match merge_base {
-        Ok(output) if output.status.success() => {
-            String::from_utf8_lossy(&output.stdout).trim().to_string()
-        }
-        Ok(output) => {
-            return Err(ReviewError::Other(format!(
-                "git merge-base failed for {base_ref}: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            )));
-        }
-        Err(error) => return Err(error),
-    };
-    let diff = trusted_git_output(
-        worktree,
-        &["diff", "--no-ext-diff", "--unified=80", &base_sha, head_sha],
-        cancel,
-    )
-    .await;
-    match diff {
-        Ok(output) if output.status.success() => {
-            if output.stdout.is_empty() {
-                return Err(ReviewError::Other("trusted git diff was empty".into()));
-            }
-            let text = String::from_utf8_lossy(&output.stdout);
-            let mut used = 0usize;
-            let truncated: String = text
-                .chars()
-                .take_while(|ch| {
-                    let next = used + ch.len_utf8();
-                    if next > MAX_DIFF_BYTES {
-                        false
-                    } else {
-                        used = next;
-                        true
-                    }
-                })
-                .collect();
-            if used < text.len() {
-                Ok(format!("{truncated}\n\n[diff truncated by host after {MAX_DIFF_BYTES} bytes]"))
-            } else {
-                Ok(truncated)
-            }
-        }
-        Ok(output) => Err(ReviewError::Other(format!(
-            "git diff failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ))),
-        Err(error) => Err(error),
-    }
-}
-
-async fn trusted_git_output(
-    worktree: &Path,
-    args: &[&str],
-    cancel: &Cancellation,
-) -> ReviewResult<std::process::Output> {
-    const GIT_TIMEOUT_SECS: u64 = 30;
-    let mut command = tokio::process::Command::new("git");
-    command
-        .args(args)
-        .current_dir(worktree)
-        .kill_on_drop(true);
-    tokio::select! {
-        biased;
-        _ = cancel.cancelled() => Err(ReviewError::Cancelled),
-        _ = tokio::time::sleep(Duration::from_secs(GIT_TIMEOUT_SECS)) => {
-            Err(ReviewError::Other(format!("trusted git preflight timed out after {GIT_TIMEOUT_SECS}s")))
-        }
-        output = command.output() => output.map_err(ReviewError::Io),
-    }
 }
 
 #[cfg(test)]

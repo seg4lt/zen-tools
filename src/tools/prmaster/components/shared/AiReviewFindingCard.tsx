@@ -108,33 +108,6 @@ export function AiReviewFindingCard({
             {finding.rationale}
           </p>
         )}
-        {(finding.confidence || finding.failure_scenario || finding.evidence?.length) && (
-          <div className="grid gap-1 rounded-md border border-border/50 bg-background/40 px-2 py-1.5 text-[10.5px] leading-snug">
-            {finding.confidence && (
-              <div>
-                <span className="mr-1 font-semibold uppercase tracking-wide text-muted-foreground">
-                  Confidence
-                </span>
-                <span className="font-medium">{finding.confidence}</span>
-              </div>
-            )}
-            {finding.failure_scenario && (
-              <div>
-                <span className="mr-1 font-semibold uppercase tracking-wide text-muted-foreground">
-                  Failure path
-                </span>
-                {finding.failure_scenario}
-              </div>
-            )}
-            {finding.evidence && finding.evidence.length > 0 && (
-              <ul className="list-disc space-y-0.5 pl-4 text-muted-foreground">
-                {finding.evidence.map((item, index) => (
-                  <li key={`${index}-${item}`}>{item}</li>
-                ))}
-              </ul>
-            )}
-          </div>
-        )}
         <CommentAction
           finding={finding}
           onPost={onPost}

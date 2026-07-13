@@ -654,15 +654,6 @@ export interface AiReviewFinding {
   /** Lowercase language id used by the syntax highlighter. */
   language?: string;
   rationale: string;
-  confidence?: "high" | "medium" | "low" | string;
-  evidence?: string[];
-  failure_scenario?: string;
-}
-
-export interface AiReviewVerificationCheck {
-  name: string;
-  status: "passed" | "failed" | "skipped" | string;
-  summary: string;
 }
 
 export interface AiReviewStartResp {
@@ -699,7 +690,6 @@ export interface AiReviewReportResp {
   overall_summary: string;
   /** High-level bullet summary copied from `report.json`'s `change_summary`. */
   change_summary: string[];
-  verification_checks: AiReviewVerificationCheck[];
   /** The exact prompt the run sent to `claude -p`. */
   prompt: string;
   pr: { owner: string; repo: string; number: number };

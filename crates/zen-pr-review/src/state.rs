@@ -21,43 +21,6 @@ use uuid::Uuid;
 
 use crate::events::AiReviewEvent;
 
-/// Latched cancellation shared across every phase of one review run.
-#[derive(Debug)]
-pub struct Cancellation {
-    tx: tokio::sync::watch::Sender<bool>,
-}
-
-impl Default for Cancellation {
-    fn default() -> Self {
-        Self {
-            tx: tokio::sync::watch::channel(false).0,
-        }
-    }
-}
-
-impl Cancellation {
-    /// Permanently mark this run cancelled and wake the currently-active phase.
-    pub fn cancel(&self) {
-        self.tx.send_replace(true);
-    }
-
-    /// Whether cancellation was requested, including between phases.
-    pub fn is_cancelled(&self) -> bool {
-        *self.tx.borrow()
-    }
-
-    /// Wait until cancellation, without losing a request that happened before
-    /// the waiter was registered.
-    pub async fn cancelled(&self) {
-        let mut rx = self.tx.subscribe();
-        while !*rx.borrow_and_update() {
-            if rx.changed().await.is_err() {
-                return;
-            }
-        }
-    }
-}
-
 /// Status of a review run as the registry sees it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -138,7 +101,7 @@ struct RegistryInner {
     /// Maps `run_id` → cancel handle (`AbortHandle`-style closure).
     /// We keep a `tokio::sync::Notify` per run; cancelling fires it,
     /// which the runner observes via `tokio::select!`.
-    cancels: HashMap<String, Arc<Cancellation>>,
+    cancels: HashMap<String, Arc<tokio::sync::Notify>>,
 }
 
 impl RunRegistry {
@@ -156,14 +119,14 @@ impl RunRegistry {
         head_sha: String,
         worktree_path: String,
         model: String,
-    ) -> Result<(String, Arc<Cancellation>), AlreadyLive> {
+    ) -> Result<(String, Arc<tokio::sync::Notify>), AlreadyLive> {
         let mut inner = self.inner.lock();
         let key = (pr.slug(), head_sha.clone());
         if inner.live_keys.contains_key(&key) {
             return Err(AlreadyLive);
         }
         let run_id = Uuid::new_v4().to_string();
-        let cancel = Arc::new(Cancellation::default());
+        let cancel = Arc::new(tokio::sync::Notify::new());
         inner.live_keys.insert(key, run_id.clone());
         inner.cancels.insert(run_id.clone(), cancel.clone());
         inner.runs.insert(
@@ -235,8 +198,8 @@ impl RunRegistry {
     pub fn cancel(&self, run_id: &str) -> bool {
         let cancel = self.inner.lock().cancels.get(run_id).cloned();
         match cancel {
-            Some(cancel) => {
-                cancel.cancel();
+            Some(n) => {
+                n.notify_waiters();
                 true
             }
             None => false,
@@ -293,15 +256,6 @@ mod tests {
         assert!(reg
             .start(pr(2), "abc".into(), "/tmp/y".into(), "sonnet".into())
             .is_ok());
-    }
-
-    #[tokio::test]
-    async fn cancellation_is_latched_before_waiter_registration() {
-        let cancel = Cancellation::default();
-        cancel.cancel();
-        tokio::time::timeout(std::time::Duration::from_millis(20), cancel.cancelled())
-            .await
-            .expect("latched cancellation should resolve immediately");
     }
 
     #[test]
