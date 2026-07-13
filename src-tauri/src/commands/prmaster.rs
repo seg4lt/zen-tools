@@ -87,12 +87,16 @@ pub async fn prmaster_get_gh_status(
 #[tauri::command]
 pub async fn prmaster_get_mine(
     state: State<'_, Mutex<AppState>>,
+    config: State<'_, UserConfig>,
 ) -> AppResult<Vec<EnrichedPullRequest>> {
     let engine = {
         let s = state.lock().await;
         engine(&s)
     };
-    Ok(engine.list_mine().await?)
+    let settings = config
+        .get::<PrMasterSettings>(PRMASTER_SETTINGS_KEY)?
+        .unwrap_or_default();
+    Ok(engine.list_mine(&settings).await?)
 }
 
 /// Open PRs requesting the current user as reviewer, enriched with
@@ -100,12 +104,16 @@ pub async fn prmaster_get_mine(
 #[tauri::command]
 pub async fn prmaster_get_to_review(
     state: State<'_, Mutex<AppState>>,
+    config: State<'_, UserConfig>,
 ) -> AppResult<Vec<EnrichedPullRequest>> {
     let engine = {
         let s = state.lock().await;
         engine(&s)
     };
-    Ok(engine.list_to_review().await?)
+    let settings = config
+        .get::<PrMasterSettings>(PRMASTER_SETTINGS_KEY)?
+        .unwrap_or_default();
+    Ok(engine.list_to_review(&settings).await?)
 }
 
 /// Open PRs authored by a specified GitHub user. This team-member watchlist
@@ -133,12 +141,16 @@ pub async fn prmaster_get_open_prs_by_author(
 #[tauri::command]
 pub async fn prmaster_get_reviewed(
     state: State<'_, Mutex<AppState>>,
+    config: State<'_, UserConfig>,
 ) -> AppResult<Vec<EnrichedPullRequest>> {
     let engine = {
         let s = state.lock().await;
         engine(&s)
     };
-    Ok(engine.list_reviewed().await?)
+    let settings = config
+        .get::<PrMasterSettings>(PRMASTER_SETTINGS_KEY)?
+        .unwrap_or_default();
+    Ok(engine.list_reviewed(&settings).await?)
 }
 
 /// Submit an APPROVE review on `pr`.

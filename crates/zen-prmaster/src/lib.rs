@@ -249,7 +249,7 @@ impl PrMasterEngine {
         &self,
         settings: &PrMasterSettings,
     ) -> GhResult<Arc<RefreshSnapshot>> {
-        let snapshot = self.refresh_lists().await?;
+        let snapshot = self.refresh_lists(settings).await?;
         let _ = self.inner.tx.send(PrMasterEvent::Refreshed((*snapshot).clone()));
 
         if settings.notifications_enabled {
@@ -588,7 +588,10 @@ impl PrMasterEngine {
     /// Force a full refresh: parallel fetch of `to_review`, `reviewed`,
     /// `mine`; enrich each via the batched GraphQL query; classify into
     /// To Review / Done buckets matching the Swift `refresh()` exactly.
-    pub async fn refresh_lists(&self) -> GhResult<Arc<RefreshSnapshot>> {
+    pub async fn refresh_lists(
+        &self,
+        settings: &PrMasterSettings,
+    ) -> GhResult<Arc<RefreshSnapshot>> {
         // Identify the current user first so classification can run.
         let current_user = match self.inner.gh.whoami().await {
             Ok(u) => Some(u),
@@ -625,9 +628,25 @@ impl PrMasterEngine {
             self.inner.gh.enrich(reviewed),
             self.inner.gh.enrich(mine),
         );
-        let enriched_to_review = enriched_to_review.unwrap_or_default();
+        let mut enriched_to_review = enriched_to_review.unwrap_or_default();
         let enriched_reviewed = enriched_reviewed.unwrap_or_default();
         let enriched_mine = enriched_mine?;
+
+        // Team-watchlist PRs are part of the same review universe as direct
+        // review requests. Merge them before classification so PRs the user
+        // has already approved/requested changes on land in Done, and so the
+        // UI, persisted snapshot, notifications, and tray badge all count the
+        // exact same queue.
+        for author in &settings.watched_authors {
+            let author = author.trim().trim_start_matches('@');
+            if author.is_empty() {
+                continue;
+            }
+            match self.list_open_prs_by_author(author).await {
+                Ok(mut prs) => enriched_to_review.append(&mut prs),
+                Err(e) => warn!(author, error = %e, "watched-author PR lookup failed"),
+            }
+        }
 
         let user = current_user.as_deref();
         let (to_review_bucket, done_bucket) =
@@ -650,7 +669,10 @@ impl PrMasterEngine {
     /// return the cache. Drives every "show me bucket X" code path so the
     /// Mine / Review / Done tabs share one fetch when opened in
     /// quick succession.
-    pub async fn refresh_lists_if_stale(&self) -> GhResult<Arc<RefreshSnapshot>> {
+    pub async fn refresh_lists_if_stale(
+        &self,
+        settings: &PrMasterSettings,
+    ) -> GhResult<Arc<RefreshSnapshot>> {
         let cached = self.inner.snapshot.load_full();
         let last = *self.inner.refresh_lock.lock();
         let fresh = match (cached.as_ref(), last) {
@@ -660,7 +682,7 @@ impl PrMasterEngine {
         if let (true, Some(snap)) = (fresh, cached) {
             return Ok(snap);
         }
-        self.refresh_lists().await
+        self.refresh_lists(settings).await
     }
 
     /// Snapshot of the current cached refresh (or `None` if never refreshed).
@@ -669,8 +691,11 @@ impl PrMasterEngine {
     }
 
     /// "To Review" bucket — uses the cached refresh (refreshes if stale).
-    pub async fn list_to_review(&self) -> GhResult<Vec<EnrichedPullRequest>> {
-        Ok(self.refresh_lists_if_stale().await?.to_review.clone())
+    pub async fn list_to_review(
+        &self,
+        settings: &PrMasterSettings,
+    ) -> GhResult<Vec<EnrichedPullRequest>> {
+        Ok(self.refresh_lists_if_stale(settings).await?.to_review.clone())
     }
 
     /// Open PRs authored by a specified user. This team-member watchlist is
@@ -691,13 +716,19 @@ impl PrMasterEngine {
     }
 
     /// "Done" / Reviewed bucket.
-    pub async fn list_reviewed(&self) -> GhResult<Vec<EnrichedPullRequest>> {
-        Ok(self.refresh_lists_if_stale().await?.reviewed.clone())
+    pub async fn list_reviewed(
+        &self,
+        settings: &PrMasterSettings,
+    ) -> GhResult<Vec<EnrichedPullRequest>> {
+        Ok(self.refresh_lists_if_stale(settings).await?.reviewed.clone())
     }
 
     /// "Mine" bucket — your own open PRs.
-    pub async fn list_mine(&self) -> GhResult<Vec<EnrichedPullRequest>> {
-        Ok(self.refresh_lists_if_stale().await?.mine.clone())
+    pub async fn list_mine(
+        &self,
+        settings: &PrMasterSettings,
+    ) -> GhResult<Vec<EnrichedPullRequest>> {
+        Ok(self.refresh_lists_if_stale(settings).await?.mine.clone())
     }
 
     /// Every inline review comment on `pr`, anchored to a file:line:side.
