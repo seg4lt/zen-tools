@@ -571,6 +571,13 @@ body.markdown-terminal-active main {
   font-weight: 700;
 }
 
+.zen-excalidraw-drilldown-hint {
+  color: var(--muted-foreground);
+  font-size: 0.58rem;
+  line-height: 1.35;
+  text-align: center;
+}
+
 .zen-excalidraw-markdown-inspector textarea {
   min-height: 14rem;
   resize: vertical;

@@ -371,6 +371,7 @@ const ARCHITECTURE_SERVICES: ArchitectureService[] = [
 ];
 
 const ARCHITECTURE_NODE_KEY = "zenToolsArchitectureNode";
+const ARCHITECTURE_INSTANCE_KEY = "zenToolsArchitectureInstance";
 const MARKDOWN_CARD_KEY = "zenToolsMarkdownCard";
 
 function ArchitectureCategoryIcon({ category }: { category: ArchitectureService["category"] }) {
@@ -639,7 +640,7 @@ export default function ExcalidrawEditor({
   const [architecturePanelOpen, setArchitecturePanelOpen] = useState(false);
   const [architectureQuery, setArchitectureQuery] = useState("");
   const [libraryResultLimit, setLibraryResultLimit] = useState(48);
-  const [selectedArchitectureNodeId, setSelectedArchitectureNodeId] =
+  const [selectedDrilldownElementId, setSelectedDrilldownElementId] =
     useState<string | null>(null);
   const [selectedMarkdownCardId, setSelectedMarkdownCardId] =
     useState<string | null>(null);
@@ -1059,6 +1060,23 @@ export default function ExcalidrawEditor({
     });
   }, []);
 
+  const navigateToDetailFrame = useCallback(
+    (frameId: string) => {
+      const presentationTarget = presentationFrameIds.indexOf(frameId);
+      if (presentationMode && presentationTarget >= 0) {
+        goToPresentationSlide(presentationTarget);
+        return;
+      }
+      focusFrame(frameId);
+    },
+    [
+      focusFrame,
+      goToPresentationSlide,
+      presentationFrameIds,
+      presentationMode,
+    ],
+  );
+
   const toggleFrameHidden = useCallback((frameId: string) => {
     const api = apiRef.current;
     const current = framesRef.current.find((frame) => frame.id === frameId);
@@ -1155,11 +1173,6 @@ export default function ExcalidrawEditor({
             provider: service.provider,
             service: service.service,
             category: service.category,
-            resourceName: "",
-            environment: "",
-            owner: "",
-            region: "",
-            notes: "",
             detailFrameId: "",
           },
         },
@@ -1226,6 +1239,7 @@ export default function ExcalidrawEditor({
       const groupMap = new Map(
         [...groupIds].map((groupId) => [groupId, crypto.randomUUID()]),
       );
+      const architectureInstanceId = crypto.randomUUID();
       const created = restored.map((element) => {
         const clone = structuredClone(element);
         return {
@@ -1270,6 +1284,14 @@ export default function ExcalidrawEditor({
           version: 1,
           versionNonce: Math.floor(Math.random() * 2 ** 31),
           updated: Date.now(),
+          customData: {
+            ...element.customData,
+            [ARCHITECTURE_NODE_KEY]: true,
+            [ARCHITECTURE_INSTANCE_KEY]: architectureInstanceId,
+            provider: item.source,
+            service: item.name,
+            detailFrameId: "",
+          },
         } as unknown as OrderedExcalidrawElement;
       });
       api.updateScene({
@@ -1310,9 +1332,19 @@ export default function ExcalidrawEditor({
     (elementId: string, patch: Record<string, unknown>) => {
       const api = apiRef.current;
       if (!api) return;
+      const elements = api.getSceneElementsIncludingDeleted();
+      const target = elements.find((element) => element.id === elementId);
+      const architectureInstance =
+        target?.customData?.[ARCHITECTURE_INSTANCE_KEY];
+      const targetGroups = new Set(target?.groupIds ?? []);
       api.updateScene({
-        elements: api.getSceneElementsIncludingDeleted().map((element) =>
-          element.id === elementId
+        elements: elements.map((element) =>
+          element.id === elementId ||
+          (typeof architectureInstance === "string" &&
+            element.customData?.[ARCHITECTURE_INSTANCE_KEY] ===
+              architectureInstance) ||
+          (architectureInstance === undefined &&
+            element.groupIds.some((groupId) => targetGroups.has(groupId)))
             ? newElementWith(element, {
                 customData: { ...element.customData, ...patch },
               })
@@ -1472,7 +1504,7 @@ export default function ExcalidrawEditor({
     setFrameThumbnails({});
     setFramePanelOpen(false);
     setArchitecturePanelOpen(false);
-    setSelectedArchitectureNodeId(null);
+    setSelectedDrilldownElementId(null);
     setSelectedMarkdownCardId(null);
     manualFrameOrderRef.current = null;
     setSelectedDirectionalArrowIds([]);
@@ -1665,8 +1697,8 @@ export default function ExcalidrawEditor({
       sceneRef.current?.elements.find((element) => element.id === id),
     )
     .find(Boolean)?.strokeColor;
-  const selectedArchitectureNode = sceneRef.current?.elements.find(
-    (element) => element.id === selectedArchitectureNodeId,
+  const selectedDrilldownElement = sceneRef.current?.elements.find(
+    (element) => element.id === selectedDrilldownElementId,
   );
   const filteredArchitectureServices = ARCHITECTURE_SERVICES.filter(
     (service) =>
@@ -1897,43 +1929,19 @@ export default function ExcalidrawEditor({
           </div>
         </div>
       ) : null}
-      {selectedArchitectureNode && !presentationMode ? (
+      {selectedDrilldownElement &&
+      !selectedMarkdownCardId &&
+      !presentationMode ? (
         <div className="zen-excalidraw-inspector-panel">
-          <div className="zen-excalidraw-inspector-title">Architecture metadata</div>
-          {(["resourceName", "environment", "owner", "region"] as const).map(
-            (field) => (
-              <label key={field}>
-                <span>{field.replace(/([A-Z])/g, " $1")}</span>
-                <input
-                  value={String(selectedArchitectureNode.customData?.[field] ?? "")}
-                  onChange={(event) =>
-                    updateElementCustomData(selectedArchitectureNode.id, {
-                      [field]: event.target.value,
-                    })
-                  }
-                />
-              </label>
-            ),
-          )}
-          <label>
-            <span>Notes</span>
-            <textarea
-              value={String(selectedArchitectureNode.customData?.notes ?? "")}
-              onChange={(event) =>
-                updateElementCustomData(selectedArchitectureNode.id, {
-                  notes: event.target.value,
-                })
-              }
-            />
-          </label>
+          <div className="zen-excalidraw-inspector-title">Drill-down</div>
           <label>
             <span>Detail frame</span>
             <select
               value={String(
-                selectedArchitectureNode.customData?.detailFrameId ?? "",
+                selectedDrilldownElement.customData?.detailFrameId ?? "",
               )}
               onChange={(event) =>
-                updateElementCustomData(selectedArchitectureNode.id, {
+                updateElementCustomData(selectedDrilldownElement.id, {
                   detailFrameId: event.target.value,
                 })
               }
@@ -1946,17 +1954,24 @@ export default function ExcalidrawEditor({
               ))}
             </select>
           </label>
-          {selectedArchitectureNode.customData?.detailFrameId ? (
-            <button
-              type="button"
-              onClick={() =>
-                focusFrame(
-                  String(selectedArchitectureNode.customData?.detailFrameId),
-                )
-              }
-            >
-              Open detail frame
-            </button>
+          {selectedDrilldownElement.customData?.detailFrameId ? (
+            <>
+              <button
+                type="button"
+                onClick={() =>
+                  navigateToDetailFrame(
+                    String(
+                      selectedDrilldownElement.customData?.detailFrameId,
+                    ),
+                  )
+                }
+              >
+                Open detail frame
+              </button>
+              <small className="zen-excalidraw-drilldown-hint">
+                Click while presenting · ⌘/Ctrl-click while editing
+              </small>
+            </>
           ) : null}
         </div>
       ) : null}
@@ -2281,17 +2296,47 @@ export default function ExcalidrawEditor({
         // React is the sole owner of this controlled value; the capture-phase
         // shortcut handler above handles Alt+R without an internal-state race.
         viewModeEnabled={presentationMode}
+        onPointerDown={(_activeTool, pointerDownState) => {
+          const hitElement = pointerDownState.hit.element;
+          if (!hitElement) return;
+          const sceneElements = sceneRef.current?.elements ?? [];
+          const instanceId =
+            hitElement.customData?.[ARCHITECTURE_INSTANCE_KEY];
+          const hitGroups = new Set(hitElement.groupIds);
+          const linkedElement =
+            typeof hitElement.customData?.detailFrameId === "string"
+              ? hitElement
+              : sceneElements.find(
+                  (candidate) =>
+                    (typeof instanceId === "string" &&
+                      candidate.customData?.[ARCHITECTURE_INSTANCE_KEY] ===
+                        instanceId) ||
+                    candidate.groupIds.some((groupId) =>
+                      hitGroups.has(groupId),
+                    ),
+                );
+          const detailFrameId = linkedElement?.customData?.detailFrameId;
+          if (
+            typeof detailFrameId !== "string" ||
+            !detailFrameId ||
+            (!presentationMode && !pointerDownState.withCmdOrCtrl)
+          ) {
+            return;
+          }
+          navigateToDetailFrame(detailFrameId);
+        }}
         onChange={(elements, appState, files) => {
           const scene = { elements, appState, files };
           sceneRef.current = scene;
           refreshFrameThumbnails(scene);
-          const selectedArchitectureNode = elements.find(
+          const selectedDrilldownElement = elements.find(
             (element) =>
               appState.selectedElementIds[element.id] &&
-              element.customData?.[ARCHITECTURE_NODE_KEY] === true,
+              element.type !== "frame" &&
+              element.type !== "magicframe",
           );
-          setSelectedArchitectureNodeId(
-            selectedArchitectureNode?.id ?? null,
+          setSelectedDrilldownElementId(
+            selectedDrilldownElement?.id ?? null,
           );
           const selectedMarkdownCard = elements.find(
             (element) =>
