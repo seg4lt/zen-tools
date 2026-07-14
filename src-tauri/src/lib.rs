@@ -36,6 +36,59 @@ pub fn exit_app(app: &tauri::AppHandle) {
     app.exit(0);
 }
 
+/// Bring the main window forward, rebuilding it from `tauri.conf.json` if it
+/// was destroyed while the background app remained alive.
+///
+/// Every Dock, tray, and global-shortcut activation path goes through this
+/// helper so a missing `main` window cannot turn an activation into a no-op.
+pub fn show_or_create_main_window(app: &tauri::AppHandle) -> Option<tauri::WebviewWindow> {
+    #[cfg(target_os = "macos")]
+    if let Err(e) = app.set_activation_policy(tauri::ActivationPolicy::Regular) {
+        tracing::warn!(error = %e, "restoring regular activation policy failed");
+    }
+
+    let window = if let Some(window) = app.get_webview_window("main") {
+        window
+    } else {
+        let Some(config) = app
+            .config()
+            .app
+            .windows
+            .iter()
+            .find(|config| config.label == "main")
+        else {
+            tracing::error!("main window configuration is missing");
+            return None;
+        };
+
+        match tauri::WebviewWindowBuilder::from_config(app, config)
+            .and_then(|builder| builder.build())
+        {
+            Ok(window) => window,
+            Err(e) => {
+                // A second activation may have won the creation race.
+                if let Some(window) = app.get_webview_window("main") {
+                    window
+                } else {
+                    tracing::error!(error = %e, "recreating main window failed");
+                    return None;
+                }
+            }
+        }
+    };
+
+    if let Err(e) = window.unminimize() {
+        tracing::warn!(error = %e, "unminimizing main window failed");
+    }
+    if let Err(e) = window.show() {
+        tracing::warn!(error = %e, "showing main window failed");
+    }
+    if let Err(e) = window.set_focus() {
+        tracing::warn!(error = %e, "focusing main window failed");
+    }
+    Some(window)
+}
+
 /// Build the `tauri-plugin-global-shortcut` plugin with the always-on
 /// hotkey handlers baked in. Two chords are wired up here:
 ///
@@ -77,15 +130,7 @@ fn build_global_shortcut_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
             let Some(route) = route else { return };
             let app = app.clone();
             tauri::async_runtime::spawn(async move {
-                if let Some(win) = app.get_webview_window("main") {
-                    let _ = win.unminimize();
-                    let _ = win.show();
-                    let _ = win.set_focus();
-                }
-                #[cfg(target_os = "macos")]
-                {
-                    let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
-                }
+                show_or_create_main_window(&app);
                 let _ = app.emit("prmaster:focus-route", route);
             });
         })
@@ -634,12 +679,7 @@ pub fn run() {
             // `app:focus-first-tool` event.
             #[cfg(target_os = "macos")]
             if let tauri::RunEvent::Reopen { .. } = event {
-                let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
-                if let Some(win) = app.get_webview_window("main") {
-                    let _ = win.unminimize();
-                    let _ = win.show();
-                    let _ = win.set_focus();
-                }
+                show_or_create_main_window(app);
                 // Do NOT emit `app:focus-first-tool` here.  The React app is
                 // still running on whatever route the user was viewing when
                 // they clicked ✕ — just showing the window is enough to

@@ -8,7 +8,14 @@
  * pattern doesn't fight with parent flex sizing.
  */
 
-import { useMemo, useRef } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type PointerEvent,
+} from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { cellToString, type DbCell, type DbQueryResult } from "../lib/tauri";
 
@@ -26,7 +33,7 @@ export function ResultsGrid({ result }: ResultsGridProps) {
   // Pre-compute per-column widths from header + sample of rows. Cheap:
   // scan the first 50 rows so wide values dominate sizing without
   // walking every cell.
-  const columnWidths = useMemo(() => {
+  const automaticColumnWidths = useMemo(() => {
     const sample = result.rows.slice(0, 50);
     return result.columns.map((col, idx) => {
       let maxLen = col.name.length + col.typeName.length + 2;
@@ -40,6 +47,95 @@ export function ResultsGrid({ result }: ResultsGridProps) {
       return Math.max(MIN_COL_WIDTH, Math.min(MAX_COL_WIDTH, px));
     });
   }, [result.columns, result.rows]);
+
+  const [columnWidthOverrides, setColumnWidthOverrides] = useState<
+    Record<number, number>
+  >({});
+  const resizeRef = useRef<{
+    columnIndex: number;
+    startX: number;
+    startWidth: number;
+    previousCursor: string;
+    previousUserSelect: string;
+  } | null>(null);
+
+  // A new query result should start with freshly calculated widths.
+  useEffect(() => {
+    setColumnWidthOverrides({});
+  }, [result]);
+
+  // Restore document-level styles if the grid unmounts during a drag.
+  useEffect(
+    () => () => {
+      const resize = resizeRef.current;
+      if (!resize) return;
+      document.body.style.cursor = resize.previousCursor;
+      document.body.style.userSelect = resize.previousUserSelect;
+    },
+    [],
+  );
+
+  const columnWidths = automaticColumnWidths.map(
+    (width, idx) => columnWidthOverrides[idx] ?? width,
+  );
+
+  const startColumnResize = (
+    event: PointerEvent<HTMLDivElement>,
+    columnIndex: number,
+  ) => {
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    resizeRef.current = {
+      columnIndex,
+      startX: event.clientX,
+      startWidth: columnWidths[columnIndex],
+      previousCursor: document.body.style.cursor,
+      previousUserSelect: document.body.style.userSelect,
+    };
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+  };
+
+  const resizeColumn = (event: PointerEvent<HTMLDivElement>) => {
+    const resize = resizeRef.current;
+    if (!resize) return;
+
+    const nextWidth = Math.max(
+      MIN_COL_WIDTH,
+      Math.round(resize.startWidth + event.clientX - resize.startX),
+    );
+    setColumnWidthOverrides((widths) => ({
+      ...widths,
+      [resize.columnIndex]: nextWidth,
+    }));
+  };
+
+  const stopColumnResize = (event: PointerEvent<HTMLDivElement>) => {
+    const resize = resizeRef.current;
+    if (!resize) return;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    resizeRef.current = null;
+    document.body.style.cursor = resize.previousCursor;
+    document.body.style.userSelect = resize.previousUserSelect;
+  };
+
+  const resizeColumnWithKeyboard = (
+    event: KeyboardEvent<HTMLDivElement>,
+    columnIndex: number,
+  ) => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    event.preventDefault();
+    const delta = (event.shiftKey ? 40 : 10) * (event.key === "ArrowLeft" ? -1 : 1);
+    setColumnWidthOverrides((widths) => ({
+      ...widths,
+      [columnIndex]: Math.max(
+        MIN_COL_WIDTH,
+        (widths[columnIndex] ?? automaticColumnWidths[columnIndex]) + delta,
+      ),
+    }));
+  };
 
   const totalWidth = columnWidths.reduce((a, b) => a + b, 0);
 
@@ -81,7 +177,7 @@ export function ResultsGrid({ result }: ResultsGridProps) {
         {result.columns.map((col, idx) => (
           <div
             key={idx}
-            className="flex shrink-0 items-center gap-1 truncate border-r border-border/40 px-2 py-1 text-left"
+            className="relative flex shrink-0 items-center gap-1 border-r border-border/40 px-2 py-1 text-left"
             style={{ width: columnWidths[idx] }}
             title={`${col.name} : ${col.typeName}`}
           >
@@ -91,6 +187,31 @@ export function ResultsGrid({ result }: ResultsGridProps) {
             <span className="shrink-0 text-[10px] uppercase text-muted-foreground/70">
               {col.typeName}
             </span>
+            <div
+              role="separator"
+              aria-label={`Resize ${col.name} column`}
+              aria-orientation="vertical"
+              aria-valuemin={MIN_COL_WIDTH}
+              aria-valuenow={columnWidths[idx]}
+              tabIndex={0}
+              className="group absolute -right-1 top-0 z-20 h-full w-2 cursor-col-resize touch-none select-none outline-none"
+              title="Drag to resize · Double-click to auto-fit"
+              onPointerDown={(event) => startColumnResize(event, idx)}
+              onPointerMove={resizeColumn}
+              onPointerUp={stopColumnResize}
+              onPointerCancel={stopColumnResize}
+              onLostPointerCapture={stopColumnResize}
+              onDoubleClick={() =>
+                setColumnWidthOverrides((widths) => {
+                  const next = { ...widths };
+                  delete next[idx];
+                  return next;
+                })
+              }
+              onKeyDown={(event) => resizeColumnWithKeyboard(event, idx)}
+            >
+              <span className="absolute inset-y-0 left-1/2 w-px bg-transparent transition-colors group-hover:bg-primary/60 group-focus:bg-primary/60" />
+            </div>
           </div>
         ))}
       </div>

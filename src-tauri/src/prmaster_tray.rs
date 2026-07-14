@@ -127,11 +127,7 @@ fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
 
 /// Focus the main window and navigate to the PRMaster route.
 pub fn focus_main_window_at_prmaster(app: &AppHandle) {
-    if let Some(win) = app.get_webview_window("main") {
-        let _ = win.unminimize();
-        let _ = win.show();
-        let _ = win.set_focus();
-    }
+    crate::show_or_create_main_window(app);
     // Tell the frontend to navigate to /prmaster regardless of where the
     // user was. The router subscribes to this event in `App.tsx`.
     let _ = app.emit_to(
@@ -139,14 +135,6 @@ pub fn focus_main_window_at_prmaster(app: &AppHandle) {
         "prmaster:focus-route",
         "/prmaster",
     );
-
-    // Restore the regular activation policy so the dock icon comes back
-    // when we expand to the main window from a hidden / accessory state.
-    #[cfg(target_os = "macos")]
-    {
-        use tauri::ActivationPolicy;
-        let _ = app.set_activation_policy(ActivationPolicy::Regular);
-    }
 }
 
 // `Emitter` is needed for `emit_to`. Imported at the top of `lib.rs`

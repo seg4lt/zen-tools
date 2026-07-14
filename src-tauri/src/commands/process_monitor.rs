@@ -141,12 +141,7 @@ pub async fn pm_popover_close(app: AppHandle) -> AppResult<()> {
 /// Used by the popover's "Open Full Window" button.
 #[tauri::command]
 pub async fn pm_show_main_window(app: AppHandle) -> AppResult<()> {
-    use tauri::Manager;
-    if let Some(win) = app.get_webview_window("main") {
-        let _ = win.unminimize();
-        let _ = win.show();
-        let _ = win.set_focus();
-    }
+    crate::show_or_create_main_window(&app);
     tray::destroy_pm_popover(&app);
     Ok(())
 }

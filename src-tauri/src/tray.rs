@@ -368,15 +368,7 @@ fn build_pm_popover(app: &AppHandle) -> tauri::Result<tauri::WebviewWindow> {
 // ── Action handlers ─────────────────────────────────────────────────
 
 fn focus_main_window(app: &AppHandle) {
-    if let Some(win) = app.get_webview_window("main") {
-        let _ = win.unminimize();
-        let _ = win.show();
-        let _ = win.set_focus();
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
-    }
+    crate::show_or_create_main_window(app);
     // Reset the route to the user's first enabled tool. The
     // `FirstToolListener` in `src/router.tsx` consumes the event.
     let _ = app.emit("app:focus-first-tool", ());
