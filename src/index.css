@@ -608,7 +608,8 @@ body.markdown-terminal-active main {
   padding: 1em;
   background: #fff;
   color: #202124;
-  font-family: ui-sans-serif, system-ui, sans-serif;
+  font-family: Iosevka, "Iosevka Nerd Font Mono", "Iosevka Nerd Font",
+    "Iosevka Term", "SFMono-Regular", Consolas, monospace;
   line-height: 1.4;
   pointer-events: none;
   user-select: none;
@@ -617,6 +618,8 @@ body.markdown-terminal-active main {
 .zen-excalidraw-markdown-card h1,
 .zen-excalidraw-markdown-card h2,
 .zen-excalidraw-markdown-card h3,
+.zen-excalidraw-markdown-card h4,
+.zen-excalidraw-markdown-card h5,
 .zen-excalidraw-markdown-card p,
 .zen-excalidraw-markdown-card blockquote {
   margin: 0 0 0.55em;
@@ -625,12 +628,23 @@ body.markdown-terminal-active main {
 .zen-excalidraw-markdown-card h1 { font-size: 1.55em; }
 .zen-excalidraw-markdown-card h2 { font-size: 1.3em; }
 .zen-excalidraw-markdown-card h3 { font-size: 1.12em; }
+.zen-excalidraw-markdown-card h4 { font-size: 1em; }
+.zen-excalidraw-markdown-card h5 { font-size: 0.88em; }
 .zen-excalidraw-markdown-card code {
   padding: 0.08em 0.25em;
   border-radius: 0.2em;
   background: #eef0f4;
   font-family: ui-monospace, monospace;
 }
+.zen-excalidraw-markdown-card a {
+  color: #1864ab;
+  font-weight: 650;
+  pointer-events: auto;
+  text-decoration: underline;
+  text-decoration-thickness: 0.08em;
+  text-underline-offset: 0.15em;
+}
+.zen-excalidraw-markdown-card a:hover { color: #1c7ed6; }
 .zen-excalidraw-markdown-card img {
   max-width: 100%;
   max-height: 55%;
@@ -650,6 +664,92 @@ body.markdown-terminal-active main {
   border-color: #e8590c;
   background: #fff4e6;
   color: #8f3f0a;
+}
+.zen-excalidraw-markdown-card .zen-md-callout.is-warning {
+  border-color: #f08c00;
+  background: #fff9db;
+  color: #7a4b00;
+}
+.zen-excalidraw-markdown-card .zen-md-callout.is-error {
+  border-color: #e03131;
+  background: #fff0f0;
+  color: #9c1c1c;
+}
+.zen-excalidraw-markdown-card .zen-md-callout.is-note,
+.zen-excalidraw-markdown-card .zen-md-callout.is-notes {
+  border-color: #7950f2;
+  background: #f3f0ff;
+  color: #4c2ca3;
+}
+.zen-excalidraw-markdown-card .zen-md-callout.is-flavor {
+  border-color: #d6336c;
+  background: #fff0f6;
+  color: #9c2550;
+}
+.zen-excalidraw-markdown-card.is-dark {
+  background: #232329;
+  color: #f1f3f5;
+}
+.zen-excalidraw-markdown-card.is-dark code {
+  background: #373740;
+  color: #f8f9fa;
+}
+.zen-excalidraw-markdown-card.is-dark a { color: #74c0fc; }
+.zen-excalidraw-markdown-card.is-dark a:hover { color: #a5d8ff; }
+.zen-excalidraw-markdown-card.is-dark .zen-md-callout {
+  border-color: #4dabf7;
+  background: #17344a;
+  color: #d0ebff;
+}
+.zen-excalidraw-markdown-card.is-dark .zen-md-callout.is-important {
+  border-color: #ff922b;
+  background: #422b17;
+  color: #ffe8cc;
+}
+.zen-excalidraw-markdown-card.is-dark .zen-md-callout.is-warning {
+  border-color: #fcc419;
+  background: #403815;
+  color: #fff3bf;
+}
+.zen-excalidraw-markdown-card.is-dark .zen-md-callout.is-error {
+  border-color: #ff6b6b;
+  background: #481f24;
+  color: #ffe3e3;
+}
+.zen-excalidraw-markdown-card.is-dark .zen-md-callout.is-note,
+.zen-excalidraw-markdown-card.is-dark .zen-md-callout.is-notes {
+  border-color: #9775fa;
+  background: #302654;
+  color: #e5dbff;
+}
+.zen-excalidraw-markdown-card.is-dark .zen-md-callout.is-flavor {
+  border-color: #f06595;
+  background: #482337;
+  color: #ffdeeb;
+}
+.zen-excalidraw-markdown-card.is-editing {
+  padding: 0;
+  pointer-events: auto;
+  user-select: text;
+}
+.zen-excalidraw-markdown-card.is-editing textarea {
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  resize: none;
+  padding: 1em;
+  border: 0;
+  outline: 0;
+  background: #fff;
+  color: #202124;
+  font: inherit;
+  line-height: 1.4;
+}
+.zen-excalidraw-markdown-card.is-editing.is-dark textarea {
+  background: #232329;
+  color: #f1f3f5;
+  caret-color: #f1f3f5;
+  color-scheme: dark;
 }
 
 @media (max-width: 720px) {

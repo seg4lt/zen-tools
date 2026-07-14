@@ -89,8 +89,13 @@ export function useOpenFile() {
    *  `*.excalidraw.png` saves take.
    */
   const saveCurrent = useCallback(
-    async (overrideContent?: string | Uint8Array) => {
-      const tab = activeTab(state);
+    async (
+      overrideContent?: string | Uint8Array,
+      targetPath?: string,
+    ) => {
+      const tab = targetPath
+        ? state.tabs.find((candidate) => candidate.path === targetPath)
+        : activeTab(state);
       if (!tab) return;
       try {
         if (overrideContent instanceof Uint8Array) {
@@ -99,7 +104,7 @@ export function useOpenFile() {
           const content = overrideContent ?? tab.doc;
           await markdownTauri.writeFile(tab.path, content);
         }
-        dispatch({ type: "markSaved" });
+        dispatch({ type: "markSaved", path: tab.path });
       } catch (err) {
         console.error("[markdown] save failed", err);
       }

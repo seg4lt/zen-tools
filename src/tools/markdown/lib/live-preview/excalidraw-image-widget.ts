@@ -39,6 +39,7 @@
  */
 
 import { WidgetType } from "@codemirror/view";
+import { open as openExternalUrl } from "@tauri-apps/plugin-shell";
 import { assetUrl } from "../tauri";
 
 export class ExcalidrawImageWidget extends WidgetType {
@@ -112,32 +113,54 @@ export class ExcalidrawImageWidget extends WidgetType {
         "@excalidraw/excalidraw"
       );
       const restored = await loadFromBlob(blob, null, null);
+      const themedAppState = {
+        ...restored.appState,
+        theme: this.theme,
+        // Override the saved canvas background so the embed flips
+        // with the *host* theme rather than carrying whatever was
+        // active when the user pressed save.  Excalidraw's `theme`
+        // flag inverts stock strokes/fills, but it leaves
+        // `viewBackgroundColor` alone — the spread above would
+        // otherwise restore a baked white (or black) bg and we'd
+        // see a light rectangle in a dark editor (or vice versa).
+        //
+        // The two values match Excalidraw's own canvas colours
+        // (`#ffffff` / `#121212`) so the embed reads as a native
+        // pane in either theme.  Custom-painted element colours
+        // still don't theme — that's an Excalidraw library
+        // constraint, not something we can override here.
+        viewBackgroundColor:
+          this.theme === "dark" ? "#121212" : "#ffffff",
+        // Don't re-embed the scene on the re-themed export — the
+        // canonical copy with the scene already lives on disk;
+        // this in-memory render is just for display.
+        exportEmbedScene: false,
+      } as const;
       const svgEl = await exportToSvg({
         elements: restored.elements,
-        appState: {
-          ...restored.appState,
-          theme: this.theme,
-          // Override the saved canvas background so the embed flips
-          // with the *host* theme rather than carrying whatever was
-          // active when the user pressed save.  Excalidraw's `theme`
-          // flag inverts stock strokes/fills, but it leaves
-          // `viewBackgroundColor` alone — the spread above would
-          // otherwise restore a baked white (or black) bg and we'd
-          // see a light rectangle in a dark editor (or vice versa).
-          //
-          // The two values match Excalidraw's own canvas colours
-          // (`#ffffff` / `#121212`) so the embed reads as a native
-          // pane in either theme.  Custom-painted element colours
-          // still don't theme — that's an Excalidraw library
-          // constraint, not something we can override here.
-          viewBackgroundColor:
-            this.theme === "dark" ? "#121212" : "#ffffff",
-          // Don't re-embed the scene on the re-themed export — the
-          // canonical copy with the scene already lives on disk;
-          // this in-memory render is just for display.
-          exportEmbedScene: false,
-        },
+        appState: themedAppState,
         files: restored.files,
+      });
+      const { appendMarkdownCardsToSvg } = await import(
+        "../../components/excalidraw-editor"
+      );
+      appendMarkdownCardsToSvg(svgEl, restored.elements, themedAppState);
+      // Tauri webviews do not hand SVG/HTML target=_blank links to the OS.
+      // Route markdown-card SVG anchors through the shell plugin so the
+      // default browser or mail app opens them.
+      const markdownLinks = svgEl.querySelectorAll(
+        "[data-zen-markdown-card] a[href]",
+      ) as NodeListOf<SVGAElement>;
+      markdownLinks.forEach((anchor: SVGAElement) => {
+        anchor.addEventListener("click", (event: MouseEvent) => {
+          const href = anchor.getAttribute("href");
+          if (!href) return;
+          event.preventDefault();
+          event.stopPropagation();
+          void openExternalUrl(href).catch((error) =>
+            console.error("[markdown] open SVG link failed", error),
+          );
+        });
       });
       // Mark the freshly-rendered svg so users can spot whether the
       // re-theme path took or whether the fallback is showing.

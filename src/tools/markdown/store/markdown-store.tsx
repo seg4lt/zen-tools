@@ -559,7 +559,10 @@ function reducer(state: MarkdownState, action: MarkdownAction): MarkdownState {
       let changed = false;
       const tabs = state.tabs.map((t) => {
         if (t.id !== id) return t;
-        if (t.doc === action.doc) return t;
+        // Excalidraw uses a small sentinel instead of storing its multi-MB
+        // scene in React state. Once autosave clears `dirty`, the next canvas
+        // edit repeats that sentinel and must still mark the tab dirty again.
+        if (t.doc === action.doc && t.dirty) return t;
         changed = true;
         return { ...t, doc: action.doc, dirty: true };
       });

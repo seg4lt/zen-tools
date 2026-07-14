@@ -57,6 +57,7 @@ import type {
 } from "@excalidraw/excalidraw/element/types";
 import type { AppState, BinaryFiles } from "@excalidraw/excalidraw/types";
 import { convertFileSrc } from "@tauri-apps/api/core";
+import { open as openExternalUrl } from "@tauri-apps/plugin-shell";
 import {
   ChevronLeft,
   ChevronRight,
@@ -82,7 +83,14 @@ import {
   Server,
   Shield,
 } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  createElement,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import type React from "react";
 import { createPortal } from "react-dom";
 import { terminalSetTrafficLightsHidden } from "@/tools/terminal/lib/tauri";
@@ -111,9 +119,9 @@ interface ExcalidrawEditorProps {
    *  scene.  The host's `saveCurrent(...)` routes a `string` through
    *  `writeFile` (text, used for the SVG path) and a `Uint8Array`
    *  through `writeBytes` (binary, used for the PNG path). */
-  onSave: (data: string | Uint8Array) => void;
+  onSave: (data: string | Uint8Array) => void | Promise<void>;
   /** Called 500 ms after the last user edit with the serialized scene. */
-  onAutoSave: (data: string | Uint8Array) => void;
+  onAutoSave: (data: string | Uint8Array) => void | Promise<void>;
   /** `"dark"` or `"light"` — passed straight through to Excalidraw. */
   theme: "light" | "dark";
 }
@@ -396,61 +404,435 @@ function architectureIconLabel(service: ArchitectureService): string {
     : "▣";
 }
 
-function markdownToCanvasText(markdown: string): string {
-  return markdown
-    .split("\n")
-    .map((line) => {
-      if (line.startsWith("> [!IMPORTANT]")) return "⚠  IMPORTANT";
-      if (line.startsWith("> [!NOTE]")) return "ⓘ  NOTE";
-      if (line.startsWith("> ")) return `│ ${line.slice(2)}`;
-      if (/^[-*] /.test(line)) return `• ${line.slice(2)}`;
-      if (/^#{1,3} /.test(line)) return line.replace(/^#{1,3} /, "").toUpperCase();
-      return line
-        .replace(/\*\*([^*]+)\*\*/g, "$1")
-        .replace(/`([^`]+)`/g, "$1")
-        .replace(/^!\[([^\]]*)\]\(.+\)$/, "🖼  $1");
-    })
-    .join("\n");
+const CALLOUT_LABELS: Record<string, string> = {
+  important: "Important",
+  info: "Info",
+  warning: "Warning",
+  note: "Note",
+  notes: "Notes",
+  error: "Error",
+  flavor: "Flavor",
+};
+
+function safeMarkdownHref(href: string): string | null {
+  const value = href.trim();
+  return /^(https?:|mailto:)/i.test(value) ? value : null;
 }
 
-function createMarkdownCardElements(markdown: string, x: number, y: number) {
-  const canvasText = markdownToCanvasText(markdown);
-  const lines = canvasText.split("\n");
+function renderInlineMarkdown(text: string): React.ReactNode[] {
+  const pattern =
+    /(\[([^\]]+)\]\(([^)\s]+)(?:\s+"[^"]*")?\)|`([^`]+)`|\*\*([^*]+)\*\*|~~([^~]+)~~|\*([^*]+)\*)/g;
+  const content: React.ReactNode[] = [];
+  let cursor = 0;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(text)) !== null) {
+    if (match.index > cursor) content.push(text.slice(cursor, match.index));
+    const key = `${match.index}-${match[0]}`;
+    if (match[2] && match[3]) {
+      const href = safeMarkdownHref(match[3]);
+      content.push(
+        href ? (
+          <a
+            key={key}
+            href={href}
+            target="_blank"
+            rel="noreferrer noopener"
+            onPointerDown={(event) => event.stopPropagation()}
+            onClick={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              void openExternalUrl(href).catch((error) =>
+                console.error("[excalidraw] open markdown link failed", error),
+              );
+            }}
+          >
+            {match[2]}
+          </a>
+        ) : (
+          match[2]
+        ),
+      );
+    } else if (match[4]) {
+      content.push(<code key={key}>{match[4]}</code>);
+    } else if (match[5]) {
+      content.push(<strong key={key}>{match[5]}</strong>);
+    } else if (match[6]) {
+      content.push(<s key={key}>{match[6]}</s>);
+    } else if (match[7]) {
+      content.push(<em key={key}>{match[7]}</em>);
+    }
+    cursor = pattern.lastIndex;
+  }
+  if (cursor < text.length) content.push(text.slice(cursor));
+  return content;
+}
+
+function MarkdownCardPreview({
+  markdown,
+  elementId,
+  onGrow,
+}: {
+  markdown: string;
+  elementId: string;
+  onGrow: (elementId: string, height: number) => void;
+}) {
+  const previewRef = useRef<HTMLDivElement | null>(null);
+  const lines = markdown.split("\n");
+  const content: React.ReactNode[] = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index] ?? "";
+    const callout = line.match(
+      /^>\s*\[!(IMPORTANT|INFO|WARNING|NOTE|NOTES|ERROR|FLAVOR)\]\s*(.*)$/i,
+    );
+    if (callout) {
+      const kind = callout[1].toLowerCase();
+      const body = callout[2] ? [callout[2]] : [];
+      while (lines[index + 1]?.startsWith("> ")) {
+        index += 1;
+        body.push((lines[index] ?? "").slice(2));
+      }
+      content.push(
+        <div key={`callout-${index}`} className={`zen-md-callout is-${kind}`}>
+          <strong>{CALLOUT_LABELS[kind]}</strong>
+          {body.map((text, bodyIndex) => (
+            <p key={bodyIndex}>{renderInlineMarkdown(text)}</p>
+          ))}
+        </div>,
+      );
+      continue;
+    }
+
+    const heading = line.match(/^(#{1,5})\s+(.+)$/);
+    if (heading) {
+      const level = heading[1].length as 1 | 2 | 3 | 4 | 5;
+      content.push(
+        createElement(
+          `h${level}`,
+          { key: `heading-${index}` },
+          renderInlineMarkdown(heading[2]),
+        ),
+      );
+      continue;
+    }
+
+    if (/^[-*]\s+/.test(line)) {
+      const items = [line.replace(/^[-*]\s+/, "")];
+      while (/^[-*]\s+/.test(lines[index + 1] ?? "")) {
+        index += 1;
+        items.push((lines[index] ?? "").replace(/^[-*]\s+/, ""));
+      }
+      content.push(
+        <ul key={`list-${index}`} className="zen-md-list">
+          {items.map((item, itemIndex) => (
+            <li key={itemIndex}>{renderInlineMarkdown(item)}</li>
+          ))}
+        </ul>,
+      );
+      continue;
+    }
+
+    if (!line.trim()) {
+      content.push(<div key={`space-${index}`} className="zen-md-spacer" />);
+      continue;
+    }
+    content.push(
+      <p key={`paragraph-${index}`}>{renderInlineMarkdown(line)}</p>,
+    );
+  }
+  useLayoutEffect(() => {
+    const preview = previewRef.current;
+    if (!preview) return;
+    const measure = () => {
+      const card = preview.parentElement;
+      onGrow(
+        elementId,
+        Math.ceil(card?.scrollHeight ?? preview.scrollHeight),
+      );
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(preview);
+    return () => observer.disconnect();
+  }, [elementId, markdown, onGrow]);
+
+  return (
+    <div ref={previewRef} className="zen-excalidraw-markdown-preview">
+      {content}
+    </div>
+  );
+}
+
+const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
+
+function svgCalloutColors(kind: string, dark: boolean) {
+  const light: Record<string, { fill: string; stroke: string; text: string }> = {
+    important: { fill: "#fff4e6", stroke: "#e8590c", text: "#8f3f0a" },
+    warning: { fill: "#fff9db", stroke: "#f08c00", text: "#7a4b00" },
+    error: { fill: "#fff0f0", stroke: "#e03131", text: "#9c1c1c" },
+    note: { fill: "#f3f0ff", stroke: "#7950f2", text: "#4c2ca3" },
+    notes: { fill: "#f3f0ff", stroke: "#7950f2", text: "#4c2ca3" },
+    flavor: { fill: "#fff0f6", stroke: "#d6336c", text: "#9c2550" },
+    info: { fill: "#e7f5ff", stroke: "#168ddd", text: "#12547a" },
+  };
+  const darkColors: Record<string, { fill: string; stroke: string; text: string }> = {
+    important: { fill: "#422b17", stroke: "#ff922b", text: "#ffe8cc" },
+    warning: { fill: "#403815", stroke: "#fcc419", text: "#fff3bf" },
+    error: { fill: "#481f24", stroke: "#ff6b6b", text: "#ffe3e3" },
+    note: { fill: "#302654", stroke: "#9775fa", text: "#e5dbff" },
+    notes: { fill: "#302654", stroke: "#9775fa", text: "#e5dbff" },
+    flavor: { fill: "#482337", stroke: "#f06595", text: "#ffdeeb" },
+    info: { fill: "#17344a", stroke: "#4dabf7", text: "#d0ebff" },
+  };
+  const palette = dark ? darkColors : light;
+  return palette[kind] ?? palette.info;
+}
+
+export function appendMarkdownCardsToSvg(
+  svg: SVGSVGElement,
+  elements: readonly OrderedExcalidrawElement[],
+  appState: Pick<AppState, "theme">,
+) {
+  const cards = elements.filter(
+    (element) =>
+      element.type === "embeddable" &&
+      typeof element.customData?.[MARKDOWN_CARD_KEY] === "string" &&
+      !element.isDeleted,
+  );
+  if (cards.length === 0) return;
+
+  const visibleElements = getNonDeletedElements(elements);
+  const [minX, minY] = getCommonBounds(visibleElements);
+  const padding = 10;
+  const offsetX = -minX + padding;
+  const offsetY = -minY + padding;
+  const dark = appState.theme === "dark";
+  const document = svg.ownerDocument;
+  const makeSvgElement = <K extends keyof SVGElementTagNameMap>(name: K) =>
+    document.createElementNS(SVG_NAMESPACE, name);
+
+  for (const card of cards) {
+    const group = makeSvgElement("g");
+    group.setAttribute("data-zen-markdown-card", card.id);
+    const centerX = card.width / 2;
+    const centerY = card.height / 2;
+    group.setAttribute(
+      "transform",
+      `translate(${card.x + offsetX} ${card.y + offsetY}) rotate(${(card.angle * 180) / Math.PI} ${centerX} ${centerY})`,
+    );
+
+    const surface = makeSvgElement("rect");
+    surface.setAttribute("width", String(card.width));
+    surface.setAttribute("height", String(card.height));
+    surface.setAttribute("rx", "16");
+    surface.setAttribute("fill", dark ? "#232329" : "#ffffff");
+    surface.setAttribute("stroke", "#6965db");
+    surface.setAttribute("stroke-width", "2");
+    group.appendChild(surface);
+
+    const left = 20;
+    const contentWidth = Math.max(80, card.width - left * 2);
+    let y = 24;
+    const appendText = (
+      value: string,
+      fontSize: number,
+      options?: { weight?: string; color?: string; prefix?: string },
+    ) => {
+      const markdownLink = value.match(/\[([^\]]+)\]\((https?:\/\/[^)\s]+|mailto:[^)\s]+)\)/i);
+      const linkHref = markdownLink ? safeMarkdownHref(markdownLink[2]) : null;
+      const displayValue = value
+        .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+        .replace(/\*\*([^*]+)\*\*/g, "$1")
+        .replace(/~~([^~]+)~~/g, "$1")
+        .replace(/`([^`]+)`/g, "$1")
+        .replace(/\*([^*]+)\*/g, "$1");
+      const lineHeight = fontSize * 1.35;
+      const charactersPerLine = Math.max(
+        8,
+        Math.floor(contentWidth / (fontSize * 0.61)),
+      );
+      const words = `${options?.prefix ?? ""}${displayValue}`.split(/\s+/);
+      const wrapped: string[] = [];
+      let current = "";
+      for (const word of words) {
+        const next = current ? `${current} ${word}` : word;
+        if (current && next.length > charactersPerLine) {
+          wrapped.push(current);
+          current = word;
+        } else {
+          current = next;
+        }
+      }
+      wrapped.push(current);
+      const text = makeSvgElement("text");
+      text.setAttribute("x", String(left));
+      text.setAttribute("y", String(y + fontSize));
+      text.setAttribute(
+        "font-family",
+        'Iosevka, "Iosevka Nerd Font Mono", "Iosevka Nerd Font", "Iosevka Term", monospace',
+      );
+      text.setAttribute("font-size", String(fontSize));
+      text.setAttribute("font-weight", options?.weight ?? "400");
+      text.setAttribute("fill", options?.color ?? (dark ? "#f1f3f5" : "#202124"));
+      wrapped.forEach((line, index) => {
+        const span = makeSvgElement("tspan");
+        span.setAttribute("x", String(left));
+        span.setAttribute("dy", index === 0 ? "0" : String(lineHeight));
+        span.textContent = line;
+        text.appendChild(span);
+      });
+      if (linkHref) {
+        const anchor = makeSvgElement("a");
+        anchor.setAttribute("href", linkHref);
+        anchor.setAttribute("target", "_blank");
+        text.setAttribute("text-decoration", "underline");
+        text.setAttribute("fill", dark ? "#74c0fc" : "#1864ab");
+        anchor.appendChild(text);
+        group.appendChild(anchor);
+      } else {
+        group.appendChild(text);
+      }
+      y += wrapped.length * lineHeight;
+    };
+
+    const lines = String(card.customData?.[MARKDOWN_CARD_KEY]).split("\n");
+    for (let index = 0; index < lines.length; index += 1) {
+      const line = lines[index] ?? "";
+      const callout = line.match(
+        /^>\s*\[!(IMPORTANT|INFO|WARNING|NOTE|NOTES|ERROR|FLAVOR)\]\s*(.*)$/i,
+      );
+      if (callout) {
+        const kind = callout[1].toLowerCase();
+        const colors = svgCalloutColors(kind, dark);
+        const body = callout[2] ? [callout[2]] : [];
+        while (lines[index + 1]?.startsWith("> ")) {
+          index += 1;
+          body.push((lines[index] ?? "").slice(2));
+        }
+        const calloutTop = y;
+        const calloutRect = makeSvgElement("rect");
+        calloutRect.setAttribute("x", String(left - 8));
+        calloutRect.setAttribute("y", String(calloutTop));
+        calloutRect.setAttribute("width", String(contentWidth + 16));
+        calloutRect.setAttribute("rx", "5");
+        calloutRect.setAttribute("fill", colors.fill);
+        calloutRect.setAttribute("stroke", colors.stroke);
+        calloutRect.setAttribute("stroke-width", "2");
+        group.appendChild(calloutRect);
+        y += 8;
+        appendText(CALLOUT_LABELS[kind], 15, {
+          weight: "700",
+          color: colors.text,
+        });
+        for (const bodyLine of body) {
+          appendText(bodyLine, 14, { color: colors.text });
+        }
+        y += 8;
+        calloutRect.setAttribute("height", String(y - calloutTop));
+        y += 8;
+        continue;
+      }
+      const heading = line.match(/^(#{1,5})\s+(.+)$/);
+      if (heading) {
+        const sizes = [0, 29, 25, 22, 19, 16];
+        appendText(heading[2], sizes[heading[1].length] ?? 16, {
+          weight: "700",
+        });
+        y += 6;
+      } else if (/^[-*]\s+/.test(line)) {
+        appendText(line.replace(/^[-*]\s+/, ""), 16, { prefix: "• " });
+      } else if (!line.trim()) {
+        y += 10;
+      } else {
+        appendText(line, 16);
+      }
+    }
+    svg.appendChild(group);
+  }
+}
+
+function createMarkdownCardElements(
+  markdown: string,
+  x: number,
+  y: number,
+  requestedWidth?: number,
+) {
+  const lines = markdown.split("\n");
   const longestLine = Math.max(20, ...lines.map((line) => line.length));
-  const width = Math.min(720, Math.max(360, longestLine * 9 + 48));
-  const height = Math.min(640, Math.max(180, lines.length * 24 + 48));
-  const groupId = `markdown-card-${crypto.randomUUID()}`;
-  return convertToExcalidrawElements(
+  const width = requestedWidth ?? Math.min(720, Math.max(360, longestLine * 9 + 48));
+  const charactersPerLine = Math.max(20, Math.floor((width - 48) / 9));
+  const visualLineCount = lines.reduce(
+    (count, line) => count + Math.max(1, Math.ceil(line.length / charactersPerLine)),
+    0,
+  );
+  const height = Math.max(180, visualLineCount * 24 + 48);
+  // `convertToExcalidrawElements` intentionally passes iframe/embeddable
+  // skeletons through unchanged. Run this custom element through restore so
+  // required fields such as groupIds, boundElements, frameId, and index are
+  // always present before Excalidraw inspects it.
+  return restoreElements(
     [
       {
-        type: "rectangle",
+        type: "embeddable",
         x,
         y,
         width,
         height,
-        backgroundColor: "#ffffff",
+        backgroundColor: "transparent",
         strokeColor: "#6965db",
         fillStyle: "solid",
         strokeWidth: 2,
         roundness: { type: 3 },
-        groupIds: [groupId],
+        link: "zen-tools://markdown-card",
         customData: {
           [MARKDOWN_CARD_KEY]: markdown,
           zenToolsMarkdownBaseWidth: width,
         },
       },
-      {
-        type: "text",
-        x: x + 24,
-        y: y + 22,
-        text: canvasText,
-        fontSize: 18,
-        strokeColor: "#202124",
-        groupIds: [groupId],
-      },
-    ] as unknown as Parameters<typeof convertToExcalidrawElements>[0],
-    { regenerateIds: true },
+    ] as never,
+    null,
   );
+}
+
+/** Upgrade native-shape markdown cards to the in-canvas HTML card renderer. */
+function upgradeLegacyMarkdownCards(
+  elements: readonly OrderedExcalidrawElement[],
+): readonly OrderedExcalidrawElement[] {
+  const legacyCards = elements.filter(
+    (element) =>
+      element.type === "rectangle" &&
+      typeof element.customData?.[MARKDOWN_CARD_KEY] === "string",
+  );
+  if (legacyCards.length === 0) return elements;
+
+  const replacedIds = new Set<string>();
+  const replacements: OrderedExcalidrawElement[] = [];
+  for (const card of legacyCards) {
+    replacedIds.add(card.id);
+    for (const bound of card.boundElements ?? []) {
+      if (bound.type === "text") replacedIds.add(bound.id);
+    }
+    const groups = new Set(card.groupIds);
+    for (const candidate of elements) {
+      if (
+        candidate.type === "text" &&
+        candidate.groupIds.some((groupId) => groups.has(groupId))
+      ) {
+        replacedIds.add(candidate.id);
+      }
+    }
+    replacements.push(
+      ...createMarkdownCardElements(
+        String(card.customData?.[MARKDOWN_CARD_KEY]),
+        card.x,
+        card.y,
+        card.width,
+      ),
+    );
+  }
+  return [
+    ...elements.filter((element) => !replacedIds.has(element.id)),
+    ...replacements,
+  ];
 }
 
 const PRESENTATION_ORDER_KEY = "zenToolsPresentationOrder";
@@ -644,7 +1026,6 @@ export default function ExcalidrawEditor({
     useState<string | null>(null);
   const [selectedMarkdownCardId, setSelectedMarkdownCardId] =
     useState<string | null>(null);
-  const [markdownDraft, setMarkdownDraft] = useState("");
   const [selectedDirectionalArrowIds, setSelectedDirectionalArrowIds] =
     useState<string[]>([]);
   const [selectedArrowsAnimated, setSelectedArrowsAnimated] = useState(false);
@@ -675,6 +1056,7 @@ export default function ExcalidrawEditor({
   const sceneRef = useRef<LiveScene | null>(null);
   const fullscreenBeforePresentationRef = useRef(false);
   const dirtiedRef = useRef(false);
+  const changeVersionRef = useRef(0);
   const readyRef = useRef(false);
   const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const onAutoSaveRef = useRef(onAutoSave);
@@ -686,18 +1068,6 @@ export default function ExcalidrawEditor({
   useEffect(() => {
     setLibraryResultLimit(48);
   }, [architectureQuery]);
-
-  useEffect(() => {
-    if (!selectedMarkdownCardId) {
-      setMarkdownDraft("");
-      return;
-    }
-    const element = sceneRef.current?.elements.find(
-      (candidate) => candidate.id === selectedMarkdownCardId,
-    );
-    const markdown = element?.customData?.[MARKDOWN_CARD_KEY];
-    setMarkdownDraft(typeof markdown === "string" ? markdown : "");
-  }, [selectedMarkdownCardId]);
 
   const serializeScene = useCallback(
     async (scene: LiveScene): Promise<string | Uint8Array> => {
@@ -720,9 +1090,33 @@ export default function ExcalidrawEditor({
         appState: exportAppState,
         files: scene.files,
       });
+      // Custom `renderEmbeddable` HTML is not part of Excalidraw's SVG
+      // renderer. Add an SVG-native snapshot of each markdown card so linked
+      // drawings show their notes, while the metadata still contains the
+      // original editable embeddable scene.
+      appendMarkdownCardsToSvg(svgEl, scene.elements, exportAppState);
       return new XMLSerializer().serializeToString(svgEl);
     },
     [path],
+  );
+
+  const growMarkdownCard = useCallback(
+    (elementId: string, requiredHeight: number) => {
+      const api = apiRef.current;
+      if (!api || !Number.isFinite(requiredHeight)) return;
+      const elements = api.getSceneElementsIncludingDeleted();
+      const card = elements.find((element) => element.id === elementId);
+      if (!card || requiredHeight <= card.height + 1) return;
+      api.updateScene({
+        elements: elements.map((element) =>
+          element.id === elementId
+            ? newElementWith(element, { height: requiredHeight })
+            : element,
+        ),
+        captureUpdate: CaptureUpdateAction.IMMEDIATELY,
+      });
+    },
+    [],
   );
 
   const focusPresentationSlide = useCallback(
@@ -1356,96 +1750,6 @@ export default function ExcalidrawEditor({
     [],
   );
 
-  const commitMarkdownCard = useCallback(() => {
-    if (!selectedMarkdownCardId) return;
-    const api = apiRef.current;
-    if (!api) return;
-    const allElements = api.getSceneElementsIncludingDeleted();
-    const card = allElements.find(
-      (element) => element.id === selectedMarkdownCardId,
-    );
-    if (!card) return;
-    const groupId = card.groupIds[0];
-    const created = createMarkdownCardElements(markdownDraft, card.x, card.y);
-    api.updateScene({
-      elements: [
-        ...allElements.map((element) =>
-          element.id === selectedMarkdownCardId ||
-          (groupId && element.groupIds.includes(groupId))
-            ? newElementWith(element, { isDeleted: true })
-            : element,
-        ),
-        ...created,
-      ],
-      appState: {
-        selectedElementIds: Object.fromEntries(
-          created.map((element) => [element.id, true]),
-        ),
-      },
-      captureUpdate: CaptureUpdateAction.IMMEDIATELY,
-    });
-  }, [markdownDraft, selectedMarkdownCardId]);
-
-  const pasteImageIntoMarkdown = useCallback(
-    (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
-      const image = Array.from(event.clipboardData.files).find((file) =>
-        file.type.startsWith("image/"),
-      );
-      if (!image) return;
-      event.preventDefault();
-      const reader = new FileReader();
-      reader.onload = () => {
-        const dataUrl = typeof reader.result === "string" ? reader.result : "";
-        const api = apiRef.current;
-        const card = api
-          ?.getSceneElements()
-          .find((element) => element.id === selectedMarkdownCardId);
-        if (!api || !card || !dataUrl) return;
-        const fileId = crypto.randomUUID();
-        api.addFiles([
-          {
-            id: fileId,
-            dataURL: dataUrl,
-            mimeType: image.type,
-            created: Date.now(),
-          } as unknown as Parameters<ExcalidrawImperativeAPI["addFiles"]>[0][number],
-        ]);
-        const preview = new Image();
-        preview.onload = () => {
-          const maxWidth = Math.max(160, card.width * 0.8);
-          const scale = Math.min(1, maxWidth / Math.max(1, preview.width));
-          const width = Math.max(80, preview.width * scale);
-          const height = Math.max(80, preview.height * scale);
-          const created = convertToExcalidrawElements(
-            [
-              {
-                type: "image",
-                x: card.x + (card.width - width) / 2,
-                y: card.y + card.height + 24,
-                width,
-                height,
-                fileId,
-                status: "saved",
-                scale: [1, 1],
-              },
-            ] as unknown as Parameters<typeof convertToExcalidrawElements>[0],
-            { regenerateIds: true },
-          );
-          api.updateScene({
-            elements: [...api.getSceneElementsIncludingDeleted(), ...created],
-            appState: {
-              selectedElementIds: { [created[0].id]: true },
-            },
-            captureUpdate: CaptureUpdateAction.IMMEDIATELY,
-          });
-        };
-        preview.src = dataUrl;
-      };
-      reader.readAsDataURL(image);
-    },
-    [selectedMarkdownCardId],
-  );
-
   // Excalidraw fires onChange while restoring initialData. Give that
   // mount-time callback a frame to settle so opening a drawing never
   // counts as an edit or schedules an overwrite.
@@ -1462,6 +1766,17 @@ export default function ExcalidrawEditor({
     return () => {
       if (autoSaveTimerRef.current !== null) {
         clearTimeout(autoSaveTimerRef.current);
+        autoSaveTimerRef.current = null;
+        // A tab can be switched or closed inside the debounce window. Flush
+        // the pending scene so that a fast navigation never drops the edit.
+        const latest = sceneRef.current;
+        if (latest && dirtiedRef.current) {
+          void serializeScene(latest)
+            .then((data) => onAutoSaveRef.current(data))
+            .catch((err) =>
+              console.error("[excalidraw] final auto-save failed", err),
+            );
+        }
       }
       if (thumbnailTimerRef.current !== null) {
         clearTimeout(thumbnailTimerRef.current);
@@ -1469,7 +1784,7 @@ export default function ExcalidrawEditor({
       thumbnailUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
       thumbnailUrlsRef.current = [];
     };
-  }, []);
+  }, [serializeScene]);
 
   // Match the terminal's app-viewport mode on macOS: HTML covers the whole
   // webview and AppKit's traffic lights are hidden until the user exits.
@@ -1494,6 +1809,7 @@ export default function ExcalidrawEditor({
   useEffect(() => {
     let cancelled = false;
     dirtiedRef.current = false;
+    changeVersionRef.current = 0;
     setPresentationMode(false);
     setFullscreen(false);
     fullscreenBeforePresentationRef.current = false;
@@ -1536,7 +1852,7 @@ export default function ExcalidrawEditor({
         const restored = await loadFromBlob(blob, null, null);
         if (cancelled) return;
         setInitialData({
-          elements: restored.elements,
+          elements: upgradeLegacyMarkdownCards(restored.elements),
           appState: restored.appState,
           files: restored.files,
         });
@@ -1975,26 +2291,6 @@ export default function ExcalidrawEditor({
           ) : null}
         </div>
       ) : null}
-      {selectedMarkdownCardId && !presentationMode ? (
-        <div className="zen-excalidraw-markdown-inspector">
-          <div className="zen-excalidraw-inspector-title">Markdown card</div>
-          <textarea
-            value={markdownDraft}
-            onPaste={pasteImageIntoMarkdown}
-            onChange={(event) => setMarkdownDraft(event.target.value)}
-            onKeyDown={(event) => {
-              if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
-                event.preventDefault();
-                commitMarkdownCard();
-              }
-            }}
-          />
-          <div className="zen-excalidraw-markdown-actions">
-            <small>Paste images directly · ⌘Enter to apply</small>
-            <button type="button" onClick={commitMarkdownCard}>Apply</button>
-          </div>
-        </div>
-      ) : null}
       {framePanelOpen && !presentationMode ? (
         <div
           className="zen-excalidraw-frame-panel"
@@ -2296,6 +2592,76 @@ export default function ExcalidrawEditor({
         // React is the sole owner of this controlled value; the capture-phase
         // shortcut handler above handles Alt+R without an internal-state race.
         viewModeEnabled={presentationMode}
+        validateEmbeddable={() => true}
+        renderEmbeddable={(element, appState) => {
+          const markdown = element.customData?.[MARKDOWN_CARD_KEY];
+          if (typeof markdown !== "string") return null;
+          const isEditing =
+            appState.activeEmbeddable?.element.id === element.id &&
+            appState.activeEmbeddable.state === "active";
+          if (isEditing) {
+            return (
+              <div
+                className={`zen-excalidraw-markdown-card is-editing${
+                  theme === "dark" ? " is-dark" : ""
+                }`}
+              >
+                <textarea
+                  autoFocus
+                  aria-label="Edit markdown card"
+                  value={markdown}
+                  onPointerDown={(event) => event.stopPropagation()}
+                  onChange={(event) => {
+                    const value = event.target.value;
+                    const requiredHeight = Math.ceil(
+                      event.currentTarget.scrollHeight + 2,
+                    );
+                    const api = apiRef.current;
+                    if (!api) return;
+                    api.updateScene({
+                      elements: api
+                        .getSceneElementsIncludingDeleted()
+                        .map((candidate) =>
+                          candidate.id === element.id
+                            ? newElementWith(candidate, {
+                                customData: {
+                                  ...candidate.customData,
+                                  [MARKDOWN_CARD_KEY]: value,
+                                },
+                              })
+                            : candidate,
+                        ),
+                      captureUpdate: CaptureUpdateAction.IMMEDIATELY,
+                    });
+                    growMarkdownCard(element.id, requiredHeight);
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key !== "Escape") return;
+                    event.currentTarget.blur();
+                  }}
+                  onBlur={() => {
+                    apiRef.current?.updateScene({
+                      appState: { activeEmbeddable: null },
+                    });
+                  }}
+                />
+              </div>
+            );
+          }
+          return (
+            <div
+              className={`zen-excalidraw-markdown-card${
+                theme === "dark" ? " is-dark" : ""
+              }`}
+            >
+              <MarkdownCardPreview
+                markdown={markdown}
+                elementId={element.id}
+                onGrow={growMarkdownCard}
+              />
+            </div>
+          );
+        }}
         onPointerDown={(_activeTool, pointerDownState) => {
           const hitElement = pointerDownState.hit.element;
           if (!hitElement) return;
@@ -2328,22 +2694,32 @@ export default function ExcalidrawEditor({
         onChange={(elements, appState, files) => {
           const scene = { elements, appState, files };
           sceneRef.current = scene;
+
           refreshFrameThumbnails(scene);
-          const selectedDrilldownElement = elements.find(
+          const selectedElement = elements.find(
             (element) =>
               appState.selectedElementIds[element.id] &&
               element.type !== "frame" &&
               element.type !== "magicframe",
           );
-          setSelectedDrilldownElementId(
-            selectedDrilldownElement?.id ?? null,
-          );
-          const selectedMarkdownCard = elements.find(
+          const directlySelectedMarkdownCard = elements.find(
             (element) =>
               appState.selectedElementIds[element.id] &&
               typeof element.customData?.[MARKDOWN_CARD_KEY] === "string",
           );
+          const selectedMarkdownCard =
+            directlySelectedMarkdownCard ??
+            (selectedElement?.type === "text" && selectedElement.containerId
+              ? elements.find(
+                  (element) =>
+                    element.id === selectedElement.containerId &&
+                    typeof element.customData?.[MARKDOWN_CARD_KEY] === "string",
+                )
+              : undefined);
           setSelectedMarkdownCardId(selectedMarkdownCard?.id ?? null);
+          setSelectedDrilldownElementId(
+            selectedMarkdownCard ? null : (selectedElement?.id ?? null),
+          );
           const nextFrames = orderedPresentationFrames(
             elements,
             manualFrameOrderRef.current ?? undefined,
@@ -2503,6 +2879,7 @@ export default function ExcalidrawEditor({
             return unchanged ? current : flowPaths;
           });
           if (!readyRef.current) return;
+          changeVersionRef.current += 1;
           if (!dirtiedRef.current) {
             dirtiedRef.current = true;
             onDirty();
@@ -2514,8 +2891,16 @@ export default function ExcalidrawEditor({
             autoSaveTimerRef.current = null;
             const latest = sceneRef.current;
             if (!latest) return;
+            const savingVersion = changeVersionRef.current;
             void serializeScene(latest)
               .then((data) => onAutoSaveRef.current(data))
+              .then(() => {
+                // A slower disk write must not mark a newer canvas revision
+                // clean; that newer revision has its own pending timer.
+                if (savingVersion === changeVersionRef.current) {
+                  dirtiedRef.current = false;
+                }
+              })
               .catch((err) =>
                 console.error("[excalidraw] auto-save failed", err),
               );

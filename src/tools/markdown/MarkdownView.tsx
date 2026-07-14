@@ -658,8 +658,8 @@ export function MarkdownView() {
                   // Excalidraw hands us either a serialised SVG
                   // string or PNG `Uint8Array` depending on the
                   // file's extension — `saveCurrent` routes both.
-                  onSave={(data) => void saveCurrent(data)}
-                  onAutoSave={(data) => void saveCurrent(data)}
+                  onSave={(data) => saveCurrent(data, tab!.path)}
+                  onAutoSave={(data) => saveCurrent(data, tab!.path)}
                 />
               </Suspense>
             ) : (
