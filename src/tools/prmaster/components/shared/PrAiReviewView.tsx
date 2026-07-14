@@ -7,9 +7,7 @@
  *   2. **Live**     — streaming JSONL log from Claude. The header
  *      offers a Cancel button.
  *   3. **Loaded**   — a finished run's data, viewable in two modes:
- *        * `log`    — replay of the streaming events for that run
- *                     (default after a fresh run finishes — we never
- *                     auto-jump to the report).
+ *        * `log`    — replay of the streaming events for that run.
  *        * `report` — severity-grouped findings with copy buttons,
  *                     syntax highlighting, and per-finding
  *                     "Post inline comment" actions.
@@ -18,9 +16,8 @@
  *
  * Cached-report fast-path: on mount we call `aiReviewListRuns(prRef)`
  * and, if the newest persisted run targets the current PR head SHA
- * and has `status === "done"`, we render its **log** view — keeping
- * the user one click away from the report without forcing them into
- * it. The History panel can flip to any prior run; each row carries
+ * and has `status === "done"`, we render its report. The History panel
+ * can flip to any prior run; each row carries
  * both a "Log" and a "Report" action so the user can re-watch the
  * original streaming session even after the app has restarted.
  */
@@ -93,8 +90,7 @@ interface LoadedRun {
   headSha: string;
 }
 
-/** Which body view is active when there's a loaded run. The user can
- *  flip between them via the header toggle; we never auto-flip. */
+/** Which body view is active when there's a loaded run. */
 type ViewMode = AiReviewViewMode;
 
 export function PrAiReviewView({ pr }: Props) {
@@ -202,11 +198,9 @@ export function PrAiReviewView({ pr }: Props) {
     }
   }, [key, ref]);
 
-  // On head-sha resolve: hydrate history and, if the newest run
-  // targets the current head SHA, lazily load its **log view** (we
-  // never auto-flip to the findings report — the user opts in via
-  // the header toggle). Restores the user's last-loaded run + view
-  // mode when they switch tools and come back.
+  // On head-sha resolve: hydrate history and, if the newest run targets
+  // the current head SHA, load its report. An explicitly selected saved run
+  // keeps the user's chosen Log/Report mode across navigation.
   useEffect(() => {
     if (!headSha) return;
     let alive = true;
@@ -224,12 +218,13 @@ export function PrAiReviewView({ pr }: Props) {
           const resp = await prmasterTauri.aiReviewGetReport(target.run_id);
           if (!alive) return;
           setLoaded(reportRespToLoaded(target.run_id, resp));
-          if (!savedRun && cached) {
-            reviewSessionStore.patch(key, {
-              loadedRunId: cached.run_id,
-              aiViewMode: "log",
-            });
-          }
+          // Automatic hydration always opens the report. This also migrates
+          // sessions persisted when Log was the old default; an explicit
+          // History → Log click still opens that run in log mode.
+          reviewSessionStore.patch(key, {
+            loadedRunId: target.run_id,
+            aiViewMode: "report",
+          });
         } catch (e) {
           // eslint-disable-next-line no-console
           console.warn("[ai-review] cached report fetch failed:", formatErr(e));
@@ -246,12 +241,9 @@ export function PrAiReviewView({ pr }: Props) {
     };
   }, [headSha, key, refreshHistory]);
 
-  // When a live run finishes, refresh history **and** silently load
-  // the just-finished run into `loaded` — but keep `viewMode` on
-  // "log" so the user stays on the streaming log they were watching.
-  // Loading `loaded` is what lets the header surface a Log/Report
-  // toggle: without it the only way back to the report would be the
-  // History panel, which is overkill for the run that just ended.
+  // When a live run finishes, refresh history, load the just-finished run,
+  // and switch to Report. Clean runs still have a useful summary/change
+  // report, so zero findings is not a reason to remain in the raw log.
   useEffect(() => {
     if (!headSha) return;
     const prevStatus = prevRunStatusRef.current;
@@ -270,7 +262,7 @@ export function PrAiReviewView({ pr }: Props) {
         setLoaded(reportRespToLoaded(cached.run_id, resp));
         reviewSessionStore.patch(key, {
           loadedRunId: cached.run_id,
-          aiViewMode: "log",
+          aiViewMode: "report",
         });
       } catch (e) {
         // eslint-disable-next-line no-console
@@ -536,7 +528,6 @@ export function PrAiReviewView({ pr }: Props) {
             <ViewModeToggle
               value={viewMode}
               onChange={setViewMode}
-              hasFindings={loaded.findings.length > 0}
             />
           )}
           {isLive ? (
@@ -630,18 +621,14 @@ export function PrAiReviewView({ pr }: Props) {
   );
 }
 
-/** Two-button segmented toggle for the page header. The Report
- *  button is disabled with a tooltip when the run produced zero
- *  findings — there's nothing to render — but the user can still
- *  flip to the log to see what Claude did. */
+/** Two-button segmented toggle for the page header. Reports remain useful
+ * with zero findings because they include the review summary. */
 function ViewModeToggle({
   value,
   onChange,
-  hasFindings,
 }: {
   value: ViewMode;
   onChange: (next: ViewMode) => void;
-  hasFindings: boolean;
 }) {
   return (
     <div className="inline-flex h-6 items-center rounded-md border border-border/60 bg-background/50 p-0.5 text-[10.5px]">
@@ -662,16 +649,14 @@ function ViewModeToggle({
       <button
         type="button"
         onClick={() => onChange("report")}
-        disabled={!hasFindings}
         className={cn(
           "flex items-center gap-1 rounded px-2 py-0.5 transition-colors",
           value === "report"
             ? "bg-card text-foreground shadow-sm"
             : "text-muted-foreground hover:text-foreground",
-          !hasFindings && "cursor-not-allowed opacity-50 hover:text-muted-foreground",
         )}
         aria-pressed={value === "report"}
-        title={hasFindings ? "Show severity-grouped findings" : "No findings to show"}
+        title="Show review report"
       >
         <ListChecks className="size-3" />
         Report

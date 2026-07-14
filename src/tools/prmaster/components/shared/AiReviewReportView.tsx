@@ -18,6 +18,7 @@ import { Button, cn } from "@zen-tools/ui";
 import {
   ChevronDown,
   ChevronUp,
+  CheckCircle2,
   Code2,
   FileSearch,
   History,
@@ -83,6 +84,16 @@ export function AiReviewReportView(props: Props) {
     props.findings,
   ]);
   const totalCount = props.findings.length;
+  const severityCounts = useMemo(
+    () =>
+      Object.fromEntries(
+        SEVERITY_ORDER.map((severity) => [
+          severity,
+          grouped.get(severity)?.length ?? 0,
+        ]),
+      ) as Record<SeverityBucket, number>,
+    [grouped],
+  );
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-2 overflow-hidden">
@@ -94,6 +105,7 @@ export function AiReviewReportView(props: Props) {
         finishedAtMs={props.finishedAtMs}
         headSha={props.headSha}
         totalCount={totalCount}
+        severityCounts={severityCounts}
         prompt={props.prompt}
         legacyHtml={props.legacyHtml}
         history={props.history}
@@ -102,17 +114,17 @@ export function AiReviewReportView(props: Props) {
         onSelectRunLog={props.onSelectRunLog}
         onShowLog={props.onShowLog}
       />
-      <div className="min-h-0 flex-1 overflow-y-auto pr-1">
+      <div className="min-h-0 flex-1 overflow-y-auto px-1 pb-4 pr-2">
         {totalCount === 0 ? (
           <EmptyFindings overallSummary={props.overallSummary} />
         ) : (
-          <div className="flex flex-col gap-3">
+          <div className="flex flex-col gap-5">
             {SEVERITY_ORDER.map((sev) => {
               const items = grouped.get(sev);
               if (!items || items.length === 0) return null;
               return (
                 <SeveritySection key={sev} severity={sev} count={items.length}>
-                  <div className="flex flex-col gap-1.5">
+                  <div className="flex flex-col gap-2.5">
                     {items.map((f) => (
                       <AiReviewFindingCard
                         key={f.id}
@@ -142,6 +154,7 @@ function ReportHeader({
   finishedAtMs,
   headSha,
   totalCount,
+  severityCounts,
   prompt,
   legacyHtml,
   history,
@@ -157,6 +170,7 @@ function ReportHeader({
   finishedAtMs: number | null;
   headSha: string;
   totalCount: number;
+  severityCounts: Record<SeverityBucket, number>;
   prompt: string;
   legacyHtml: string | null;
   history: AiReviewRunSummary[];
@@ -172,42 +186,26 @@ function ReportHeader({
     setOpenPanel((prev) => (prev === next ? null : next));
 
   return (
-    <header className="shrink-0 rounded-md border bg-card/40 px-2.5 py-1.5">
-      <div className="flex flex-wrap items-start justify-between gap-2">
-        <div className="min-w-0">
-          {overallSummary && (
-            <p className="text-[12px] font-medium leading-snug text-foreground">
-              <Sparkles className="mr-1 inline-block size-3 align-[-2px] text-blue-500" />
-              {overallSummary}
-            </p>
-          )}
-          {changeSummary.length > 0 && (
-            <ul className="mt-1 list-disc space-y-0.5 pl-4 text-[11px] leading-snug text-muted-foreground">
-              {changeSummary.map((item, i) => (
-                <li key={`${i}-${item}`}>{item}</li>
-              ))}
-            </ul>
-          )}
-          <div className="mt-1 flex flex-wrap items-center gap-2 text-[10px] text-muted-foreground">
-            <span className="font-mono">head {headSha.slice(0, 12)}</span>
-            <span>·</span>
-            <span>
-              {totalCount} finding{totalCount === 1 ? "" : "s"}
-            </span>
-            <span>·</span>
-            <span className="font-mono">{model}</span>
-            {costUsd != null && (
-              <>
-                <span>·</span>
-                <span>{fmtCost(costUsd)}</span>
-              </>
-            )}
-            {finishedAtMs && (
-              <>
-                <span>·</span>
-                <span>{fmtTime(finishedAtMs)}</span>
-              </>
-            )}
+    <header className="shrink-0 rounded-lg border bg-card/70 px-4 py-3 shadow-sm">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <div className={cn(
+            "flex size-7 items-center justify-center rounded-md border",
+            totalCount === 0
+              ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+              : "border-blue-500/30 bg-blue-500/10 text-blue-600 dark:text-blue-400",
+          )}>
+            {totalCount === 0 ? <CheckCircle2 className="size-4" /> : <Sparkles className="size-4" />}
+          </div>
+          <div>
+            <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">
+              Review outcome
+            </div>
+            <div className="text-xs font-medium text-foreground">
+              {totalCount === 0
+                ? "No actionable findings"
+                : `${totalCount} actionable finding${totalCount === 1 ? "" : "s"}`}
+            </div>
           </div>
         </div>
         <div className="flex items-center gap-1">
@@ -244,6 +242,44 @@ function ReportHeader({
           )}
         </div>
       </div>
+      <p className="mt-3 text-sm font-medium leading-relaxed text-foreground">
+        {overallSummary || (totalCount === 0
+          ? "The review completed without identifying an actionable defect."
+          : "The review identified issues that need attention.")}
+      </p>
+      {changeSummary.length > 0 && (
+        <div className="mt-3 rounded-md border border-border/60 bg-background/45 px-3 py-2.5">
+          <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">
+            What changed
+          </div>
+          <ul className="list-disc space-y-1 pl-4 text-xs leading-relaxed text-foreground/80 marker:text-muted-foreground">
+            {changeSummary.map((item, i) => (
+              <li key={`${i}-${item}`}>{item}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+      <div className="mt-3 flex flex-wrap items-center gap-1.5">
+        <MetaPill mono>head {headSha.slice(0, 12)}</MetaPill>
+        <MetaPill mono>{model}</MetaPill>
+        {costUsd != null && <MetaPill>{fmtCost(costUsd)}</MetaPill>}
+        {finishedAtMs && <MetaPill>{fmtTime(finishedAtMs)}</MetaPill>}
+        {totalCount > 0 && SEVERITY_ORDER.map((severity) => {
+          const count = severityCounts[severity];
+          if (count === 0) return null;
+          return (
+            <span
+              key={severity}
+              className={cn(
+                "rounded-full border px-2 py-1 text-[10px] font-semibold capitalize",
+                severityChipClass(severity),
+              )}
+            >
+              {severity} {count}
+            </span>
+          );
+        })}
+      </div>
       {openPanel === "history" && (
         <HistoryPanel
           history={history}
@@ -255,6 +291,25 @@ function ReportHeader({
       {openPanel === "prompt" && <PromptPanel prompt={prompt} />}
       {openPanel === "raw" && legacyHtml && <RawHtmlPanel html={legacyHtml} />}
     </header>
+  );
+}
+
+function MetaPill({
+  children,
+  mono = false,
+}: {
+  children: React.ReactNode;
+  mono?: boolean;
+}) {
+  return (
+    <span
+      className={cn(
+        "rounded-full border border-border/60 bg-muted/35 px-2 py-1 text-[10px] text-muted-foreground",
+        mono && "font-mono",
+      )}
+    >
+      {children}
+    </span>
   );
 }
 
@@ -440,12 +495,12 @@ function SeveritySection({
     <section>
       <h2
         className={cn(
-          "mb-1.5 flex items-center gap-1.5 text-[9.5px] font-bold uppercase tracking-[0.14em]",
+          "mb-2 flex items-center gap-2 text-[11px] font-bold uppercase tracking-[0.14em]",
           severityHeadingColor(severity),
         )}
       >
         <span>{severity}</span>
-        <span className="rounded-full bg-muted px-1.5 py-px text-[9px] font-mono text-muted-foreground">
+        <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-mono text-muted-foreground">
           {count}
         </span>
       </h2>
@@ -457,12 +512,12 @@ function SeveritySection({
 function EmptyFindings({ overallSummary }: { overallSummary: string }) {
   return (
     <div className="flex h-full min-h-0 items-center justify-center">
-      <div className="grid max-w-md gap-2 rounded-md border border-emerald-500/30 bg-emerald-500/5 p-5 text-center">
-        <Sparkles className="mx-auto size-5 text-emerald-500" />
-        <div className="text-sm font-medium text-emerald-700 dark:text-emerald-400">
-          No findings
+      <div className="grid max-w-lg gap-3 rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-8 text-center shadow-sm">
+        <CheckCircle2 className="mx-auto size-7 text-emerald-500" />
+        <div className="text-base font-semibold text-emerald-700 dark:text-emerald-400">
+          Review complete — no actionable findings
         </div>
-        <p className="text-[11px] text-muted-foreground">
+        <p className="text-xs leading-relaxed text-muted-foreground">
           {overallSummary || "Claude reviewed the diff and didn't surface anything actionable."}
         </p>
       </div>
@@ -498,6 +553,19 @@ function severityHeadingColor(sev: SeverityBucket): string {
       return "text-blue-600 dark:text-blue-400";
     case "low":
       return "text-emerald-600 dark:text-emerald-400";
+  }
+}
+
+function severityChipClass(sev: SeverityBucket): string {
+  switch (sev) {
+    case "critical":
+      return "border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-400";
+    case "high":
+      return "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-400";
+    case "medium":
+      return "border-blue-500/30 bg-blue-500/10 text-blue-700 dark:text-blue-400";
+    case "low":
+      return "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400";
   }
 }
 

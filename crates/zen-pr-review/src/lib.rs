@@ -192,6 +192,12 @@ impl ReviewEngine {
         let registry_for_runner = registry.clone();
         let run_id_for_runner = run_id_owned.clone();
         let runner_sink = move |event: AiReviewEvent| {
+            // Claude's process-level result only means the CLI exited. The
+            // host still has to parse, copy, and persist the report before the
+            // frontend may treat the run as done.
+            if matches!(event, AiReviewEvent::Done { .. }) {
+                return;
+            }
             registry_for_runner.append_event(&run_id_for_runner, event.clone());
             let _ = tx_for_runner.send((run_id_for_runner.clone(), event));
         };
@@ -279,14 +285,8 @@ impl ReviewEngine {
                 // directly. The HTML, when present, is purely a
                 // legacy / debug artefact.
                 let report_path = dst_json.to_string_lossy().into_owned();
-                emit(AiReviewEvent::Done {
-                    cost_usd: out.cost_usd,
-                    duration_ms: out.duration_ms,
-                    report_path: Some(report_path.clone()),
-                    findings_count: Some(findings_count),
-                });
                 let html_path = dst_html_opt.map(|p| p.to_string_lossy().into_owned());
-                self.finalize(
+                let persisted = self.finalize(
                     run_id,
                     RunStatus::Done,
                     html_path,
@@ -303,7 +303,24 @@ impl ReviewEngine {
                     &worktree_path,
                 )
                 .await;
-                Ok(())
+                if persisted {
+                    // Emit Done only after finalize has written the run record
+                    // and history index. The frontend immediately loads it.
+                    emit(AiReviewEvent::Done {
+                        cost_usd: out.cost_usd,
+                        duration_ms: out.duration_ms,
+                        report_path: Some(dst_json.to_string_lossy().into_owned()),
+                        findings_count: Some(findings_count),
+                    });
+                    Ok(())
+                } else {
+                    emit(AiReviewEvent::Error {
+                        message: "Review completed but its report could not be saved.".into(),
+                    });
+                    Err(ReviewError::Other(
+                        "completed review report could not be persisted".into(),
+                    ))
+                }
             }
             Ok(out) => {
                 emit(AiReviewEvent::Error {
@@ -475,14 +492,15 @@ impl ReviewEngine {
         kv: &KvStore,
         local_repo: &Path,
         worktree_path: &Path,
-    ) {
+    ) -> bool {
         let entry = self.inner.registry.finish(
             run_id,
             status,
-            report_html_path.clone(),
+            report_json_path.clone().or_else(|| report_html_path.clone()),
             cost_usd,
             duration_ms,
         );
+        let mut persisted = false;
         if let Some(entry) = entry {
             let summary = RunSummary {
                 run_id: entry.run_id.clone(),
@@ -510,13 +528,21 @@ impl ReviewEngine {
             };
             if let Err(e) = persist::record_completion(kv, &entry.pr, &record, reports_root) {
                 tracing::warn!(?e, "ai-review: persisting run record failed");
+            } else {
+                persisted = true;
             }
         }
-        // Worktree cleanup is best-effort.
-        let exec = worktree::build_git_executor();
-        if let Err(e) = worktree::remove_worktree(&exec, local_repo, worktree_path).await {
-            tracing::warn!(?e, "ai-review: worktree cleanup failed");
-        }
+        // Worktree cleanup is best-effort and should not delay the Done event
+        // after the report is safely persisted.
+        let local_repo = local_repo.to_path_buf();
+        let worktree_path = worktree_path.to_path_buf();
+        tokio::spawn(async move {
+            let exec = worktree::build_git_executor();
+            if let Err(e) = worktree::remove_worktree(&exec, &local_repo, &worktree_path).await {
+                tracing::warn!(?e, "ai-review: worktree cleanup failed");
+            }
+        });
+        persisted
     }
 }
 

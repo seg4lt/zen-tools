@@ -60,7 +60,8 @@ export function AiReviewFindingCard({
   return (
     <article
       className={cn(
-        "group relative overflow-hidden rounded-xl border border-border/40 shadow-sm transition-shadow hover:shadow-md",
+        "group relative overflow-hidden rounded-lg border border-border/60 border-l-[3px] shadow-sm transition-shadow hover:shadow-md",
+        accent.borderColor,
       )}
       style={{
         // Two-layer background:
@@ -73,7 +74,7 @@ export function AiReviewFindingCard({
         backgroundColor: "var(--card)",
       }}
     >
-      <div className="relative z-10 flex flex-col gap-2.5 px-3.5 py-3">
+      <div className="relative z-10 flex flex-col gap-3.5 px-4 py-4">
         <CardHeader finding={finding} sev={sev} />
         <Snippet
           label="Current"
@@ -101,12 +102,14 @@ export function AiReviewFindingCard({
           />
         )}
         {finding.rationale && (
-          <p className="whitespace-pre-wrap text-[11.5px] leading-snug text-foreground/85">
-            <span className="mr-1.5 align-baseline text-[9px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">
-              Why
-            </span>
-            {finding.rationale}
-          </p>
+          <div className="rounded-md border border-border/50 bg-background/40 px-3 py-2.5">
+            <div className="mb-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">
+              Why this matters
+            </div>
+            <p className="whitespace-pre-wrap text-xs leading-relaxed text-foreground/85">
+              {finding.rationale}
+            </p>
+          </div>
         )}
         <CommentAction
           finding={finding}
@@ -145,7 +148,7 @@ function CardHeader({
         <Icon className={cn("size-3.5", accent.iconColor)} aria-hidden />
       </div>
       <div className="min-w-0 flex-1">
-        <h3 className="text-[12.5px] font-semibold leading-tight tracking-tight text-foreground">
+        <h3 className="text-sm font-semibold leading-snug tracking-tight text-foreground">
           {finding.title}
         </h3>
         <FilePathChip
@@ -207,7 +210,7 @@ function FilePathChip({
     <button
       type="button"
       onClick={onCopy}
-      className="mt-0.5 inline-flex max-w-full items-center gap-1 rounded border border-transparent px-1 py-px font-mono text-[10px] leading-tight text-muted-foreground transition-colors hover:border-border/60 hover:bg-background/40 hover:text-foreground"
+      className="mt-1 inline-flex max-w-full items-center gap-1 rounded border border-transparent px-1 py-px font-mono text-[11px] leading-tight text-muted-foreground transition-colors hover:border-border/60 hover:bg-background/40 hover:text-foreground"
       title={copied ? "Copied!" : "Copy path"}
     >
       <span className="truncate">{display}</span>
@@ -259,7 +262,7 @@ function Snippet({
       <div className="flex items-baseline justify-between">
         <div
           className={cn(
-            "text-[9px] font-semibold uppercase tracking-[0.14em]",
+            "text-[10px] font-semibold uppercase tracking-[0.14em]",
             accent === "current"
               ? "text-muted-foreground"
               : "text-emerald-600 dark:text-emerald-400",
@@ -283,7 +286,7 @@ function Snippet({
       </div>
       <pre
         className={cn(
-          "ai-review-snippet overflow-x-auto rounded-md border py-1.5 font-mono text-[11px] leading-[1.5]",
+          "ai-review-snippet overflow-x-auto rounded-md border py-2 font-mono text-xs leading-[1.6]",
           accent === "current"
             ? "border-border/40 bg-background/60 dark:bg-[#0a0c10]/80"
             : "border-emerald-500/30 bg-emerald-500/[0.04]",
@@ -304,7 +307,7 @@ function Snippet({
                 inHighlight && "bg-amber-500/10",
               )}
             >
-              <span className="select-none pr-2.5 text-right text-[9.5px] text-muted-foreground/70">
+              <span className="select-none pr-2.5 text-right text-[10px] text-muted-foreground/70">
                 {lineNum}
               </span>
               <code className="pr-2.5">
@@ -595,6 +598,8 @@ interface SeverityAccent {
   pillBg: string;
   /** Text colour of the severity pill. */
   pillText: string;
+  /** Left rail on the finding card for fast severity scanning. */
+  borderColor: string;
   /** lucide icon component the plate renders. */
   icon: typeof AlertOctagon;
 }
@@ -606,6 +611,7 @@ const SEVERITY_ACCENT: Record<SeverityKey, SeverityAccent> = {
     iconColor: "text-red-500",
     pillBg: "bg-red-500/15",
     pillText: "text-red-700 dark:text-red-400",
+    borderColor: "border-l-red-500/70",
     icon: AlertOctagon,
   },
   high: {
@@ -614,6 +620,7 @@ const SEVERITY_ACCENT: Record<SeverityKey, SeverityAccent> = {
     iconColor: "text-amber-500",
     pillBg: "bg-amber-500/15",
     pillText: "text-amber-700 dark:text-amber-400",
+    borderColor: "border-l-amber-500/70",
     icon: AlertTriangle,
   },
   medium: {
@@ -622,6 +629,7 @@ const SEVERITY_ACCENT: Record<SeverityKey, SeverityAccent> = {
     iconColor: "text-blue-500",
     pillBg: "bg-blue-500/15",
     pillText: "text-blue-700 dark:text-blue-400",
+    borderColor: "border-l-blue-500/70",
     icon: ShieldAlert,
   },
   low: {
@@ -630,6 +638,7 @@ const SEVERITY_ACCENT: Record<SeverityKey, SeverityAccent> = {
     iconColor: "text-emerald-500",
     pillBg: "bg-emerald-500/15",
     pillText: "text-emerald-700 dark:text-emerald-400",
+    borderColor: "border-l-emerald-500/70",
     icon: Info,
   },
 };
