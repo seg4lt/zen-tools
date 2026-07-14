@@ -12,6 +12,7 @@ import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { AppProviders } from "@/components/app-shell/app-providers";
 import { TitleBar } from "@/components/app-shell/title-bar";
+import { ShortcutHelpView } from "@/components/app-shell/shortcut-help";
 import { UpdateBanner } from "@/lib/updater/UpdateBanner";
 import { HTTPRunnerShell } from "@/tools/http-runner/HTTPRunnerShell";
 import { RequestsView } from "@/tools/http-runner/RequestsView";
@@ -272,6 +273,12 @@ const settingsRoute = createRoute({
   component: SettingsView,
 });
 
+const shortcutsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/shortcuts",
+  component: ShortcutHelpView,
+});
+
 const prmasterRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/prmaster",
@@ -326,6 +333,7 @@ const routeTree = rootRoute.addChildren([
   prmasterReviewRoute,
   terminalRoute,
   settingsRoute,
+  shortcutsRoute,
 ]);
 
 export const router = createRouter({

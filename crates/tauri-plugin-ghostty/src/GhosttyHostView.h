@@ -137,6 +137,12 @@ void GhosttyHandleWriteClipboard(int kind, const void *content, unsigned long n,
 /// can find their target window. Pass NULL on teardown.
 void GhosttyRegisterHostView(void *view);
 
+/// Execute one of ghostty's validated binding-action strings against the
+/// currently focused surface. Used by host chrome such as the search field.
+/// Returns false when there is no focused surface or ghostty rejects the
+/// action string.
+bool GhosttyFocusedSurfaceBindingAction(const char *action);
+
 /// Implements the runtime's `action_cb`. Handles window-title updates,
 /// fullscreen toggles, ring-bell, open-url, close-window, mouse shape
 /// and visibility, etc. Returns true if the action was handled.

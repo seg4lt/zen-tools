@@ -376,6 +376,11 @@ function applyStatusEventToPane(
           lastEventAt: receivedAt,
         },
       };
+    case "search-started":
+    case "search-ended":
+    case "search-total":
+    case "search-selected":
+      return pane;
   }
 }
 

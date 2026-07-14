@@ -965,9 +965,30 @@ void GhosttyHostViewClearSurface(NSView* view) {
 
 static _Atomic(void *) g_host_view = NULL;
 static _Atomic(void *) g_app = NULL;
+static _Atomic(void *) g_search_surface = NULL;
+static int tab_id_for_surface(ghostty_surface_t surface);
 
 void GhosttyRegisterHostView(void *view) {
     atomic_store(&g_host_view, view);
+}
+
+bool GhosttyFocusedSurfaceBindingAction(const char *action) {
+    if (!action) return false;
+    ghostty_surface_t surface = atomic_load(&g_search_surface);
+    // Never dereference a cached surface after its native view has gone
+    // away. Pointer comparison while walking the live tree is safe.
+    if (surface && tab_id_for_surface(surface) == 0) {
+        atomic_store(&g_search_surface, NULL);
+        surface = NULL;
+    }
+    if (!surface) {
+        NSView *view = (__bridge NSView *)atomic_load(&g_host_view);
+        if ([view isKindOfClass:[GhosttyHostView class]]) {
+            surface = [(GhosttyHostView *)view surface];
+        }
+    }
+    if (!surface) return false;
+    return ghostty_surface_binding_action(surface, action, strlen(action));
 }
 
 // Conditional clear used by `resignFirstResponder`. Declared at the top
@@ -1124,6 +1145,10 @@ enum {
     TERMINAL_STATUS_EVENT_DESKTOP_NOTIFICATION = 5,
     TERMINAL_STATUS_EVENT_CHILD_EXITED        = 6,
     TERMINAL_STATUS_EVENT_RENDERER_HEALTH     = 7,
+    TERMINAL_STATUS_EVENT_SEARCH_STARTED      = 8,
+    TERMINAL_STATUS_EVENT_SEARCH_ENDED        = 9,
+    TERMINAL_STATUS_EVENT_SEARCH_TOTAL        = 10,
+    TERMINAL_STATUS_EVENT_SEARCH_SELECTED     = 11,
 };
 static GhosttyTerminalStatusEventFn g_terminal_status_event_fn = NULL;
 
@@ -1134,8 +1159,6 @@ void GhosttyRegisterTerminalStatusEventCallback(GhosttyTerminalStatusEventFn fn)
 static long long saturating_u64_to_i64(uint64_t value) {
     return value > (uint64_t)LLONG_MAX ? LLONG_MAX : (long long)value;
 }
-
-static int tab_id_for_surface(ghostty_surface_t surface);
 
 static void emit_terminal_status_event(
     int kind,
@@ -1181,6 +1204,21 @@ static int tab_id_for_surface(ghostty_surface_t surface) {
         if (match) return tab_id_get(child);
     }
     return 0;
+}
+
+static GhosttyHostView *host_view_for_surface(ghostty_surface_t surface) {
+    if (!surface || !g_tab_container) return nil;
+    NSMutableArray<NSView *> *stack = [g_tab_container.subviews mutableCopy];
+    while (stack.count > 0) {
+        NSView *view = stack.lastObject;
+        [stack removeLastObject];
+        if ([view isKindOfClass:[GhosttyHostView class]]
+            && [(GhosttyHostView *)view surface] == surface) {
+            return (GhosttyHostView *)view;
+        }
+        for (NSView *subview in view.subviews) [stack addObject:subview];
+    }
+    return nil;
 }
 
 static int tab_id_for_target(ghostty_target_s *tgt) {
@@ -2122,6 +2160,61 @@ bool GhosttyHandleAction(void *app, void *target, void *action) {
                     nil,
                     nil);
             }
+            return true;
+        }
+        case GHOSTTY_ACTION_START_SEARCH: {
+            int tab_id = status_tab_id_for_target(tgt);
+            if (tgt && tgt->tag == GHOSTTY_TARGET_SURFACE) {
+                atomic_store(&g_search_surface, tgt->target.surface);
+            }
+            const char *needle_c = act->action.start_search.needle;
+            NSString *needle = needle_c ? [NSString stringWithUTF8String:needle_c] : @"";
+            emit_terminal_status_event(
+                TERMINAL_STATUS_EVENT_SEARCH_STARTED,
+                tab_id,
+                0,
+                0,
+                needle,
+                nil);
+            return true;
+        }
+        case GHOSTTY_ACTION_END_SEARCH: {
+            ghostty_surface_t search_surface =
+                tgt && tgt->tag == GHOSTTY_TARGET_SURFACE
+                    ? tgt->target.surface
+                    : atomic_load(&g_search_surface);
+            emit_terminal_status_event(
+                TERMINAL_STATUS_EVENT_SEARCH_ENDED,
+                status_tab_id_for_target(tgt),
+                0,
+                0,
+                nil,
+                nil);
+            atomic_store(&g_search_surface, NULL);
+            GhosttyHostView *search_host = host_view_for_surface(search_surface);
+            if (search_host.window) {
+                [search_host.window makeFirstResponder:search_host];
+            }
+            return true;
+        }
+        case GHOSTTY_ACTION_SEARCH_TOTAL: {
+            emit_terminal_status_event(
+                TERMINAL_STATUS_EVENT_SEARCH_TOTAL,
+                status_tab_id_for_target(tgt),
+                (long long)act->action.search_total.total,
+                0,
+                nil,
+                nil);
+            return true;
+        }
+        case GHOSTTY_ACTION_SEARCH_SELECTED: {
+            emit_terminal_status_event(
+                TERMINAL_STATUS_EVENT_SEARCH_SELECTED,
+                status_tab_id_for_target(tgt),
+                (long long)act->action.search_selected.selected,
+                0,
+                nil,
+                nil);
             return true;
         }
         case GHOSTTY_ACTION_TOGGLE_FULLSCREEN: {

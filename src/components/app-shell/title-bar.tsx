@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useRouterState } from "@tanstack/react-router";
-import { Settings as SettingsIcon } from "lucide-react";
+import { CircleHelp, Settings as SettingsIcon } from "lucide-react";
 import { Button } from "@zen-tools/ui";
 import { ToolPill } from "./tool-pill";
 import { isMac, useShortcut } from "@zen-tools/keyboard";
@@ -41,6 +41,7 @@ export function TitleBar() {
     location.pathname.startsWith(t.route),
   )?.id;
   const onSettings = location.pathname.startsWith("/settings");
+  const onShortcuts = location.pathname.startsWith("/shortcuts");
 
   // Apply persisted zoom + bind ⌘= / ⌘− / ⌘0 globally. `fireInInputs`
   // because the registry otherwise drops shortcuts while focus is in
@@ -150,13 +151,27 @@ export function TitleBar() {
         ))}
       </div>
 
-      {/* Right group — single Settings icon. Theme + Vim toggles
+      {/* Right group — shortcut help and Settings. Theme + Vim toggles
           (and zoom) live inside the settings page. */}
       <div
         className="ml-auto flex items-center gap-1"
         // Stop the drag region from swallowing pointer events on this group.
         data-tauri-drag-region={false}
       >
+        <Button
+          variant="ghost"
+          size="icon"
+          aria-label="Keyboard shortcuts"
+          aria-pressed={onShortcuts}
+          onClick={() => void navigate({ to: "/shortcuts" })}
+          className={
+            "size-7 " +
+            (onShortcuts ? "bg-muted text-foreground" : "")
+          }
+          title="Keyboard shortcuts"
+        >
+          <CircleHelp className="size-4" />
+        </Button>
         <Button
           variant="ghost"
           size="icon"

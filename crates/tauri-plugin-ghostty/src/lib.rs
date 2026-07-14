@@ -58,6 +58,7 @@ pub fn init() -> TauriPlugin<Wry> {
                 commands::terminal_focus_split,
                 commands::terminal_new_tab,
                 commands::terminal_focus_tab,
+                commands::terminal_search,
                 commands::terminal_close_tab,
                 commands::terminal_list_tabs,
                 commands::terminal_set_chrome_inset,

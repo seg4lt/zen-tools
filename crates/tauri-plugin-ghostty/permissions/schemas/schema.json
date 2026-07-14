@@ -319,6 +319,18 @@
           "markdownDescription": "Denies the terminal_new command without any pre-configured scope."
         },
         {
+          "description": "Enables the terminal_search command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-terminal-search",
+          "markdownDescription": "Enables the terminal_search command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the terminal_search command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-terminal-search",
+          "markdownDescription": "Denies the terminal_search command without any pre-configured scope."
+        },
+        {
           "description": "Enables the terminal_set_color_scheme command without any pre-configured scope.",
           "type": "string",
           "const": "allow-terminal-set-color-scheme",
@@ -343,10 +355,10 @@
           "markdownDescription": "Denies the terminal_split command without any pre-configured scope."
         },
         {
-          "description": "Default permissions for the ghostty terminal plugin.\n#### This default permission set includes:\n\n- `allow-terminal-new`\n- `allow-terminal-set-color-scheme`\n- `allow-terminal-split`\n- `allow-terminal-focus-split`\n- `allow-terminal-new-tab`\n- `allow-terminal-focus-tab`\n- `allow-terminal-close-tab`\n- `allow-terminal-list-tabs`\n- `allow-terminal-set-chrome-inset`\n- `allow-terminal-set-webview-content-zoom`\n- `allow-terminal-set-close-window-on-last-tab`\n- `allow-terminal-set-traffic-lights-hidden`",
+          "description": "Default permissions for the ghostty terminal plugin.\n#### This default permission set includes:\n\n- `allow-terminal-new`\n- `allow-terminal-set-color-scheme`\n- `allow-terminal-split`\n- `allow-terminal-focus-split`\n- `allow-terminal-new-tab`\n- `allow-terminal-focus-tab`\n- `allow-terminal-search`\n- `allow-terminal-close-tab`\n- `allow-terminal-list-tabs`\n- `allow-terminal-set-chrome-inset`\n- `allow-terminal-set-webview-content-zoom`\n- `allow-terminal-set-close-window-on-last-tab`\n- `allow-terminal-set-traffic-lights-hidden`",
           "type": "string",
           "const": "default",
-          "markdownDescription": "Default permissions for the ghostty terminal plugin.\n#### This default permission set includes:\n\n- `allow-terminal-new`\n- `allow-terminal-set-color-scheme`\n- `allow-terminal-split`\n- `allow-terminal-focus-split`\n- `allow-terminal-new-tab`\n- `allow-terminal-focus-tab`\n- `allow-terminal-close-tab`\n- `allow-terminal-list-tabs`\n- `allow-terminal-set-chrome-inset`\n- `allow-terminal-set-webview-content-zoom`\n- `allow-terminal-set-close-window-on-last-tab`\n- `allow-terminal-set-traffic-lights-hidden`"
+          "markdownDescription": "Default permissions for the ghostty terminal plugin.\n#### This default permission set includes:\n\n- `allow-terminal-new`\n- `allow-terminal-set-color-scheme`\n- `allow-terminal-split`\n- `allow-terminal-focus-split`\n- `allow-terminal-new-tab`\n- `allow-terminal-focus-tab`\n- `allow-terminal-search`\n- `allow-terminal-close-tab`\n- `allow-terminal-list-tabs`\n- `allow-terminal-set-chrome-inset`\n- `allow-terminal-set-webview-content-zoom`\n- `allow-terminal-set-close-window-on-last-tab`\n- `allow-terminal-set-traffic-lights-hidden`"
         },
         {
           "description": "Allows creating a new terminal surface attached to a window.",
@@ -383,6 +395,12 @@
           "type": "string",
           "const": "allow-terminal-focus-tab",
           "markdownDescription": "Allows switching the active tab by id."
+        },
+        {
+          "description": "Allows driving Ghostty's built-in search on the focused terminal surface.",
+          "type": "string",
+          "const": "allow-terminal-search",
+          "markdownDescription": "Allows driving Ghostty's built-in search on the focused terminal surface."
         },
         {
           "description": "Allows closing a tab by id (frees the surfaces under that tab).",

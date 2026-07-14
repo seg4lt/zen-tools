@@ -12,7 +12,7 @@ use crate::{
 };
 use ghostty_rs::{App, Config, RuntimeCallbacks, SurfaceConfig, View};
 use serde::{Deserialize, Serialize};
-use std::ffi::{c_char, c_void, CStr};
+use std::ffi::{c_char, c_void, CStr, CString};
 use std::sync::mpsc;
 use std::sync::OnceLock;
 use tauri::{AppHandle, Emitter, Manager, State, Window, Wry};
@@ -75,6 +75,31 @@ enum TerminalStatusPayload {
         id: TabId,
         healthy: bool,
     },
+    SearchStarted {
+        id: TabId,
+        query: String,
+    },
+    SearchEnded {
+        id: TabId,
+    },
+    SearchTotal {
+        id: TabId,
+        total: i64,
+    },
+    SearchSelected {
+        id: TabId,
+        selected: i64,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SearchAction {
+    Start,
+    Update,
+    Next,
+    Previous,
+    End,
 }
 
 #[tauri::command]
@@ -166,7 +191,10 @@ pub fn terminal_new(
 
         let state = app_handle_for_main.state::<PluginState>();
         let mut inner = state.inner.lock();
-        let app = inner.app.as_ref().ok_or_else(|| "ghostty app missing".to_string())?;
+        let app = inner
+            .app
+            .as_ref()
+            .ok_or_else(|| "ghostty app missing".to_string())?;
         let view = unsafe { View::new(app, host_view, surface_cfg) }
             .map_err(|e| format!("ghostty_surface_new: {e}"))?;
         unsafe { macos::set_surface(host_view, view.raw() as *mut c_void) };
@@ -189,7 +217,7 @@ pub fn terminal_new(
         // Install the application-level Cmd-key monitor (idempotent).
         unsafe {
             macos::install_event_monitor(
-                inner.surfaces.get(&surface_id).unwrap().raw() as *mut c_void,
+                inner.surfaces.get(&surface_id).unwrap().raw() as *mut c_void
             )
         };
 
@@ -286,7 +314,11 @@ pub fn terminal_set_color_scheme(
             // Catches split-created panes that aren't tracked in
             // Rust state. Returns the count for diagnostics.
             let n = unsafe { macos::set_color_scheme_all(mode_dark) };
-            tracing::debug!(panes = n, dark = mode_dark, "ghostty: pushed color scheme to all live panes");
+            tracing::debug!(
+                panes = n,
+                dark = mode_dark,
+                "ghostty: pushed color scheme to all live panes"
+            );
         })
         .map_err(|e| format!("run_on_main: {e}"))?;
     Ok(())
@@ -410,13 +442,39 @@ pub fn terminal_new_tab(
 }
 
 #[tauri::command]
-pub fn terminal_focus_tab(
-    window: Window<Wry>,
-    tab_id: TabId,
-) -> Result<bool, String> {
+pub fn terminal_focus_tab(window: Window<Wry>, tab_id: TabId) -> Result<bool, String> {
     let ok = run_on_main(&window, move |_| unsafe { macos::tab_focus(tab_id) })
         .map_err(|e| format!("run_on_main: {e}"))?;
     Ok(ok)
+}
+
+/// Drive Ghostty's built-in scrollback search for the currently focused
+/// split. Ghostty owns matching, highlighting, selection, and scrolling;
+/// the webview only supplies the query and renders the small search bar.
+#[tauri::command]
+pub fn terminal_search(
+    window: Window<Wry>,
+    action: SearchAction,
+    query: Option<String>,
+) -> Result<bool, String> {
+    let binding = match action {
+        SearchAction::Start => "start_search".to_owned(),
+        SearchAction::Update => {
+            let query = query.unwrap_or_default();
+            if query.contains('\0') {
+                return Err("search query contains a NUL byte".into());
+            }
+            format!("search:{query}")
+        }
+        SearchAction::Next => "navigate_search:next".to_owned(),
+        SearchAction::Previous => "navigate_search:previous".to_owned(),
+        SearchAction::End => "end_search".to_owned(),
+    };
+    let binding = CString::new(binding).map_err(|_| "invalid search action".to_owned())?;
+    run_on_main(&window, move |_| unsafe {
+        macos::focused_surface_binding_action(&binding)
+    })
+    .map_err(|e| format!("run_on_main: {e}"))
 }
 
 #[tauri::command]
@@ -477,7 +535,11 @@ pub fn terminal_set_webview_content_zoom(
     state: State<'_, PluginState>,
     zoom: f64,
 ) -> Result<(), String> {
-    let zoom = if zoom.is_finite() && zoom > 0.0 { zoom } else { 1.0 };
+    let zoom = if zoom.is_finite() && zoom > 0.0 {
+        zoom
+    } else {
+        1.0
+    };
     {
         let mut inner = state.inner.lock();
         if (inner.webview_content_zoom - zoom).abs() < f64::EPSILON {
@@ -510,10 +572,7 @@ pub fn terminal_set_close_window_on_last_tab(
 /// distraction-free mode where even the AppKit-painted controls
 /// disappear. Toggling back un-hides them.
 #[tauri::command]
-pub fn terminal_set_traffic_lights_hidden(
-    window: Window<Wry>,
-    hidden: bool,
-) -> Result<(), String> {
+pub fn terminal_set_traffic_lights_hidden(window: Window<Wry>, hidden: bool) -> Result<(), String> {
     run_on_main(&window, move |w| {
         if let Ok(ns_window) = w.ns_window() {
             if !ns_window.is_null() {
@@ -750,9 +809,9 @@ pub fn ensure_ghostty_resources_dir() {
         ];
 
         // Also check ~/Applications/Ghostty.app (user-scoped installs).
-        let home_candidate: Option<String> = std::env::var("HOME").ok().map(|h| {
-            format!("{h}/Applications/Ghostty.app/Contents/Resources/ghostty")
-        });
+        let home_candidate: Option<String> = std::env::var("HOME")
+            .ok()
+            .map(|h| format!("{h}/Applications/Ghostty.app/Contents/Resources/ghostty"));
 
         for candidate in candidates
             .iter()
@@ -792,7 +851,9 @@ where
         let r = f(&win);
         let _ = tx.send(r);
     })?;
-    Ok(rx.recv().expect("main-thread closure dropped without sending"))
+    Ok(rx
+        .recv()
+        .expect("main-thread closure dropped without sending"))
 }
 
 unsafe fn container_bounds(container: *mut c_void) -> objc2_foundation::NSRect {
@@ -868,10 +929,7 @@ fn spawn_tab_native(
 /// triggers `ghostty_surface_free`) before unmounting via tab_close.
 /// If `close_window_on_last_tab` is set and this is the last tab,
 /// the window is closed instead. MUST run on main.
-fn close_tab_native(
-    app_handle: &AppHandle<Wry>,
-    tab_id: TabId,
-) -> Result<bool, String> {
+fn close_tab_native(app_handle: &AppHandle<Wry>, tab_id: TabId) -> Result<bool, String> {
     let state = app_handle.state::<PluginState>();
     let mut inner = state.inner.lock();
 
@@ -932,7 +990,11 @@ extern "C" fn tab_event_trampoline(kind: i32, tab_id: i32, value: *const c_char)
     let value_str = if value.is_null() {
         None
     } else {
-        Some(unsafe { CStr::from_ptr(value) }.to_string_lossy().into_owned())
+        Some(
+            unsafe { CStr::from_ptr(value) }
+                .to_string_lossy()
+                .into_owned(),
+        )
     };
     let mut title = None::<String>;
     let mut cwd_absolute_path = None::<String>;
@@ -994,7 +1056,11 @@ extern "C" fn terminal_status_event_trampoline(
         if ptr.is_null() {
             None
         } else {
-            Some(unsafe { CStr::from_ptr(ptr) }.to_string_lossy().into_owned())
+            Some(
+                unsafe { CStr::from_ptr(ptr) }
+                    .to_string_lossy()
+                    .into_owned(),
+            )
         }
     };
 
@@ -1053,6 +1119,27 @@ extern "C" fn terminal_status_event_trampoline(
             TerminalStatusPayload::RendererHealth {
                 id: tab_id,
                 healthy: arg0 != 0,
+            }
+        }
+        Some(crate::macos::TerminalStatusEventKind::SearchStarted) => {
+            TerminalStatusPayload::SearchStarted {
+                id: tab_id,
+                query: read_cstr(text0).unwrap_or_default(),
+            }
+        }
+        Some(crate::macos::TerminalStatusEventKind::SearchEnded) => {
+            TerminalStatusPayload::SearchEnded { id: tab_id }
+        }
+        Some(crate::macos::TerminalStatusEventKind::SearchTotal) => {
+            TerminalStatusPayload::SearchTotal {
+                id: tab_id,
+                total: arg0.max(0),
+            }
+        }
+        Some(crate::macos::TerminalStatusEventKind::SearchSelected) => {
+            TerminalStatusPayload::SearchSelected {
+                id: tab_id,
+                selected: arg0,
             }
         }
         None => return,
@@ -1190,9 +1277,7 @@ extern "C" fn reload_config_trampoline(_app_ptr: *mut std::ffi::c_void, _soft: b
         let app = match inner.app.as_ref() {
             Some(a) => a,
             None => {
-                tracing::warn!(
-                    "ghostty: reload_config fired before app was initialised; ignoring"
-                );
+                tracing::warn!("ghostty: reload_config fired before app was initialised; ignoring");
                 return;
             }
         };

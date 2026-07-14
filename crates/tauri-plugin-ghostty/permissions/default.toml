@@ -12,6 +12,7 @@ permissions = [
     "allow-terminal-focus-split",
     "allow-terminal-new-tab",
     "allow-terminal-focus-tab",
+    "allow-terminal-search",
     "allow-terminal-close-tab",
     "allow-terminal-list-tabs",
     "allow-terminal-set-chrome-inset",
@@ -49,6 +50,11 @@ commands.allow = ["terminal_new_tab"]
 identifier = "allow-terminal-focus-tab"
 description = "Allows switching the active tab by id."
 commands.allow = ["terminal_focus_tab"]
+
+[[permission]]
+identifier = "allow-terminal-search"
+description = "Allows driving Ghostty's built-in search on the focused terminal surface."
+commands.allow = ["terminal_search"]
 
 [[permission]]
 identifier = "allow-terminal-close-tab"

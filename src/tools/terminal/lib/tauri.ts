@@ -105,7 +105,33 @@ export type TerminalStatusEvent =
       id: number;
       kind: "renderer-health";
       healthy: boolean;
+    }
+  | {
+      id: number;
+      kind: "search-started";
+      query: string;
+    }
+  | {
+      id: number;
+      kind: "search-ended";
+    }
+  | {
+      id: number;
+      kind: "search-total";
+      total: number;
+    }
+  | {
+      id: number;
+      kind: "search-selected";
+      selected: number;
     };
+
+export type TerminalSearchAction =
+  | "start"
+  | "update"
+  | "next"
+  | "previous"
+  | "end";
 
 /**
  * One-time bootstrap. Creates the GhosttyApp (process-singleton),
@@ -132,6 +158,14 @@ export function terminalNewTab(config: TerminalConfig = {}) {
 /** Bring `tabId`'s NSView to the front; hides the previously active pane. */
 export function terminalFocusTab(tabId: number) {
   return invoke<void>("plugin:ghostty|terminal_focus_tab", { tabId });
+}
+
+/** Drive Ghostty's native search engine for the focused split. */
+export function terminalSearch(
+  action: TerminalSearchAction,
+  query?: string,
+) {
+  return invoke<boolean>("plugin:ghostty|terminal_search", { action, query });
 }
 
 /** Free the surface for `tabId` and remove its NSView. */

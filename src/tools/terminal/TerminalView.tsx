@@ -54,6 +54,7 @@ import { useDistractionFree } from "./store/distraction-free";
 import { useTerminalStore } from "./store/terminal-store";
 import {
   terminalFocusTab,
+  terminalSearch,
   terminalSetChromeInset,
   terminalSetTrafficLightsHidden,
   type ChromeInset,
@@ -149,6 +150,14 @@ export function TerminalView() {
   );
   const [railHiddenAuto, setRailHiddenAuto] = useState(false);
   const [railWidth, setRailWidth] = useState(() => readInitialRailWidth());
+  const [search, setSearch] = useState<{
+    id: number;
+    query: string;
+    total: number | null;
+    selected: number | null;
+  } | null>(null);
+  const [searchFocusRequest, setSearchFocusRequest] = useState(0);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
   const railVisible = railVisibleOverride ?? !railHiddenAuto;
   const containerRef = useRef<HTMLDivElement | null>(null);
   const railRef = useRef<HTMLElement | null>(null);
@@ -197,6 +206,67 @@ export function TerminalView() {
       console.error("[terminal] focus_tab failed:", e),
     );
   }, [activeId]);
+
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    let cancelled = false;
+    void listen<
+      | { id: number; kind: "search-started"; query: string }
+      | { id: number; kind: "search-ended" }
+      | { id: number; kind: "search-total"; total: number }
+      | { id: number; kind: "search-selected"; selected: number }
+    >("terminal:status", (event) => {
+      const payload = event.payload;
+      if (!payload.kind.startsWith("search-")) return;
+      if (payload.kind === "search-started") {
+        setSearch({ id: payload.id, query: payload.query, total: null, selected: null });
+        setSearchFocusRequest((request) => request + 1);
+        return;
+      }
+      if (payload.kind === "search-ended") {
+        setSearch((current) => current?.id === payload.id ? null : current);
+        return;
+      }
+      setSearch((current) => {
+        if (!current || current.id !== payload.id) return current;
+        return payload.kind === "search-total"
+          ? { ...current, total: payload.total >= 0 ? payload.total : null }
+          : { ...current, selected: payload.selected >= 0 ? payload.selected : null };
+      });
+    }).then((fn) => {
+      if (cancelled) fn();
+      else unlisten = fn;
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+
+  // Focus only after React has committed the search bar. The request counter
+  // changes for every Cmd+F, so pressing it again while search is already open
+  // also returns focus to the query field.
+  useEffect(() => {
+    if (!search || search.id !== activeId || searchFocusRequest === 0) return;
+    const frame = requestAnimationFrame(() => {
+      const input = searchInputRef.current;
+      input?.focus();
+      input?.select();
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [activeId, search?.id, searchFocusRequest]);
+
+  const openSearch = useCallback(() => {
+    void terminalSearch("start").catch((error) =>
+      console.error("[terminal] start search failed:", error),
+    );
+  }, []);
+
+  const closeSearch = useCallback(() => {
+    void terminalSearch("end").catch((error) =>
+      console.error("[terminal] end search failed:", error),
+    );
+  }, []);
 
   useEffect(() => {
     document.body.classList.add("terminal-route-active");
@@ -285,6 +355,7 @@ export function TerminalView() {
     dfEnabled,
     railVisible,
     workspaces.length,
+    search?.id,
   ]);
 
   useEffect(() => {
@@ -365,6 +436,7 @@ export function TerminalView() {
   useShortcut("mod+shift+e", toggleRailVisible, true, {
     fireInInputs: true,
   });
+  useShortcut("mod+f", openSearch, true, { fireInInputs: true });
 
   // Keep a ref to each native-key-hook handler so the Tauri `listen`
   // useEffect can safely use [] deps (register ONCE on mount). Without
@@ -884,7 +956,79 @@ export function TerminalView() {
         )}
 
         <div className="relative min-h-0 flex-1">
-          <div ref={growthRef} className="absolute inset-0" aria-hidden />
+          <div
+            ref={growthRef}
+            className="absolute inset-x-0 bottom-0"
+            style={{ top: search && search.id === activeId ? 48 : 0 }}
+            aria-hidden
+          />
+          {search && search.id === activeId && (
+            <div className="terminal-chrome terminal-search" role="search">
+              <input
+                ref={searchInputRef}
+                className="terminal-search__input"
+                type="text"
+                value={search.query}
+                placeholder="Search scrollback"
+                aria-label="Search terminal scrollback"
+                onChange={(event) => {
+                  const query = event.currentTarget.value;
+                  setSearch((current) => current ? {
+                    ...current,
+                    query,
+                    total: null,
+                    selected: null,
+                  } : current);
+                  void terminalSearch("update", query).catch((error) =>
+                    console.error("[terminal] update search failed:", error),
+                  );
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === "Escape") {
+                    event.preventDefault();
+                    closeSearch();
+                  } else if (event.key === "Enter") {
+                    event.preventDefault();
+                    void terminalSearch(event.shiftKey ? "previous" : "next");
+                  }
+                }}
+              />
+              <span className="terminal-search__count" aria-live="polite">
+                {search.total == null
+                  ? "…"
+                  : search.total === 0
+                    ? "0/0"
+                    : `${search.selected == null ? 0 : search.selected + 1}/${search.total}`}
+              </span>
+              <button
+                type="button"
+                className="terminal-search__button"
+                aria-label="Previous match"
+                title="Previous match (Shift+Enter)"
+                onClick={() => void terminalSearch("previous")}
+              >
+                ↑
+              </button>
+              <button
+                type="button"
+                className="terminal-search__button"
+                aria-label="Next match"
+                title="Next match (Enter)"
+                onClick={() => void terminalSearch("next")}
+              >
+                ↓
+              </button>
+              <button
+                type="button"
+                className="terminal-search__button"
+                aria-label="Close search"
+                title="Close search (Escape)"
+                onClick={closeSearch}
+              >
+                ×
+              </button>
+            </div>
+          )}
           {!activeWorkspaceHasPane && activeWorkspace && (
             <div className="terminal-chrome terminal-empty-state">
               <div className="terminal-empty-state__card">

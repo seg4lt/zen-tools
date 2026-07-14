@@ -6,6 +6,7 @@ const COMMANDS: &[&str] = &[
     "terminal_set_color_scheme",
     "terminal_split",
     "terminal_focus_split",
+    "terminal_search",
 ];
 
 fn main() {

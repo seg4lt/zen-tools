@@ -36,18 +36,14 @@ extern "C" {
     fn GhosttyRegisterTabEventCallback(
         fn_ptr: Option<extern "C" fn(kind: i32, tab_id: i32, value: *const c_char)>,
     );
-    fn GhosttyRegisterTabActionCallback(
-        fn_ptr: Option<extern "C" fn(kind: i32, arg: i64)>,
-    );
+    fn GhosttyRegisterTabActionCallback(fn_ptr: Option<extern "C" fn(kind: i32, arg: i64)>);
 
     // Embedding-host passthrough chords (for example cmd+opt+f,
     // cmd+[ / cmd+], cmd+shift+[ / cmd+shift+], cmd+n, cmd+shift+n).
     // The plugin's NSEvent monitor consumes the chord and fires this
     // callback with a stable identifier string. See
     // `GhosttyHostView.h::GhosttyRegisterHostKeyHookCallback`.
-    fn GhosttyRegisterHostKeyHookCallback(
-        fn_ptr: Option<extern "C" fn(chord: *const c_char)>,
-    );
+    fn GhosttyRegisterHostKeyHookCallback(fn_ptr: Option<extern "C" fn(chord: *const c_char)>);
 
     // Reload-config action handler. Ghostty fires
     // `GHOSTTY_ACTION_RELOAD_CONFIG` after color-scheme / conditional
@@ -77,6 +73,7 @@ extern "C" {
     // map (those are allocated entirely on the C side from
     // `perform_new_split`). Returns the count of surfaces touched.
     fn GhosttySetColorSchemeAll(dark: i32) -> i32;
+    fn GhosttyFocusedSurfaceBindingAction(action: *const c_char) -> bool;
 }
 
 /// Ensure the tab content container is mounted as a subview of the
@@ -290,6 +287,10 @@ pub enum TerminalStatusEventKind {
     DesktopNotification = 5,
     ChildExited = 6,
     RendererHealth = 7,
+    SearchStarted = 8,
+    SearchEnded = 9,
+    SearchTotal = 10,
+    SearchSelected = 11,
 }
 
 impl TerminalStatusEventKind {
@@ -302,16 +303,23 @@ impl TerminalStatusEventKind {
             5 => Self::DesktopNotification,
             6 => Self::ChildExited,
             7 => Self::RendererHealth,
+            8 => Self::SearchStarted,
+            9 => Self::SearchEnded,
+            10 => Self::SearchTotal,
+            11 => Self::SearchSelected,
             _ => return None,
         })
     }
 }
 
+/// Execute a binding action on the currently focused native surface.
+pub unsafe fn focused_surface_binding_action(action: &std::ffi::CStr) -> bool {
+    GhosttyFocusedSurfaceBindingAction(action.as_ptr())
+}
+
 /// Install the tab action callback. Called by ghostty's action_cb when
 /// it sees NEW_TAB / CLOSE_TAB / GOTO_TAB. Runs on the main thread.
-pub unsafe fn register_tab_action_callback(
-    fn_ptr: extern "C" fn(kind: i32, arg: i64),
-) {
+pub unsafe fn register_tab_action_callback(fn_ptr: extern "C" fn(kind: i32, arg: i64)) {
     GhosttyRegisterTabActionCallback(Some(fn_ptr));
 }
 
@@ -319,18 +327,14 @@ pub unsafe fn register_tab_action_callback(
 /// NSEvent monitor sees a chord that the host wants to handle
 /// instead of forwarding to ghostty (for example `cmd+opt+f`,
 /// `cmd+[`, `cmd+shift+]`, or `cmd+shift+n`). Runs on the main thread.
-pub unsafe fn register_host_key_hook_callback(
-    fn_ptr: extern "C" fn(chord: *const c_char),
-) {
+pub unsafe fn register_host_key_hook_callback(fn_ptr: extern "C" fn(chord: *const c_char)) {
     GhosttyRegisterHostKeyHookCallback(Some(fn_ptr));
 }
 
 /// Install the reload-config callback. Fires when ghostty's action_cb
 /// dispatches `GHOSTTY_ACTION_RELOAD_CONFIG` — most importantly after
 /// `ghostty_app_set_color_scheme()`. Runs on the main thread.
-pub unsafe fn register_reload_config_callback(
-    fn_ptr: extern "C" fn(app: *mut c_void, soft: bool),
-) {
+pub unsafe fn register_reload_config_callback(fn_ptr: extern "C" fn(app: *mut c_void, soft: bool)) {
     GhosttyRegisterReloadConfigCallback(Some(fn_ptr));
 }
 

@@ -10,6 +10,7 @@ Default permissions for the ghostty terminal plugin.
 - `allow-terminal-focus-split`
 - `allow-terminal-new-tab`
 - `allow-terminal-focus-tab`
+- `allow-terminal-search`
 - `allow-terminal-close-tab`
 - `allow-terminal-list-tabs`
 - `allow-terminal-set-chrome-inset`
@@ -74,6 +75,32 @@ Enables the terminal_new command without any pre-configured scope.
 <td>
 
 Denies the terminal_new command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`ghostty:allow-terminal-search`
+
+</td>
+<td>
+
+Enables the terminal_search command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`ghostty:deny-terminal-search`
+
+</td>
+<td>
+
+Denies the terminal_search command without any pre-configured scope.
 
 </td>
 </tr>
@@ -204,6 +231,19 @@ Allows creating a new tab (a fresh GhosttyHostView + surface mounted in the tab 
 <td>
 
 Allows switching the active tab by id.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`ghostty:allow-terminal-search`
+
+</td>
+<td>
+
+Allows driving Ghostty's built-in search on the focused terminal surface.
 
 </td>
 </tr>

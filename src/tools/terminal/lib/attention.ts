@@ -268,6 +268,11 @@ export function applyTerminalToolStatus(
       };
     case "renderer-health":
       return { ...current, unhealthy: !event.healthy };
+    case "search-started":
+    case "search-ended":
+    case "search-total":
+    case "search-selected":
+      return current;
   }
 }
 
