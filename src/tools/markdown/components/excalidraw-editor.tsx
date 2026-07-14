@@ -34,13 +34,17 @@
 
 import {
   CaptureUpdateAction,
+  convertToExcalidrawElements,
   Excalidraw,
   exportToBlob,
   exportToSvg,
+  getCommonBounds,
   getNonDeletedElements,
   loadFromBlob,
   newElementWith,
+  restoreElements,
   sceneCoordsToViewportCoords,
+  viewportCoordsToSceneCoords,
 } from "@excalidraw/excalidraw";
 import "@excalidraw/excalidraw/index.css";
 import type {
@@ -59,7 +63,9 @@ import {
   ChevronDown,
   ChevronUp,
   Activity,
+  Boxes,
   Copy,
+  Database,
   Eye,
   EyeOff,
   Trash2,
@@ -70,10 +76,27 @@ import {
   Minimize2,
   Pencil,
   Presentation,
+  FileText,
+  Network,
+  Search,
+  Server,
+  Shield,
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import type React from "react";
 import { createPortal } from "react-dom";
 import { terminalSetTrafficLightsHidden } from "@/tools/terminal/lib/tauri";
+import architectureComponentsLibraryRaw from "@/assets/excalidraw-libraries/architecture-components.excalidrawlib?raw";
+import awsLibraryRaw from "@/assets/excalidraw-libraries/aws.excalidrawlib?raw";
+import basicUxLibraryRaw from "@/assets/excalidraw-libraries/basic-ux.excalidrawlib?raw";
+import devopsLibraryRaw from "@/assets/excalidraw-libraries/devops.excalidrawlib?raw";
+import formsLibraryRaw from "@/assets/excalidraw-libraries/forms.excalidrawlib?raw";
+import softwareArchitectureLibraryRaw from "@/assets/excalidraw-libraries/software-architecture.excalidrawlib?raw";
+import softwareLogosLibraryRaw from "@/assets/excalidraw-libraries/software-logos.excalidrawlib?raw";
+import stickyNotesLibraryRaw from "@/assets/excalidraw-libraries/sticky-notes.excalidrawlib?raw";
+import systemDesignLibraryRaw from "@/assets/excalidraw-libraries/system-design.excalidrawlib?raw";
+import umlErLibraryRaw from "@/assets/excalidraw-libraries/uml-er.excalidrawlib?raw";
+import webKitLibraryRaw from "@/assets/excalidraw-libraries/web-kit.excalidrawlib?raw";
 
 interface ExcalidrawEditorProps {
   /** Absolute path of the open `*.excalidraw.svg` *or*
@@ -120,12 +143,313 @@ interface AnimatedArrowPath {
 type FlowSpeed = "slow" | "normal" | "fast";
 type FlowDensity = "sparse" | "normal" | "dense";
 type FlowDirection = "auto" | "forward" | "reverse" | "both";
+type ConnectorType =
+  | "request"
+  | "event"
+  | "data"
+  | "replication"
+  | "network"
+  | "control"
+  | "trust";
 
 interface FlowStyle {
   speed: FlowSpeed;
   density: FlowDensity;
   direction: FlowDirection;
   color: string | null;
+  connectorType: ConnectorType;
+  protocol: string;
+}
+
+interface ArchitectureService {
+  provider: "AWS" | "Azure" | "Data" | "Generic";
+  service: string;
+  category: "compute" | "storage" | "database" | "network" | "security" | "messaging";
+}
+
+interface BundledLibraryItem {
+  id: string;
+  name: string;
+  source: string;
+  elements: readonly Record<string, unknown>[];
+}
+
+function parseLibraryItems(
+  raw: string,
+  source: BundledLibraryItem["source"],
+): BundledLibraryItem[] {
+  const parsed = JSON.parse(raw) as {
+    libraryItems?: Array<{
+      id: string;
+      name?: string;
+      elements: readonly Record<string, unknown>[];
+    }>;
+    library?: Array<readonly Record<string, unknown>[]>;
+  };
+  const modernItems = (parsed.libraryItems ?? []).map((item, index) => ({
+    id: `${source}-${item.id}`,
+    name: item.name?.trim() || `${source} icon ${index + 1}`,
+    source,
+    elements: item.elements,
+  }));
+  const legacyItems = (parsed.library ?? []).map((elements, index) => {
+    const label = elements.find(
+      (element) => element.type === "text" && typeof element.text === "string",
+    )?.text;
+    return {
+      id: `${source}-legacy-${index}`,
+      name:
+        typeof label === "string" && label.trim()
+          ? label.trim().split("\n")[0]
+          : `${source} icon ${index + 1}`,
+      source,
+      elements,
+    };
+  });
+  return [...modernItems, ...legacyItems];
+}
+
+const BUNDLED_LIBRARY_ITEMS = [
+  ...parseLibraryItems(softwareArchitectureLibraryRaw, "Software Architecture"),
+  ...parseLibraryItems(systemDesignLibraryRaw, "System Design Components"),
+  ...parseLibraryItems(architectureComponentsLibraryRaw, "Architecture Components"),
+  ...parseLibraryItems(softwareLogosLibraryRaw, "Software Logos"),
+  ...parseLibraryItems(awsLibraryRaw, "AWS"),
+  ...parseLibraryItems(umlErLibraryRaw, "UML & ER"),
+  ...parseLibraryItems(formsLibraryRaw, "Forms"),
+  ...parseLibraryItems(basicUxLibraryRaw, "Basic UX"),
+  ...parseLibraryItems(devopsLibraryRaw, "DevOps"),
+  ...parseLibraryItems(stickyNotesLibraryRaw, "Sticky Notes"),
+  ...parseLibraryItems(webKitLibraryRaw, "Web Kit"),
+];
+
+function LibraryItemThumbnail({
+  item,
+  theme,
+}: {
+  item: BundledLibraryItem;
+  theme: "light" | "dark";
+}) {
+  const hostRef = useRef<HTMLSpanElement | null>(null);
+  const [source, setSource] = useState<string | null>(null);
+
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!host) return;
+    let objectUrl: string | null = null;
+    let cancelled = false;
+    let nearViewport = false;
+    let rendering = false;
+    const releasePreview = () => {
+      if (!objectUrl) return;
+      URL.revokeObjectURL(objectUrl);
+      objectUrl = null;
+      setSource(null);
+    };
+    const renderPreview = async () => {
+      if (rendering || objectUrl || cancelled || !nearViewport) return;
+      rendering = true;
+      const elements = restoreElements(item.elements as never, null);
+      try {
+        const svg = await exportToSvg({
+          elements,
+          appState: {
+            exportBackground: false,
+            viewBackgroundColor: "transparent",
+            theme,
+            exportWithDarkMode: theme === "dark",
+          } as AppState,
+          files: {},
+          exportPadding: 8,
+        });
+        if (cancelled || !nearViewport) return;
+        objectUrl = URL.createObjectURL(
+          new Blob([new XMLSerializer().serializeToString(svg)], {
+            type: "image/svg+xml",
+          }),
+        );
+        setSource(objectUrl);
+      } finally {
+        rendering = false;
+      }
+    };
+    const observer = new IntersectionObserver(
+      (entries) => {
+        nearViewport = entries.some((entry) => entry.isIntersecting);
+        if (nearViewport) void renderPreview();
+        else releasePreview();
+      },
+      { rootMargin: "240px" },
+    );
+    observer.observe(host);
+    return () => {
+      cancelled = true;
+      observer.disconnect();
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [item, theme]);
+
+  return (
+    <span ref={hostRef} className="zen-excalidraw-library-thumbnail">
+      {source ? <img src={source} alt="" /> : <Loader2 aria-hidden="true" />}
+    </span>
+  );
+}
+
+function LibraryResultsSentinel({
+  hasMore,
+  page,
+  onVisible,
+}: {
+  hasMore: boolean;
+  page: number;
+  onVisible: () => void;
+}) {
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
+  const onVisibleRef = useRef(onVisible);
+  onVisibleRef.current = onVisible;
+
+  useEffect(() => {
+    const sentinel = sentinelRef.current;
+    if (!sentinel || !hasMore) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          observer.disconnect();
+          onVisibleRef.current();
+        }
+      },
+      { rootMargin: "500px 0px" },
+    );
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [hasMore, page]);
+
+  if (!hasMore) return null;
+  return (
+    <div ref={sentinelRef} className="zen-excalidraw-library-sentinel">
+      <Loader2 aria-hidden="true" />
+      <span>Loading more diagrams…</span>
+    </div>
+  );
+}
+
+const ARCHITECTURE_SERVICES: ArchitectureService[] = [
+  { provider: "AWS", service: "EC2", category: "compute" },
+  { provider: "AWS", service: "Lambda", category: "compute" },
+  { provider: "AWS", service: "ECS / EKS", category: "compute" },
+  { provider: "AWS", service: "S3", category: "storage" },
+  { provider: "AWS", service: "RDS", category: "database" },
+  { provider: "AWS", service: "DynamoDB", category: "database" },
+  { provider: "AWS", service: "API Gateway", category: "network" },
+  { provider: "AWS", service: "CloudFront", category: "network" },
+  { provider: "AWS", service: "VPC", category: "network" },
+  { provider: "AWS", service: "SQS / SNS", category: "messaging" },
+  { provider: "AWS", service: "IAM", category: "security" },
+  { provider: "AWS", service: "Secrets Manager", category: "security" },
+  { provider: "Azure", service: "Virtual Machines", category: "compute" },
+  { provider: "Azure", service: "Functions", category: "compute" },
+  { provider: "Azure", service: "AKS", category: "compute" },
+  { provider: "Azure", service: "Blob Storage", category: "storage" },
+  { provider: "Azure", service: "Azure SQL", category: "database" },
+  { provider: "Azure", service: "Cosmos DB", category: "database" },
+  { provider: "Azure", service: "API Management", category: "network" },
+  { provider: "Azure", service: "VNet", category: "network" },
+  { provider: "Azure", service: "Service Bus", category: "messaging" },
+  { provider: "Azure", service: "Key Vault", category: "security" },
+  { provider: "Data", service: "PostgreSQL", category: "database" },
+  { provider: "Data", service: "MySQL", category: "database" },
+  { provider: "Data", service: "MongoDB", category: "database" },
+  { provider: "Data", service: "Redis", category: "database" },
+  { provider: "Data", service: "Kafka", category: "messaging" },
+  { provider: "Data", service: "Elasticsearch", category: "database" },
+  { provider: "Generic", service: "Service", category: "compute" },
+  { provider: "Generic", service: "Database", category: "database" },
+  { provider: "Generic", service: "Queue", category: "messaging" },
+  { provider: "Generic", service: "Network", category: "network" },
+  { provider: "Generic", service: "Trust Boundary", category: "security" },
+];
+
+const ARCHITECTURE_NODE_KEY = "zenToolsArchitectureNode";
+const MARKDOWN_CARD_KEY = "zenToolsMarkdownCard";
+
+function ArchitectureCategoryIcon({ category }: { category: ArchitectureService["category"] }) {
+  if (category === "database") return <Database aria-hidden="true" />;
+  if (category === "network") return <Network aria-hidden="true" />;
+  if (category === "security") return <Shield aria-hidden="true" />;
+  if (category === "messaging") return <Boxes aria-hidden="true" />;
+  return <Server aria-hidden="true" />;
+}
+
+function architectureIconLabel(service: ArchitectureService): string {
+  const serviceName = service.service.toLowerCase();
+  if (serviceName.includes("lambda") || serviceName.includes("functions")) return "λ";
+  if (serviceName.includes("kafka") || serviceName.includes("queue") || serviceName.includes("sqs")) return "⇄";
+  if (serviceName.includes("s3") || serviceName.includes("blob")) return "▤";
+  if (service.category === "database") return "DB";
+  if (service.category === "network") return "⇆";
+  if (service.category === "security") return "◇";
+  if (service.category === "messaging") return "⇝";
+  return serviceName.includes("container") || serviceName.includes("eks") || serviceName.includes("aks")
+    ? "▦"
+    : "▣";
+}
+
+function markdownToCanvasText(markdown: string): string {
+  return markdown
+    .split("\n")
+    .map((line) => {
+      if (line.startsWith("> [!IMPORTANT]")) return "⚠  IMPORTANT";
+      if (line.startsWith("> [!NOTE]")) return "ⓘ  NOTE";
+      if (line.startsWith("> ")) return `│ ${line.slice(2)}`;
+      if (/^[-*] /.test(line)) return `• ${line.slice(2)}`;
+      if (/^#{1,3} /.test(line)) return line.replace(/^#{1,3} /, "").toUpperCase();
+      return line
+        .replace(/\*\*([^*]+)\*\*/g, "$1")
+        .replace(/`([^`]+)`/g, "$1")
+        .replace(/^!\[([^\]]*)\]\(.+\)$/, "🖼  $1");
+    })
+    .join("\n");
+}
+
+function createMarkdownCardElements(markdown: string, x: number, y: number) {
+  const canvasText = markdownToCanvasText(markdown);
+  const lines = canvasText.split("\n");
+  const longestLine = Math.max(20, ...lines.map((line) => line.length));
+  const width = Math.min(720, Math.max(360, longestLine * 9 + 48));
+  const height = Math.min(640, Math.max(180, lines.length * 24 + 48));
+  const groupId = `markdown-card-${crypto.randomUUID()}`;
+  return convertToExcalidrawElements(
+    [
+      {
+        type: "rectangle",
+        x,
+        y,
+        width,
+        height,
+        backgroundColor: "#ffffff",
+        strokeColor: "#6965db",
+        fillStyle: "solid",
+        strokeWidth: 2,
+        roundness: { type: 3 },
+        groupIds: [groupId],
+        customData: {
+          [MARKDOWN_CARD_KEY]: markdown,
+          zenToolsMarkdownBaseWidth: width,
+        },
+      },
+      {
+        type: "text",
+        x: x + 24,
+        y: y + 22,
+        text: canvasText,
+        fontSize: 18,
+        strokeColor: "#202124",
+        groupIds: [groupId],
+      },
+    ] as unknown as Parameters<typeof convertToExcalidrawElements>[0],
+    { regenerateIds: true },
+  );
 }
 
 const PRESENTATION_ORDER_KEY = "zenToolsPresentationOrder";
@@ -135,11 +459,15 @@ const FLOW_SPEED_KEY = "zenToolsFlowSpeed";
 const FLOW_DENSITY_KEY = "zenToolsFlowDensity";
 const FLOW_DIRECTION_KEY = "zenToolsFlowDirection";
 const FLOW_COLOR_KEY = "zenToolsFlowColor";
+const CONNECTOR_TYPE_KEY = "zenToolsConnectorType";
+const CONNECTOR_PROTOCOL_KEY = "zenToolsConnectorProtocol";
 const DEFAULT_FLOW_STYLE: FlowStyle = {
   speed: "normal",
   density: "normal",
   direction: "auto",
   color: null,
+  connectorType: "request",
+  protocol: "",
 };
 const POINTY_ARROWHEADS = new Set([
   "arrow",
@@ -165,6 +493,7 @@ function flowStyleFromArrow(arrow: OrderedArrowElement): FlowStyle {
   const density = arrow.customData?.[FLOW_DENSITY_KEY];
   const direction = arrow.customData?.[FLOW_DIRECTION_KEY];
   const color = arrow.customData?.[FLOW_COLOR_KEY];
+  const connectorType = arrow.customData?.[CONNECTOR_TYPE_KEY];
   return {
     speed:
       speed === "slow" || speed === "fast" || speed === "normal"
@@ -182,6 +511,20 @@ function flowStyleFromArrow(arrow: OrderedArrowElement): FlowStyle {
         ? direction
         : "auto",
     color: typeof color === "string" ? color : null,
+    connectorType:
+      connectorType === "event" ||
+      connectorType === "data" ||
+      connectorType === "replication" ||
+      connectorType === "network" ||
+      connectorType === "control" ||
+      connectorType === "trust" ||
+      connectorType === "request"
+        ? connectorType
+        : "request",
+    protocol:
+      typeof arrow.customData?.[CONNECTOR_PROTOCOL_KEY] === "string"
+        ? arrow.customData[CONNECTOR_PROTOCOL_KEY]
+        : "",
   };
 }
 
@@ -243,7 +586,9 @@ function sameFlowStyle(a: FlowStyle, b: FlowStyle): boolean {
     a.speed === b.speed &&
     a.density === b.density &&
     a.direction === b.direction &&
-    a.color === b.color
+    a.color === b.color &&
+    a.connectorType === b.connectorType &&
+    a.protocol === b.protocol
   );
 }
 
@@ -291,6 +636,14 @@ export default function ExcalidrawEditor({
     Record<string, string>
   >({});
   const [framePanelOpen, setFramePanelOpen] = useState(false);
+  const [architecturePanelOpen, setArchitecturePanelOpen] = useState(false);
+  const [architectureQuery, setArchitectureQuery] = useState("");
+  const [libraryResultLimit, setLibraryResultLimit] = useState(48);
+  const [selectedArchitectureNodeId, setSelectedArchitectureNodeId] =
+    useState<string | null>(null);
+  const [selectedMarkdownCardId, setSelectedMarkdownCardId] =
+    useState<string | null>(null);
+  const [markdownDraft, setMarkdownDraft] = useState("");
   const [selectedDirectionalArrowIds, setSelectedDirectionalArrowIds] =
     useState<string[]>([]);
   const [selectedArrowsAnimated, setSelectedArrowsAnimated] = useState(false);
@@ -315,6 +668,7 @@ export default function ExcalidrawEditor({
   const processedDirectionalArrowIdsRef = useRef<Set<string>>(new Set());
   const thumbnailTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const thumbnailUrlsRef = useRef<string[]>([]);
+  const lastSpacePressRef = useRef(0);
 
   const apiRef = useRef<ExcalidrawImperativeAPI | null>(null);
   const sceneRef = useRef<LiveScene | null>(null);
@@ -327,6 +681,22 @@ export default function ExcalidrawEditor({
   useEffect(() => {
     onAutoSaveRef.current = onAutoSave;
   }, [onAutoSave]);
+
+  useEffect(() => {
+    setLibraryResultLimit(48);
+  }, [architectureQuery]);
+
+  useEffect(() => {
+    if (!selectedMarkdownCardId) {
+      setMarkdownDraft("");
+      return;
+    }
+    const element = sceneRef.current?.elements.find(
+      (candidate) => candidate.id === selectedMarkdownCardId,
+    );
+    const markdown = element?.customData?.[MARKDOWN_CARD_KEY];
+    setMarkdownDraft(typeof markdown === "string" ? markdown : "");
+  }, [selectedMarkdownCardId]);
 
   const serializeScene = useCallback(
     async (scene: LiveScene): Promise<string | Uint8Array> => {
@@ -551,6 +921,8 @@ export default function ExcalidrawEditor({
                   [FLOW_DENSITY_KEY]: nextStyle.density,
                   [FLOW_DIRECTION_KEY]: nextStyle.direction,
                   [FLOW_COLOR_KEY]: nextStyle.color,
+                  [CONNECTOR_TYPE_KEY]: nextStyle.connectorType,
+                  [CONNECTOR_PROTOCOL_KEY]: nextStyle.protocol,
                 },
               })
             : element,
@@ -741,6 +1113,307 @@ export default function ExcalidrawEditor({
     });
   }, []);
 
+  const sceneCenter = useCallback(() => {
+    const api = apiRef.current;
+    const rect = editorHostRef.current?.getBoundingClientRect();
+    if (!api || !rect) return { x: 100, y: 100 };
+    return viewportCoordsToSceneCoords(
+      { clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 },
+      api.getAppState(),
+    );
+  }, []);
+
+  const insertArchitectureService = useCallback(
+    (service: ArchitectureService) => {
+      const api = apiRef.current;
+      if (!api) return;
+      const center = sceneCenter();
+      const providerColor =
+        service.provider === "AWS"
+          ? "#ff9900"
+          : service.provider === "Azure"
+            ? "#168ddd"
+            : service.provider === "Data"
+              ? "#2f9e44"
+              : "#6965db";
+      const groupId = `architecture-${crypto.randomUUID()}`;
+      const skeleton = [
+        {
+          type: "rectangle",
+          x: center.x - 120,
+          y: center.y - 48,
+          width: 240,
+          height: 96,
+          backgroundColor: "#ffffff",
+          strokeColor: providerColor,
+          fillStyle: "solid",
+          strokeWidth: 2,
+          roundness: { type: 3 },
+          groupIds: [groupId],
+          customData: {
+            [ARCHITECTURE_NODE_KEY]: true,
+            provider: service.provider,
+            service: service.service,
+            category: service.category,
+            resourceName: "",
+            environment: "",
+            owner: "",
+            region: "",
+            notes: "",
+            detailFrameId: "",
+          },
+        },
+        {
+          type: "rectangle",
+          x: center.x - 108,
+          y: center.y - 36,
+          width: 72,
+          height: 72,
+          backgroundColor: providerColor,
+          strokeColor: providerColor,
+          fillStyle: "solid",
+          roundness: { type: 3 },
+          groupIds: [groupId],
+          label: {
+            text: architectureIconLabel(service),
+            fontSize: 24,
+            textAlign: "center",
+            verticalAlign: "middle",
+            strokeColor: "#ffffff",
+          },
+        },
+        {
+          type: "text",
+          x: center.x - 22,
+          y: center.y - 24,
+          text: `${service.service}\n${service.provider}`,
+          fontSize: 18,
+          strokeColor: "#1b1b1f",
+          groupIds: [groupId],
+        },
+      ] as unknown as Parameters<typeof convertToExcalidrawElements>[0];
+      const created = convertToExcalidrawElements(skeleton, {
+        regenerateIds: true,
+      });
+      api.updateScene({
+        elements: [...api.getSceneElementsIncludingDeleted(), ...created],
+        appState: {
+          selectedElementIds: Object.fromEntries(
+            created.map((element) => [element.id, true]),
+          ),
+        },
+        captureUpdate: CaptureUpdateAction.IMMEDIATELY,
+      });
+      setArchitecturePanelOpen(false);
+    },
+    [sceneCenter],
+  );
+
+  const insertLibraryItem = useCallback(
+    (item: BundledLibraryItem) => {
+      const api = apiRef.current;
+      if (!api) return;
+      const restored = restoreElements(item.elements as never, null);
+      if (restored.length === 0) return;
+      const [minX, minY, maxX, maxY] = getCommonBounds(restored);
+      const center = sceneCenter();
+      const offsetX = center.x - (minX + maxX) / 2;
+      const offsetY = center.y - (minY + maxY) / 2;
+      const idMap = new Map(
+        restored.map((element) => [element.id, crypto.randomUUID()]),
+      );
+      const groupIds = new Set(restored.flatMap((element) => element.groupIds));
+      const groupMap = new Map(
+        [...groupIds].map((groupId) => [groupId, crypto.randomUUID()]),
+      );
+      const created = restored.map((element) => {
+        const clone = structuredClone(element);
+        return {
+          ...clone,
+          id: idMap.get(element.id) ?? crypto.randomUUID(),
+          x: element.x + offsetX,
+          y: element.y + offsetY,
+          groupIds: element.groupIds.map(
+            (groupId) => groupMap.get(groupId) ?? groupId,
+          ),
+          frameId: element.frameId ? (idMap.get(element.frameId) ?? null) : null,
+          containerId:
+            element.type === "text" && element.containerId
+              ? (idMap.get(element.containerId) ?? null)
+              : element.type === "text"
+                ? null
+                : undefined,
+          boundElements: element.boundElements?.map((binding) => ({
+            ...binding,
+            id: idMap.get(binding.id) ?? binding.id,
+          })) ?? null,
+          startBinding:
+            (element.type === "arrow" || element.type === "line") &&
+            element.startBinding
+              ? {
+                  ...element.startBinding,
+                  elementId:
+                    idMap.get(element.startBinding.elementId) ??
+                    element.startBinding.elementId,
+                }
+              : null,
+          endBinding:
+            (element.type === "arrow" || element.type === "line") &&
+            element.endBinding
+              ? {
+                  ...element.endBinding,
+                  elementId:
+                    idMap.get(element.endBinding.elementId) ??
+                    element.endBinding.elementId,
+                }
+              : null,
+          version: 1,
+          versionNonce: Math.floor(Math.random() * 2 ** 31),
+          updated: Date.now(),
+        } as unknown as OrderedExcalidrawElement;
+      });
+      api.updateScene({
+        elements: [...api.getSceneElementsIncludingDeleted(), ...created],
+        appState: {
+          selectedElementIds: Object.fromEntries(
+            created.map((element) => [element.id, true]),
+          ),
+        },
+        captureUpdate: CaptureUpdateAction.IMMEDIATELY,
+      });
+      setArchitecturePanelOpen(false);
+    },
+    [sceneCenter],
+  );
+
+  const insertMarkdownCard = useCallback(() => {
+    const api = apiRef.current;
+    if (!api) return;
+    const center = sceneCenter();
+    const created = createMarkdownCardElements(
+      "# Architecture note\n\n- Add context\n- Document decisions\n\n> [!IMPORTANT]\n> Capture risks and constraints.",
+      center.x - 180,
+      center.y - 120,
+    );
+    api.updateScene({
+      elements: [...api.getSceneElementsIncludingDeleted(), ...created],
+      appState: {
+        selectedElementIds: Object.fromEntries(
+          created.map((element) => [element.id, true]),
+        ),
+      },
+      captureUpdate: CaptureUpdateAction.IMMEDIATELY,
+    });
+  }, [sceneCenter]);
+
+  const updateElementCustomData = useCallback(
+    (elementId: string, patch: Record<string, unknown>) => {
+      const api = apiRef.current;
+      if (!api) return;
+      api.updateScene({
+        elements: api.getSceneElementsIncludingDeleted().map((element) =>
+          element.id === elementId
+            ? newElementWith(element, {
+                customData: { ...element.customData, ...patch },
+              })
+            : element,
+        ),
+        captureUpdate: CaptureUpdateAction.IMMEDIATELY,
+      });
+    },
+    [],
+  );
+
+  const commitMarkdownCard = useCallback(() => {
+    if (!selectedMarkdownCardId) return;
+    const api = apiRef.current;
+    if (!api) return;
+    const allElements = api.getSceneElementsIncludingDeleted();
+    const card = allElements.find(
+      (element) => element.id === selectedMarkdownCardId,
+    );
+    if (!card) return;
+    const groupId = card.groupIds[0];
+    const created = createMarkdownCardElements(markdownDraft, card.x, card.y);
+    api.updateScene({
+      elements: [
+        ...allElements.map((element) =>
+          element.id === selectedMarkdownCardId ||
+          (groupId && element.groupIds.includes(groupId))
+            ? newElementWith(element, { isDeleted: true })
+            : element,
+        ),
+        ...created,
+      ],
+      appState: {
+        selectedElementIds: Object.fromEntries(
+          created.map((element) => [element.id, true]),
+        ),
+      },
+      captureUpdate: CaptureUpdateAction.IMMEDIATELY,
+    });
+  }, [markdownDraft, selectedMarkdownCardId]);
+
+  const pasteImageIntoMarkdown = useCallback(
+    (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
+      const image = Array.from(event.clipboardData.files).find((file) =>
+        file.type.startsWith("image/"),
+      );
+      if (!image) return;
+      event.preventDefault();
+      const reader = new FileReader();
+      reader.onload = () => {
+        const dataUrl = typeof reader.result === "string" ? reader.result : "";
+        const api = apiRef.current;
+        const card = api
+          ?.getSceneElements()
+          .find((element) => element.id === selectedMarkdownCardId);
+        if (!api || !card || !dataUrl) return;
+        const fileId = crypto.randomUUID();
+        api.addFiles([
+          {
+            id: fileId,
+            dataURL: dataUrl,
+            mimeType: image.type,
+            created: Date.now(),
+          } as unknown as Parameters<ExcalidrawImperativeAPI["addFiles"]>[0][number],
+        ]);
+        const preview = new Image();
+        preview.onload = () => {
+          const maxWidth = Math.max(160, card.width * 0.8);
+          const scale = Math.min(1, maxWidth / Math.max(1, preview.width));
+          const width = Math.max(80, preview.width * scale);
+          const height = Math.max(80, preview.height * scale);
+          const created = convertToExcalidrawElements(
+            [
+              {
+                type: "image",
+                x: card.x + (card.width - width) / 2,
+                y: card.y + card.height + 24,
+                width,
+                height,
+                fileId,
+                status: "saved",
+                scale: [1, 1],
+              },
+            ] as unknown as Parameters<typeof convertToExcalidrawElements>[0],
+            { regenerateIds: true },
+          );
+          api.updateScene({
+            elements: [...api.getSceneElementsIncludingDeleted(), ...created],
+            appState: {
+              selectedElementIds: { [created[0].id]: true },
+            },
+            captureUpdate: CaptureUpdateAction.IMMEDIATELY,
+          });
+        };
+        preview.src = dataUrl;
+      };
+      reader.readAsDataURL(image);
+    },
+    [selectedMarkdownCardId],
+  );
+
   // Excalidraw fires onChange while restoring initialData. Give that
   // mount-time callback a frame to settle so opening a drawing never
   // counts as an edit or schedules an overwrite.
@@ -798,6 +1471,9 @@ export default function ExcalidrawEditor({
     framesRef.current = [];
     setFrameThumbnails({});
     setFramePanelOpen(false);
+    setArchitecturePanelOpen(false);
+    setSelectedArchitectureNodeId(null);
+    setSelectedMarkdownCardId(null);
     manualFrameOrderRef.current = null;
     setSelectedDirectionalArrowIds([]);
     setSelectedArrowsAnimated(false);
@@ -859,6 +1535,39 @@ export default function ExcalidrawEditor({
   // ────────────────────────────────────────────────────────────────
   useEffect(() => {
     const handler = async (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      const isTyping = Boolean(
+        target?.closest("input, textarea, [contenteditable='true']"),
+      );
+
+      if (e.key === "Escape" && architecturePanelOpen) {
+        e.preventDefault();
+        e.stopPropagation();
+        setArchitecturePanelOpen(false);
+        return;
+      }
+
+      if (
+        !presentationMode &&
+        !isTyping &&
+        e.key === " " &&
+        !e.repeat &&
+        !e.metaKey &&
+        !e.ctrlKey &&
+        !e.altKey
+      ) {
+        const now = performance.now();
+        if (now - lastSpacePressRef.current <= 350) {
+          e.preventDefault();
+          e.stopPropagation();
+          lastSpacePressRef.current = 0;
+          setArchitectureQuery("");
+          setArchitecturePanelOpen(true);
+          return;
+        }
+        lastSpacePressRef.current = now;
+      }
+
       const isPresentationToggle =
         e.altKey &&
         !e.metaKey &&
@@ -920,6 +1629,7 @@ export default function ExcalidrawEditor({
     window.addEventListener("keydown", handler, true);
     return () => window.removeEventListener("keydown", handler, true);
   }, [
+    architecturePanelOpen,
     exitPresentation,
     fullscreen,
     goToPresentationSlide,
@@ -955,6 +1665,25 @@ export default function ExcalidrawEditor({
       sceneRef.current?.elements.find((element) => element.id === id),
     )
     .find(Boolean)?.strokeColor;
+  const selectedArchitectureNode = sceneRef.current?.elements.find(
+    (element) => element.id === selectedArchitectureNodeId,
+  );
+  const filteredArchitectureServices = ARCHITECTURE_SERVICES.filter(
+    (service) =>
+      `${service.provider} ${service.service} ${service.category}`
+        .toLowerCase()
+        .includes(architectureQuery.trim().toLowerCase()),
+  );
+  const normalizedArchitectureQuery = architectureQuery.trim().toLowerCase();
+  const matchingLibraryItems = BUNDLED_LIBRARY_ITEMS.filter((item) =>
+    `${item.source} ${item.name}`
+      .toLowerCase()
+      .includes(normalizedArchitectureQuery),
+  );
+  const filteredLibraryItems = matchingLibraryItems.slice(
+    0,
+    libraryResultLimit,
+  );
 
   return (
     <div
@@ -1054,6 +1783,203 @@ export default function ExcalidrawEditor({
           </>
         )}
       </div>
+      {architecturePanelOpen && !presentationMode ? (
+        <div
+          className="zen-excalidraw-action-backdrop"
+          onPointerDown={() => setArchitecturePanelOpen(false)}
+        >
+          <div
+            className="zen-excalidraw-action-palette"
+            onPointerDown={(event) => event.stopPropagation()}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="zen-excalidraw-architecture-search">
+              <Search aria-hidden="true" />
+              <input
+                autoFocus
+                value={architectureQuery}
+                placeholder="Search AWS, architecture, UML, wireframes, logos…"
+                onChange={(event) => setArchitectureQuery(event.target.value)}
+              />
+              <kbd>esc</kbd>
+            </div>
+            <div className="zen-excalidraw-action-content">
+              <div className="zen-excalidraw-action-section-title">Actions</div>
+              <div className="zen-excalidraw-action-list">
+                {"markdown card note".includes(architectureQuery.trim().toLowerCase()) ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      insertMarkdownCard();
+                      setArchitecturePanelOpen(false);
+                    }}
+                  >
+                    <span className="zen-excalidraw-action-icon"><FileText aria-hidden="true" /></span>
+                    <span><strong>Markdown card</strong><small>Rendered notes, lists, callouts, and pasted images</small></span>
+                  </button>
+                ) : null}
+                {"presentation frames organize slides".includes(architectureQuery.trim().toLowerCase()) ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setFramePanelOpen(true);
+                      setArchitecturePanelOpen(false);
+                    }}
+                  >
+                    <span className="zen-excalidraw-action-icon"><Layers3 aria-hidden="true" /></span>
+                    <span><strong>Organize frames</strong><small>Reorder and manage presentation slides</small></span>
+                  </button>
+                ) : null}
+              </div>
+              <div className="zen-excalidraw-action-section-title">
+                Official Excalidraw library icons
+                <span>
+                  {filteredLibraryItems.length} of {matchingLibraryItems.length}
+                </span>
+              </div>
+              <div className="zen-excalidraw-architecture-grid">
+                {filteredLibraryItems.map((item) => {
+                  const color =
+                    item.source === "AWS"
+                      ? "#ff9900"
+                      : item.source === "Sticky Notes"
+                        ? "#f59f00"
+                        : item.source === "UML & ER"
+                          ? "#2f9e44"
+                          : item.source === "DevOps"
+                            ? "#168ddd"
+                            : item.source === "Software Logos"
+                              ? "#d6336c"
+                              : "#6965db";
+                  return (
+                    <button
+                      key={item.id}
+                      type="button"
+                      style={{ "--architecture-color": color } as React.CSSProperties}
+                      onClick={() => insertLibraryItem(item)}
+                    >
+                      <LibraryItemThumbnail item={item} theme={theme} />
+                      <span>{item.name}</span>
+                      <small>{item.source}</small>
+                    </button>
+                  );
+                })}
+              </div>
+              <LibraryResultsSentinel
+                hasMore={filteredLibraryItems.length < matchingLibraryItems.length}
+                page={libraryResultLimit}
+                onVisible={() =>
+                  setLibraryResultLimit((current) =>
+                    Math.min(current + 48, matchingLibraryItems.length),
+                  )
+                }
+              />
+              <div className="zen-excalidraw-action-section-title">Quick labeled templates</div>
+              <div className="zen-excalidraw-architecture-grid">
+                {filteredArchitectureServices.map((service) => (
+                  <button
+                    key={`${service.provider}-${service.service}`}
+                    type="button"
+                    style={{ "--architecture-color": service.provider === "AWS" ? "#ff9900" : service.provider === "Azure" ? "#168ddd" : service.provider === "Data" ? "#2f9e44" : "#6965db" } as React.CSSProperties}
+                    onClick={() => insertArchitectureService(service)}
+                  >
+                    <span className="zen-excalidraw-service-icon">
+                      <ArchitectureCategoryIcon category={service.category} />
+                      <em>{architectureIconLabel(service)}</em>
+                    </span>
+                    <span>{service.service}</span>
+                    <small>{service.provider}</small>
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="zen-excalidraw-action-hint">Open anywhere on the canvas with <kbd>space</kbd> <kbd>space</kbd></div>
+          </div>
+        </div>
+      ) : null}
+      {selectedArchitectureNode && !presentationMode ? (
+        <div className="zen-excalidraw-inspector-panel">
+          <div className="zen-excalidraw-inspector-title">Architecture metadata</div>
+          {(["resourceName", "environment", "owner", "region"] as const).map(
+            (field) => (
+              <label key={field}>
+                <span>{field.replace(/([A-Z])/g, " $1")}</span>
+                <input
+                  value={String(selectedArchitectureNode.customData?.[field] ?? "")}
+                  onChange={(event) =>
+                    updateElementCustomData(selectedArchitectureNode.id, {
+                      [field]: event.target.value,
+                    })
+                  }
+                />
+              </label>
+            ),
+          )}
+          <label>
+            <span>Notes</span>
+            <textarea
+              value={String(selectedArchitectureNode.customData?.notes ?? "")}
+              onChange={(event) =>
+                updateElementCustomData(selectedArchitectureNode.id, {
+                  notes: event.target.value,
+                })
+              }
+            />
+          </label>
+          <label>
+            <span>Detail frame</span>
+            <select
+              value={String(
+                selectedArchitectureNode.customData?.detailFrameId ?? "",
+              )}
+              onChange={(event) =>
+                updateElementCustomData(selectedArchitectureNode.id, {
+                  detailFrameId: event.target.value,
+                })
+              }
+            >
+              <option value="">None</option>
+              {frames.map((frame, index) => (
+                <option key={frame.id} value={frame.id}>
+                  {frame.name || `Frame ${index + 1}`}
+                </option>
+              ))}
+            </select>
+          </label>
+          {selectedArchitectureNode.customData?.detailFrameId ? (
+            <button
+              type="button"
+              onClick={() =>
+                focusFrame(
+                  String(selectedArchitectureNode.customData?.detailFrameId),
+                )
+              }
+            >
+              Open detail frame
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+      {selectedMarkdownCardId && !presentationMode ? (
+        <div className="zen-excalidraw-markdown-inspector">
+          <div className="zen-excalidraw-inspector-title">Markdown card</div>
+          <textarea
+            value={markdownDraft}
+            onPaste={pasteImageIntoMarkdown}
+            onChange={(event) => setMarkdownDraft(event.target.value)}
+            onKeyDown={(event) => {
+              if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+                event.preventDefault();
+                commitMarkdownCard();
+              }
+            }}
+          />
+          <div className="zen-excalidraw-markdown-actions">
+            <small>Paste images directly · ⌘Enter to apply</small>
+            <button type="button" onClick={commitMarkdownCard}>Apply</button>
+          </div>
+        </div>
+      ) : null}
       {framePanelOpen && !presentationMode ? (
         <div
           className="zen-excalidraw-frame-panel"
@@ -1250,6 +2176,36 @@ export default function ExcalidrawEditor({
                     </select>
                   </label>
                   <label>
+                    <span>Connection</span>
+                    <select
+                      value={displayedFlowStyle.connectorType}
+                      onChange={(event) =>
+                        updateFlowStyle({
+                          connectorType: event.target.value as ConnectorType,
+                        })
+                      }
+                    >
+                      <option value="request">Request</option>
+                      <option value="event">Event</option>
+                      <option value="data">Data</option>
+                      <option value="replication">Replication</option>
+                      <option value="network">Network</option>
+                      <option value="control">Control</option>
+                      <option value="trust">Trust</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>Protocol</span>
+                    <input
+                      type="text"
+                      value={displayedFlowStyle.protocol}
+                      placeholder="HTTPS, gRPC…"
+                      onChange={(event) =>
+                        updateFlowStyle({ protocol: event.target.value })
+                      }
+                    />
+                  </label>
+                  <label>
                     <span>Flow color</span>
                     <span className="zen-excalidraw-flow-color-row">
                       <input
@@ -1329,6 +2285,20 @@ export default function ExcalidrawEditor({
           const scene = { elements, appState, files };
           sceneRef.current = scene;
           refreshFrameThumbnails(scene);
+          const selectedArchitectureNode = elements.find(
+            (element) =>
+              appState.selectedElementIds[element.id] &&
+              element.customData?.[ARCHITECTURE_NODE_KEY] === true,
+          );
+          setSelectedArchitectureNodeId(
+            selectedArchitectureNode?.id ?? null,
+          );
+          const selectedMarkdownCard = elements.find(
+            (element) =>
+              appState.selectedElementIds[element.id] &&
+              typeof element.customData?.[MARKDOWN_CARD_KEY] === "string",
+          );
+          setSelectedMarkdownCardId(selectedMarkdownCard?.id ?? null);
           const nextFrames = orderedPresentationFrames(
             elements,
             manualFrameOrderRef.current ?? undefined,
@@ -1408,6 +2378,10 @@ export default function ExcalidrawEditor({
                         [FLOW_DIRECTION_KEY]:
                           currentFlowStyleRef.current.direction,
                         [FLOW_COLOR_KEY]: currentFlowStyleRef.current.color,
+                        [CONNECTOR_TYPE_KEY]:
+                          currentFlowStyleRef.current.connectorType,
+                        [CONNECTOR_PROTOCOL_KEY]:
+                          currentFlowStyleRef.current.protocol,
                       },
                     })
                   : element,
