@@ -18,7 +18,7 @@ import {
   useState,
 } from "react";
 import { useNavigate } from "@tanstack/react-router";
-import { Keyboard, Loader2, PanelLeftOpen, Save } from "lucide-react";
+import { Loader2, Maximize2, Minimize2, PanelLeftOpen } from "lucide-react";
 import { Button } from "@zen-tools/ui";
 import { DragHandle } from "@/components/drag-handle";
 import { useVimMode } from "@/hooks/use-vim-mode";
@@ -55,17 +55,13 @@ import { markdownTauri } from "./lib/tauri";
 import { useVaults } from "./hooks/use-vaults";
 import { useMarkdownKeyboardNav } from "./hooks/use-keyboard-nav";
 import { useOpenTerminalTab } from "./hooks/use-open-terminal-tab";
-import {
-  basename,
-  basenameNoExt,
-  dirname,
-  normalizePath,
-} from "./lib/tauri";
+import { basenameNoExt, dirname, normalizePath } from "./lib/tauri";
 import { useTheme } from "@/hooks/use-theme";
 import {
   terminalCloseTab,
   terminalFocusTab,
   terminalSetChromeInset,
+  terminalSetTrafficLightsHidden,
   type ChromeInset,
 } from "@/tools/terminal/lib/tauri";
 
@@ -187,7 +183,6 @@ export function MarkdownView() {
   // `activeTab(state)` call.
   const tab = tabForLeaf(workspace.focusedLeafId);
   const isExcalidraw = tab?.kind === "excalidraw";
-  const isTerminalTab = tab?.kind === "terminal";
   const { theme } = useTheme();
   const isDark = theme === "dark";
   const terminalHostRefs = useRef<Map<string, HTMLDivElement>>(new Map());
@@ -243,7 +238,7 @@ export function MarkdownView() {
   // Vim toggle plumbing — shared `useVimMode` hook reads + writes the
   // same prefs blob every tool reads, so the toggle propagates
   // instantly to the HTTP runner / Database Explorer editors too.
-  const { vimMode, setVimMode } = useVimMode();
+  const { vimMode } = useVimMode();
 
   // ── Deterministic per-leaf dispatch ────────────────────────────
   //
@@ -296,10 +291,6 @@ export function MarkdownView() {
       [dispatch],
     ),
   });
-
-  // (The chrome Save button still goes through `saveCurrent()` — a
-  // button click can't race a focus transition the way an in-editor
-  // ⌘S can, so the activeTab-keyed path is fine there.)
 
   // Per-leaf save — keyed by leafId, looks up the path through
   // `leafTabsRef` + `tabsRef` at fire time. Stable across renders
@@ -473,18 +464,6 @@ export function MarkdownView() {
     void refreshVaults();
   }, [refreshVaults]);
 
-  // Toggle the global `vim_mode` pref. The hook's `setVimMode`
-  // round-trips through `getPreferences` + `savePreferences` and
-  // invalidates the React Query cache, so other tools' `useVimMode`
-  // observers re-render with the new value on the next tick.
-  const onToggleVim = useCallback(async () => {
-    try {
-      await setVimMode(!vimMode);
-    } catch (err) {
-      console.error("[markdown] toggle vim failed", err);
-    }
-  }, [vimMode, setVimMode]);
-
   // Workspace context — bridges `:q` / `:vsplit` / `:hsplit` ex-commands
   // to the split workspace. `:q` closes the focused split when there
   // are multiple leaves; otherwise falls back to closing the active
@@ -622,66 +601,6 @@ export function MarkdownView() {
 
   return (
     <div className="flex h-full min-h-0 w-full flex-col">
-      <div className="flex h-9 shrink-0 items-center gap-2 border-b bg-card/60 px-3">
-        <span className="text-sm font-medium">Markdown</span>
-        {tab ? (
-          <span
-            className={cn(
-              "inline-flex items-center gap-1 text-[11px] text-muted-foreground/80",
-              tab.dirty && "text-amber-600 dark:text-amber-300",
-            )}
-            title={tab.path}
-          >
-            {tab.dirty ? "●" : ""}{" "}
-            {/* Preserve the historical `foo.md` label for true `.md`
-             * files, but show the full basename for drawings and
-             * non-`.md` text files so their real suffix stays visible. */}
-            {tab.kind === "terminal"
-              ? tab.terminal?.title ?? "shell"
-              : tab.kind === "markdown" && /\.md$/i.test(tab.path)
-              ? `${basenameNoExt(tab.path)}.md`
-              : basename(tab.path)}
-          </span>
-        ) : null}
-        <div className="ml-auto flex items-center gap-1">
-          {tab && tab.kind !== "terminal" ? (
-            <Button
-              size="xs"
-              variant="ghost"
-              title="Save (Cmd+S / :w)"
-              onClick={() => void saveCurrent()}
-              className="gap-1"
-              disabled={!tab.dirty}
-            >
-              <Save className="size-3" /> Save
-            </Button>
-          ) : null}
-          {/* Vim mode applies only to CodeMirror-based text editors —
-           *  hide the toggle in the Excalidraw drawing pane where
-           *  the chrome would just be confusing. */}
-          {!isExcalidraw && !isTerminalTab && (
-            <Button
-              size="xs"
-              variant="ghost"
-              onClick={() => void onToggleVim()}
-              title={
-                vimMode
-                  ? "Vim mode is ON — click to disable globally"
-                  : "Vim mode is OFF — click to enable globally"
-              }
-              className={cn(
-                "gap-1 font-mono uppercase tracking-wider",
-                vimMode
-                  ? "text-emerald-600 dark:text-emerald-400"
-                  : "text-muted-foreground",
-              )}
-            >
-              <Keyboard className="size-3" /> vim{" "}
-              {vimMode ? "on" : "off"}
-            </Button>
-          )}
-        </div>
-      </div>
       <div className="flex min-h-0 flex-1">
         {sidebarCollapsed ? (
           <div className="flex w-7 shrink-0 flex-col items-center border-r bg-muted/20 py-1">
@@ -918,6 +837,31 @@ function MarkdownLeafShell({
   const handleRef = useRef<MarkdownEditorHandle | null>(null);
   const lastTabIdRef = useRef<string | null>(null);
   const terminalHostRef = useRef<HTMLDivElement | null>(null);
+  const [fullscreen, setFullscreen] = useState(false);
+
+  useEffect(() => {
+    if (!fullscreen) return;
+    void terminalSetTrafficLightsHidden(true).catch((err) =>
+      console.error("[markdown] hide traffic lights failed", err),
+    );
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      setFullscreen(false);
+    };
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown, true);
+      void terminalSetTrafficLightsHidden(false).catch((err) =>
+        console.error("[markdown] restore traffic lights failed", err),
+      );
+    };
+  }, [fullscreen]);
+
+  useEffect(() => {
+    if (leafTab?.kind === "terminal") setFullscreen(false);
+  }, [leafTab?.kind]);
 
   // Register on mount, unregister on unmount, so the parent can
   // address this leaf's editor (jump-list scroll, focus, etc.).
@@ -992,15 +936,47 @@ function MarkdownLeafShell({
     <div
       className={cn(
         "flex h-full w-full min-h-0 min-w-0 flex-col",
+        fullscreen && "zen-markdown-fullscreen",
         focused ? "outline outline-1 outline-primary/40 -outline-offset-1" : "",
       )}
     >
-      <TabStrip
-        tabs={tabs}
-        activeTabId={leafTab?.id ?? null}
-        onSelect={onSelectTab}
-        onClose={onCloseTab}
-      />
+      <div className="flex shrink-0 bg-muted/60">
+        <div className="min-w-0 flex-1">
+          <TabStrip
+            tabs={tabs}
+            activeTabId={leafTab?.id ?? null}
+            onSelect={onSelectTab}
+            onClose={onCloseTab}
+          />
+        </div>
+        {leafTab && leafTab.kind !== "terminal" ? (
+          <div className="flex items-center border-b border-border/60 px-1.5 pt-1">
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-6 w-6 p-0"
+              title={
+                fullscreen
+                  ? "Exit fullscreen editor (Escape)"
+                  : "Fullscreen editor"
+              }
+              aria-label={
+                fullscreen
+                  ? "Exit fullscreen editor"
+                  : "Enter fullscreen editor"
+              }
+              onClick={() => setFullscreen((current) => !current)}
+            >
+              {fullscreen ? (
+                <Minimize2 className="size-3.5" />
+              ) : (
+                <Maximize2 className="size-3.5" />
+              )}
+            </Button>
+          </div>
+        ) : null}
+      </div>
       <div className="min-h-0 min-w-0 flex-1">
         {leafTab?.kind === "terminal" ? (
           leafTab.terminal?.phase === "ready" ? (

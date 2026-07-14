@@ -33,21 +33,47 @@
  */
 
 import {
+  CaptureUpdateAction,
   Excalidraw,
   exportToBlob,
   exportToSvg,
+  getNonDeletedElements,
   loadFromBlob,
+  newElementWith,
+  sceneCoordsToViewportCoords,
 } from "@excalidraw/excalidraw";
 import "@excalidraw/excalidraw/index.css";
 import type {
   ExcalidrawImperativeAPI,
   ExcalidrawInitialDataState,
 } from "@excalidraw/excalidraw/types";
-import type { OrderedExcalidrawElement } from "@excalidraw/excalidraw/element/types";
+import type {
+  ExcalidrawArrowElement,
+  OrderedExcalidrawElement,
+} from "@excalidraw/excalidraw/element/types";
 import type { AppState, BinaryFiles } from "@excalidraw/excalidraw/types";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { Loader2 } from "lucide-react";
+import {
+  ChevronLeft,
+  ChevronRight,
+  ChevronDown,
+  ChevronUp,
+  Activity,
+  Copy,
+  Eye,
+  EyeOff,
+  Trash2,
+  GripVertical,
+  Layers3,
+  Loader2,
+  Maximize2,
+  Minimize2,
+  Pencil,
+  Presentation,
+} from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import { terminalSetTrafficLightsHidden } from "@/tools/terminal/lib/tauri";
 
 interface ExcalidrawEditorProps {
   /** Absolute path of the open `*.excalidraw.svg` *or*
@@ -76,6 +102,173 @@ interface LiveScene {
   files: BinaryFiles;
 }
 
+interface PresentationFrame {
+  id: string;
+  name: string | null;
+  hidden: boolean;
+}
+
+interface AnimatedArrowPath {
+  id: string;
+  path: string;
+  color: string;
+  direction: "forward" | "reverse" | "both";
+  speed: FlowSpeed;
+  density: FlowDensity;
+}
+
+type FlowSpeed = "slow" | "normal" | "fast";
+type FlowDensity = "sparse" | "normal" | "dense";
+type FlowDirection = "auto" | "forward" | "reverse" | "both";
+
+interface FlowStyle {
+  speed: FlowSpeed;
+  density: FlowDensity;
+  direction: FlowDirection;
+  color: string | null;
+}
+
+const PRESENTATION_ORDER_KEY = "zenToolsPresentationOrder";
+const PRESENTATION_HIDDEN_KEY = "zenToolsPresentationHidden";
+const ANIMATED_ARROW_KEY = "zenToolsAnimatedArrow";
+const FLOW_SPEED_KEY = "zenToolsFlowSpeed";
+const FLOW_DENSITY_KEY = "zenToolsFlowDensity";
+const FLOW_DIRECTION_KEY = "zenToolsFlowDirection";
+const FLOW_COLOR_KEY = "zenToolsFlowColor";
+const DEFAULT_FLOW_STYLE: FlowStyle = {
+  speed: "normal",
+  density: "normal",
+  direction: "auto",
+  color: null,
+};
+const POINTY_ARROWHEADS = new Set([
+  "arrow",
+  "triangle",
+  "triangle_outline",
+]);
+
+type OrderedArrowElement = OrderedExcalidrawElement & ExcalidrawArrowElement;
+
+function isDirectionalArrow(
+  element: OrderedExcalidrawElement,
+): element is OrderedArrowElement {
+  return (
+    !element.isDeleted &&
+    element.type === "arrow" &&
+    (POINTY_ARROWHEADS.has(element.startArrowhead ?? "") ||
+      POINTY_ARROWHEADS.has(element.endArrowhead ?? ""))
+  );
+}
+
+function flowStyleFromArrow(arrow: OrderedArrowElement): FlowStyle {
+  const speed = arrow.customData?.[FLOW_SPEED_KEY];
+  const density = arrow.customData?.[FLOW_DENSITY_KEY];
+  const direction = arrow.customData?.[FLOW_DIRECTION_KEY];
+  const color = arrow.customData?.[FLOW_COLOR_KEY];
+  return {
+    speed:
+      speed === "slow" || speed === "fast" || speed === "normal"
+        ? speed
+        : "normal",
+    density:
+      density === "sparse" || density === "dense" || density === "normal"
+        ? density
+        : "normal",
+    direction:
+      direction === "forward" ||
+      direction === "reverse" ||
+      direction === "both" ||
+      direction === "auto"
+        ? direction
+        : "auto",
+    color: typeof color === "string" ? color : null,
+  };
+}
+
+function orderedPresentationFrames(
+  elements: readonly OrderedExcalidrawElement[],
+  preferredOrder?: readonly string[],
+): PresentationFrame[] {
+  const preferredRank = preferredOrder
+    ? new Map(preferredOrder.map((id, index) => [id, index]))
+    : null;
+  return elements
+    .map((element, sceneIndex) => ({ element, sceneIndex }))
+    .filter(
+      ({ element }) =>
+        !element.isDeleted &&
+        (element.type === "frame" || element.type === "magicframe"),
+    )
+    .sort((a, b) => {
+      if (preferredRank) {
+        const aPreferred = preferredRank.get(a.element.id) ?? Infinity;
+        const bPreferred = preferredRank.get(b.element.id) ?? Infinity;
+        if (aPreferred !== bPreferred) return aPreferred - bPreferred;
+      }
+      const aOrder = a.element.customData?.[PRESENTATION_ORDER_KEY];
+      const bOrder = b.element.customData?.[PRESENTATION_ORDER_KEY];
+      const aRank = typeof aOrder === "number" ? aOrder : Infinity;
+      const bRank = typeof bOrder === "number" ? bOrder : Infinity;
+      return aRank - bRank || a.sceneIndex - b.sceneIndex;
+    })
+    .map(({ element }) => ({
+      id: element.id,
+      name:
+        element.type === "frame" || element.type === "magicframe"
+          ? element.name
+          : null,
+      hidden: element.customData?.[PRESENTATION_HIDDEN_KEY] === true,
+    }));
+}
+
+function sameFrames(
+  a: readonly PresentationFrame[],
+  b: readonly PresentationFrame[],
+): boolean {
+  return (
+    a.length === b.length &&
+    a.every((frame, index) => {
+      const other = b[index];
+      return (
+        frame.id === other?.id &&
+        frame.name === other.name &&
+        frame.hidden === other.hidden
+      );
+    })
+  );
+}
+
+function sameFlowStyle(a: FlowStyle, b: FlowStyle): boolean {
+  return (
+    a.speed === b.speed &&
+    a.density === b.density &&
+    a.direction === b.direction &&
+    a.color === b.color
+  );
+}
+
+function flowPathFromPoints(
+  points: readonly { x: number; y: number }[],
+  curved: boolean,
+): string {
+  const first = points[0];
+  if (!first) return "";
+  if (!curved || points.length < 3) {
+    return `M ${first.x} ${first.y} ${points
+      .slice(1)
+      .map((point) => `L ${point.x} ${point.y}`)
+      .join(" ")}`;
+  }
+  let path = `M ${first.x} ${first.y}`;
+  for (let index = 1; index < points.length - 1; index += 1) {
+    const point = points[index];
+    const next = points[index + 1];
+    path += ` Q ${point.x} ${point.y} ${(point.x + next.x) / 2} ${(point.y + next.y) / 2}`;
+  }
+  const last = points[points.length - 1];
+  return `${path} L ${last.x} ${last.y}`;
+}
+
 export default function ExcalidrawEditor({
   path,
   onDirty,
@@ -87,9 +280,45 @@ export default function ExcalidrawEditor({
     ExcalidrawInitialDataState | null | undefined
   >(undefined); // `undefined` = still loading
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [presentationMode, setPresentationMode] = useState(false);
+  const [fullscreen, setFullscreen] = useState(false);
+  const [presentationFrameIds, setPresentationFrameIds] = useState<string[]>(
+    [],
+  );
+  const [presentationIndex, setPresentationIndex] = useState(0);
+  const [frames, setFrames] = useState<PresentationFrame[]>([]);
+  const [frameThumbnails, setFrameThumbnails] = useState<
+    Record<string, string>
+  >({});
+  const [framePanelOpen, setFramePanelOpen] = useState(false);
+  const [selectedDirectionalArrowIds, setSelectedDirectionalArrowIds] =
+    useState<string[]>([]);
+  const [selectedArrowsAnimated, setSelectedArrowsAnimated] = useState(false);
+  const [currentArrowAnimation, setCurrentArrowAnimation] = useState(false);
+  const [currentFlowStyle, setCurrentFlowStyle] =
+    useState<FlowStyle>(DEFAULT_FLOW_STYLE);
+  const [selectedFlowStyle, setSelectedFlowStyle] =
+    useState<FlowStyle>(DEFAULT_FLOW_STYLE);
+  const [arrowStyleControlVisible, setArrowStyleControlVisible] =
+    useState(false);
+  const [animatedArrowPaths, setAnimatedArrowPaths] = useState<
+    AnimatedArrowPath[]
+  >([]);
+  const [animationControlHost, setAnimationControlHost] =
+    useState<HTMLElement | null>(null);
+  const draggedFrameIdRef = useRef<string | null>(null);
+  const manualFrameOrderRef = useRef<string[] | null>(null);
+  const editorHostRef = useRef<HTMLDivElement | null>(null);
+  const framesRef = useRef<PresentationFrame[]>([]);
+  const currentArrowAnimationRef = useRef(false);
+  const currentFlowStyleRef = useRef<FlowStyle>(DEFAULT_FLOW_STYLE);
+  const processedDirectionalArrowIdsRef = useRef<Set<string>>(new Set());
+  const thumbnailTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const thumbnailUrlsRef = useRef<string[]>([]);
 
   const apiRef = useRef<ExcalidrawImperativeAPI | null>(null);
   const sceneRef = useRef<LiveScene | null>(null);
+  const fullscreenBeforePresentationRef = useRef(false);
   const dirtiedRef = useRef(false);
   const readyRef = useRef(false);
   const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -125,6 +354,393 @@ export default function ExcalidrawEditor({
     [path],
   );
 
+  const focusPresentationSlide = useCallback(
+    (index: number, frameIds: readonly string[] = presentationFrameIds) => {
+      const api = apiRef.current;
+      if (!api) return;
+      const elements = api.getSceneElements();
+      const target =
+        frameIds.length > 0
+          ? elements.find((element) => element.id === frameIds[index])
+          : elements;
+      if (!target || (Array.isArray(target) && target.length === 0)) return;
+      api.scrollToContent(target, {
+        fitToViewport: true,
+        viewportZoomFactor: 0.94,
+        animate: true,
+        duration: 250,
+      });
+    },
+    [presentationFrameIds],
+  );
+
+  const focusAfterFullscreenLayout = useCallback(
+    (index: number, frameIds: readonly string[]) => {
+      // Fullscreen changes Excalidraw's measured viewport. Wait for both the
+      // React commit and Excalidraw's resize observer before fitting a frame.
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => focusPresentationSlide(index, frameIds));
+      });
+    },
+    [focusPresentationSlide],
+  );
+
+  const startPresentation = useCallback(() => {
+    const frameIds = frames
+      .filter((frame) => !frame.hidden)
+      .map((frame) => frame.id);
+    setPresentationFrameIds(frameIds);
+    setPresentationIndex(0);
+    fullscreenBeforePresentationRef.current = fullscreen;
+    setFullscreen(true);
+    setPresentationMode(true);
+    focusAfterFullscreenLayout(0, frameIds);
+  }, [focusAfterFullscreenLayout, frames, fullscreen]);
+
+  const refreshFrameThumbnails = useCallback((scene: LiveScene) => {
+    if (thumbnailTimerRef.current !== null) {
+      clearTimeout(thumbnailTimerRef.current);
+    }
+    thumbnailTimerRef.current = setTimeout(() => {
+      thumbnailTimerRef.current = null;
+      const visibleElements = getNonDeletedElements(scene.elements);
+      const frameElements = visibleElements.filter(
+        (element) =>
+          (element.type === "frame" || element.type === "magicframe"),
+      );
+      void Promise.all(
+        frameElements.map(async (frame) => {
+          // Use the same raster path as Excalidraw's PNG export. Passing the
+          // whole scene plus exportingFrame lets Excalidraw perform its own
+          // overlap, clipping, ordering, image, and font handling.
+          const blob = await exportToBlob({
+            elements: visibleElements,
+            appState: {
+              ...scene.appState,
+              exportBackground: true,
+              exportEmbedScene: false,
+            },
+            files: scene.files,
+            mimeType: "image/png",
+            exportPadding: 0,
+            exportingFrame: frame,
+            maxWidthOrHeight: 320,
+          });
+          return [
+            frame.id,
+            URL.createObjectURL(blob),
+          ] as const;
+        }),
+      )
+        .then((entries) => {
+          const previousUrls = thumbnailUrlsRef.current;
+          thumbnailUrlsRef.current = entries.map(([, url]) => url);
+          setFrameThumbnails(Object.fromEntries(entries));
+          previousUrls.forEach((url) => URL.revokeObjectURL(url));
+        })
+        .catch((err) =>
+          console.error("[excalidraw] frame thumbnail failed", err),
+        );
+    }, 350);
+  }, []);
+
+  const exitPresentation = useCallback(() => {
+    setPresentationMode(false);
+    setFullscreen(fullscreenBeforePresentationRef.current);
+    setPresentationFrameIds([]);
+    setPresentationIndex(0);
+  }, []);
+
+  const goToPresentationSlide = useCallback(
+    (nextIndex: number) => {
+      const slideCount = Math.max(1, presentationFrameIds.length);
+      const clamped = Math.min(slideCount - 1, Math.max(0, nextIndex));
+      setPresentationIndex(clamped);
+      focusPresentationSlide(clamped);
+    },
+    [focusPresentationSlide, presentationFrameIds.length],
+  );
+
+  const persistFrameOrder = useCallback((orderedIds: readonly string[]) => {
+    const api = apiRef.current;
+    if (!api) return;
+    const orderById = new Map(orderedIds.map((id, index) => [id, index]));
+    const nextElements = api
+      .getSceneElementsIncludingDeleted()
+      .map((element) => {
+        const order = orderById.get(element.id);
+        if (
+          order === undefined ||
+          (element.type !== "frame" && element.type !== "magicframe")
+        ) {
+          return element;
+        }
+        return newElementWith(element, {
+          customData: {
+            ...element.customData,
+            [PRESENTATION_ORDER_KEY]: order,
+          },
+        });
+      });
+    // Keep the manual order authoritative while Excalidraw publishes the
+    // update. Its first callback can otherwise contain the pre-update custom
+    // data and immediately snap the organizer back to its old order.
+    manualFrameOrderRef.current = [...orderedIds];
+    const reorderedFrames = orderedIds
+      .map((id) => framesRef.current.find((frame) => frame.id === id))
+      .filter((frame): frame is PresentationFrame => Boolean(frame));
+    framesRef.current = reorderedFrames;
+    setFrames(reorderedFrames);
+    api.updateScene({
+      elements: nextElements,
+      captureUpdate: CaptureUpdateAction.IMMEDIATELY,
+    });
+  }, []);
+
+  const toggleAnimatedArrows = useCallback(() => {
+    const api = apiRef.current;
+    if (!api) return;
+    const selectedIds = new Set(selectedDirectionalArrowIds);
+    const enabled =
+      selectedDirectionalArrowIds.length > 0
+        ? !selectedArrowsAnimated
+        : !currentArrowAnimationRef.current;
+    currentArrowAnimationRef.current = enabled;
+    setCurrentArrowAnimation(enabled);
+    if (selectedIds.size === 0) return;
+    const nextElements = api
+      .getSceneElementsIncludingDeleted()
+      .map((element) => {
+        if (!selectedIds.has(element.id) || element.type !== "arrow") {
+          return element;
+        }
+        return newElementWith(element, {
+          customData: {
+            ...element.customData,
+            [ANIMATED_ARROW_KEY]: enabled,
+          },
+        });
+      });
+    api.updateScene({
+      elements: nextElements,
+      captureUpdate: CaptureUpdateAction.IMMEDIATELY,
+    });
+  }, [selectedArrowsAnimated, selectedDirectionalArrowIds]);
+
+  const updateFlowStyle = useCallback(
+    (patch: Partial<FlowStyle>) => {
+      const api = apiRef.current;
+      if (!api) return;
+      const base =
+        selectedDirectionalArrowIds.length > 0
+          ? selectedFlowStyle
+          : currentFlowStyleRef.current;
+      const nextStyle = { ...base, ...patch };
+      currentFlowStyleRef.current = nextStyle;
+      setCurrentFlowStyle(nextStyle);
+      setSelectedFlowStyle(nextStyle);
+      if (selectedDirectionalArrowIds.length === 0) return;
+      const selectedIds = new Set(selectedDirectionalArrowIds);
+      api.updateScene({
+        elements: api.getSceneElementsIncludingDeleted().map((element) =>
+          selectedIds.has(element.id) && element.type === "arrow"
+            ? newElementWith(element, {
+                customData: {
+                  ...element.customData,
+                  [FLOW_SPEED_KEY]: nextStyle.speed,
+                  [FLOW_DENSITY_KEY]: nextStyle.density,
+                  [FLOW_DIRECTION_KEY]: nextStyle.direction,
+                  [FLOW_COLOR_KEY]: nextStyle.color,
+                },
+              })
+            : element,
+        ),
+        captureUpdate: CaptureUpdateAction.IMMEDIATELY,
+      });
+    },
+    [selectedDirectionalArrowIds, selectedFlowStyle],
+  );
+
+  const moveFrame = useCallback(
+    (frameId: string, targetIndex: number) => {
+      const currentFrames = framesRef.current;
+      const currentIndex = currentFrames.findIndex(
+        (frame) => frame.id === frameId,
+      );
+      if (currentIndex < 0) return;
+      const clamped = Math.max(
+        0,
+        Math.min(currentFrames.length - 1, targetIndex),
+      );
+      if (currentIndex === clamped) return;
+      const reordered = [...currentFrames];
+      const [moved] = reordered.splice(currentIndex, 1);
+      reordered.splice(clamped, 0, moved);
+      persistFrameOrder(reordered.map((frame) => frame.id));
+    },
+    [persistFrameOrder],
+  );
+
+  // Track the pointer globally and resolve the row under its coordinates.
+  // This does not depend on pointerenter/HTML drag events, both of which can
+  // be swallowed by Excalidraw's canvas pointer capture in a webview.
+  useEffect(() => {
+    const handlePointerMove = (event: PointerEvent) => {
+      const draggedId = draggedFrameIdRef.current;
+      const host = editorHostRef.current;
+      if (!draggedId || !host) return;
+      const rows = Array.from(
+        host.querySelectorAll<HTMLElement>("[data-presentation-frame-id]"),
+      );
+      if (rows.length === 0) return;
+      const target = rows.reduce((nearest, row) => {
+        const rowRect = row.getBoundingClientRect();
+        const nearestRect = nearest.getBoundingClientRect();
+        const rowDistance = Math.abs(
+          event.clientY - (rowRect.top + rowRect.height / 2),
+        );
+        const nearestDistance = Math.abs(
+          event.clientY - (nearestRect.top + nearestRect.height / 2),
+        );
+        return rowDistance < nearestDistance ? row : nearest;
+      });
+      const targetId = target.dataset.presentationFrameId;
+      const targetIndex = framesRef.current.findIndex(
+        (frame) => frame.id === targetId,
+      );
+      if (targetIndex >= 0) moveFrame(draggedId, targetIndex);
+    };
+    const clearDraggedFrame = () => {
+      draggedFrameIdRef.current = null;
+      document.body.classList.remove("zen-excalidraw-frame-dragging");
+    };
+    window.addEventListener("pointermove", handlePointerMove, true);
+    window.addEventListener("pointerup", clearDraggedFrame, true);
+    window.addEventListener("pointercancel", clearDraggedFrame, true);
+    return () => {
+      window.removeEventListener("pointermove", handlePointerMove, true);
+      window.removeEventListener("pointerup", clearDraggedFrame, true);
+      window.removeEventListener("pointercancel", clearDraggedFrame, true);
+      clearDraggedFrame();
+    };
+  }, [moveFrame]);
+
+  // Excalidraw does not expose a property-panel extension API. Mount our
+  // control immediately after its native Stroke style fieldset so animation
+  // behaves like an element style instead of unrelated app chrome.
+  useEffect(() => {
+    if (!arrowStyleControlVisible) {
+      setAnimationControlHost(null);
+      return;
+    }
+    const editorHost = editorHostRef.current;
+    if (!editorHost) return;
+    let portalHost: HTMLElement | null = null;
+    const mountControl = () => {
+      const panel = editorHost.querySelector<HTMLElement>(
+        ".selected-shape-actions",
+      );
+      if (!panel) {
+        if (portalHost && !portalHost.isConnected) {
+          portalHost = null;
+          setAnimationControlHost(null);
+        }
+        return;
+      }
+      const strokeFieldset = Array.from(panel.querySelectorAll("fieldset")).find(
+        (fieldset) =>
+          fieldset.querySelector("legend")?.textContent?.trim() ===
+          "Stroke style",
+      );
+      if (!strokeFieldset) return;
+      const existing = panel.querySelector<HTMLElement>(
+        ".zen-excalidraw-animation-control-host",
+      );
+      const nextHost = existing ?? document.createElement("div");
+      nextHost.className = "zen-excalidraw-animation-control-host";
+      if (!existing) strokeFieldset.insertAdjacentElement("afterend", nextHost);
+      if (portalHost !== nextHost) {
+        portalHost = nextHost;
+        setAnimationControlHost(nextHost);
+      }
+    };
+    mountControl();
+    const observer = new MutationObserver(mountControl);
+    observer.observe(editorHost, { childList: true, subtree: true });
+    return () => {
+      observer.disconnect();
+      portalHost?.remove();
+    };
+  }, [arrowStyleControlVisible]);
+
+  const focusFrame = useCallback((frameId: string) => {
+    const api = apiRef.current;
+    const frame = api
+      ?.getSceneElements()
+      .find((element) => element.id === frameId);
+    if (!api || !frame) return;
+    api.scrollToContent(frame, {
+      fitToViewport: true,
+      viewportZoomFactor: 0.8,
+      animate: true,
+      duration: 200,
+    });
+  }, []);
+
+  const toggleFrameHidden = useCallback((frameId: string) => {
+    const api = apiRef.current;
+    const current = framesRef.current.find((frame) => frame.id === frameId);
+    if (!api || !current) return;
+    api.updateScene({
+      elements: api.getSceneElementsIncludingDeleted().map((element) =>
+        element.id === frameId
+          ? newElementWith(element, {
+              customData: {
+                ...element.customData,
+                [PRESENTATION_HIDDEN_KEY]: !current.hidden,
+              },
+            })
+          : element,
+      ),
+      captureUpdate: CaptureUpdateAction.IMMEDIATELY,
+    });
+  }, []);
+
+  const duplicateFrame = useCallback((frameId: string) => {
+    const api = apiRef.current;
+    if (!api) return;
+    api.updateScene({
+      appState: { selectedElementIds: { [frameId]: true } },
+      captureUpdate: CaptureUpdateAction.NEVER,
+    });
+    requestAnimationFrame(() => {
+      document.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "d",
+          code: "KeyD",
+          metaKey: true,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+  }, []);
+
+  const deleteFrame = useCallback((frameId: string) => {
+    const api = apiRef.current;
+    if (!api || !window.confirm("Delete this frame and everything inside it?")) {
+      return;
+    }
+    api.updateScene({
+      elements: api.getSceneElementsIncludingDeleted().map((element) =>
+        element.id === frameId || element.frameId === frameId
+          ? newElementWith(element, { isDeleted: true })
+          : element,
+      ),
+      captureUpdate: CaptureUpdateAction.IMMEDIATELY,
+    });
+  }, []);
+
   // Excalidraw fires onChange while restoring initialData. Give that
   // mount-time callback a frame to settle so opening a drawing never
   // counts as an edit or schedules an overwrite.
@@ -142,8 +758,27 @@ export default function ExcalidrawEditor({
       if (autoSaveTimerRef.current !== null) {
         clearTimeout(autoSaveTimerRef.current);
       }
+      if (thumbnailTimerRef.current !== null) {
+        clearTimeout(thumbnailTimerRef.current);
+      }
+      thumbnailUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
+      thumbnailUrlsRef.current = [];
     };
   }, []);
+
+  // Match the terminal's app-viewport mode on macOS: HTML covers the whole
+  // webview and AppKit's traffic lights are hidden until the user exits.
+  useEffect(() => {
+    void terminalSetTrafficLightsHidden(fullscreen).catch((err) =>
+      console.error("[excalidraw] set traffic lights hidden failed", err),
+    );
+    return () => {
+      if (!fullscreen) return;
+      void terminalSetTrafficLightsHidden(false).catch((err) =>
+        console.error("[excalidraw] restore traffic lights failed", err),
+      );
+    };
+  }, [fullscreen]);
 
   // ────────────────────────────────────────────────────────────────
   // Load the file's bytes off disk and turn them into an Excalidraw
@@ -154,6 +789,20 @@ export default function ExcalidrawEditor({
   useEffect(() => {
     let cancelled = false;
     dirtiedRef.current = false;
+    setPresentationMode(false);
+    setFullscreen(false);
+    fullscreenBeforePresentationRef.current = false;
+    setPresentationFrameIds([]);
+    setPresentationIndex(0);
+    setFrames([]);
+    framesRef.current = [];
+    setFrameThumbnails({});
+    setFramePanelOpen(false);
+    manualFrameOrderRef.current = null;
+    setSelectedDirectionalArrowIds([]);
+    setSelectedArrowsAnimated(false);
+    setAnimatedArrowPaths([]);
+    processedDirectionalArrowIdsRef.current = new Set();
     setLoadError(null);
 
     async function load() {
@@ -210,6 +859,51 @@ export default function ExcalidrawEditor({
   // ────────────────────────────────────────────────────────────────
   useEffect(() => {
     const handler = async (e: KeyboardEvent) => {
+      const isPresentationToggle =
+        e.altKey &&
+        !e.metaKey &&
+        !e.ctrlKey &&
+        !e.shiftKey &&
+        e.key.toLowerCase() === "r";
+      if (isPresentationToggle) {
+        // `viewModeEnabled` is controlled by React. Handle Excalidraw's
+        // standard shortcut here so its internal action cannot race the prop
+        // and create a setState feedback loop.
+        e.preventDefault();
+        e.stopPropagation();
+        if (presentationMode) exitPresentation();
+        else startPresentation();
+        return;
+      }
+
+      if (e.key === "Escape" && (presentationMode || fullscreen)) {
+        e.preventDefault();
+        e.stopPropagation();
+        if (presentationMode) exitPresentation();
+        else setFullscreen(false);
+        return;
+      }
+
+      if (presentationMode) {
+        const isNext =
+          e.key === "ArrowRight" ||
+          e.key === "ArrowDown" ||
+          e.key === "PageDown" ||
+          e.key === " ";
+        const isPrevious =
+          e.key === "ArrowLeft" ||
+          e.key === "ArrowUp" ||
+          e.key === "PageUp";
+        if (isNext || isPrevious) {
+          e.preventDefault();
+          e.stopPropagation();
+          goToPresentationSlide(
+            presentationIndex + (isNext ? 1 : -1),
+          );
+        }
+        return;
+      }
+
       const isSave =
         (e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === "s";
       if (!isSave) return;
@@ -225,7 +919,17 @@ export default function ExcalidrawEditor({
     };
     window.addEventListener("keydown", handler, true);
     return () => window.removeEventListener("keydown", handler, true);
-  }, [onSave, path, serializeScene]);
+  }, [
+    exitPresentation,
+    fullscreen,
+    goToPresentationSlide,
+    onSave,
+    path,
+    presentationIndex,
+    presentationMode,
+    serializeScene,
+    startPresentation,
+  ]);
 
   // ────────────────────────────────────────────────────────────────
   // Render
@@ -238,12 +942,370 @@ export default function ExcalidrawEditor({
     );
   }
 
+  const flowAnimationEnabled =
+    selectedDirectionalArrowIds.length > 0
+      ? selectedArrowsAnimated
+      : currentArrowAnimation;
+  const displayedFlowStyle =
+    selectedDirectionalArrowIds.length > 0
+      ? selectedFlowStyle
+      : currentFlowStyle;
+  const selectedArrowStrokeColor = selectedDirectionalArrowIds
+    .map((id) =>
+      sceneRef.current?.elements.find((element) => element.id === id),
+    )
+    .find(Boolean)?.strokeColor;
+
   return (
-    <div className="relative h-full w-full" data-tauri-drag-region={false}>
+    <div
+      ref={editorHostRef}
+      className={`relative h-full w-full${
+        fullscreen ? " zen-excalidraw-fullscreen" : ""
+      }`}
+      data-tauri-drag-region={false}
+    >
       {loadError ? (
         <div className="absolute left-2 top-2 z-10 rounded border border-destructive/40 bg-destructive/10 px-2 py-1 font-mono text-[10px] text-destructive">
           load: {loadError}
         </div>
+      ) : null}
+      <div
+        className="zen-excalidraw-controls"
+        onPointerDown={(event) => event.stopPropagation()}
+        onClick={(event) => event.stopPropagation()}
+      >
+        {presentationMode ? (
+          <>
+            <button
+              type="button"
+              className="zen-excalidraw-control-button zen-excalidraw-icon-button"
+              title="Previous frame (←)"
+              aria-label="Previous presentation frame"
+              disabled={presentationIndex === 0}
+              onClick={() => goToPresentationSlide(presentationIndex - 1)}
+            >
+              <ChevronLeft aria-hidden="true" />
+            </button>
+            <span className="zen-excalidraw-slide-count">
+              {presentationIndex + 1} /{" "}
+              {Math.max(1, presentationFrameIds.length)}
+            </span>
+            <button
+              type="button"
+              className="zen-excalidraw-control-button zen-excalidraw-icon-button"
+              title="Next frame (→ or Space)"
+              aria-label="Next presentation frame"
+              disabled={
+                presentationIndex >=
+                Math.max(1, presentationFrameIds.length) - 1
+              }
+              onClick={() => goToPresentationSlide(presentationIndex + 1)}
+            >
+              <ChevronRight aria-hidden="true" />
+            </button>
+            <button
+              type="button"
+              className="zen-excalidraw-control-button"
+              title="Exit presentation (Escape)"
+              onClick={exitPresentation}
+            >
+              <Pencil aria-hidden="true" />
+              <span>Edit</span>
+            </button>
+          </>
+        ) : (
+          <>
+            <button
+              type="button"
+              className="zen-excalidraw-control-button"
+              title="Order presentation frames"
+              aria-expanded={framePanelOpen}
+              onClick={() => setFramePanelOpen((current) => !current)}
+            >
+              <Layers3 aria-hidden="true" />
+              <span>Frames{frames.length > 0 ? ` ${frames.length}` : ""}</span>
+            </button>
+            <button
+              type="button"
+              className="zen-excalidraw-control-button zen-excalidraw-icon-button"
+              title={
+                fullscreen ? "Exit fullscreen canvas (Escape)" : "Fullscreen canvas"
+              }
+              aria-label={
+                fullscreen ? "Exit fullscreen canvas" : "Enter fullscreen canvas"
+              }
+              onClick={() => setFullscreen((current) => !current)}
+            >
+              {fullscreen ? (
+                <Minimize2 aria-hidden="true" />
+              ) : (
+                <Maximize2 aria-hidden="true" />
+              )}
+            </button>
+            <button
+              type="button"
+              className="zen-excalidraw-control-button"
+              title="Present frames (Alt+R)"
+              onClick={startPresentation}
+            >
+              <Presentation aria-hidden="true" />
+              <span>Present</span>
+            </button>
+          </>
+        )}
+      </div>
+      {framePanelOpen && !presentationMode ? (
+        <div
+          className="zen-excalidraw-frame-panel"
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={(event) => event.stopPropagation()}
+        >
+          <div className="zen-excalidraw-frame-panel-title">
+            Presentation order
+          </div>
+          {frames.length === 0 ? (
+            <div className="zen-excalidraw-frame-empty">
+              Add frames to create slides.
+            </div>
+          ) : (
+            <div className="zen-excalidraw-frame-list">
+              {frames.map((frame, index) => (
+                <div
+                  key={frame.id}
+                  className="zen-excalidraw-frame-row"
+                  data-presentation-frame-id={frame.id}
+                  onPointerDown={(event) => {
+                    if ((event.target as HTMLElement).closest("button")) return;
+                    event.preventDefault();
+                    event.stopPropagation();
+                    draggedFrameIdRef.current = frame.id;
+                    document.body.classList.add(
+                      "zen-excalidraw-frame-dragging",
+                    );
+                  }}
+                  onPointerUp={() => {
+                    draggedFrameIdRef.current = null;
+                  }}
+                >
+                  <GripVertical
+                    className="zen-excalidraw-frame-grip"
+                    aria-hidden="true"
+                  />
+                  <button
+                    type="button"
+                    className="zen-excalidraw-frame-preview"
+                    title="Focus frame"
+                    onClick={() => focusFrame(frame.id)}
+                  >
+                    {frameThumbnails[frame.id] ? (
+                      <img
+                        src={frameThumbnails[frame.id]}
+                        alt=""
+                        draggable={false}
+                      />
+                    ) : (
+                      <span>{index + 1}</span>
+                    )}
+                  </button>
+                  <div className="zen-excalidraw-frame-details">
+                    <button
+                      type="button"
+                      className="zen-excalidraw-frame-name"
+                      title="Focus frame"
+                      onClick={() => focusFrame(frame.id)}
+                    >
+                      <span>{index + 1}</span>
+                      <span className="zen-excalidraw-frame-name-text">
+                        {frame.name?.trim() || `Frame ${index + 1}`}
+                      </span>
+                      {frame.hidden ? <em>Hidden</em> : null}
+                    </button>
+                    <div className="zen-excalidraw-frame-actions">
+                      <button
+                        type="button"
+                        aria-label={`Move ${frame.name || `frame ${index + 1}`} up`}
+                        disabled={index === 0}
+                        onClick={() => moveFrame(frame.id, index - 1)}
+                      >
+                        <ChevronUp aria-hidden="true" />
+                      </button>
+                      <button
+                        type="button"
+                        aria-label={`Move ${frame.name || `frame ${index + 1}`} down`}
+                        disabled={index === frames.length - 1}
+                        onClick={() => moveFrame(frame.id, index + 1)}
+                      >
+                        <ChevronDown aria-hidden="true" />
+                      </button>
+                      <button
+                        type="button"
+                        aria-label="Duplicate frame"
+                        title="Duplicate frame"
+                        onClick={() => duplicateFrame(frame.id)}
+                      >
+                        <Copy aria-hidden="true" />
+                      </button>
+                      <button
+                        type="button"
+                        aria-label={
+                          frame.hidden
+                            ? "Include frame in presentation"
+                            : "Hide frame from presentation"
+                        }
+                        title={
+                          frame.hidden
+                            ? "Include in presentation"
+                            : "Hide from presentation"
+                        }
+                        onClick={() => toggleFrameHidden(frame.id)}
+                      >
+                        {frame.hidden ? (
+                          <Eye aria-hidden="true" />
+                        ) : (
+                          <EyeOff aria-hidden="true" />
+                        )}
+                      </button>
+                      <button
+                        type="button"
+                        className="is-destructive"
+                        aria-label="Delete frame and contents"
+                        title="Delete frame and contents"
+                        onClick={() => deleteFrame(frame.id)}
+                      >
+                        <Trash2 aria-hidden="true" />
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      ) : null}
+      {animationControlHost && arrowStyleControlVisible
+        ? createPortal(
+            <fieldset className="zen-excalidraw-animation-control">
+              <legend>Flow animation</legend>
+              <div className="buttonList">
+                <button
+                  type="button"
+                  className={flowAnimationEnabled ? "active" : undefined}
+                  aria-pressed={flowAnimationEnabled}
+                  title={
+                    flowAnimationEnabled
+                      ? "Disable directional flow animation"
+                      : "Animate flow toward the arrowhead"
+                  }
+                  onClick={toggleAnimatedArrows}
+                >
+                  <Activity aria-hidden="true" />
+                </button>
+              </div>
+              {flowAnimationEnabled ? (
+                <div className="zen-excalidraw-flow-settings">
+                  <label>
+                    <span>Speed</span>
+                    <select
+                      value={displayedFlowStyle.speed}
+                      onChange={(event) =>
+                        updateFlowStyle({
+                          speed: event.target.value as FlowSpeed,
+                        })
+                      }
+                    >
+                      <option value="slow">Slow</option>
+                      <option value="normal">Normal</option>
+                      <option value="fast">Fast</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>Density</span>
+                    <select
+                      value={displayedFlowStyle.density}
+                      onChange={(event) =>
+                        updateFlowStyle({
+                          density: event.target.value as FlowDensity,
+                        })
+                      }
+                    >
+                      <option value="sparse">Sparse</option>
+                      <option value="normal">Normal</option>
+                      <option value="dense">Dense</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>Direction</span>
+                    <select
+                      value={displayedFlowStyle.direction}
+                      onChange={(event) =>
+                        updateFlowStyle({
+                          direction: event.target.value as FlowDirection,
+                        })
+                      }
+                    >
+                      <option value="auto">Arrowheads</option>
+                      <option value="forward">Start → end</option>
+                      <option value="reverse">End → start</option>
+                      <option value="both">Both</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>Flow color</span>
+                    <span className="zen-excalidraw-flow-color-row">
+                      <input
+                        type="color"
+                        value={
+                          displayedFlowStyle.color ??
+                          selectedArrowStrokeColor ??
+                          "#6965db"
+                        }
+                        onChange={(event) =>
+                          updateFlowStyle({ color: event.target.value })
+                        }
+                      />
+                      <button
+                        type="button"
+                        onClick={() => updateFlowStyle({ color: null })}
+                      >
+                        Match stroke
+                      </button>
+                    </span>
+                  </label>
+                </div>
+              ) : null}
+            </fieldset>,
+            animationControlHost,
+          )
+        : null}
+      {animatedArrowPaths.length > 0 ? (
+        <svg
+          className="zen-excalidraw-flow-overlay"
+          aria-hidden="true"
+          width="100%"
+          height="100%"
+        >
+          {animatedArrowPaths.flatMap((arrow) => {
+            const paths = [
+              <path
+                key={`${arrow.id}-primary`}
+                d={arrow.path}
+                className={`zen-excalidraw-flow-line is-${arrow.direction} is-${arrow.speed} is-${arrow.density}`}
+                style={{ stroke: arrow.color }}
+              />,
+            ];
+            if (arrow.direction === "both") {
+              paths.push(
+                <path
+                  key={`${arrow.id}-reverse`}
+                  d={arrow.path}
+                  className={`zen-excalidraw-flow-line is-reverse is-secondary is-${arrow.speed} is-${arrow.density}`}
+                  style={{ stroke: arrow.color }}
+                />,
+              );
+            }
+            return paths;
+          })}
+        </svg>
       ) : null}
       <Excalidraw
         initialData={initialData}
@@ -251,9 +1313,176 @@ export default function ExcalidrawEditor({
           apiRef.current = api;
         }}
         theme={theme}
+        // Embedded Excalidraw listens on its own container by default. That
+        // makes shortcuts appear broken whenever focus is still on the host
+        // chrome (for example immediately after opening a drawing). Let the
+        // active drawing listen at document level and focus it on mount so
+        // undo/redo, tool keys, delete, copy/paste, and zoom work consistently.
+        handleKeyboardGlobally
+        autoFocus
+        // Excalidraw+ presentation slides are a hosted product feature, but
+        // the open-source editor exposes its distraction-free view mode.
+        // React is the sole owner of this controlled value; the capture-phase
+        // shortcut handler above handles Alt+R without an internal-state race.
+        viewModeEnabled={presentationMode}
         onChange={(elements, appState, files) => {
           const scene = { elements, appState, files };
           sceneRef.current = scene;
+          refreshFrameThumbnails(scene);
+          const nextFrames = orderedPresentationFrames(
+            elements,
+            manualFrameOrderRef.current ?? undefined,
+          );
+          setFrames((current) => {
+            if (sameFrames(current, nextFrames)) return current;
+            framesRef.current = nextFrames;
+            return nextFrames;
+          });
+
+          const selectedArrows = elements.filter(
+            (element): element is OrderedArrowElement =>
+              isDirectionalArrow(element) &&
+              appState.selectedElementIds[element.id],
+          );
+          const nextSelectedIds = selectedArrows.map((arrow) => arrow.id);
+          setSelectedDirectionalArrowIds((current) =>
+            current.length === nextSelectedIds.length &&
+            current.every((id, index) => id === nextSelectedIds[index])
+              ? current
+              : nextSelectedIds,
+          );
+          setSelectedArrowsAnimated(
+            selectedArrows.length > 0 &&
+              selectedArrows.every(
+                (arrow) => arrow.customData?.[ANIMATED_ARROW_KEY] === true,
+              ),
+          );
+          if (selectedArrows[0]) {
+            const nextSelectedStyle = flowStyleFromArrow(selectedArrows[0]);
+            setSelectedFlowStyle((current) =>
+              sameFlowStyle(current, nextSelectedStyle)
+                ? current
+                : nextSelectedStyle,
+            );
+          }
+          setArrowStyleControlVisible(
+            selectedArrows.length > 0 || appState.activeTool.type === "arrow",
+          );
+
+          // The custom animation flag is the equivalent of Excalidraw's
+          // currentItem* style fields. Newly drawn directional arrows inherit
+          // it once; existing arrows are never changed merely by switching
+          // tools. NEVER keeps the metadata attachment in the same undo unit
+          // as creating the arrow instead of adding a second undo step.
+          const newlyDrawnAnimatedIds = new Set<string>();
+          for (const element of elements) {
+            if (!isDirectionalArrow(element)) continue;
+            if (
+              appState.newElement?.id === element.id ||
+              appState.multiElement?.id === element.id
+            ) {
+              continue;
+            }
+            if (!processedDirectionalArrowIdsRef.current.has(element.id)) {
+              processedDirectionalArrowIdsRef.current.add(element.id);
+              if (
+                readyRef.current &&
+                currentArrowAnimationRef.current &&
+                element.customData?.[ANIMATED_ARROW_KEY] === undefined
+              ) {
+                newlyDrawnAnimatedIds.add(element.id);
+              }
+            }
+          }
+          if (newlyDrawnAnimatedIds.size > 0) {
+            apiRef.current?.updateScene({
+              elements: elements.map((element) =>
+                newlyDrawnAnimatedIds.has(element.id)
+                  ? newElementWith(element, {
+                      customData: {
+                        ...element.customData,
+                        [ANIMATED_ARROW_KEY]: true,
+                        [FLOW_SPEED_KEY]: currentFlowStyleRef.current.speed,
+                        [FLOW_DENSITY_KEY]:
+                          currentFlowStyleRef.current.density,
+                        [FLOW_DIRECTION_KEY]:
+                          currentFlowStyleRef.current.direction,
+                        [FLOW_COLOR_KEY]: currentFlowStyleRef.current.color,
+                      },
+                    })
+                  : element,
+              ),
+              captureUpdate: CaptureUpdateAction.NEVER,
+            });
+          }
+
+          const hostRect = editorHostRef.current?.getBoundingClientRect();
+          const flowPaths = elements
+            .filter(
+              (element): element is OrderedArrowElement =>
+                isDirectionalArrow(element) &&
+                element.customData?.[ANIMATED_ARROW_KEY] === true,
+            )
+            .map((arrow): AnimatedArrowPath => {
+              const centerX = arrow.x + arrow.width / 2;
+              const centerY = arrow.y + arrow.height / 2;
+              const cos = Math.cos(arrow.angle);
+              const sin = Math.sin(arrow.angle);
+              const points = arrow.points.map(([localX, localY]) => {
+                const sceneX = arrow.x + localX;
+                const sceneY = arrow.y + localY;
+                const dx = sceneX - centerX;
+                const dy = sceneY - centerY;
+                const viewport = sceneCoordsToViewportCoords(
+                  {
+                    sceneX: centerX + dx * cos - dy * sin,
+                    sceneY: centerY + dx * sin + dy * cos,
+                  },
+                  appState,
+                );
+                return {
+                  x: viewport.x - (hostRect?.left ?? 0),
+                  y: viewport.y - (hostRect?.top ?? 0),
+                };
+              });
+              const hasStart = POINTY_ARROWHEADS.has(
+                arrow.startArrowhead ?? "",
+              );
+              const hasEnd = POINTY_ARROWHEADS.has(arrow.endArrowhead ?? "");
+              const style = flowStyleFromArrow(arrow);
+              const automaticDirection =
+                hasStart && hasEnd ? "both" : hasStart ? "reverse" : "forward";
+              return {
+                id: arrow.id,
+                path: flowPathFromPoints(
+                  points,
+                  Boolean(arrow.roundness) && !arrow.elbowed,
+                ),
+                color: style.color ?? arrow.strokeColor,
+                direction:
+                  style.direction === "auto"
+                    ? automaticDirection
+                    : style.direction,
+                speed: style.speed,
+                density: style.density,
+              };
+            });
+          setAnimatedArrowPaths((current) => {
+            const unchanged =
+              current.length === flowPaths.length &&
+              current.every((path, index) => {
+                const next = flowPaths[index];
+                return (
+                  path.id === next?.id &&
+                  path.path === next.path &&
+                  path.color === next.color &&
+                  path.direction === next.direction &&
+                  path.speed === next.speed &&
+                  path.density === next.density
+                );
+              });
+            return unchanged ? current : flowPaths;
+          });
           if (!readyRef.current) return;
           if (!dirtiedRef.current) {
             dirtiedRef.current = true;
