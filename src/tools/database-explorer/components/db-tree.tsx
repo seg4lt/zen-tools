@@ -376,14 +376,19 @@ function CatalogSearchResults({
   const activeDescriptionRequest = useRef<string | null>(null);
 
   const toggleDetails = (hit: DbCatalogSearchHit, rowKey: string) => {
-    if (!hit.table) return;
-    const key = `${connectionId}/${hit.database}/${hit.schema}/${hit.table}`;
+    if (!isExpandableCatalogHit(hit)) return;
     if (expandedRowKey === rowKey) {
       setExpandedRowKey(null);
       activeDescriptionRequest.current = null;
       return;
     }
     setExpandedRowKey(rowKey);
+    if (hit.kind === "database" || hit.kind === "schema") {
+      activeDescriptionRequest.current = null;
+      return;
+    }
+    const table = hit.table ?? hit.name;
+    const key = `${connectionId}/${hit.database}/${hit.schema}/${table}`;
     if (description?.key === key) {
       activeDescriptionRequest.current = null;
       return;
@@ -392,7 +397,7 @@ function CatalogSearchResults({
     setLoadingKey(key);
     activeDescriptionRequest.current = key;
     void dbTauri
-      .describeTable(connectionId, hit.database, hit.schema, hit.table)
+      .describeTable(connectionId, hit.database, hit.schema, table)
       .then((value) => {
         if (activeDescriptionRequest.current === key) {
           setDescription({ key, value });
@@ -442,9 +447,11 @@ function CatalogSearchResults({
   return (
     <div className="pt-1">
       {result.items.map((hit, index) => {
-        const tableKey = hit.table
-          ? `${connectionId}/${hit.database}/${hit.schema}/${hit.table}`
-          : null;
+        const expandable = isExpandableCatalogHit(hit);
+        const tableKey =
+          hit.kind === "table" || hit.kind === "view"
+            ? `${connectionId}/${hit.database}/${hit.schema}/${hit.table ?? hit.name}`
+            : null;
         const rowKey = `${connectionId}/${hit.database}/${hit.schema}/${hit.table ?? ""}/${hit.kind}/${hit.name}/${index}`;
         return (
           <div key={rowKey}>
@@ -452,7 +459,7 @@ function CatalogSearchResults({
               depth={0}
               icon={catalogHitIcon(hit)}
               chevron={
-                tableKey ? (
+                expandable ? (
                   expandedRowKey === rowKey ? (
                     <ChevronDown className="size-3" />
                   ) : (
@@ -462,7 +469,7 @@ function CatalogSearchResults({
               }
               label={hit.name}
               detail={catalogHitPath(hit)}
-              onClick={tableKey ? () => toggleDetails(hit, rowKey) : undefined}
+              onClick={expandable ? () => toggleDetails(hit, rowKey) : undefined}
               adornment={
                 <span className="ml-auto shrink-0 rounded bg-muted px-1 text-[9px] uppercase text-muted-foreground">
                   {hit.kind}
@@ -470,12 +477,23 @@ function CatalogSearchResults({
               }
               title={`${hit.kind} · ${catalogHitPath(hit)}`}
             />
-            {tableKey && expandedRowKey === rowKey ? (
-              loadingKey === tableKey ? (
+            {expandable && expandedRowKey === rowKey ? (
+              hit.kind === "database" ? (
+                <CatalogDatabaseContents
+                  connectionId={connectionId}
+                  database={hit.database}
+                />
+              ) : hit.kind === "schema" ? (
+                <CatalogSchemaContents
+                  connectionId={connectionId}
+                  database={hit.database}
+                  schema={hit.schema || hit.name}
+                />
+              ) : tableKey && loadingKey === tableKey ? (
                 <div className="flex items-center gap-2 px-6 py-2 text-xs text-muted-foreground">
                   <Loader2 className="size-3 animate-spin" /> Loading table metadata…
                 </div>
-              ) : description?.key === tableKey ? (
+              ) : tableKey && description?.key === tableKey ? (
                 <TableDetails depth={1} desc={description.value} indexedAt={undefined} />
               ) : (
                 <div className="px-6 py-2 text-xs text-destructive">
@@ -492,6 +510,70 @@ function CatalogSearchResults({
         </div>
       ) : null}
     </div>
+  );
+}
+
+function isExpandableCatalogHit(hit: DbCatalogSearchHit): boolean {
+  return (
+    hit.kind === "database" ||
+    hit.kind === "schema" ||
+    hit.kind === "table" ||
+    hit.kind === "view"
+  );
+}
+
+function CatalogDatabaseContents({
+  connectionId,
+  database,
+}: {
+  connectionId: string;
+  database: string;
+}) {
+  const { state } = useDbExplorerStore();
+  const { fetchSchemas } = useDbTree();
+  const schemas = state.trees[connectionId]?.schemasByDb[database];
+
+  useEffect(() => {
+    if (schemas === undefined) fetchSchemas(connectionId, database);
+  }, [schemas, connectionId, database, fetchSchemas]);
+
+  if (schemas === undefined) return <Row depth={1} muted label="Loading…" />;
+  if (schemas.length === 0) return <Row depth={1} muted label="(no schemas)" />;
+  return schemas.map((schema) => (
+    <SchemaNode
+      key={schema}
+      connectionId={connectionId}
+      database={database}
+      schema={schema}
+      depth={1}
+    />
+  ));
+}
+
+function CatalogSchemaContents({
+  connectionId,
+  database,
+  schema,
+}: {
+  connectionId: string;
+  database: string;
+  schema: string;
+}) {
+  return (
+    <>
+      <TablesFolder
+        connectionId={connectionId}
+        database={database}
+        schema={schema}
+        depth={1}
+      />
+      <RoutinesFolder
+        connectionId={connectionId}
+        database={database}
+        schema={schema}
+        depth={1}
+      />
+    </>
   );
 }
 
@@ -592,10 +674,12 @@ function SchemaNode({
   connectionId,
   database,
   schema,
+  depth = 1,
 }: {
   connectionId: string;
   database: string;
   schema: string;
+  depth?: number;
 }) {
   const { state } = useDbExplorerStore();
   const [localOpen, setLocalOpen] = useState(false);
@@ -634,7 +718,7 @@ function SchemaNode({
   return (
     <div className="group">
       <Row
-        depth={1}
+        depth={depth}
         onClick={() => setLocalOpen(!localOpen)}
         icon={<FolderOpen className="h-3 w-3 text-muted-foreground" />}
         chevron={
@@ -671,11 +755,13 @@ function SchemaNode({
             connectionId={connectionId}
             database={database}
             schema={schema}
+            depth={depth + 1}
           />
           <RoutinesFolder
             connectionId={connectionId}
             database={database}
             schema={schema}
+            depth={depth + 1}
           />
         </>
       )}
@@ -689,10 +775,12 @@ function TablesFolder({
   connectionId,
   database,
   schema,
+  depth = 2,
 }: {
   connectionId: string;
   database: string;
   schema: string;
+  depth?: number;
 }) {
   const { state, dispatch } = useDbExplorerStore();
   const { fetchTables } = useDbTree();
@@ -770,7 +858,7 @@ function TablesFolder({
   return (
     <div>
       <Row
-        depth={2}
+        depth={depth}
         onClick={() => setLocalOpen(!localOpen)}
         icon={<Folder className="h-3 w-3 text-muted-foreground" />}
         chevron={
@@ -792,9 +880,9 @@ function TablesFolder({
       {open && (
         <div>
           {visibleTables === undefined ? (
-            <Row depth={3} muted label="Loading…" />
+            <Row depth={depth + 1} muted label="Loading…" />
           ) : visibleTables.length === 0 ? (
-            <Row depth={3} muted label="(none)" />
+            <Row depth={depth + 1} muted label="(none)" />
           ) : (
             visibleTables.map((t) => (
               <TableNode
@@ -803,6 +891,7 @@ function TablesFolder({
                 database={database}
                 schema={schema}
                 table={t}
+                depth={depth + 1}
               />
             ))
           )}
@@ -816,10 +905,12 @@ function RoutinesFolder({
   connectionId,
   database,
   schema,
+  depth = 2,
 }: {
   connectionId: string;
   database: string;
   schema: string;
+  depth?: number;
 }) {
   const { state, dispatch } = useDbExplorerStore();
   const [localOpen, setLocalOpen] = useState(false);
@@ -888,7 +979,7 @@ function RoutinesFolder({
   return (
     <div>
       <Row
-        depth={2}
+        depth={depth}
         onClick={() => setLocalOpen(!localOpen)}
         icon={<Sigma className="h-3 w-3 text-muted-foreground" />}
         chevron={
@@ -911,15 +1002,16 @@ function RoutinesFolder({
       {open && (
         <div>
           {visibleRoutines === undefined ? (
-            <Row depth={3} muted label="Loading…" />
+            <Row depth={depth + 1} muted label="Loading…" />
           ) : visibleRoutines.length === 0 ? (
-            <Row depth={3} muted label="(none)" />
+            <Row depth={depth + 1} muted label="(none)" />
           ) : (
             visibleRoutines.map((r) => (
               <RoutineLeaf
                 key={`${r.kind}:${r.name}`}
                 routine={r}
                 indexedAt={routinesIndexedAt}
+                depth={depth + 1}
               />
             ))
           )}
@@ -936,11 +1028,13 @@ function TableNode({
   database,
   schema,
   table,
+  depth = 3,
 }: {
   connectionId: string;
   database: string;
   schema: string;
   table: string;
+  depth?: number;
 }) {
   const { state } = useDbExplorerStore();
   const [localOpen, setLocalOpen] = useState(false);
@@ -964,7 +1058,7 @@ function TableNode({
   return (
     <div>
       <Row
-        depth={3}
+        depth={depth}
         onClick={() => setLocalOpen(!localOpen)}
         icon={<Table className="h-3 w-3 text-muted-foreground" />}
         chevron={
@@ -985,7 +1079,7 @@ function TableNode({
       />
       {open && (
         <TableDetails
-          depth={4}
+          depth={depth + 1}
           desc={cached}
           indexedAt={indexedAt}
         />
@@ -1288,18 +1382,20 @@ function TriggerRow({
 function RoutineLeaf({
   routine,
   indexedAt,
+  depth = 3,
 }: {
   routine: DbRoutineDescription;
   /** Routines are session-cached separately from tables; this is the
    * timestamp from `readRoutinesFetchedAt`. */
   indexedAt: number | undefined;
+  depth?: number;
 }) {
   const sig = `(${routine.argumentTypes.join(", ")})`;
   const ret = routine.returnType ? ` → ${routine.returnType}` : "";
   const Icon = routine.kind === "procedure" ? Cog : Sigma;
   return (
     <Row
-      depth={3}
+      depth={depth}
       icon={<Icon className="h-3 w-3 text-muted-foreground/70" />}
       label={routine.name}
       detail={`${sig}${ret}`}
