@@ -657,7 +657,30 @@ export interface AiReviewFinding {
   suggested: string;
   /** Lowercase language id used by the syntax highlighter. */
   language?: string;
+  /** Concise, PR-ready comment. Absent on reports created before this field. */
+  comment?: string;
   rationale: string;
+  /** Optional evidence-backed caller/callee or data-flow trace. */
+  call_graph?: AiReviewCallGraph | null;
+}
+
+export interface AiReviewCallGraph {
+  nodes: AiReviewCallGraphNode[];
+  edges: AiReviewCallGraphEdge[];
+}
+
+export interface AiReviewCallGraphNode {
+  id: string;
+  label: string;
+  path?: string;
+  line?: number | null;
+  kind?: "entry" | "changed" | "affected" | "guard" | "test" | string;
+}
+
+export interface AiReviewCallGraphEdge {
+  from: string;
+  to: string;
+  label?: string;
 }
 
 export interface AiReviewStartResp {

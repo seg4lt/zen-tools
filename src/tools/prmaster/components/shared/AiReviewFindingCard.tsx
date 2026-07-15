@@ -22,15 +22,25 @@ import {
   AlertOctagon,
   AlertTriangle,
   Check,
+  ChevronDown,
+  ChevronRight,
+  Code2,
   Copy,
+  GitBranch,
   Info,
   Loader2,
   MessageSquarePlus,
+  SearchCode,
   ShieldAlert,
+  Wrench,
 } from "lucide-react";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { highlight, type Token } from "../../lib/highlight";
-import type { AiReviewFinding } from "../../lib/tauri";
+import type {
+  AiReviewCallGraph,
+  AiReviewCallGraphNode,
+  AiReviewFinding,
+} from "../../lib/tauri";
 import { hasActionableSuggestion } from "../../lib/finding-suggestion";
 
 interface Props {
@@ -56,6 +66,8 @@ export function AiReviewFindingCard({
 }: Props) {
   const sev = severityKey(finding.severity);
   const accent = SEVERITY_ACCENT[sev];
+  const conciseComment = finding.comment?.trim() || firstSentences(finding.rationale, 2);
+  const callGraph = usableCallGraph(finding.call_graph);
 
   return (
     <article
@@ -76,41 +88,57 @@ export function AiReviewFindingCard({
     >
       <div className="relative z-10 flex flex-col gap-3.5 px-4 py-4">
         <CardHeader finding={finding} sev={sev} />
-        <Snippet
-          label="Current"
-          code={finding.current}
-          language={finding.language}
-          startLine={
-            finding.snippet_start_line && finding.snippet_start_line > 0
-              ? finding.snippet_start_line
-              : finding.start_line
-          }
-          highlightLines={[finding.start_line, finding.end_line]}
-          accent="current"
-        />
-        {hasActionableSuggestion(finding) && (
-          <Snippet
-            label="Suggested"
-            code={finding.suggested}
-            language={finding.language}
-            startLine={
-              finding.snippet_start_line && finding.snippet_start_line > 0
-                ? finding.snippet_start_line
-                : finding.start_line
-            }
-            accent="suggested"
-          />
-        )}
-        {finding.rationale && (
+        {conciseComment && (
           <div className="rounded-md border border-border/50 bg-background/40 px-3 py-2.5">
             <div className="mb-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">
-              Why this matters
+              PR comment
             </div>
-            <p className="whitespace-pre-wrap text-xs leading-relaxed text-foreground/85">
-              {finding.rationale}
+            <p className="whitespace-pre-wrap text-xs leading-relaxed text-foreground/90">
+              {conciseComment}
             </p>
           </div>
         )}
+        <div className="grid gap-1.5 sm:grid-cols-2 xl:grid-cols-4">
+          {finding.current && (
+            <FindingDisclosure label="Code context" icon={<Code2 className="size-3" />}>
+              <Snippet
+                label="Current"
+                code={finding.current}
+                language={finding.language}
+                startLine={snippetStart(finding)}
+                highlightLines={[finding.start_line, finding.end_line]}
+                accent="current"
+              />
+            </FindingDisclosure>
+          )}
+          {callGraph && (
+            <FindingDisclosure
+              label="Trace"
+              icon={<GitBranch className="size-3" />}
+              badge={`${callGraph.nodes.length} nodes`}
+            >
+              <CallGraph graph={callGraph} />
+            </FindingDisclosure>
+          )}
+          {finding.rationale && (
+            <FindingDisclosure label="Deep dive" icon={<SearchCode className="size-3" />}>
+              <p className="whitespace-pre-wrap text-xs leading-relaxed text-foreground/85">
+                {finding.rationale}
+              </p>
+            </FindingDisclosure>
+          )}
+          {hasActionableSuggestion(finding) && (
+            <FindingDisclosure label="Solution" icon={<Wrench className="size-3" />}>
+              <Snippet
+                label="Suggested"
+                code={finding.suggested}
+                language={finding.language}
+                startLine={snippetStart(finding)}
+                accent="suggested"
+              />
+            </FindingDisclosure>
+          )}
+        </div>
         <CommentAction
           finding={finding}
           onPost={onPost}
@@ -121,6 +149,109 @@ export function AiReviewFindingCard({
       </div>
     </article>
   );
+}
+
+function FindingDisclosure({
+  label,
+  icon,
+  badge,
+  children,
+}: {
+  label: string;
+  icon: React.ReactNode;
+  badge?: string;
+  children: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className={cn("min-w-0", open && "sm:col-span-2 xl:col-span-4")}>
+      <button
+        type="button"
+        onClick={() => setOpen((value) => !value)}
+        aria-expanded={open}
+        className={cn(
+          "flex w-full items-center gap-1.5 rounded-md border border-border/50 bg-background/35 px-2.5 py-2 text-left text-[11px] font-medium transition-colors hover:bg-accent",
+          open && "rounded-b-none bg-accent/50",
+        )}
+      >
+        {open ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
+        {icon}
+        <span>{label}</span>
+        {badge && <span className="ml-auto text-[9px] font-normal text-muted-foreground">{badge}</span>}
+      </button>
+      {open && (
+        <div className="rounded-b-md border border-t-0 border-border/50 bg-background/25 p-3">
+          {children}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CallGraph({ graph }: { graph: AiReviewCallGraph }) {
+  const nodes = new Map(graph.nodes.map((node) => [node.id, node]));
+  const connected = new Set(graph.edges.flatMap((edge) => [edge.from, edge.to]));
+  return (
+    <div className="space-y-2">
+      {graph.edges.map((edge, index) => {
+        const from = nodes.get(edge.from);
+        const to = nodes.get(edge.to);
+        if (!from || !to) return null;
+        return (
+          <div key={`${edge.from}-${edge.to}-${index}`} className="grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-2">
+            <CallGraphNode node={from} />
+            <div className="flex min-w-12 flex-col items-center text-muted-foreground">
+              <span className="text-[9px]">{edge.label || "flows to"}</span>
+              <span aria-hidden className="w-full text-center text-xs">────▶</span>
+            </div>
+            <CallGraphNode node={to} />
+          </div>
+        );
+      })}
+      {graph.nodes.filter((node) => !connected.has(node.id)).map((node) => (
+        <CallGraphNode key={node.id} node={node} />
+      ))}
+    </div>
+  );
+}
+
+function CallGraphNode({ node }: { node: AiReviewCallGraphNode }) {
+  return (
+    <div className={cn("min-w-0 rounded-md border px-2.5 py-2", callGraphNodeClass(node.kind))}>
+      <div className="truncate font-mono text-[11px] font-semibold" title={node.label}>{node.label}</div>
+      {node.path && (
+        <div className="mt-0.5 truncate font-mono text-[9px] text-muted-foreground" title={node.path}>
+          {node.path}{node.line ? `:${node.line}` : ""}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function callGraphNodeClass(kind?: string): string {
+  switch (kind) {
+    case "changed": return "border-amber-500/40 bg-amber-500/[0.07]";
+    case "affected": return "border-red-500/30 bg-red-500/[0.05]";
+    case "guard": return "border-emerald-500/30 bg-emerald-500/[0.05]";
+    case "test": return "border-violet-500/30 bg-violet-500/[0.05]";
+    default: return "border-blue-500/30 bg-blue-500/[0.05]";
+  }
+}
+
+function usableCallGraph(graph?: AiReviewCallGraph | null): AiReviewCallGraph | null {
+  return graph && graph.nodes.length > 1 ? graph : null;
+}
+
+function snippetStart(finding: AiReviewFinding): number {
+  return finding.snippet_start_line && finding.snippet_start_line > 0
+    ? finding.snippet_start_line
+    : finding.start_line;
+}
+
+function firstSentences(text: string, count: number): string {
+  const trimmed = text.trim();
+  const sentences = trimmed.match(/[^.!?]+[.!?]+(?:\s+|$)|[^.!?]+$/g);
+  return sentences?.slice(0, count).map((part) => part.trim()).join(" ") || trimmed;
 }
 
 function CardHeader({

@@ -258,7 +258,17 @@ SCHEMA:
       "snippet_start_line": 117,
       "current": "<the snippet, including 3-5 lines of CONTEXT above and below the finding>",
       "suggested": "<optional: rewritten snippet, '(remove these lines)', or empty string when no concrete fix>",
-      "rationale": "Concrete trigger, execution path, incorrect outcome, and confirming evidence. 3-6 sentences."
+      "comment": "PR-ready explanation of the defect and impact. 1-3 concise sentences.",
+      "rationale": "Deeper trigger, execution path, incorrect outcome, and confirming evidence. 3-6 sentences.",
+      "call_graph": {{
+        "nodes": [
+          {{ "id": "api", "label": "handle_request", "path": "src/api.rs", "line": 42, "kind": "entry" }},
+          {{ "id": "changed", "label": "save_record", "path": "src/store.rs", "line": 88, "kind": "changed" }}
+        ],
+        "edges": [
+          {{ "from": "api", "to": "changed", "label": "calls" }}
+        ]
+      }}
     }}
   ]
 }}
@@ -276,7 +286,9 @@ FIELD RULES — read carefully, the host UI depends on every one of these:
   - you would just repeat the `current` snippet unchanged.
   When provided, it should be a drop-in replacement for `current`'s problem region (with the same surrounding context), OR the literal string "(remove these lines)" when the fix is deletion.
 - `language` is a lowercase identifier the renderer maps to a syntax highlighter: `"rust"`, `"ts"`, `"js"`, `"tsx"`, `"jsx"`, `"python"`, `"go"`, `"java"`, `"c"`, `"cpp"`, `"css"`, `"html"`, `"json"`, `"yaml"`, `"toml"`, `"sql"`, `"bash"`, `"sh"`, `"md"`. Use the closest match for the file extension; leave empty if unsure.
-- `rationale` must make the case like a concise bug report, not advice. State: (1) the concrete trigger or state, (2) the execution/data path through named identifiers, (3) the observable incorrect outcome or impact, and (4) the evidence or counter-check that confirms existing guards/tests do not prevent it. Aim for 3-6 direct sentences. Never write "might", "could potentially", "consider", or "looks fragile" without specifying the exact condition that makes the failure real.
+- `comment` is the concise, PR-ready portion. It must stand alone as a useful inline review comment in 1-3 sentences: identify the concrete condition, what breaks, and the impact. Do not include severity, AI/model attribution, or a heading. The user may post only this portion after trimming the draft.
+- `rationale` is the deeper evidence layer. State: (1) the concrete trigger or state, (2) the execution/data path through named identifiers, (3) the observable incorrect outcome or impact, and (4) the evidence or counter-check that confirms existing guards/tests do not prevent it. Aim for 3-6 direct sentences. Never write "might", "could potentially", "consider", or "looks fragile" without specifying the exact condition that makes the failure real.
+- `call_graph` is optional. Include it only when the finding has a meaningful caller/callee, event, or data-flow trace. Use 2-8 nodes and only evidence-backed edges. `id` is unique within the finding; `label` is a short symbol or system name; `path` and `line` point to evidence when known; `kind` is one of `entry`, `changed`, `affected`, `guard`, or `test`. Edges point from caller/source to callee/destination and carry a short verb such as `calls`, `emits`, `reads`, or `bypasses`. Omit `call_graph` entirely for local leaf defects where a graph adds no information.
 - `id` is a stable kebab-case slug like `crit-tokio-spawn-leak-runner-rs-114`. Used as a stable handle by the host UI.
 
 QUALITY BAR:
@@ -310,6 +322,8 @@ mod tests {
         assert!(p.contains("/tmp/wt"));
         assert!(p.contains("language"));
         assert!(p.contains("snippet_start_line"));
+        assert!(p.contains("call_graph"));
+        assert!(p.contains("PR-ready"));
         assert!(p.contains("Try to disprove yourself before reporting"));
         assert!(p.contains("concrete trigger"));
     }

@@ -135,9 +135,58 @@ pub struct Finding {
     /// monospaced text".
     #[serde(default)]
     pub language: String,
-    /// Why this matters.
+    /// Short, PR-ready review comment. It should stand on its own; the
+    /// rationale below carries the deeper audit trail.
+    #[serde(default)]
+    pub comment: String,
+    /// Detailed trigger, execution path, impact, and supporting evidence.
     #[serde(default)]
     pub rationale: String,
+    /// Optional structured caller/callee or data-flow trace.
+    #[serde(default)]
+    pub call_graph: Option<CallGraph>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// Small evidence graph rendered alongside a finding when execution flow is
+/// important to understanding the defect.
+pub struct CallGraph {
+    /// Symbols, systems, guards, or tests participating in the trace.
+    #[serde(default)]
+    pub nodes: Vec<CallGraphNode>,
+    /// Directed relationships between nodes.
+    #[serde(default)]
+    pub edges: Vec<CallGraphEdge>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+/// One labeled location in a finding's call graph.
+pub struct CallGraphNode {
+    /// Finding-local stable identifier referenced by edges.
+    pub id: String,
+    /// Short symbol or system label shown in the graph.
+    pub label: String,
+    /// Repository-relative evidence path, when known.
+    #[serde(default)]
+    pub path: String,
+    /// One-based evidence line, when known.
+    #[serde(default)]
+    pub line: Option<u32>,
+    /// `entry`, `changed`, `affected`, `guard`, or `test`.
+    #[serde(default)]
+    pub kind: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Directed caller/callee or data-flow relationship between two nodes.
+pub struct CallGraphEdge {
+    /// Source node id.
+    pub from: String,
+    /// Destination node id.
+    pub to: String,
+    /// Short relationship verb such as `calls`, `reads`, or `emits`.
+    #[serde(default)]
+    pub label: String,
 }
 
 /// Top-level shape of `report.json`.
@@ -172,7 +221,9 @@ pub fn run_key(run_id: &str) -> String {
 
 /// Read the per-PR index; returns an empty list on a cache miss.
 pub fn load_index(kv: &KvStore, pr: &PrKey) -> ReviewResult<Vec<RunSummary>> {
-    Ok(kv.get::<Vec<RunSummary>>(&index_key(pr))?.unwrap_or_default())
+    Ok(kv
+        .get::<Vec<RunSummary>>(&index_key(pr))?
+        .unwrap_or_default())
 }
 
 /// Read a single run record.
@@ -312,7 +363,9 @@ mod tests {
         let index = load_index(&kv, &pr).unwrap();
         assert_eq!(index.len(), MAX_RUNS_PER_PR);
         // Newest-first invariant.
-        assert!(index[0].run_id.ends_with(&(MAX_RUNS_PER_PR + 2).to_string()));
+        assert!(index[0]
+            .run_id
+            .ends_with(&(MAX_RUNS_PER_PR + 2).to_string()));
         // Oldest entries are gone.
         assert!(load_run(&kv, "run-0").unwrap().is_none());
     }
@@ -327,5 +380,24 @@ mod tests {
         purge_pr(&kv, &pr, dir.path()).unwrap();
         assert!(load_index(&kv, &pr).unwrap().is_empty());
         assert!(load_run(&kv, "only").unwrap().is_none());
+    }
+
+    #[test]
+    fn legacy_finding_defaults_progressive_disclosure_fields() {
+        let finding: Finding = serde_json::from_value(serde_json::json!({
+            "id": "legacy",
+            "severity": "medium",
+            "title": "Legacy finding",
+            "path": "src/lib.rs",
+            "start_line": 1,
+            "end_line": 1,
+            "side": "RIGHT",
+            "rationale": "Older reports only had a rationale."
+        }))
+        .unwrap();
+
+        assert!(finding.comment.is_empty());
+        assert!(finding.call_graph.is_none());
+        assert_eq!(finding.rationale, "Older reports only had a rationale.");
     }
 }
