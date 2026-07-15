@@ -14,7 +14,7 @@
  * Wired up as the `filterBar` slot of `EnrichedListView` on the Review
  * and Done tabs.
  */
-import { forwardRef, useMemo, useState } from "react";
+import { forwardRef, useEffect, useMemo, useState } from "react";
 import {
   ChevronDown,
   Filter,
@@ -32,12 +32,13 @@ import {
   DropdownMenuTrigger,
 } from "@zen-tools/ui";
 import { cn } from "@zen-tools/ui";
-import type {
-  EnrichedPullRequest,
-  NotificationFilter,
+import {
+  prmasterTauri,
+  type EnrichedPullRequest,
+  type NotificationFilter,
 } from "../../lib/tauri";
 import { matchesWildcardSearch } from "../../lib/search";
-import { matchesFileGlob } from "../../lib/file-glob";
+import { enrichedId } from "../../store/prmaster-store";
 
 export interface PrFilterState {
   authors: Set<string>;
@@ -55,47 +56,10 @@ export const emptyFilterState: PrFilterState = {
   savedFilterIds: new Set(),
 };
 
-/** Does a single saved filter match this row? Mirrors the backend
- * notification predicate, including changed-file globs. */
-function rowMatchesSavedFilter(
-  row: EnrichedPullRequest,
-  saved: NotificationFilter,
-): boolean {
-  if (!saved.enabled) return false;
-  const pr = row.pr;
-  if (saved.authors.length > 0) {
-    const author = pr.author?.login ?? "";
-    if (!saved.authors.includes(author)) return false;
-  }
-  if (saved.repos.length > 0) {
-    const full = pr.repository.nameWithOwner;
-    const short = full.split("/", 2)[1] ?? full;
-    if (!saved.repos.some((r) => r === full || r === short)) return false;
-  }
-  if (saved.title_regex) {
-    try {
-      if (!new RegExp(saved.title_regex, "i").test(pr.title)) return false;
-    } catch {
-      return false;
-    }
-  }
-  if (saved.file_globs.length > 0) {
-    const paths = row.detail?.files?.nodes.map((file) => file.path) ?? [];
-    if (
-      !paths.some((path) =>
-        saved.file_globs.some((glob) => matchesFileGlob(path, glob)),
-      )
-    ) {
-      return false;
-    }
-  }
-  return true;
-}
-
 export function applyPrFilters(
   rows: EnrichedPullRequest[],
   state: PrFilterState,
-  savedFilters: NotificationFilter[],
+  savedFilterMatches: ReadonlySet<string> | null,
 ): EnrichedPullRequest[] {
   let filtered = rows;
 
@@ -103,13 +67,9 @@ export function applyPrFilters(
   // Mirrors how Author/Repo chips work: multiple selections widen the
   // result rather than narrow it.
   if (state.savedFilterIds.size > 0) {
-    const active = savedFilters.filter((f) => state.savedFilterIds.has(f.id));
-    filtered =
-      active.length === 0
-        ? []
-        : filtered.filter((row) =>
-            active.some((f) => rowMatchesSavedFilter(row, f)),
-          );
+    filtered = savedFilterMatches
+      ? filtered.filter((row) => savedFilterMatches.has(enrichedId(row)))
+      : [];
   }
 
   if (state.authors.size > 0) {
@@ -133,6 +93,39 @@ export function applyPrFilters(
     });
   }
   return filtered;
+}
+
+/** Resolve saved-filter matches through Rust's canonical predicate. */
+export function useSavedFilterMatches(
+  rows: EnrichedPullRequest[],
+  selectedIds: ReadonlySet<string>,
+): ReadonlySet<string> | null {
+  const [matches, setMatches] = useState<ReadonlySet<string> | null>(null);
+  const ids = useMemo(() => [...selectedIds].sort(), [selectedIds]);
+  const idsKey = ids.join("\u0000");
+
+  useEffect(() => {
+    if (ids.length === 0) {
+      setMatches(null);
+      return;
+    }
+    let alive = true;
+    setMatches(null);
+    void prmasterTauri.matchFilterRows(ids, rows).then(
+      (matched) => {
+        if (alive) setMatches(new Set(matched));
+      },
+      (error) => {
+        console.error("[prmaster] saved-filter match failed:", error);
+        if (alive) setMatches(new Set());
+      },
+    );
+    return () => {
+      alive = false;
+    };
+  }, [idsKey, rows]);
+
+  return matches;
 }
 
 export function PrFilterBar({

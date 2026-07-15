@@ -12,6 +12,7 @@ import {
   emptyFilterState,
   PrFilterBar,
   type PrFilterState,
+  useSavedFilterMatches,
 } from "../shared/PrFilterBar";
 import { prmasterTauri, type NotificationFilter } from "../../lib/tauri";
 
@@ -46,9 +47,13 @@ export function ToReviewTab() {
     };
   }, []);
 
+  const savedFilterMatches = useSavedFilterMatches(
+    state.toReview,
+    filter.savedFilterIds,
+  );
   const filteredRows = useMemo(
-    () => applyPrFilters(state.toReview, filter, savedFilters),
-    [state.toReview, filter, savedFilters],
+    () => applyPrFilters(state.toReview, filter, savedFilterMatches),
+    [state.toReview, filter, savedFilterMatches],
   );
 
   return (

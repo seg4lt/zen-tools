@@ -597,6 +597,7 @@ pub fn run() {
             commands::prmaster::prmaster_get_settings,
             commands::prmaster::prmaster_save_settings,
             commands::prmaster::prmaster_list_filters,
+            commands::prmaster::prmaster_match_filter_rows,
             commands::prmaster::prmaster_save_filter,
             commands::prmaster::prmaster_delete_filter,
             commands::prmaster::prmaster_test_filter_notification,

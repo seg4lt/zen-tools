@@ -451,6 +451,8 @@ export const prmasterTauri = {
   saveSettings: (settings: PrMasterSettings) =>
     invoke<void>("prmaster_save_settings", { settings }),
   listFilters: () => invoke<NotificationFilter[]>("prmaster_list_filters"),
+  matchFilterRows: (filterIds: string[], rows: EnrichedPullRequest[]) =>
+    invoke<string[]>("prmaster_match_filter_rows", { filterIds, rows }),
   saveFilter: (filter: NotificationFilter) =>
     invoke<void>("prmaster_save_filter", { filter }),
   deleteFilter: (id: string) => invoke<void>("prmaster_delete_filter", { id }),

@@ -446,6 +446,53 @@ pub async fn prmaster_list_filters(
         .map_err(|e| crate::error::AppError::Other(format!("filter store: {e}")))
 }
 
+/// Return the PR ids from `rows` that match any selected saved filter.
+/// This is the canonical matcher used by the tray badge as well, avoiding
+/// frontend/backend drift for file globs and title regexes.
+#[tauri::command]
+pub async fn prmaster_match_filter_rows(
+    state: State<'_, Mutex<AppState>>,
+    filter_ids: Vec<String>,
+    rows: Vec<EnrichedPullRequest>,
+) -> AppResult<Vec<String>> {
+    let engine = {
+        let s = state.lock().await;
+        engine(&s)
+    };
+    let filters = engine
+        .list_filters()
+        .map_err(|e| crate::error::AppError::Other(format!("filter store: {e}")))?;
+    let selected: Vec<&NotificationFilter> = filters
+        .iter()
+        .filter(|filter| filter.enabled && filter_ids.iter().any(|id| id == &filter.id))
+        .collect();
+
+    if selected.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    Ok(rows
+        .into_iter()
+        .filter(|row| {
+            let file_paths: Vec<String> = row
+                .detail
+                .as_ref()
+                .and_then(|detail| detail.files.as_ref())
+                .map(|files| files.nodes.iter().map(|file| file.path.clone()).collect())
+                .unwrap_or_default();
+            selected
+                .iter()
+                .any(|filter| filter.matches(&row.pr, &file_paths))
+        })
+        .map(|row| {
+            format!(
+                "{}#{}",
+                row.pr.repository.name_with_owner, row.pr.number
+            )
+        })
+        .collect())
+}
+
 /// Insert or update a notification filter. The frontend supplies the full
 /// row; the engine bumps `updated_at_ms` and persists.
 #[tauri::command]
