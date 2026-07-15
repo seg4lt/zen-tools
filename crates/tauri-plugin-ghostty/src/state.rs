@@ -41,7 +41,7 @@ pub struct Inner {
     pub next_surface_id: SurfaceId,
     pub tabs: Vec<TabState>,
     /// Behaviour flag — when the user hits Cmd+W on the last remaining
-    /// tab, do we close the window? Default true (matches macOS).
+    /// tab, do we close the window? Defaults to false for an embedded tool.
     /// Settable by an embedding host via `terminal_set_close_window_on_last_tab`.
     pub close_window_on_last_tab: bool,
     /// Whole-app WKWebView zoom (`webview.setZoom`). Used to scale

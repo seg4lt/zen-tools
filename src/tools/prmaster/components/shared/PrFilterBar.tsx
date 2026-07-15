@@ -37,6 +37,7 @@ import {
   type EnrichedPullRequest,
   type NotificationFilter,
 } from "../../lib/tauri";
+import { matchesWildcardSearch } from "../../lib/search";
 
 export interface PrFilterState {
   authors: Set<string>;
@@ -356,10 +357,9 @@ function MultiSelectChip({
   // Always alphabetical — items must NOT jump around as the user toggles
   // them, since that destroys the click target a user is aiming at.
   const filtered = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    const list = q
-      ? items.filter((i) => keyOf(i).toLowerCase().includes(q))
-      : items;
+    const list = items.filter((item) =>
+      matchesWildcardSearch(keyOf(item), search),
+    );
     return [...list].sort((a, b) => keyOf(a).localeCompare(keyOf(b)));
   }, [items, search, keyOf]);
 

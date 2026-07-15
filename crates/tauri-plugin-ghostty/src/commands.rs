@@ -121,9 +121,6 @@ pub fn terminal_new(
                 .map_err(|e| format!("create_app: {e}"))?
                 .map_err(|e| e.to_string())?;
             inner.app = Some(app);
-            // Default — close window when user closes the last tab.
-            // Embedders override via terminal_set_close_window_on_last_tab.
-            inner.close_window_on_last_tab = true;
         }
     }
 
@@ -1235,6 +1232,17 @@ extern "C" fn host_key_hook_trampoline(chord: *const c_char) {
     let chord_str = unsafe { std::ffi::CStr::from_ptr(chord) }.to_string_lossy();
     let event_name = format!("terminal:host-key-hook:{chord_str}");
     let _ = app.emit(&event_name, ());
+}
+
+/// Install the application-wide host shortcut bridge before any terminal
+/// surface exists. This lets Cmd+W be consumed while a web editor is focused,
+/// before AppKit converts it into a host-window close request.
+pub(crate) fn install_host_key_monitor(app_handle: &AppHandle<Wry>) {
+    APP_HANDLE_FOR_TABS.set(app_handle.clone()).ok();
+    unsafe {
+        macos::register_host_key_hook_callback(host_key_hook_trampoline);
+        macos::install_event_monitor(std::ptr::null_mut());
+    }
 }
 
 /// Reload-config trampoline. Fired by ObjC's `GhosttyHandleAction`

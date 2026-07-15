@@ -138,8 +138,8 @@ pub unsafe fn set_surface(view: *mut c_void, surface: *mut c_void) {
 /// extern "C" keyDown handlers on macOS 26).
 ///
 /// # Safety
-/// `surface` must be a valid `ghostty_surface_t` and must outlive the
-/// monitor.
+/// Must run on the main thread. `surface` is retained for API compatibility
+/// but is no longer dereferenced and may be null.
 pub unsafe fn install_event_monitor(surface: *mut c_void) {
     GhosttyInstallEventMonitor(surface);
 }

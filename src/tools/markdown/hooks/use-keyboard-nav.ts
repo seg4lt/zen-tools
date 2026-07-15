@@ -17,7 +17,6 @@
 
 import { useEffect, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { invoke } from "@tauri-apps/api/core";
 import { useShortcut } from "@zen-tools/keyboard/registry";
 import { terminalCloseTab } from "@/tools/terminal/lib/tauri";
 import { useMarkdownStore } from "../store/markdown-store";
@@ -116,14 +115,11 @@ export function useMarkdownKeyboardNav() {
     { fireInInputs: true },
   );
 
-  // Primary Cmd+W handler for macOS.  AppKit intercepts Cmd+W before
-  // WKWebView so `useShortcut("mod+w")` never fires; instead the Rust
-  // `CloseRequested` handler emits `app:close-requested` and defers the
-  // decision to us.
+  // Primary Cmd+W handler for macOS. The native event monitor consumes
+  // Cmd+W before AppKit can close the host window and emits this event.
   //
   // * Active tab → close it; window stays visible.
-  // * No tabs → fall through to `app_hide_main_window` so Cmd+W still
-  //   hides the app as expected.
+  // * No tabs → no-op; Cmd+W must never close the host window.
   //
   // `activeTabId` is captured in a ref so the listener can close the
   // *current* active tab even if the state changed since the effect ran.
@@ -139,7 +135,7 @@ export function useMarkdownKeyboardNav() {
   useEffect(() => {
     let unlisten: (() => void) | null = null;
     (async () => {
-      unlisten = await listen<null>("app:close-requested", () => {
+      unlisten = await listen<null>("terminal:host-key-hook:cmd-w", () => {
         const active = tabsRef.current.find((tab) => tab.id === activeTabIdRef.current);
         if (
           active?.kind === "terminal" &&
@@ -150,8 +146,6 @@ export function useMarkdownKeyboardNav() {
           );
         } else if (activeTabIdRef.current) {
           dispatchRef.current({ type: "closeTab", id: activeTabIdRef.current });
-        } else {
-          void invoke("app_hide_main_window");
         }
       });
     })();

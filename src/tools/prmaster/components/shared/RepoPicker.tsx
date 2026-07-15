@@ -21,6 +21,7 @@ import {
   DropdownMenuTrigger,
 } from "@zen-tools/ui";
 import { cn } from "@zen-tools/ui";
+import { matchesWildcardSearch } from "../../lib/search";
 
 interface Props {
   repos: string[];
@@ -34,7 +35,7 @@ interface Props {
   compact?: boolean;
   onToggle: (repo: string) => void;
   onClear: () => void;
-  /** Force re-fetch from GitHub (ignores cache). Optional. */
+  /** Fetch from GitHub and replace the repository cache. Optional. */
   onFetch?: () => void;
 }
 
@@ -58,8 +59,7 @@ export function RepoPicker({
   // Always alphabetical — items don't reshuffle on toggle, so the click
   // target stays put.
   const filtered = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    const list = q ? repos.filter((r) => r.toLowerCase().includes(q)) : repos;
+    const list = repos.filter((repo) => matchesWildcardSearch(repo, search));
     return [...list].sort((a, b) => a.localeCompare(b));
   }, [repos, search]);
 
@@ -137,7 +137,7 @@ export function RepoPicker({
             <Input
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="Filter repos…"
+              placeholder="Filter repos (* and ? supported)…"
               className="h-7 text-xs"
               autoFocus
             />
@@ -191,7 +191,7 @@ export function RepoPicker({
                   variant="outline"
                   disabled={fetching}
                   onClick={onFetch}
-                  title="Fetch the full repo list from GitHub (ignores cache)"
+                  title="Fetch the full repo list from GitHub and replace the cache"
                 >
                   {fetching ? (
                     <Loader2 className="size-3.5 animate-spin" />

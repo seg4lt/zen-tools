@@ -622,7 +622,6 @@ function RepoMappingsEditor({
   const [reposLoading, setReposLoading] = useState(false);
   const [reposFetching, setReposFetching] = useState(false);
   const [reposCachedAt, setReposCachedAt] = useState<number | null>(null);
-  const [reposStale, setReposStale] = useState(false);
   const [reposError, setReposError] = useState<string | null>(null);
   const [pickRepo, setPickRepo] = useState<string | null>(null);
 
@@ -633,7 +632,6 @@ function RepoMappingsEditor({
       const result = await prmasterTauri.listAccessibleRepos();
       setAvailableRepos(result.repos);
       setReposCachedAt(result.cached_at_ms);
-      setReposStale(result.stale);
     } catch (err) {
       setReposError(formatError(err));
     } finally {
@@ -648,7 +646,6 @@ function RepoMappingsEditor({
       const result = await prmasterTauri.fetchRepos();
       setAvailableRepos(result.repos);
       setReposCachedAt(result.cached_at_ms);
-      setReposStale(result.stale);
     } catch (err) {
       setReposError(formatError(err));
     } finally {
@@ -698,13 +695,13 @@ function RepoMappingsEditor({
   const cacheFooter =
     reposCachedAt == null
       ? `${availableRepos.length} repositories cached`
-      : `${availableRepos.length} cached · ${formatCacheAge(reposCachedAt)}${reposStale ? " (stale, click Fetch)" : ""}`;
+      : `${availableRepos.length} cached · ${formatCacheAge(reposCachedAt)}`;
 
   return (
     <div className="grid gap-1.5">
       <p className="text-xs text-muted-foreground">
         Map GitHub repos → local clones for faster AI Summary (5–10×).
-        Cache TTL 7d.
+        The repository cache updates only when you click Fetch.
       </p>
 
       {/* Cache strip — always-visible Fetch + cache age. The cache is
@@ -714,7 +711,7 @@ function RepoMappingsEditor({
       <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
         <span className="flex items-center gap-1.5">
           {cacheFooter}
-          {(reposStale || availableRepos.length === 0) && (
+          {availableRepos.length === 0 && (
             <span className="text-amber-600 dark:text-amber-400">●</span>
           )}
         </span>
@@ -723,7 +720,7 @@ function RepoMappingsEditor({
           variant="outline"
           disabled={reposFetching}
           onClick={() => void fetchRepos()}
-          title="Re-fetch the full repo list from GitHub (ignores cache)"
+          title="Fetch the full repo list from GitHub and replace the cache"
         >
           {reposFetching ? (
             <Loader2 className="size-3.5 animate-spin" />

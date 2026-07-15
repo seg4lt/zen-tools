@@ -725,8 +725,6 @@ export interface RepoListResult {
   repos: string[];
   /** UNIX millis when the cache was last refreshed (null if never). */
   cached_at_ms: number | null;
-  /** True when the cache is older than the 7-day TTL. */
-  stale: boolean;
 }
 
 export interface AiSummaryParams {

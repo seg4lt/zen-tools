@@ -452,6 +452,9 @@ export function TerminalView() {
     activatePinnedByIndex,
     toggleRailVisible,
     toggleDF,
+    closeActivePane: () => {
+      if (activeId != null) void closePane(activeId);
+    },
   });
   nativeHookHandlers.current = {
     cyclePane,
@@ -461,6 +464,9 @@ export function TerminalView() {
     activatePinnedByIndex,
     toggleRailVisible,
     toggleDF,
+    closeActivePane: () => {
+      if (activeId != null) void closePane(activeId);
+    },
   };
 
   useEffect(() => {
@@ -470,6 +476,9 @@ export function TerminalView() {
       const subs = await Promise.all([
         listen("terminal:host-key-hook:cmd-opt-f", () => {
           nativeHookHandlers.current.toggleDF();
+        }),
+        listen("terminal:host-key-hook:cmd-w", () => {
+          nativeHookHandlers.current.closeActivePane();
         }),
         listen("terminal:host-key-hook:cmd-left-bracket", () => {
           nativeHookHandlers.current.cyclePane(-1);

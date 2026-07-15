@@ -17,6 +17,7 @@ import {
 } from "@zen-tools/ui";
 import { Input } from "@zen-tools/ui";
 import { cn } from "@zen-tools/ui";
+import { matchesWildcardSearch } from "../../lib/search";
 
 interface Props {
   /** Repos to choose from (already filtered to "unmapped" by the caller). */
@@ -51,8 +52,7 @@ export function SearchableRepoDropdown({
   // Always alphabetical — even the selected value stays in its natural
   // alphabetical slot so the list never reshuffles between renders.
   const filtered = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    const list = q ? items.filter((r) => r.toLowerCase().includes(q)) : items;
+    const list = items.filter((repo) => matchesWildcardSearch(repo, search));
     return [...list].sort((a, b) => a.localeCompare(b));
   }, [items, search]);
 
@@ -82,7 +82,7 @@ export function SearchableRepoDropdown({
           <Input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search repos (matches anywhere)…"
+            placeholder="Search repos (* and ? supported)…"
             className="h-7 text-xs"
             autoFocus
             onKeyDown={(e) => {

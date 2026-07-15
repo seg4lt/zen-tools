@@ -84,6 +84,7 @@ import { ensureTablesForSql } from "./lib/schema-cache";
 import { useAutoSave } from "@/hooks/use-auto-save";
 import { useShortcut } from "@zen-tools/keyboard";
 import { useVimMode } from "@/hooks/use-vim-mode";
+import { listen } from "@tauri-apps/api/event";
 
 export function DatabaseExplorerView() {
   useSqlProjectsBootstrap();
@@ -881,31 +882,53 @@ export function DatabaseExplorerView() {
   );
 
   /**
-   * Cmd+W / Ctrl+W — close the active result tab.
-   *
-   * Only registered when there's at least one result tab to close;
-   * otherwise the chord falls through to the OS default (which on
-   * macOS/Tauri closes the window). `fireInInputs: true` so the
-   * shortcut still works when the user's cursor is parked in the
-   * SQL editor — that's where they almost always are when they
-   * want to dismiss the last result.
+   * Cmd+W / Ctrl+W — close the active result tab first, then the active
+   * editor tab when there are no results. With neither, it is a no-op.
    */
-  const closeActiveResultTab = useCallback(() => {
-    if (!activeId) return;
-    const tabs = state.resultsByConnection[activeId];
-    if (!tabs || tabs.length === 0) return;
-    const idx = Math.min(
-      state.activeResultIndexByConnection[activeId] ?? 0,
-      tabs.length - 1,
-    );
-    dispatch({ type: "close-result-tab", id: activeId, index: idx });
-  }, [activeId, state.resultsByConnection, state.activeResultIndexByConnection, dispatch]);
+  const closeActiveDbTab = useCallback(() => {
+    if (activeId) {
+      const tabs = state.resultsByConnection[activeId];
+      if (tabs && tabs.length > 0) {
+        const idx = Math.min(
+          state.activeResultIndexByConnection[activeId] ?? 0,
+          tabs.length - 1,
+        );
+        dispatch({ type: "close-result-tab", id: activeId, index: idx });
+        return;
+      }
+    }
+    if (state.selectedFilePath) {
+      dispatch({ type: "close-editor-tab", path: state.selectedFilePath });
+    }
+  }, [
+    activeId,
+    state.resultsByConnection,
+    state.activeResultIndexByConnection,
+    state.selectedFilePath,
+    dispatch,
+  ]);
   useShortcut(
     "mod+w",
-    closeActiveResultTab,
-    !!(activeId && (state.resultsByConnection[activeId]?.length ?? 0) > 0),
+    closeActiveDbTab,
+    !!(
+      state.selectedFilePath ||
+      (activeId && (state.resultsByConnection[activeId]?.length ?? 0) > 0)
+    ),
     { fireInInputs: true },
   );
+
+  // macOS intercepts Cmd+W before the webview. The native bridge consumes
+  // it so the app window cannot close, then asks the active tool to handle
+  // the chord. With no result or editor tab this intentionally does nothing.
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    void listen("terminal:host-key-hook:cmd-w", closeActiveDbTab).then(
+      (dispose) => {
+        unlisten = dispose;
+      },
+    );
+    return () => unlisten?.();
+  }, [closeActiveDbTab]);
 
   const handleToggleAutoExplain = useCallback(() => {
     if (!activeId) return;

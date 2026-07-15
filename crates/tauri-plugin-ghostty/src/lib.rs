@@ -69,6 +69,7 @@ pub fn init() -> TauriPlugin<Wry> {
             .setup(|app, _api| {
                 tracing::info!("[plugin-ghostty] setup callback running");
                 app.manage(state::PluginState::default());
+                commands::install_host_key_monitor(app);
                 tracing::info!("[plugin-ghostty] state managed");
                 Ok(())
             });

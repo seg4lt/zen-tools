@@ -2485,6 +2485,20 @@ void GhosttyInstallEventMonitor(ghostty_surface_t surface) {
                 (NSEventModifierFlagCommand | NSEventModifierFlagOption |
                  NSEventModifierFlagShift   | NSEventModifierFlagControl);
             NSString *chars = event.charactersIgnoringModifiers;
+            NSResponder *fr = event.window.firstResponder;
+
+            // Cmd+W belongs to the active in-app tab, never the host
+            // window. When focus is in the webview, hand the chord to
+            // React before AppKit can turn it into performClose:. Native
+            // terminal focus still flows through ghostty below so it can
+            // close a split or terminal tab directly.
+            if (devMods == NSEventModifierFlagCommand
+                && [chars isEqualToString:@"w"]
+                && ![fr isKindOfClass:[GhosttyHostView class]]) {
+                if (g_host_key_hook_fn) g_host_key_hook_fn("cmd-w");
+                return nil;
+            }
+
             if (devMods == (NSEventModifierFlagCommand | NSEventModifierFlagOption)
                 && [chars isEqualToString:@"f"]) {
                 if (g_host_key_hook_fn) g_host_key_hook_fn("cmd-opt-f");
@@ -2507,7 +2521,6 @@ void GhosttyInstallEventMonitor(ghostty_surface_t surface) {
             // updates it before keyDown lands), so we use both:
             //   * firstResponder check → SHOULD we intercept at all?
             //   * g_host_view → WHICH surface gets the event?
-            NSResponder *fr = event.window.firstResponder;
             if (![fr isKindOfClass:[GhosttyHostView class]]) {
                 return event; // pass through to AppKit / WKWebView
             }
