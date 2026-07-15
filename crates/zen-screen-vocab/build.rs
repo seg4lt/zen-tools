@@ -143,4 +143,3 @@ fn next_to_binary_dir(out_dir: &PathBuf) -> Option<PathBuf> {
         .and_then(|p| p.parent())
         .map(|p| p.to_path_buf())
 }
-

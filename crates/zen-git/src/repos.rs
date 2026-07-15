@@ -139,4 +139,3 @@ fn dirs_data_or_home() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."))
 }
-

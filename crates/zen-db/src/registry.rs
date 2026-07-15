@@ -101,18 +101,19 @@ impl ConnectionRegistry {
         slot.list_schemas(database).await
     }
 
-    pub async fn list_tables(&self, id: &str, database: &str, schema: &str) -> DbResult<Vec<String>> {
+    pub async fn list_tables(
+        &self,
+        id: &str,
+        database: &str,
+        schema: &str,
+    ) -> DbResult<Vec<String>> {
         let slot = self.slot(id)?;
         slot.list_tables(database, schema).await
     }
 
     /// Single round-trip catalog dump used by the SQL editor's
     /// autocomplete to seed completions cold (no per-schema fan-out).
-    pub async fn list_all_tables(
-        &self,
-        id: &str,
-        database: &str,
-    ) -> DbResult<Vec<TableSummary>> {
+    pub async fn list_all_tables(&self, id: &str, database: &str) -> DbResult<Vec<TableSummary>> {
         let slot = self.slot(id)?;
         slot.list_all_tables(database).await
     }
@@ -190,8 +191,7 @@ impl ConnectionRegistry {
         options: &ExecuteOptions,
     ) -> DbResult<Vec<QueryResult>> {
         let slot = self.slot(id)?;
-        slot
-            .execute_batch_with_options(database, schema, statements, options)
+        slot.execute_batch_with_options(database, schema, statements, options)
             .await
     }
 

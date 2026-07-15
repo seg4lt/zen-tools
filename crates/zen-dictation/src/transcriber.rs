@@ -113,4 +113,3 @@ impl Transcriber for zen_whisper::WhisperContext {
             .map_err(DictationError::from)
     }
 }
-

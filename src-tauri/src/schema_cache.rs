@@ -17,7 +17,10 @@ use crate::error::{AppError, AppResult};
 
 /// Re-export the storage primitive so callers in this crate can keep
 /// `use crate::schema_cache::SchemaCache` working.
-pub use zen_db::{now_ms, CachedTable, CachedTableMeta, SchemaCache, DEFAULT_TTL_MS};
+pub use zen_db::{
+    now_ms, CachedTable, CachedTableMeta, CatalogSearchHit, CatalogSearchResult, SchemaCache,
+    DEFAULT_TTL_MS,
+};
 
 /// Open (or create) the schema cache at the canonical location.
 pub fn open(app: &AppHandle) -> AppResult<SchemaCache> {

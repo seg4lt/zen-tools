@@ -183,7 +183,6 @@ impl MsSqlConnection {
     }
 }
 
-
 #[async_trait]
 impl DbConnection for MsSqlConnection {
     async fn ping(&self) -> DbResult<()> {
@@ -367,9 +366,7 @@ impl DbConnection for MsSqlConnection {
             }
         }
         if !found {
-            return Err(DbError::Query(format!(
-                "table not found: {schema}.{table}"
-            )));
+            return Err(DbError::Query(format!("table not found: {schema}.{table}")));
         }
 
         // Column rundown — ordinal, type with length, null-ability,
@@ -448,8 +445,11 @@ impl DbConnection for MsSqlConnection {
                         .ok()
                         .flatten()
                         .map(|s| s.to_string());
-                    let ordinal: i32 =
-                        row.try_get::<i32, _>("ordinal_position").ok().flatten().unwrap_or(0);
+                    let ordinal: i32 = row
+                        .try_get::<i32, _>("ordinal_position")
+                        .ok()
+                        .flatten()
+                        .unwrap_or(0);
                     let is_pk_raw: i32 = row.try_get::<i32, _>("is_pk").ok().flatten().unwrap_or(0);
 
                     let data_type = format_mssql_type(&base_type, char_max, num_prec, num_scale);
@@ -518,7 +518,11 @@ impl DbConnection for MsSqlConnection {
                         .flatten()
                         .unwrap_or("")
                         .to_string();
-                    let o = row.try_get::<i32, _>("key_ordinal").ok().flatten().unwrap_or(0);
+                    let o = row
+                        .try_get::<i32, _>("key_ordinal")
+                        .ok()
+                        .flatten()
+                        .unwrap_or(0);
                     keys_acc.push((n, t, c, o));
                 }
             }
@@ -670,14 +674,23 @@ impl DbConnection for MsSqlConnection {
                         .flatten()
                         .unwrap_or("")
                         .to_string();
-                    let u = row.try_get::<i32, _>("is_unique").ok().flatten().unwrap_or(0) != 0;
+                    let u = row
+                        .try_get::<i32, _>("is_unique")
+                        .ok()
+                        .flatten()
+                        .unwrap_or(0)
+                        != 0;
                     let c = row
                         .try_get::<&str, _>("col")
                         .ok()
                         .flatten()
                         .unwrap_or("")
                         .to_string();
-                    let o = row.try_get::<i32, _>("key_ordinal").ok().flatten().unwrap_or(0);
+                    let o = row
+                        .try_get::<i32, _>("key_ordinal")
+                        .ok()
+                        .flatten()
+                        .unwrap_or(0);
                     idx_acc.push((n, u, c, o));
                 }
             }
@@ -717,10 +730,30 @@ impl DbConnection for MsSqlConnection {
                         .flatten()
                         .unwrap_or("")
                         .to_string();
-                    let instead = row.try_get::<i32, _>("instead_of").ok().flatten().unwrap_or(0) != 0;
-                    let on_ins = row.try_get::<i32, _>("on_insert").ok().flatten().unwrap_or(0) != 0;
-                    let on_upd = row.try_get::<i32, _>("on_update").ok().flatten().unwrap_or(0) != 0;
-                    let on_del = row.try_get::<i32, _>("on_delete").ok().flatten().unwrap_or(0) != 0;
+                    let instead = row
+                        .try_get::<i32, _>("instead_of")
+                        .ok()
+                        .flatten()
+                        .unwrap_or(0)
+                        != 0;
+                    let on_ins = row
+                        .try_get::<i32, _>("on_insert")
+                        .ok()
+                        .flatten()
+                        .unwrap_or(0)
+                        != 0;
+                    let on_upd = row
+                        .try_get::<i32, _>("on_update")
+                        .ok()
+                        .flatten()
+                        .unwrap_or(0)
+                        != 0;
+                    let on_del = row
+                        .try_get::<i32, _>("on_delete")
+                        .ok()
+                        .flatten()
+                        .unwrap_or(0)
+                        != 0;
                     let definition = row
                         .try_get::<&str, _>("definition")
                         .ok()
@@ -811,7 +844,11 @@ impl DbConnection for MsSqlConnection {
                 .map_err(|e| DbError::Query(e.to_string()))?
             {
                 if let QueryItem::Row(row) = item {
-                    let id = row.try_get::<i32, _>("object_id").ok().flatten().unwrap_or(0);
+                    let id = row
+                        .try_get::<i32, _>("object_id")
+                        .ok()
+                        .flatten()
+                        .unwrap_or(0);
                     let name = row
                         .try_get::<&str, _>("name")
                         .ok()
@@ -850,7 +887,8 @@ impl DbConnection for MsSqlConnection {
              ORDER BY p.object_id, p.parameter_id",
             schema.replace('\'', "''"),
         );
-        let mut args: std::collections::HashMap<i32, Vec<String>> = std::collections::HashMap::new();
+        let mut args: std::collections::HashMap<i32, Vec<String>> =
+            std::collections::HashMap::new();
         {
             let mut stream = conn
                 .simple_query(q_args)
@@ -862,7 +900,11 @@ impl DbConnection for MsSqlConnection {
                 .map_err(|e| DbError::Query(e.to_string()))?
             {
                 if let QueryItem::Row(row) = item {
-                    let id = row.try_get::<i32, _>("object_id").ok().flatten().unwrap_or(0);
+                    let id = row
+                        .try_get::<i32, _>("object_id")
+                        .ok()
+                        .flatten()
+                        .unwrap_or(0);
                     let ty = row
                         .try_get::<&str, _>("type_name")
                         .ok()
@@ -949,9 +991,7 @@ impl DbConnection for MsSqlConnection {
 
         let start = Instant::now();
         let (sets, expect_data) = if analyze {
-            let wrapped = format!(
-                "SET STATISTICS XML ON; {trimmed}; SET STATISTICS XML OFF;"
-            );
+            let wrapped = format!("SET STATISTICS XML ON; {trimmed}; SET STATISTICS XML OFF;");
             (run_capturing_all_sets(&mut conn, &wrapped).await?, true)
         } else {
             // Toggle SHOWPLAN_XML in its own batch; tiberius's
@@ -1080,9 +1120,7 @@ impl DbConnection for MsSqlConnection {
         // So: drag-select a transaction block, hit Run with locks,
         // land on tab 0, see the entire batch's lock timeline. No
         // tab-juggling, no `sp_executesql` hack.
-        let sampler = spid.map(|s| {
-            MsSqlLockSampler::start(self.cfg.clone(), s, interval_ms)
-        });
+        let sampler = spid.map(|s| MsSqlLockSampler::start(self.cfg.clone(), s, interval_ms));
 
         let mut out = Vec::with_capacity(statements.len());
         for sql in statements {
@@ -1132,56 +1170,56 @@ impl DbConnection for MsSqlConnection {
 /// which would acquire a fresh checkout each call and lose
 /// transaction state.
 async fn execute_on(client: &mut MsClient, sql: &str) -> DbResult<QueryResult> {
-        let start = Instant::now();
-        let mut stream = client
-            .simple_query(sql.to_string())
-            .await
-            .map_err(|e| DbError::Query(e.to_string()))?;
+    let start = Instant::now();
+    let mut stream = client
+        .simple_query(sql.to_string())
+        .await
+        .map_err(|e| DbError::Query(e.to_string()))?;
 
-        let mut columns: Vec<Column> = Vec::new();
-        let mut rows: Vec<Vec<Cell>> = Vec::new();
+    let mut columns: Vec<Column> = Vec::new();
+    let mut rows: Vec<Vec<Cell>> = Vec::new();
 
-        while let Some(item) = stream
-            .try_next()
-            .await
-            .map_err(|e| DbError::Query(e.to_string()))?
-        {
-            match item {
-                QueryItem::Metadata(meta) => {
-                    if columns.is_empty() {
-                        columns = meta
-                            .columns()
-                            .iter()
-                            .map(|c| Column {
-                                name: c.name().to_string(),
-                                type_name: format!("{:?}", c.column_type()),
-                            })
-                            .collect();
-                    }
-                }
-                QueryItem::Row(row) => {
-                    let mut cells = Vec::with_capacity(row.len());
-                    for col_data in row.into_iter() {
-                        cells.push(decode_cell(&col_data));
-                    }
-                    rows.push(cells);
+    while let Some(item) = stream
+        .try_next()
+        .await
+        .map_err(|e| DbError::Query(e.to_string()))?
+    {
+        match item {
+            QueryItem::Metadata(meta) => {
+                if columns.is_empty() {
+                    columns = meta
+                        .columns()
+                        .iter()
+                        .map(|c| Column {
+                            name: c.name().to_string(),
+                            type_name: format!("{:?}", c.column_type()),
+                        })
+                        .collect();
                 }
             }
+            QueryItem::Row(row) => {
+                let mut cells = Vec::with_capacity(row.len());
+                for col_data in row.into_iter() {
+                    cells.push(decode_cell(&col_data));
+                }
+                rows.push(cells);
+            }
         }
+    }
 
-        // tiberius's `simple_query` does not surface a unified
-        // `rows_affected` count across all batches in v0.12; for v1 we
-        // report None for mutations and let the UI badge "OK" when a
-        // statement returns no rows. v2 will switch to `query` for
-        // mutations to capture the count.
-        Ok(QueryResult {
-            statement: sql.to_string(),
-            columns,
-            rows,
-            rows_affected: None,
-            duration_ms: start.elapsed().as_millis() as u64,
-            locks: None,
-        })
+    // tiberius's `simple_query` does not surface a unified
+    // `rows_affected` count across all batches in v0.12; for v1 we
+    // report None for mutations and let the UI badge "OK" when a
+    // statement returns no rows. v2 will switch to `query` for
+    // mutations to capture the count.
+    Ok(QueryResult {
+        statement: sql.to_string(),
+        columns,
+        rows,
+        rows_affected: None,
+        duration_ms: start.elapsed().as_millis() as u64,
+        locks: None,
+    })
 }
 
 /// Pull `@@SPID` off the user session. Used by the lock sampler so
@@ -1207,11 +1245,7 @@ async fn capture_spid(client: &mut MsClient) -> DbResult<i32> {
     Err(DbError::Query("@@SPID returned no row".into()))
 }
 
-async fn run_string_column(
-    client: &mut MsClient,
-    sql: &str,
-    col: &str,
-) -> DbResult<Vec<String>> {
+async fn run_string_column(client: &mut MsClient, sql: &str, col: &str) -> DbResult<Vec<String>> {
     let mut stream = client
         .simple_query(sql.to_string())
         .await
@@ -1392,10 +1426,7 @@ fn collapse_foreign_keys(
 /// data. The base `execute()` path collapses everything into one
 /// columns/rows pair, which is fine for normal queries but loses
 /// ShowPlan information.
-async fn run_capturing_all_sets(
-    client: &mut MsClient,
-    sql: &str,
-) -> DbResult<Vec<QueryResult>> {
+async fn run_capturing_all_sets(client: &mut MsClient, sql: &str) -> DbResult<Vec<QueryResult>> {
     let mut stream = client
         .simple_query(sql.to_string())
         .await
@@ -1406,18 +1437,17 @@ async fn run_capturing_all_sets(
     let mut cur_rows: Vec<Vec<Cell>> = Vec::new();
     let mut have_set = false;
 
-    let flush = |sets: &mut Vec<QueryResult>,
-                 columns: &mut Vec<Column>,
-                 rows: &mut Vec<Vec<Cell>>| {
-        sets.push(QueryResult {
-            statement: String::new(),
-            columns: std::mem::take(columns),
-            rows: std::mem::take(rows),
-            rows_affected: None,
-            duration_ms: 0,
-            locks: None,
-        });
-    };
+    let flush =
+        |sets: &mut Vec<QueryResult>, columns: &mut Vec<Column>, rows: &mut Vec<Vec<Cell>>| {
+            sets.push(QueryResult {
+                statement: String::new(),
+                columns: std::mem::take(columns),
+                rows: std::mem::take(rows),
+                rows_affected: None,
+                duration_ms: 0,
+                locks: None,
+            });
+        };
 
     while let Some(item) = stream
         .try_next()
@@ -1524,7 +1554,11 @@ fn parse_host_port(raw: &str, default_port: u16) -> (String, u16) {
             // Adopt the embedded port only if the UI form is still on
             // the default (1433). Anything else is an explicit user
             // choice we mustn't override.
-            let port = if default_port == 1433 { p } else { default_port };
+            let port = if default_port == 1433 {
+                p
+            } else {
+                default_port
+            };
             return (host, port);
         }
         return (host, default_port);

@@ -4,7 +4,10 @@
 //! passwords live in the OS keychain via `zen_db::secrets`. Live driver
 //! handles are kept in [`zen_db::ConnectionRegistry`] inside `AppState`.
 
-use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex as StdMutex, OnceLock, Weak},
+};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
@@ -18,8 +21,83 @@ use crate::commands::preferences::{
     load_preferences, write_preferences, DbConnectionPrefs, Preferences,
 };
 use crate::error::{AppError, AppResult};
-use crate::schema_cache::{now_ms, CachedTableMeta, SchemaCache, DEFAULT_TTL_MS};
+use crate::schema_cache::{
+    now_ms, CachedTableMeta, CatalogSearchResult, SchemaCache, DEFAULT_TTL_MS,
+};
 use crate::state::AppState;
+
+const CATALOG_TTL_MS: i64 = 60 * 60 * 1_000;
+static CATALOG_REFRESH_LOCKS: OnceLock<StdMutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>> =
+    OnceLock::new();
+
+fn catalog_refresh_lock(connection_id: &str, database: &str) -> Arc<tokio::sync::Mutex<()>> {
+    let locks = CATALOG_REFRESH_LOCKS.get_or_init(|| StdMutex::new(HashMap::new()));
+    let key = format!("{connection_id}\0{database}");
+    let mut locks = locks
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
+        return lock;
+    }
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    let lock = Arc::new(tokio::sync::Mutex::new(()));
+    locks.insert(key, Arc::downgrade(&lock));
+    lock
+}
+
+async fn refresh_catalog(
+    registry: Arc<ConnectionRegistry>,
+    cache: SchemaCache,
+    connection_id: String,
+    database: String,
+) -> AppResult<()> {
+    let (relations, schemas) = tokio::join!(
+        registry.list_all_tables(&connection_id, &database),
+        registry.list_schemas(&connection_id, &database),
+    );
+    let relations = relations?;
+    let (schemas, schemas_complete) = match schemas {
+        Ok(schemas) => (schemas, true),
+        Err(e) => {
+            tracing::warn!(
+                ?e,
+                "catalog schema listing failed; indexing relation schemas only"
+            );
+            (Vec::new(), false)
+        }
+    };
+    tokio::task::spawn_blocking(move || {
+        cache.replace_relations(
+            &connection_id,
+            &database,
+            &schemas,
+            schemas_complete,
+            &relations,
+            now_ms(),
+        )
+    })
+    .await
+    .map_err(|e| AppError::Other(format!("join: {e}")))??;
+    Ok(())
+}
+
+async fn refresh_database_catalog(
+    registry: Arc<ConnectionRegistry>,
+    cache: SchemaCache,
+    connection_id: String,
+) -> AppResult<Vec<String>> {
+    let databases = registry.list_databases(&connection_id).await?;
+    let cache_databases = databases.clone();
+    let indexed = tokio::task::spawn_blocking(move || {
+        cache.replace_databases(&connection_id, &cache_databases, now_ms())
+    })
+    .await
+    .map_err(|e| AppError::Other(format!("join: {e}")))?;
+    if let Err(e) = indexed {
+        tracing::warn!(?e, "database catalog index update failed");
+    }
+    Ok(databases)
+}
 
 /// Connection details posted from the front-end. Same shape as
 /// `zen_db::ConnectionConfig` — duplicated locally so we control
@@ -171,8 +249,8 @@ pub async fn db_delete_connection(
         let id_for_cache = id.clone();
         // SQLite is sync; off-load to the blocking pool so we don't
         // stall the runtime on disk I/O.
-        let _ = tokio::task::spawn_blocking(move || cache.invalidate_connection(&id_for_cache))
-            .await;
+        let _ =
+            tokio::task::spawn_blocking(move || cache.invalidate_connection(&id_for_cache)).await;
     }
 
     let mut prefs = load_preferences(&app)?;
@@ -220,10 +298,7 @@ pub async fn db_connect(
 
 /// Drop a live driver handle (the keychain entry is preserved).
 #[tauri::command]
-pub async fn db_disconnect(
-    id: String,
-    state: tauri::State<'_, Mutex<AppState>>,
-) -> AppResult<()> {
+pub async fn db_disconnect(id: String, state: tauri::State<'_, Mutex<AppState>>) -> AppResult<()> {
     let registry = {
         let s = state.lock().await;
         registry(&s)
@@ -238,13 +313,14 @@ pub async fn db_disconnect(
 #[tauri::command]
 pub async fn db_list_databases(
     id: String,
+    app: AppHandle,
     state: tauri::State<'_, Mutex<AppState>>,
 ) -> AppResult<Vec<String>> {
     let registry = {
         let s = state.lock().await;
         registry(&s)
     };
-    Ok(registry.list_databases(&id).await?)
+    refresh_database_catalog(registry, require_cache(&app)?.clone(), id).await
 }
 
 /// Schemas inside the given database.
@@ -285,13 +361,31 @@ pub async fn db_list_routines(
     id: String,
     database: String,
     schema: String,
+    app: AppHandle,
     state: tauri::State<'_, Mutex<AppState>>,
 ) -> AppResult<Vec<RoutineDescription>> {
     let registry = {
         let s = state.lock().await;
         registry(&s)
     };
-    Ok(registry.list_routines(&id, &database, &schema).await?)
+    let rows = registry.list_routines(&id, &database, &schema).await?;
+    if let Ok(cache) = require_cache(&app) {
+        let cache = cache.clone();
+        let cache_id = id.clone();
+        let cache_database = database.clone();
+        let cache_schema = schema.clone();
+        let cache_rows = rows.clone();
+        match tokio::task::spawn_blocking(move || {
+            cache.upsert_routines(&cache_id, &cache_database, &cache_schema, &cache_rows)
+        })
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => tracing::warn!(?e, "routine catalog index update failed"),
+            Err(e) => tracing::warn!(?e, "routine catalog index task failed"),
+        }
+    }
+    Ok(rows)
 }
 
 /// Every relation in `database` — used by the SQL editor's autocomplete
@@ -320,8 +414,43 @@ pub async fn db_list_all_tables(
         1,
     );
     emit_progress(&app, &job);
+    let refresh_lock = catalog_refresh_lock(&id, &database);
+    let _refresh_guard = refresh_lock.lock().await;
     match registry.list_all_tables(&id, &database).await {
         Ok(rows) => {
+            let (schemas, schemas_complete) = match registry.list_schemas(&id, &database).await {
+                Ok(schemas) => (schemas, true),
+                Err(e) => {
+                    tracing::warn!(
+                        ?e,
+                        "catalog schema listing failed; indexing relation schemas only"
+                    );
+                    (Vec::new(), false)
+                }
+            };
+            if let Ok(cache) = require_cache(&app) {
+                let cache = cache.clone();
+                let cache_id = id.clone();
+                let cache_database = database.clone();
+                let cache_schemas = schemas;
+                let cache_rows = rows.clone();
+                match tokio::task::spawn_blocking(move || {
+                    cache.replace_relations(
+                        &cache_id,
+                        &cache_database,
+                        &cache_schemas,
+                        schemas_complete,
+                        &cache_rows,
+                        now_ms(),
+                    )
+                })
+                .await
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => tracing::warn!(?e, "catalog index update failed"),
+                    Err(e) => tracing::warn!(?e, "catalog index task failed"),
+                }
+            }
             emit_progress(&app, &job.clone().done());
             Ok(rows)
         }
@@ -330,6 +459,97 @@ pub async fn db_list_all_tables(
             Err(e.into())
         }
     }
+}
+
+/// Search the persistent database catalog. Catalog construction, DSL parsing,
+/// matching, kind filtering, and result bounds all stay in Rust/SQLite; the
+/// frontend receives only a small render-ready page.
+#[tauri::command]
+pub async fn db_search_catalog(
+    id: String,
+    database: String,
+    query: String,
+    limit: Option<u32>,
+    app: AppHandle,
+    state: tauri::State<'_, Mutex<AppState>>,
+) -> AppResult<CatalogSearchResult> {
+    let cache = require_cache(&app)?;
+    let requested_limit = limit.unwrap_or(200) as usize;
+    let query_database = SchemaCache::query_database_scope(&query, &database);
+    let refresh_scope = query_database.as_deref().unwrap_or("").to_owned();
+    let initial = {
+        let cache = cache.clone();
+        let cache_id = id.clone();
+        let cache_database = database.clone();
+        let cache_query = query.clone();
+        tokio::task::spawn_blocking(move || {
+            cache.search_catalog(&cache_id, &cache_database, &cache_query, requested_limit)
+        })
+        .await
+        .map_err(|e| AppError::Other(format!("join: {e}")))??
+    };
+    if initial.query_too_broad {
+        return Ok(initial);
+    }
+
+    let indexed_at = initial.indexed_at;
+    let registry = {
+        let s = state.lock().await;
+        registry(&s)
+    };
+    if indexed_at.is_none() {
+        let refresh_lock = catalog_refresh_lock(&id, &refresh_scope);
+        let _refresh_guard = refresh_lock.lock().await;
+        let after_wait = {
+            let cache = cache.clone();
+            let cache_id = id.clone();
+            let cache_database = database.clone();
+            let cache_query = query.clone();
+            tokio::task::spawn_blocking(move || {
+                cache.search_catalog(&cache_id, &cache_database, &cache_query, requested_limit)
+            })
+            .await
+            .map_err(|e| AppError::Other(format!("join: {e}")))??
+        };
+        if after_wait.indexed_at.is_some() {
+            return Ok(after_wait);
+        }
+        if let Some(query_database) = query_database.clone() {
+            refresh_catalog(registry, cache.clone(), id.clone(), query_database).await?;
+        } else {
+            refresh_database_catalog(registry, cache.clone(), id.clone()).await?;
+        }
+    } else if indexed_at.map_or(false, |ts| now_ms() - ts > CATALOG_TTL_MS) {
+        let refresh_lock = catalog_refresh_lock(&id, &refresh_scope);
+        let refresh_cache = cache.clone();
+        let refresh_id = id.clone();
+        let refresh_database = query_database.clone();
+        tauri::async_runtime::spawn(async move {
+            let Ok(_guard) = refresh_lock.try_lock_owned() else {
+                return;
+            };
+            let refresh = if let Some(refresh_database) = refresh_database {
+                refresh_catalog(registry, refresh_cache, refresh_id, refresh_database)
+                    .await
+                    .map(|_| ())
+            } else {
+                refresh_database_catalog(registry, refresh_cache, refresh_id)
+                    .await
+                    .map(|_| ())
+            };
+            if let Err(e) = refresh {
+                tracing::warn!(?e, "background catalog refresh failed; serving stale index");
+            }
+        });
+        return Ok(initial);
+    }
+
+    tokio::task::spawn_blocking(move || {
+        cache.search_catalog(&id, &database, &query, requested_limit)
+    })
+    .await
+    .map_err(|e| AppError::Other(format!("join: {e}")))?
+    .map_err(Into::into)
 }
 
 // ── Query ───────────────────────────────────────────────────────────────
@@ -674,10 +894,7 @@ fn schedule_background_refresh(
         for (idx, t) in tables.iter().enumerate() {
             // Announce which table we're starting on so the chip can
             // show the name as it advances.
-            emit_progress(
-                &app,
-                &job.clone().step((idx) as u32, Some(t.clone())),
-            );
+            emit_progress(&app, &job.clone().step((idx) as u32, Some(t.clone())));
             match fetch_and_cache(&registry, &cache, &connection_id, &database, &schema, t).await {
                 Ok(_) => refreshed.push(t.clone()),
                 Err(e) => {
@@ -691,7 +908,8 @@ fn schedule_background_refresh(
         if errors > 0 {
             emit_progress(
                 &app,
-                &job.clone().error(format!("{errors} table(s) failed to refresh")),
+                &job.clone()
+                    .error(format!("{errors} table(s) failed to refresh")),
             );
         } else {
             emit_progress(&app, &job.clone().done());
@@ -917,4 +1135,3 @@ pub async fn db_invalidate_schema_cache(
     .map_err(|e| AppError::Other(format!("join: {e}")))??;
     Ok(())
 }
-

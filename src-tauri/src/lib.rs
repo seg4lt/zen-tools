@@ -20,7 +20,10 @@ pub mod user_config;
 use commands::markdown_index::MarkdownIndexRegistry;
 use commands::runs::{load_runs, RunHistory};
 use state::AppState;
-use std::sync::{atomic::{AtomicBool, Ordering}, Arc};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use tauri::{Emitter, Manager};
 use tokio::sync::Mutex;
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
@@ -200,9 +203,9 @@ pub fn run() {
                     if let Err(e) = window.hide() {
                         tracing::warn!(error = %e, "main window hide on close failed");
                     }
-                    let _ = window.app_handle().set_activation_policy(
-                        tauri::ActivationPolicy::Accessory,
-                    );
+                    let _ = window
+                        .app_handle()
+                        .set_activation_policy(tauri::ActivationPolicy::Accessory);
                 } else {
                     api.prevent_close();
                     if let Err(e) = window.destroy() {
@@ -343,7 +346,10 @@ pub fn run() {
                     app.manage(cache);
                 }
                 Err(e) => {
-                    tracing::warn!(?e, "schema_cache: open failed; auto-complete will be live-only");
+                    tracing::warn!(
+                        ?e,
+                        "schema_cache: open failed; auto-complete will be live-only"
+                    );
                 }
             }
 
@@ -411,7 +417,10 @@ pub fn run() {
             {
                 use tauri_plugin_global_shortcut::GlobalShortcutExt;
                 if let Err(e) = app.global_shortcut().register(terminal_chord()) {
-                    tracing::warn!(?e, "terminal global-shortcut register failed; ⌥⌘⇧T disabled");
+                    tracing::warn!(
+                        ?e,
+                        "terminal global-shortcut register failed; ⌥⌘⇧T disabled"
+                    );
                 }
             }
 
@@ -540,6 +549,7 @@ pub fn run() {
             commands::database::db_list_tables,
             commands::database::db_list_all_tables,
             commands::database::db_list_routines,
+            commands::database::db_search_catalog,
             commands::database::db_query,
             commands::database::db_cancel_query,
             commands::database::db_explain_query,

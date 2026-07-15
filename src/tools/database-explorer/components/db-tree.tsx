@@ -4,9 +4,9 @@
  * Foreign keys / Indexes / Checks / Triggers); routines are leaf
  * rows showing function/procedure signatures.
  *
- * Top of the rail carries a search box that filters the whole tree
- * by name, with optional `kind > name` syntax to scope to one
- * metadata kind. See `lib/db-tree-search.ts` for the DSL details.
+ * Top of the rail carries a backend catalog search. Rust/SQLite owns
+ * indexing, matching, kind scoping, and result bounds; this component
+ * only debounces the input and renders the returned page.
  *
  * All children are fetched lazily on first expansion. Per-table
  * metadata rides through the existing `schema_cache.db` (extended in
@@ -21,10 +21,7 @@
  */
 
 import {
-  createContext,
-  useContext,
   useEffect,
-  useMemo,
   useRef,
   useState,
 } from "react";
@@ -39,6 +36,7 @@ import {
   KeyRound,
   Link2,
   ListTree,
+  Loader2,
   RefreshCw,
   Search,
   ShieldCheck,
@@ -57,6 +55,8 @@ import { useDbExplorerStore } from "../store/db-explorer-store";
 import { useDbTree } from "../hooks/use-db-tree";
 import {
   dbTauri,
+  type DbCatalogSearchHit,
+  type DbCatalogSearchResult,
   type DbCheckDescription,
   type DbColumnDescription,
   type DbForeignKeyDescription,
@@ -77,14 +77,6 @@ import {
   subscribe as subscribeSchemaCache,
   subscribeRoutines,
 } from "../lib/schema-cache";
-import {
-  emptyResult,
-  evaluateQuery,
-  parseQuery,
-  type SearchResult,
-  type TableSubfolder,
-} from "../lib/db-tree-search";
-
 /**
  * Cache rows older than this are flagged "stale" by the freshness
  * badge. Mirrors the backend's `DEFAULT_TTL_MS` so the dot lights up
@@ -92,42 +84,52 @@ import {
  */
 const FRESHNESS_TTL_MS = 24 * 60 * 60 * 1000;
 
-const SearchContext = createContext<SearchResult>(emptyResult());
-
-function useSearch(): SearchResult {
-  return useContext(SearchContext);
-}
-
 export function DbTree() {
-  const { state, dispatch } = useDbExplorerStore();
-  const { fetchDatabases, fetchSchemas, fetchTables } = useDbTree();
+  const { state } = useDbExplorerStore();
+  const { fetchDatabases } = useDbTree();
   const id = state.activeConnectionId;
   const status = id ? state.status[id] : undefined;
   const tree = id ? state.trees[id] : undefined;
   const databases = tree?.databases;
-  const schemasByDb = tree?.schemasByDb;
-  const tablesBySchema = tree?.tablesBySchema;
-  const routinesBySchema = tree?.routinesBySchema;
 
   const [query, setQuery] = useState("");
-  const parsed = useMemo(() => parseQuery(query), [query]);
+  const [searchResult, setSearchResult] = useState<DbCatalogSearchResult | null>(null);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  const searchRequestRef = useRef(0);
+  const activeDatabase = id ? currentDatabase(state, id) : null;
 
-  // Snapshot the current tree state + the in-memory mirror for the
-  // search evaluator. `cachedTables` covers every table this session
-  // has described so far; columns/fks/etc. of un-described tables
-  // are silently skipped (the user can right-click → Index table to
-  // pull more in).
-  const searchResult = useMemo(() => {
-    if (!parsed || !id) return emptyResult();
-    const conn = tree;
-    if (!conn) return emptyResult();
-    return evaluateQuery(parsed, {
-      schemasByDb: conn.schemasByDb,
-      tablesBySchema: conn.tablesBySchema,
-      routinesBySchema: conn.routinesBySchema,
-      cachedTables: id ? readCachedForDatabase(id, currentDatabase(state, id) ?? "") : [],
-    });
-  }, [parsed, id, tree, state]);
+  // React owns only input timing and stale-response suppression. Parsing,
+  // matching, catalog refresh, and result bounds are backend responsibilities.
+  useEffect(() => {
+    const trimmed = query.trim();
+    const requestId = ++searchRequestRef.current;
+    if (!trimmed || !id) {
+      setSearchResult(null);
+      setSearchLoading(false);
+      setSearchError(null);
+      return;
+    }
+    setSearchResult(null);
+    const timer = window.setTimeout(() => {
+      setSearchLoading(true);
+      setSearchError(null);
+      void dbTauri
+        .searchCatalog(id, activeDatabase ?? "", trimmed)
+        .then((result) => {
+          if (searchRequestRef.current === requestId) setSearchResult(result);
+        })
+        .catch((error: unknown) => {
+          if (searchRequestRef.current !== requestId) return;
+          setSearchResult(null);
+          setSearchError(error instanceof Error ? error.message : String(error));
+        })
+        .finally(() => {
+          if (searchRequestRef.current === requestId) setSearchLoading(false);
+        });
+    }, 200);
+    return () => window.clearTimeout(timer);
+  }, [query, id, activeDatabase]);
 
   // Auto-load databases on first connect.
   useEffect(() => {
@@ -135,76 +137,6 @@ export function DbTree() {
       fetchDatabases(id);
     }
   }, [id, status, databases, fetchDatabases]);
-
-  // Eagerly fetch schemas for every database so the search box has a
-  // complete catalogue to filter against. Without this, typing a
-  // pattern before the user has expanded any database returns "no
-  // matches in loaded data" — even when the schemas would obviously
-  // match. The `useDbTree` hook dedupes in-flight calls per
-  // (connection, database), so re-running this effect is safe.
-  useEffect(() => {
-    if (!id || status !== "connected" || !databases || !schemasByDb) return;
-    for (const db of databases) {
-      if (schemasByDb[db] === undefined) {
-        fetchSchemas(id, db);
-      }
-    }
-  }, [id, status, databases, schemasByDb, fetchSchemas]);
-
-  // Same for tables — once a schema is known, pre-fetch its table
-  // list. Cheap (single SQL roundtrip per schema, no column data),
-  // and means search finds tables across schemas the user hasn't
-  // expanded yet.
-  useEffect(() => {
-    if (!id || status !== "connected" || !schemasByDb || !tablesBySchema)
-      return;
-    for (const [db, schemas] of Object.entries(schemasByDb)) {
-      for (const schema of schemas) {
-        const key = `${db}/${schema}`;
-        if (tablesBySchema[key] === undefined) {
-          fetchTables(id, db, schema);
-        }
-      }
-    }
-  }, [id, status, schemasByDb, tablesBySchema, fetchTables]);
-
-  // And routines — `proc > *`, `fn > *`, `routine > *` searches need
-  // the routine list loaded just like schemas/tables. One RPC per
-  // schema; the session-only mirror in `schema-cache.ts` dedupes.
-  // Once fetched, routines never auto-refresh — the user explicitly
-  // refreshes via the per-schema cache-refresh hover button.
-  useEffect(() => {
-    if (!id || status !== "connected" || !schemasByDb || !routinesBySchema)
-      return;
-    for (const [db, schemas] of Object.entries(schemasByDb)) {
-      for (const schema of schemas) {
-        const key = `${db}/${schema}`;
-        if (routinesBySchema[key] !== undefined) continue;
-        void ensureRoutines(id, db, schema)
-          .then((rows) =>
-            dispatch({
-              type: "set-routines",
-              id,
-              database: db,
-              schema,
-              routines: rows,
-            }),
-          )
-          // Soft-fail: on backend error, store an empty list so the
-          // UI doesn't get stuck in a "loading…" loop on the
-          // Routines folder.
-          .catch(() =>
-            dispatch({
-              type: "set-routines",
-              id,
-              database: db,
-              schema,
-              routines: [],
-            }),
-          );
-      }
-    }
-  }, [id, status, schemasByDb, routinesBySchema, dispatch]);
 
   if (!id) {
     return (
@@ -230,19 +162,32 @@ export function DbTree() {
           tree gets. The wrapper carries a solid bg so rows behind
           it don't bleed through. */}
       <div className="sticky top-0 z-10 -mx-1 -mt-2 bg-background px-1 pb-1 pt-2">
-        <SearchBox value={query} onChange={setQuery} result={searchResult} />
+        <SearchBox
+          value={query}
+          onChange={setQuery}
+          result={searchResult}
+          loading={searchLoading}
+          error={searchError}
+        />
       </div>
-      {!tree?.databases ? (
+      {query.trim() ? (
+        <CatalogSearchResults
+          connectionId={id}
+          result={searchResult}
+          loading={searchLoading}
+          error={searchError}
+        />
+      ) : !tree?.databases ? (
         <div className="px-3 py-4 text-xs text-muted-foreground">Loading…</div>
       ) : (
-        <SearchContext.Provider value={searchResult}>
+        <>
           <span className="px-2 pt-2 text-[11px] uppercase tracking-wide text-muted-foreground">
             Databases
           </span>
           {tree.databases.map((db) => (
             <DatabaseNode key={db} connectionId={id} database={db} />
           ))}
-        </SearchContext.Provider>
+        </>
       )}
     </div>
   );
@@ -273,27 +218,35 @@ const SEARCH_KIND_HINTS: Array<{
   example: string;
   hint: string;
 }> = [
-  { prefix: "table > ", example: "table > orders*", hint: "tables only" },
-  { prefix: "column > ", example: "column > email", hint: "column names only" },
-  { prefix: "fk > ", example: "fk > orders_*", hint: "foreign keys" },
-  { prefix: "key > ", example: "key > pk_*", hint: "PRIMARY + UNIQUE keys" },
-  { prefix: "index > ", example: "index > *_idx", hint: "indexes" },
-  { prefix: "check > ", example: "check > *_age_*", hint: "CHECK constraints" },
-  { prefix: "trigger > ", example: "trigger > *_audit", hint: "triggers" },
-  { prefix: "proc > ", example: "proc > archive_*", hint: "stored procedures" },
-  { prefix: "fn > ", example: "fn > format_*", hint: "functions" },
-  { prefix: "routine > ", example: "routine > *", hint: "fns + procs" },
-  { prefix: "schema > ", example: "schema > metric*", hint: "schemas (full subtree)" },
+  { prefix: "database:", example: "database:sales*", hint: "databases only" },
+  { prefix: "database:", example: "database:Sales table:order*", hint: "inside database" },
+  { prefix: "schema:", example: "schema:dbo table:order*", hint: "inside schema" },
+  { prefix: "table:", example: "table:orders column:email", hint: "inside table" },
+  { prefix: "table:", example: "table:orders*", hint: "tables only" },
+  { prefix: "column:", example: "column:email", hint: "column names only" },
+  { prefix: "fk:", example: "fk:orders_*", hint: "foreign keys" },
+  { prefix: "key:", example: "key:pk_*", hint: "PRIMARY + UNIQUE keys" },
+  { prefix: "index:", example: "index:*_idx", hint: "indexes" },
+  { prefix: "check:", example: "check:*_age_*", hint: "CHECK constraints" },
+  { prefix: "trigger:", example: "trigger:*_audit", hint: "triggers" },
+  { prefix: "proc:", example: "proc:archive_*", hint: "stored procedures" },
+  { prefix: "fn:", example: "fn:format_*", hint: "functions" },
+  { prefix: "routine:", example: "routine:*", hint: "fns + procs" },
+  { prefix: "schema:", example: "schema:metric*", hint: "schemas only" },
 ];
 
 function SearchBox({
   value,
   onChange,
   result,
+  loading,
+  error,
 }: {
   value: string;
   onChange: (v: string) => void;
-  result: SearchResult;
+  result: DbCatalogSearchResult | null;
+  loading: boolean;
+  error: string | null;
 }) {
   const inputRef = useRef<HTMLInputElement | null>(null);
   return (
@@ -305,7 +258,7 @@ function SearchBox({
           type="text"
           value={value}
           onChange={(e) => onChange(e.target.value)}
-          placeholder="Filter · name, name*, kind > name"
+          placeholder="Filter · database:db schema:dbo table:name"
           className="flex-1 bg-transparent text-xs outline-none placeholder:text-muted-foreground/60"
           spellCheck={false}
           autoCorrect="off"
@@ -348,8 +301,14 @@ function SearchBox({
                 <code>head*tail</code> = glob (anchored).
               </div>
               <div className="mt-1 text-[11px] text-muted-foreground">
-                <code>kind &gt; pattern</code> restricts to one node
-                kind. Tap a chip below to insert.
+                <code>type:pattern</code> restricts to one node kind. Earlier
+                qualifiers scope the hierarchy. Tap a chip below to insert.
+              </div>
+              <div className="mt-1 text-[11px] text-muted-foreground">
+                Prefix with <code>database:name</code>, <code>schema:name</code>, or{" "}
+                <code>table:name</code> to filter a hierarchy. Unqualified searches use
+                the active database. Quote names with spaces, for example{" "}
+                <code>database:&apos;Sales DW&apos;</code>.
               </div>
             </div>
             <div className="grid max-h-64 grid-cols-1 gap-0 overflow-auto p-1">
@@ -378,15 +337,195 @@ function SearchBox({
           </PopoverContent>
         </Popover>
       </div>
-      {result.active ? (
+      {value.trim() ? (
         <div className="px-2 pt-1 text-[10px] tabular-nums text-muted-foreground/70">
-          {result.totalMatches > 0
-            ? `${result.totalMatches} match${result.totalMatches === 1 ? "" : "es"}`
-            : "no matches in loaded data"}
+          {loading
+            ? "Searching indexed catalog…"
+            : error
+              ? "Catalog search failed"
+              : result?.queryTooBroad
+                ? "Type 3+ characters, or use type:*"
+                : result?.truncated
+                  ? `${result.items.length}+ matches · refine your search`
+                  : result
+                  ? `${result.items.length} match${result.items.length === 1 ? "" : "es"}`
+                  : "Waiting to search…"}
         </div>
       ) : null}
     </div>
   );
+}
+
+function CatalogSearchResults({
+  connectionId,
+  result,
+  loading,
+  error,
+}: {
+  connectionId: string;
+  result: DbCatalogSearchResult | null;
+  loading: boolean;
+  error: string | null;
+}) {
+  const [expandedRowKey, setExpandedRowKey] = useState<string | null>(null);
+  const [description, setDescription] = useState<{
+    key: string;
+    value: DbTableDescription;
+  } | null>(null);
+  const [loadingKey, setLoadingKey] = useState<string | null>(null);
+  const activeDescriptionRequest = useRef<string | null>(null);
+
+  const toggleDetails = (hit: DbCatalogSearchHit, rowKey: string) => {
+    if (!hit.table) return;
+    const key = `${connectionId}/${hit.database}/${hit.schema}/${hit.table}`;
+    if (expandedRowKey === rowKey) {
+      setExpandedRowKey(null);
+      activeDescriptionRequest.current = null;
+      return;
+    }
+    setExpandedRowKey(rowKey);
+    if (description?.key === key) {
+      activeDescriptionRequest.current = null;
+      return;
+    }
+    setDescription(null);
+    setLoadingKey(key);
+    activeDescriptionRequest.current = key;
+    void dbTauri
+      .describeTable(connectionId, hit.database, hit.schema, hit.table)
+      .then((value) => {
+        if (activeDescriptionRequest.current === key) {
+          setDescription({ key, value });
+        }
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (activeDescriptionRequest.current === key) {
+          activeDescriptionRequest.current = null;
+          setLoadingKey(null);
+        }
+      });
+  };
+
+  if (loading && !result) {
+    return (
+      <div className="flex items-center gap-2 px-3 py-4 text-xs text-muted-foreground">
+        <Loader2 className="size-3 animate-spin" />
+        Searching catalog…
+      </div>
+    );
+  }
+  if (error) {
+    return <div className="px-3 py-4 text-xs text-destructive">{error}</div>;
+  }
+  if (!result) {
+    return (
+      <div className="px-3 py-4 text-xs text-muted-foreground">
+        Waiting to search…
+      </div>
+    );
+  }
+  if (result.queryTooBroad) {
+    return (
+      <div className="px-3 py-4 text-xs text-muted-foreground">
+        Type at least 3 characters, or use a scoped match such as <code>table &gt; *</code>.
+      </div>
+    );
+  }
+  if (result.items.length === 0) {
+    return (
+      <div className="px-3 py-4 text-xs text-muted-foreground">
+        No indexed objects match.
+      </div>
+    );
+  }
+  return (
+    <div className="pt-1">
+      {result.items.map((hit, index) => {
+        const tableKey = hit.table
+          ? `${connectionId}/${hit.database}/${hit.schema}/${hit.table}`
+          : null;
+        const rowKey = `${connectionId}/${hit.database}/${hit.schema}/${hit.table ?? ""}/${hit.kind}/${hit.name}/${index}`;
+        return (
+          <div key={rowKey}>
+            <Row
+              depth={0}
+              icon={catalogHitIcon(hit)}
+              chevron={
+                tableKey ? (
+                  expandedRowKey === rowKey ? (
+                    <ChevronDown className="size-3" />
+                  ) : (
+                    <ChevronRight className="size-3" />
+                  )
+                ) : undefined
+              }
+              label={hit.name}
+              detail={catalogHitPath(hit)}
+              onClick={tableKey ? () => toggleDetails(hit, rowKey) : undefined}
+              adornment={
+                <span className="ml-auto shrink-0 rounded bg-muted px-1 text-[9px] uppercase text-muted-foreground">
+                  {hit.kind}
+                </span>
+              }
+              title={`${hit.kind} · ${catalogHitPath(hit)}`}
+            />
+            {tableKey && expandedRowKey === rowKey ? (
+              loadingKey === tableKey ? (
+                <div className="flex items-center gap-2 px-6 py-2 text-xs text-muted-foreground">
+                  <Loader2 className="size-3 animate-spin" /> Loading table metadata…
+                </div>
+              ) : description?.key === tableKey ? (
+                <TableDetails depth={1} desc={description.value} indexedAt={undefined} />
+              ) : (
+                <div className="px-6 py-2 text-xs text-destructive">
+                  Table metadata could not be loaded.
+                </div>
+              )
+            ) : null}
+          </div>
+        );
+      })}
+      {result.truncated ? (
+        <div className="px-3 py-2 text-[10px] text-muted-foreground">
+          More results exist. Refine the query to narrow the catalog.
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function catalogHitPath(hit: DbCatalogSearchHit): string {
+  return [hit.database, hit.schema, hit.table]
+    .filter((part): part is string => !!part && part !== hit.name)
+    .join(" › ");
+}
+
+function catalogHitIcon(hit: DbCatalogSearchHit): React.ReactNode {
+  switch (hit.kind) {
+    case "database":
+      return <Database className="size-3.5 text-sky-500" />;
+    case "schema":
+      return <FolderOpen className="size-3 text-muted-foreground" />;
+    case "table":
+    case "view":
+      return <Table className="size-3 text-muted-foreground" />;
+    case "column":
+      return <Type className="size-3 text-muted-foreground" />;
+    case "key":
+      return <KeyRound className="size-3 text-muted-foreground" />;
+    case "fk":
+      return <Link2 className="size-3 text-muted-foreground" />;
+    case "index":
+      return <ListTree className="size-3 text-muted-foreground" />;
+    case "check":
+      return <ShieldCheck className="size-3 text-muted-foreground" />;
+    case "trigger":
+      return <Zap className="size-3 text-muted-foreground" />;
+    case "function":
+    case "procedure":
+      return <Sigma className="size-3 text-muted-foreground" />;
+  }
 }
 
 // ─── Database / Schema ───────────────────────────────────────────────
@@ -400,13 +539,9 @@ function DatabaseNode({
 }) {
   const { state } = useDbExplorerStore();
   const { fetchSchemas } = useDbTree();
-  const search = useSearch();
   const [localOpen, setLocalOpen] = useState(false);
   const schemas = state.trees[connectionId]?.schemasByDb[database];
-
-  const visible = !search.active || search.visibleDatabases.has(database);
-  const forceOpen = search.active && search.visibleDatabases.has(database);
-  const open = forceOpen || localOpen;
+  const open = localOpen;
 
   // Fetch schemas the moment we go open — covers both manual toggle
   // and search-driven force-open.
@@ -415,8 +550,6 @@ function DatabaseNode({
       fetchSchemas(connectionId, database);
     }
   }, [open, schemas, connectionId, database, fetchSchemas]);
-
-  if (!visible) return null;
 
   return (
     <div>
@@ -465,14 +598,11 @@ function SchemaNode({
   schema: string;
 }) {
   const { state } = useDbExplorerStore();
-  const search = useSearch();
   const [localOpen, setLocalOpen] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
 
   const schemaId = `${database}/${schema}`;
-  const visible = !search.active || search.visibleSchemas.has(schemaId);
-  const forceOpen = search.active && search.visibleSchemas.has(schemaId);
-  const open = forceOpen || localOpen;
+  const open = localOpen;
 
   // Hover action — explicit user-driven cache refresh for everything
   // under this schema. Forces re-describe of every cached table here
@@ -500,8 +630,6 @@ function SchemaNode({
       setRefreshing(false);
     }
   };
-
-  if (!visible) return null;
 
   return (
     <div className="group">
@@ -568,17 +696,11 @@ function TablesFolder({
 }) {
   const { state, dispatch } = useDbExplorerStore();
   const { fetchTables } = useDbTree();
-  const search = useSearch();
   const [localOpen, setLocalOpen] = useState(true); // open by default — DataGrip parity
   const key = `${database}/${schema}`;
   const tables = state.trees[connectionId]?.tablesBySchema[key];
 
-  // When search is active, open the folder iff any of its tables is
-  // in the visible set. Otherwise honour the local toggle.
-  const hasMatchingTable =
-    search.active &&
-    !!tables?.some((t) => search.visibleTables.has(`${key}/${t}`));
-  const open = (search.active ? hasMatchingTable : localOpen) || localOpen;
+  const open = localOpen;
 
   // Fetch tables when the folder goes open — handles both manual
   // toggle and the search-active force-open.
@@ -643,19 +765,7 @@ function TablesFolder({
     };
   }, [open, connectionId, database, schema, dispatch]);
 
-  // Filter: when search is active, hide tables that aren't in the
-  // visible set.
-  const visibleTables = useMemo(() => {
-    if (!tables) return undefined;
-    if (!search.active) return tables;
-    return tables.filter((t) => search.visibleTables.has(`${key}/${t}`));
-  }, [tables, search.active, search.visibleTables, key]);
-
-  // Hide the entire folder when search is active and there's nothing
-  // matching inside it.
-  if (search.active && visibleTables && visibleTables.length === 0) {
-    return null;
-  }
+  const visibleTables = tables;
 
   return (
     <div>
@@ -674,9 +784,7 @@ function TablesFolder({
         adornment={
           tables ? (
             <span className="ml-auto text-[10px] tabular-nums text-muted-foreground/60">
-              {search.active && visibleTables
-                ? `${visibleTables.length}/${tables.length}`
-                : tables.length}
+              {tables.length}
             </span>
           ) : null
         }
@@ -714,16 +822,11 @@ function RoutinesFolder({
   schema: string;
 }) {
   const { state, dispatch } = useDbExplorerStore();
-  const search = useSearch();
   const [localOpen, setLocalOpen] = useState(false);
   const key = `${database}/${schema}`;
   const routines = state.trees[connectionId]?.routinesBySchema[key];
 
-  // Force-open iff at least one routine is visible.
-  const hasMatchingRoutine =
-    search.active &&
-    !!routines?.some((r) => search.visibleRoutines.has(`${key}/${r.name}`));
-  const open = hasMatchingRoutine || localOpen;
+  const open = localOpen;
 
   // First open kicks the backend; subsequent opens read from the
   // session cache.
@@ -774,15 +877,7 @@ function RoutinesFolder({
     };
   }, [open, routines, connectionId, database, schema, dispatch]);
 
-  const visibleRoutines = useMemo(() => {
-    if (!routines) return undefined;
-    if (!search.active) return routines;
-    return routines.filter((r) => search.visibleRoutines.has(`${key}/${r.name}`));
-  }, [routines, search.active, search.visibleRoutines, key]);
-
-  if (search.active && visibleRoutines && visibleRoutines.length === 0) {
-    return null;
-  }
+  const visibleRoutines = routines;
 
   // Recompute the routine fetched-at on every render — `routines`
   // updating in the store guarantees we re-render whenever the cache
@@ -807,9 +902,7 @@ function RoutinesFolder({
         adornment={
           routines ? (
             <span className="ml-auto text-[10px] tabular-nums text-muted-foreground/60">
-              {search.active && visibleRoutines
-                ? `${visibleRoutines.length}/${routines.length}`
-                : routines.length}
+              {routines.length}
             </span>
           ) : null
         }
@@ -850,15 +943,11 @@ function TableNode({
   table: string;
 }) {
   const { state } = useDbExplorerStore();
-  const search = useSearch();
   const [localOpen, setLocalOpen] = useState(false);
-  const tableId = `${database}/${schema}/${table}`;
   const indexedAt =
     state.schemaIndexedAt[`${connectionId}/${database}/${schema}/${table}`];
 
-  const visible = !search.active || search.visibleTables.has(tableId);
-  const forceOpen = search.active && search.visibleTables.has(tableId);
-  const open = forceOpen || localOpen;
+  const open = localOpen;
 
   const cached = readCached(connectionId, database, schema, [table])[0];
 
@@ -871,8 +960,6 @@ function TableNode({
     ev.preventDefault();
     void forceReindex(connectionId, database, schema, [table]);
   };
-
-  if (!visible) return null;
 
   return (
     <div>
@@ -900,7 +987,6 @@ function TableNode({
         <TableDetails
           depth={4}
           desc={cached}
-          tableId={tableId}
           indexedAt={indexedAt}
         />
       )}
@@ -911,201 +997,99 @@ function TableNode({
 function TableDetails({
   depth,
   desc,
-  tableId,
   indexedAt,
 }: {
   depth: number;
   desc: DbTableDescription | undefined;
-  tableId: string;
   /** When the parent `TableNode`'s description was last cached. Threaded
    * down so every leaf can render a "cached X ago" suffix in its
    * tooltip — same source, same age across all children. */
   indexedAt: number | undefined;
 }) {
-  const search = useSearch();
   if (!desc) {
     return <Row depth={depth} muted label="Loading…" />;
   }
 
-  const fullExpand = search.active && search.fullExpandTables.has(tableId);
-  const subfolderHits = search.tableSubfolderVisible.get(tableId);
-
-  // When search is active, a subfolder renders if (a) the table
-  // fullExpand'd (table itself matched), or (b) the subfolder has at
-  // least one matching leaf.
-  const subVisible = (s: TableSubfolder): boolean => {
-    if (!search.active) return true;
-    if (fullExpand) return true;
-    return !!subfolderHits?.has(s);
-  };
-
   return (
     <>
-      {subVisible("columns") && (
-        <SubFolder
-          depth={depth}
-          tableId={tableId}
-          subfolder="columns"
-          label="Columns"
-          icon={<Type className="h-3 w-3 text-muted-foreground" />}
-          count={desc.columns.length}
-          defaultOpen
-          indexedAt={indexedAt}
-        >
-          {desc.columns
-            .filter((c) =>
-              !search.active || fullExpand
-                ? true
-                : search.visibleColumns.has(`${tableId}/${c.name}`),
-            )
-            .map((c) => (
-              <ColumnRow
-                key={c.name}
-                depth={depth + 1}
-                col={c}
-                indexedAt={indexedAt}
-              />
-            ))}
-        </SubFolder>
-      )}
-      {subVisible("keys") && (
-        <SubFolder
-          depth={depth}
-          tableId={tableId}
-          subfolder="keys"
-          label="Keys"
-          icon={<KeyRound className="h-3 w-3 text-muted-foreground" />}
-          count={desc.keys.length}
-          indexedAt={indexedAt}
-        >
-          {desc.keys
-            .filter((k) =>
-              !search.active || fullExpand
-                ? true
-                : search.visibleKeys.has(`${tableId}/${k.name}`),
-            )
-            .map((k) => (
-              <KeyRow
-                key={k.name}
-                depth={depth + 1}
-                k={k}
-                indexedAt={indexedAt}
-              />
-            ))}
-        </SubFolder>
-      )}
-      {subVisible("fks") && (
-        <SubFolder
-          depth={depth}
-          tableId={tableId}
-          subfolder="fks"
-          label="Foreign keys"
-          icon={<Link2 className="h-3 w-3 text-muted-foreground" />}
-          count={desc.foreignKeys.length}
-          indexedAt={indexedAt}
-        >
-          {desc.foreignKeys
-            .filter((fk) =>
-              !search.active || fullExpand
-                ? true
-                : search.visibleFks.has(`${tableId}/${fk.name}`),
-            )
-            .map((fk) => (
-              <FkRow
-                key={fk.name}
-                depth={depth + 1}
-                fk={fk}
-                indexedAt={indexedAt}
-              />
-            ))}
-        </SubFolder>
-      )}
-      {subVisible("indexes") && (
-        <SubFolder
-          depth={depth}
-          tableId={tableId}
-          subfolder="indexes"
-          label="Indexes"
-          icon={<ListTree className="h-3 w-3 text-muted-foreground" />}
-          count={desc.indexes.length}
-          indexedAt={indexedAt}
-        >
-          {desc.indexes
-            .filter((idx) =>
-              !search.active || fullExpand
-                ? true
-                : search.visibleIndexes.has(`${tableId}/${idx.name}`),
-            )
-            .map((idx) => (
-              <IndexRow
-                key={idx.name}
-                depth={depth + 1}
-                idx={idx}
-                indexedAt={indexedAt}
-              />
-            ))}
-        </SubFolder>
-      )}
-      {subVisible("checks") && (
-        <SubFolder
-          depth={depth}
-          tableId={tableId}
-          subfolder="checks"
-          label="Checks"
-          icon={<ShieldCheck className="h-3 w-3 text-muted-foreground" />}
-          count={desc.checks.length}
-          indexedAt={indexedAt}
-        >
-          {desc.checks
-            .filter((c) =>
-              !search.active || fullExpand
-                ? true
-                : search.visibleChecks.has(`${tableId}/${c.name}`),
-            )
-            .map((c) => (
-              <CheckRow
-                key={c.name}
-                depth={depth + 1}
-                c={c}
-                indexedAt={indexedAt}
-              />
-            ))}
-        </SubFolder>
-      )}
-      {subVisible("triggers") && (
-        <SubFolder
-          depth={depth}
-          tableId={tableId}
-          subfolder="triggers"
-          label="Triggers"
-          icon={<Zap className="h-3 w-3 text-muted-foreground" />}
-          count={desc.triggers.length}
-          indexedAt={indexedAt}
-        >
-          {desc.triggers
-            .filter((t) =>
-              !search.active || fullExpand
-                ? true
-                : search.visibleTriggers.has(`${tableId}/${t.name}`),
-            )
-            .map((t) => (
-              <TriggerRow
-                key={t.name}
-                depth={depth + 1}
-                t={t}
-                indexedAt={indexedAt}
-              />
-            ))}
-        </SubFolder>
-      )}
+      <SubFolder
+        depth={depth}
+        label="Columns"
+        icon={<Type className="h-3 w-3 text-muted-foreground" />}
+        count={desc.columns.length}
+        defaultOpen
+        indexedAt={indexedAt}
+      >
+        {desc.columns.map((c) => (
+          <ColumnRow
+            key={c.name}
+            depth={depth + 1}
+            col={c}
+            indexedAt={indexedAt}
+          />
+        ))}
+      </SubFolder>
+      <SubFolder
+        depth={depth}
+        label="Keys"
+        icon={<KeyRound className="h-3 w-3 text-muted-foreground" />}
+        count={desc.keys.length}
+        indexedAt={indexedAt}
+      >
+        {desc.keys.map((k) => (
+          <KeyRow key={k.name} depth={depth + 1} k={k} indexedAt={indexedAt} />
+        ))}
+      </SubFolder>
+      <SubFolder
+        depth={depth}
+        label="Foreign keys"
+        icon={<Link2 className="h-3 w-3 text-muted-foreground" />}
+        count={desc.foreignKeys.length}
+        indexedAt={indexedAt}
+      >
+        {desc.foreignKeys.map((fk) => (
+          <FkRow key={fk.name} depth={depth + 1} fk={fk} indexedAt={indexedAt} />
+        ))}
+      </SubFolder>
+      <SubFolder
+        depth={depth}
+        label="Indexes"
+        icon={<ListTree className="h-3 w-3 text-muted-foreground" />}
+        count={desc.indexes.length}
+        indexedAt={indexedAt}
+      >
+        {desc.indexes.map((idx) => (
+          <IndexRow key={idx.name} depth={depth + 1} idx={idx} indexedAt={indexedAt} />
+        ))}
+      </SubFolder>
+      <SubFolder
+        depth={depth}
+        label="Checks"
+        icon={<ShieldCheck className="h-3 w-3 text-muted-foreground" />}
+        count={desc.checks.length}
+        indexedAt={indexedAt}
+      >
+        {desc.checks.map((c) => (
+          <CheckRow key={c.name} depth={depth + 1} c={c} indexedAt={indexedAt} />
+        ))}
+      </SubFolder>
+      <SubFolder
+        depth={depth}
+        label="Triggers"
+        icon={<Zap className="h-3 w-3 text-muted-foreground" />}
+        count={desc.triggers.length}
+        indexedAt={indexedAt}
+      >
+        {desc.triggers.map((t) => (
+          <TriggerRow key={t.name} depth={depth + 1} t={t} indexedAt={indexedAt} />
+        ))}
+      </SubFolder>
     </>
   );
 }
 
 function SubFolder({
   depth,
-  tableId,
-  subfolder,
   label,
   icon,
   count,
@@ -1114,8 +1098,6 @@ function SubFolder({
   children,
 }: {
   depth: number;
-  tableId: string;
-  subfolder: TableSubfolder;
   label: string;
   icon: React.ReactNode;
   count: number;
@@ -1125,11 +1107,8 @@ function SubFolder({
   indexedAt: number | undefined;
   children: React.ReactNode;
 }) {
-  const search = useSearch();
   const [localOpen, setLocalOpen] = useState(defaultOpen);
-  const fullExpand = search.active && search.fullExpandTables.has(tableId);
-  const hasHits = search.tableSubfolderVisible.get(tableId)?.has(subfolder);
-  const open = (search.active ? fullExpand || hasHits : localOpen) || localOpen;
+  const open = localOpen;
 
   return (
     <div>

@@ -289,4 +289,3 @@ pub async fn sql_workspace_delete_to_trash(path: String) -> AppResult<()> {
         .map_err(|e| AppError::Other(format!("move to trash: {e}")))?;
     Ok(())
 }
-

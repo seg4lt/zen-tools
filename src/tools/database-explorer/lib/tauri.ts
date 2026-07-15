@@ -124,6 +124,35 @@ export interface DbTableSummary {
   kind: DbTableKind;
 }
 
+/** Render-ready bounded hit from the backend-owned catalog index. */
+export interface DbCatalogSearchHit {
+  database: string;
+  schema: string;
+  table: string | null;
+  kind:
+    | "database"
+    | "schema"
+    | "table"
+    | "view"
+    | "column"
+    | "key"
+    | "fk"
+    | "index"
+    | "check"
+    | "trigger"
+    | "function"
+    | "procedure";
+  name: string;
+}
+
+/** Search bounds and freshness are decided by Rust, not React. */
+export interface DbCatalogSearchResult {
+  items: DbCatalogSearchHit[];
+  truncated: boolean;
+  queryTooBroad: boolean;
+  indexedAt: number | null;
+}
+
 /** Mirrors `zen_db::TableDescription`. */
 export interface DbTableDescription {
   database: string;
@@ -374,16 +403,26 @@ export const dbTauri = {
 
   /**
    * Stored procedures + functions in `database.schema`. Drives the
-   * per-schema "Routines" folder in the DB tree. Front-end caches
-   * results for the session — no SQLite persistence, since the
-   * query is one round-trip and routine churn often aligns with
-   * migrations the user is actively iterating on.
+   * per-schema "Routines" folder in the DB tree. The backend also
+   * snapshots their names into the searchable SQLite catalog.
    */
   listRoutines: (id: string, database: string, schema: string) =>
     invoke<DbRoutineDescription[]>("db_list_routines", {
       id,
       database,
       schema,
+    }),
+
+  /**
+   * Search the persistent Rust/SQLite catalog. The backend owns parsing,
+   * matching, indexing and the hard result cap; React only renders this page.
+   */
+  searchCatalog: (id: string, database: string, query: string) =>
+    invoke<DbCatalogSearchResult>("db_search_catalog", {
+      id,
+      database,
+      query,
+      limit: 200,
     }),
 
   // ── Query ─────────────────────────────────────────────────────────────

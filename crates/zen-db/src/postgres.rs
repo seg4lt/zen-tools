@@ -220,9 +220,7 @@ impl DbConnection for PostgresConnection {
         .map_err(|e| DbError::Query(e.to_string()))?;
 
         if column_rows.is_empty() {
-            return Err(DbError::Query(format!(
-                "table not found: {schema}.{table}"
-            )));
+            return Err(DbError::Query(format!("table not found: {schema}.{table}")));
         }
 
         let kind = match column_rows[0].6.as_str() {
@@ -711,9 +709,7 @@ impl DbConnection for PostgresConnection {
         // first result tab (which the UI auto-selects). Avoids
         // the "you have to click the pg_sleep tab to see the
         // UPDATE's row lock" cliff.
-        let sampler = pid.map(|p| {
-            PgLockSampler::start(self.connect_opts.clone(), p, interval_ms)
-        });
+        let sampler = pid.map(|p| PgLockSampler::start(self.connect_opts.clone(), p, interval_ms));
 
         let mut out = Vec::with_capacity(statements.len());
         for sql in statements {
@@ -971,9 +967,6 @@ mod tests {
 
     #[test]
     fn trims_leading_whitespace_and_semis() {
-        assert_eq!(
-            strip_explain_prefix("  ;\n EXPLAIN  SELECT 1"),
-            "SELECT 1",
-        );
+        assert_eq!(strip_explain_prefix("  ;\n EXPLAIN  SELECT 1"), "SELECT 1",);
     }
 }

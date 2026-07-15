@@ -535,7 +535,10 @@ impl Aggregator {
             self.samples.push(sample.clone());
         }
 
-        *self.cur_by_granularity.entry(sample.granularity).or_insert(0) += 1;
+        *self
+            .cur_by_granularity
+            .entry(sample.granularity)
+            .or_insert(0) += 1;
         *self.cur_by_mode.entry(sample.mode.clone()).or_insert(0) += 1;
         if !sample.granted {
             self.cur_sample_blocked = true;
@@ -605,7 +608,8 @@ impl Aggregator {
             .objects
             .into_iter()
             .map(|(object, acc)| {
-                let mut granularities: Vec<LockGranularity> = acc.granularities.into_iter().collect();
+                let mut granularities: Vec<LockGranularity> =
+                    acc.granularities.into_iter().collect();
                 granularities.sort_by_key(|g| g.as_str());
                 let mut modes: Vec<String> = acc.modes.into_iter().collect();
                 modes.sort();
@@ -618,7 +622,11 @@ impl Aggregator {
                 }
             })
             .collect();
-        objects.sort_by(|a, b| b.peak_locks.cmp(&a.peak_locks).then(a.object.cmp(&b.object)));
+        objects.sort_by(|a, b| {
+            b.peak_locks
+                .cmp(&a.peak_locks)
+                .then(a.object.cmp(&b.object))
+        });
 
         let blockers: Vec<BlockerInfo> = self
             .blockers

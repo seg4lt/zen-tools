@@ -206,4 +206,3 @@ fn clip<T>(mut v: Vec<T>, n: usize) -> Vec<T> {
     }
     v
 }
-

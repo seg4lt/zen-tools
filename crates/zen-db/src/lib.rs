@@ -19,7 +19,10 @@ pub mod types;
 
 pub use driver::{DbConnection, DbError, DbResult};
 pub use registry::ConnectionRegistry;
-pub use schema_cache::{now_ms, CachedTable, CachedTableMeta, SchemaCache, DEFAULT_TTL_MS};
+pub use schema_cache::{
+    now_ms, CachedTable, CachedTableMeta, CatalogSearchHit, CatalogSearchResult, SchemaCache,
+    DEFAULT_TTL_MS,
+};
 pub use sql::split_statements;
 pub use types::{
     BlockerInfo, Cell, CheckDescription, Column, ColumnDescription, ConnectionConfig, DbDriver,
