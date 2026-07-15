@@ -99,6 +99,9 @@ fff-search = "0.5.2"
 # but cheap to keep so reinstating Windows is a matrix-row addition
 # with no other code change.
 dunce = "1.0"
+# Native recursive filesystem events for the HTTP, SQL, and Markdown trees.
+# We debounce and fan these out through Tauri ourselves; no frontend fs access.
+notify = "8.2"
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }

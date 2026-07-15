@@ -17,6 +17,7 @@
 
 use crate::commands::preferences::{load_preferences, write_preferences};
 use crate::error::{AppError, AppResult};
+use crate::file_tree_watcher::{FileTreeWatcher, WatchScope};
 use crate::state::AppState;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -111,6 +112,7 @@ pub async fn markdown_remove_vault(
     path: String,
     app: AppHandle,
     registry: tauri::State<'_, Arc<crate::commands::markdown_index::MarkdownIndexRegistry>>,
+    watcher: tauri::State<'_, Arc<FileTreeWatcher>>,
 ) -> AppResult<Vec<String>> {
     let mut prefs = load_preferences(&app).unwrap_or_default();
     prefs.markdown_vault_dirs.retain(|p| p != &path);
@@ -122,6 +124,7 @@ pub async fn markdown_remove_vault(
     // is no longer useful.  Silently no-ops when the user removes a
     // vault they never searched.
     registry.drop_vault(Path::new(&path));
+    watcher.sync_roots(WatchScope::Markdown, out.iter().map(PathBuf::from));
     Ok(out)
 }
 
@@ -134,7 +137,9 @@ pub async fn markdown_remove_vault(
 #[tauri::command]
 pub async fn markdown_discover_files(
     vaults: Vec<String>,
+    watcher: tauri::State<'_, Arc<FileTreeWatcher>>,
 ) -> AppResult<Vec<MarkdownVaultDto>> {
+    watcher.sync_roots(WatchScope::Markdown, vaults.iter().map(PathBuf::from));
     let mut out = Vec::with_capacity(vaults.len());
     for v in vaults {
         let pb = PathBuf::from(&v);

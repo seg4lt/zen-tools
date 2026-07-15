@@ -40,6 +40,7 @@ import {
   type TerminalStatusEvent,
 } from "@/tools/terminal/lib/tauri";
 import { MarkdownWorkspaceProvider } from "./markdown-workspace";
+import { onFileTreeChanged } from "@/lib/file-tree-events";
 
 export interface OpenFileState {
   path: string;
@@ -887,6 +888,41 @@ export function MarkdownStoreProvider({ children }: { children: ReactNode }) {
     })();
     return () => {
       alive = false;
+    };
+  }, []);
+
+  // Rust owns the recursive vault watchers. The frontend only replaces its
+  // rendered snapshot when the backend reports a debounced structural change.
+  useEffect(() => {
+    let disposed = false;
+    let refreshing = false;
+    let unlisten: (() => void) | undefined;
+
+    void onFileTreeChanged(({ scope }) => {
+      if (scope !== "markdown" || refreshing) return;
+      refreshing = true;
+      void (async () => {
+        try {
+          const vaults = await markdownTauri.listVaults();
+          const files = await markdownTauri.discoverFiles(vaults);
+          if (!disposed) {
+            dispatch({ type: "setVaults", vaults });
+            dispatch({ type: "setFiles", vaults: files });
+          }
+        } catch (err) {
+          console.error("[markdown] filesystem refresh failed", err);
+        } finally {
+          refreshing = false;
+        }
+      })();
+    }).then((stop) => {
+      if (disposed) stop();
+      else unlisten = stop;
+    });
+
+    return () => {
+      disposed = true;
+      unlisten?.();
     };
   }, []);
 

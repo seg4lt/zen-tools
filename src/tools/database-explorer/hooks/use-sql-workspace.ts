@@ -12,16 +12,37 @@ import {
   type DiscoveredSqlProject,
 } from "../lib/tauri";
 import { tauri as httpTauri } from "@/tools/http-runner/lib/tauri";
+import { onFileTreeChanged } from "@/lib/file-tree-events";
 
 const PROJECTS_KEY = ["sql-workspace", "projects"] as const;
 const DIRS_KEY = ["sql-workspace", "dirs"] as const;
 
 export function useSqlProjects() {
-  return useQuery<DiscoveredSqlProject[]>({
+  const queryClient = useQueryClient();
+  const query = useQuery<DiscoveredSqlProject[]>({
     queryKey: PROJECTS_KEY,
     queryFn: () => sqlWorkspaceTauri.discover(),
     staleTime: 5_000,
   });
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void onFileTreeChanged(({ scope }) => {
+      if (scope === "sql") {
+        void queryClient.invalidateQueries({ queryKey: PROJECTS_KEY });
+      }
+    }).then((stop) => {
+      if (disposed) stop();
+      else unlisten = stop;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [queryClient]);
+
+  return query;
 }
 
 export function useSqlProjectActions() {

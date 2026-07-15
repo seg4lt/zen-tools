@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   BarChart3,
   ChevronDown,
@@ -22,6 +22,7 @@ import {
 import { Button } from "@zen-tools/ui";
 import { cn } from "@zen-tools/ui";
 import { useProjectActions } from "../hooks/use-projects";
+import { onFileTreeChanged } from "@/lib/file-tree-events";
 
 interface HttpFileTreeProps {
   selectedPath: string | null;
@@ -98,6 +99,7 @@ async function persistExpanded(set: Set<string>): Promise<void> {
  * a `+ Add project` button at the top and per-project remove on hover.
  */
 export function HttpFileTree({ selectedPath, onSelect }: HttpFileTreeProps) {
+  const queryClient = useQueryClient();
   const {
     data: projects = [],
     isLoading,
@@ -107,6 +109,23 @@ export function HttpFileTree({ selectedPath, onSelect }: HttpFileTreeProps) {
     queryKey: ["http-files"],
     queryFn: () => tauri.discoverHttpFiles(),
   });
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void onFileTreeChanged(({ scope }) => {
+      if (scope === "http") {
+        void queryClient.invalidateQueries({ queryKey: ["http-files"] });
+      }
+    }).then((stop) => {
+      if (disposed) stop();
+      else unlisten = stop;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [queryClient]);
 
   const { addProject, removeProject } = useProjectActions();
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());

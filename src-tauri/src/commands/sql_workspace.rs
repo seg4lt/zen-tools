@@ -15,6 +15,7 @@ use zen_types::prelude::*;
 
 use crate::commands::preferences::{load_preferences, write_preferences};
 use crate::error::{AppError, AppResult};
+use crate::file_tree_watcher::{FileTreeWatcher, WatchScope};
 use crate::state::AppState;
 
 /// One project's slice of the discovered tree.
@@ -95,8 +96,10 @@ pub async fn sql_workspace_remove(
 #[tauri::command]
 pub async fn sql_workspace_discover(
     state: tauri::State<'_, Mutex<AppState>>,
+    watcher: tauri::State<'_, std::sync::Arc<FileTreeWatcher>>,
 ) -> AppResult<Vec<DiscoveredSqlProject>> {
     let dirs = state.lock().await.sql_workspace_dirs.clone();
+    watcher.sync_roots(WatchScope::Sql, dirs.clone());
     let mut projects = Vec::with_capacity(dirs.len());
     for dir in dirs {
         let name = dir

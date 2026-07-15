@@ -2,6 +2,7 @@
 
 use crate::commands::preferences::{load_preferences, write_preferences};
 use crate::error::{AppError, AppResult};
+use crate::file_tree_watcher::{FileTreeWatcher, WatchScope};
 use crate::state::AppState;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -31,8 +32,10 @@ pub struct DiscoveredProject {
 #[tauri::command]
 pub async fn discover_http_files(
     state: tauri::State<'_, Mutex<AppState>>,
+    watcher: tauri::State<'_, std::sync::Arc<FileTreeWatcher>>,
 ) -> AppResult<Vec<DiscoveredProject>> {
     let dirs = state.lock().await.working_dirs.clone();
+    watcher.sync_roots(WatchScope::Http, dirs.clone());
     let mut projects = Vec::with_capacity(dirs.len());
     for dir in dirs {
         let name = dir

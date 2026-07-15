@@ -10,6 +10,7 @@ pub mod data_dir_migration;
 pub mod dictation;
 pub mod dto;
 pub mod error;
+pub mod file_tree_watcher;
 pub mod prmaster_lifecycle;
 pub mod prmaster_tray;
 pub mod schema_cache;
@@ -19,6 +20,7 @@ pub mod user_config;
 
 use commands::markdown_index::MarkdownIndexRegistry;
 use commands::runs::{load_runs, RunHistory};
+use file_tree_watcher::FileTreeWatcher;
 use state::AppState;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -292,6 +294,11 @@ pub fn run() {
                 .with(file_layer)
                 .init();
             tracing::info!("zen-tools: logging initialised");
+
+            // Recursive native filesystem watchers backing the HTTP, SQL,
+            // and Markdown file trees. Roots are registered lazily by each
+            // discovery command and retained for the lifetime of the app.
+            app.manage(Arc::new(FileTreeWatcher::new(app.handle().clone())));
 
             // ── Bundle-id rename migration ────────────────────────────
             // Old builds wrote to `~/Library/Application Support/
