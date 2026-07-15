@@ -25,9 +25,6 @@ tokio-util = { version = "0.7", features = ["compat", "rt"] }
 bb8 = "0.9"
 bb8-tiberius = { version = "0.16", default-features = false, features = ["chrono", "tds73", "with-tokio", "tls"] }
 
-# Secrets
-keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native"] }
-
 # State
 dashmap = "6"
 

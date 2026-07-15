@@ -21,9 +21,6 @@ pub enum DbError {
     #[error("connection not found: {0}")]
     NotFound(String),
 
-    #[error("keyring: {0}")]
-    Keyring(String),
-
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 

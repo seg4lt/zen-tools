@@ -1,20 +1,21 @@
 //! Database Explorer commands — thin wrappers over `zen_db`.
 //!
-//! Connection metadata (no password) is persisted in `preferences.json`;
-//! passwords live in the OS keychain via `zen_db::secrets`. Live driver
-//! handles are kept in [`zen_db::ConnectionRegistry`] inside `AppState`.
+//! Connection metadata and Base64-encoded credentials are persisted in the
+//! `preferences` row of `user_config.db`. Live driver handles are kept in
+//! [`zen_db::ConnectionRegistry`] inside `AppState`.
 
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex as StdMutex, OnceLock, Weak},
 };
 
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::Mutex;
 use zen_db::{
-    secrets, ConnectionConfig, ConnectionRegistry, DbDriver, ExecuteOptions, ExplainResult,
-    QueryResult, RoutineDescription, TableDescription, TableSummary,
+    ConnectionConfig, ConnectionRegistry, DbDriver, ExecuteOptions, ExplainResult, QueryResult,
+    RoutineDescription, TableDescription, TableSummary,
 };
 
 use crate::commands::preferences::{
@@ -119,8 +120,8 @@ pub struct DbConnectionInput {
     pub database: String,
     /// SQL-auth username.
     pub username: String,
-    /// Plaintext password — only ever lives in this transient struct;
-    /// stored in the OS keychain on save.
+    /// Plaintext password — only ever lives in this transient command DTO;
+    /// Base64-encoded before persistence.
     #[serde(default)]
     pub password: String,
     /// Trust a self-signed server cert.
@@ -152,7 +153,7 @@ impl DbConnectionInput {
         })
     }
 
-    fn to_prefs(&self) -> DbConnectionPrefs {
+    fn to_prefs(&self, password_base64: String) -> DbConnectionPrefs {
         DbConnectionPrefs {
             id: self.id.clone(),
             name: self.name.clone(),
@@ -160,7 +161,9 @@ impl DbConnectionInput {
             host: self.host.clone(),
             port: self.port,
             database: self.database.clone(),
-            username: self.username.clone(),
+            legacy_username: String::new(),
+            username_base64: encode_credential(&self.username),
+            password_base64,
             trust_server_certificate: self.trust_server_certificate,
         }
     }
@@ -170,7 +173,52 @@ fn registry(state: &AppState) -> Arc<ConnectionRegistry> {
     state.db.clone()
 }
 
-fn prefs_to_config(prefs: &DbConnectionPrefs, password: String) -> AppResult<ConnectionConfig> {
+fn encode_credential(value: &str) -> String {
+    base64::engine::general_purpose::STANDARD.encode(value.as_bytes())
+}
+
+fn decode_credential(value: &str, field: &str) -> AppResult<String> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(value)
+        .map_err(|e| AppError::Other(format!("invalid Base64 database {field}: {e}")))?;
+    String::from_utf8(bytes)
+        .map_err(|e| AppError::Other(format!("database {field} is not UTF-8: {e}")))
+}
+
+#[cfg(test)]
+mod credential_tests {
+    use super::*;
+
+    #[test]
+    fn base64_credentials_round_trip_without_plaintext_in_preferences() {
+        let input = DbConnectionInput {
+            id: "connection-1".into(),
+            name: "Local".into(),
+            driver: "postgres".into(),
+            host: "localhost".into(),
+            port: 5432,
+            database: "app".into(),
+            username: "alice@example.com".into(),
+            password: "correct horse battery staple".into(),
+            trust_server_certificate: false,
+        };
+        let prefs = input.to_prefs(encode_credential(&input.password));
+        let json = serde_json::to_string(&prefs).unwrap();
+
+        assert!(!json.contains("alice@example.com"));
+        assert!(!json.contains("correct horse battery staple"));
+        assert_eq!(
+            decode_credential(&prefs.username_base64, "username").unwrap(),
+            input.username
+        );
+        assert_eq!(
+            decode_credential(&prefs.password_base64, "password").unwrap(),
+            input.password
+        );
+    }
+}
+
+fn prefs_to_config(prefs: &DbConnectionPrefs) -> AppResult<ConnectionConfig> {
     let driver = match prefs.driver.to_ascii_lowercase().as_str() {
         "postgres" | "postgresql" | "pg" => DbDriver::Postgres,
         "mssql" | "sqlserver" | "sql-server" => DbDriver::MsSql,
@@ -183,8 +231,8 @@ fn prefs_to_config(prefs: &DbConnectionPrefs, password: String) -> AppResult<Con
         host: prefs.host.clone(),
         port: prefs.port,
         database: prefs.database.clone(),
-        username: prefs.username.clone(),
-        password,
+        username: decode_credential(&prefs.username_base64, "username")?,
+        password: decode_credential(&prefs.password_base64, "password")?,
         trust_server_certificate: prefs.trust_server_certificate,
     })
 }
@@ -201,19 +249,25 @@ pub async fn db_test_connection(input: DbConnectionInput) -> AppResult<()> {
 
 // ── Persist ─────────────────────────────────────────────────────────────
 
-/// Save (or update) a connection. Metadata goes to `preferences.json`,
-/// the password goes to the OS keychain.
+/// Save or update a connection in the local user-config database.
 #[tauri::command]
 pub async fn db_save_connection(input: DbConnectionInput, app: AppHandle) -> AppResult<()> {
-    // Validate driver before touching disk/keychain.
+    // Validate driver before touching storage.
     let _ = input.driver()?;
 
-    if !input.password.is_empty() {
-        secrets::store_password(&input.id, &input.password)?;
-    }
-
     let mut prefs = load_preferences(&app)?;
-    let new_prefs = input.to_prefs();
+    let existing_password = prefs
+        .db_connections
+        .iter()
+        .find(|connection| connection.id == input.id)
+        .map(|connection| connection.password_base64.clone())
+        .unwrap_or_default();
+    let password_base64 = if input.password.is_empty() {
+        existing_password
+    } else {
+        encode_credential(&input.password)
+    };
+    let new_prefs = input.to_prefs(password_base64);
     if let Some(existing) = prefs
         .db_connections
         .iter_mut()
@@ -227,9 +281,7 @@ pub async fn db_save_connection(input: DbConnectionInput, app: AppHandle) -> App
     Ok(())
 }
 
-/// Delete the connection: drop the live handle (if any), remove the
-/// keychain entry, prune the prefs entry, and clear any cached schema
-/// rows so the connection's UUID never gets re-used to mask stale data.
+/// Delete the connection, its persisted credentials, and cached schema rows.
 #[tauri::command]
 pub async fn db_delete_connection(
     id: String,
@@ -241,8 +293,6 @@ pub async fn db_delete_connection(
         registry(&s)
     };
     registry.disconnect(&id);
-
-    secrets::delete_password(&id)?;
 
     if let Some(cache) = app.try_state::<SchemaCache>() {
         let cache = cache.inner().clone();
@@ -259,16 +309,56 @@ pub async fn db_delete_connection(
     Ok(())
 }
 
-/// Return all saved connections (no passwords).
+/// Public saved-connection shape. The encoded password never crosses IPC.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DbConnectionSummary {
+    /// Stable connection identifier.
+    pub id: String,
+    /// User-facing connection name.
+    pub name: String,
+    /// Database driver identifier.
+    pub driver: String,
+    /// Database server host.
+    pub host: String,
+    /// Database server port.
+    pub port: u16,
+    /// Initial database or catalog.
+    pub database: String,
+    /// Decoded SQL-auth username.
+    pub username: String,
+    /// Whether this connection has a Base64-encoded password in local storage.
+    pub has_saved_password: bool,
+    /// Whether the driver trusts a self-signed server certificate.
+    pub trust_server_certificate: bool,
+}
+
+/// Return saved connections with decoded usernames and no passwords.
 #[tauri::command]
-pub async fn db_list_saved_connections(app: AppHandle) -> AppResult<Vec<DbConnectionPrefs>> {
+pub async fn db_list_saved_connections(app: AppHandle) -> AppResult<Vec<DbConnectionSummary>> {
     let prefs: Preferences = load_preferences(&app)?;
-    Ok(prefs.db_connections)
+    prefs
+        .db_connections
+        .into_iter()
+        .map(|connection| {
+            Ok(DbConnectionSummary {
+                username: decode_credential(&connection.username_base64, "username")?,
+                has_saved_password: !connection.password_base64.is_empty(),
+                id: connection.id,
+                name: connection.name,
+                driver: connection.driver,
+                host: connection.host,
+                port: connection.port,
+                database: connection.database,
+                trust_server_certificate: connection.trust_server_certificate,
+            })
+        })
+        .collect()
 }
 
 // ── Connect / disconnect ────────────────────────────────────────────────
 
-/// Open a live connection using the saved metadata + keychain password.
+/// Open a live connection using the locally persisted credentials.
 #[tauri::command]
 pub async fn db_connect(
     id: String,
@@ -283,10 +373,12 @@ pub async fn db_connect(
         .ok_or_else(|| AppError::NotInitialised(format!("connection not saved: {id}")))?
         .clone();
 
-    let password = secrets::load_password(&id)?
-        .ok_or_else(|| AppError::NotInitialised(format!("no password in keychain for: {id}")))?;
-
-    let cfg = prefs_to_config(&entry, password)?;
+    if entry.password_base64.is_empty() {
+        return Err(AppError::NotInitialised(format!(
+            "no saved password for connection: {id}; edit it and save the password once"
+        )));
+    }
+    let cfg = prefs_to_config(&entry)?;
 
     let registry = {
         let s = state.lock().await;
@@ -296,7 +388,7 @@ pub async fn db_connect(
     Ok(())
 }
 
-/// Drop a live driver handle (the keychain entry is preserved).
+/// Drop a live driver handle (saved credentials are preserved).
 #[tauri::command]
 pub async fn db_disconnect(id: String, state: tauri::State<'_, Mutex<AppState>>) -> AppResult<()> {
     let registry = {

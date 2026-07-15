@@ -22,9 +22,8 @@ impl DbDriver {
     }
 }
 
-/// Connection settings sent from the UI. `password` is transient; it is
-/// loaded from the OS keychain on connect and is **never** persisted in
-/// `preferences.json`.
+/// Runtime connection settings. Storage and credential encoding are owned by
+/// the host application; drivers receive decoded values here.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectionConfig {

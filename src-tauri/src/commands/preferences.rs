@@ -14,11 +14,13 @@
 //! `load_preferences` / `write_preferences` helpers below — only the
 //! storage backend changed.
 //!
-//! Only includes user-facing UI state (open project list, expanded
-//! folders). Anything sensitive or per-environment lives elsewhere.
+//! Includes user-facing UI state and Base64-encoded database credentials.
+//! Base64 is obfuscation, not encryption; access to this DB implies access
+//! to the saved credentials.
 
 use crate::error::AppResult;
 use crate::user_config::{self, PREFERENCES_KEY};
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
 
@@ -61,8 +63,8 @@ pub struct Preferences {
     /// "Recent" group.
     #[serde(default)]
     pub markdown_recent_files: Vec<String>,
-    /// Saved Database Explorer connections. Passwords are NEVER stored
-    /// here — they live in the OS keychain (see `zen_db::secrets`).
+    /// Saved Database Explorer connections, including Base64-encoded
+    /// usernames and passwords.
     #[serde(default)]
     pub db_connections: Vec<DbConnectionPrefs>,
     /// Project roots opened in the Database Explorer's SQL-file
@@ -148,8 +150,8 @@ pub struct TerminalSessionPanePreferences {
     pub launch_directory: Option<String>,
 }
 
-/// One persisted Database Explorer connection. Mirrors
-/// `zen_db::ConnectionConfig` minus the password (which is keychain-only).
+/// One persisted Database Explorer connection. Credentials are Base64
+/// encoded before this structure is written to `user_config.db`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DbConnectionPrefs {
@@ -165,8 +167,15 @@ pub struct DbConnectionPrefs {
     pub port: u16,
     /// Initial database / catalogue.
     pub database: String,
-    /// SQL-auth username.
-    pub username: String,
+    /// Legacy plaintext username, read only for migration from older builds.
+    #[serde(default, rename = "username", skip_serializing_if = "String::is_empty")]
+    pub legacy_username: String,
+    /// Base64-encoded SQL-auth username.
+    #[serde(default)]
+    pub username_base64: String,
+    /// Base64-encoded SQL-auth password.
+    #[serde(default)]
+    pub password_base64: String,
     /// Trust a self-signed server cert (mainly for the bundled MSSQL
     /// developer image).
     #[serde(default)]
@@ -222,7 +231,18 @@ impl Default for Preferences {
 pub fn load_preferences(app: &AppHandle) -> AppResult<Preferences> {
     let cfg = user_config::require(app)?;
     match cfg.get::<Preferences>(PREFERENCES_KEY) {
-        Ok(Some(prefs)) => Ok(prefs),
+        Ok(Some(mut prefs)) => {
+            // Upgrade legacy plaintext usernames in memory. The next normal
+            // preferences write persists only the Base64 representation.
+            for connection in &mut prefs.db_connections {
+                if connection.username_base64.is_empty() && !connection.legacy_username.is_empty() {
+                    connection.username_base64 = base64::engine::general_purpose::STANDARD
+                        .encode(connection.legacy_username.as_bytes());
+                    connection.legacy_username.clear();
+                }
+            }
+            Ok(prefs)
+        }
         Ok(None) => Ok(Preferences::default()),
         Err(e) => {
             // A schema-incompatible JSON shouldn't brick the app; the

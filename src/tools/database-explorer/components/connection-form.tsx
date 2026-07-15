@@ -1,7 +1,7 @@
 /**
  * Add / edit a database connection. The form is shown as a Radix dialog.
- * Save persists metadata to `preferences.json` and the password to the
- * OS keychain via `db_save_connection`.
+ * Save persists metadata and Base64-encoded credentials to the local
+ * `user_config.db` via `db_save_connection`.
  */
 
 import { useEffect, useMemo, useState } from "react";
@@ -188,7 +188,8 @@ export function ConnectionForm() {
         <DialogHeader>
           <DialogTitle>{editing ? "Edit connection" : "New connection"}</DialogTitle>
           <DialogDescription>
-            Passwords are stored in the OS keychain, not in preferences.json.
+            Credentials are Base64-encoded in the local app database. Base64 is
+            not encryption.
           </DialogDescription>
         </DialogHeader>
 
@@ -267,7 +268,13 @@ export function ConnectionForm() {
                 type="password"
                 value={form.password}
                 onChange={(e) => update("password", e.target.value)}
-                placeholder={editing ? "(unchanged if blank)" : ""}
+                placeholder={
+                  editing
+                    ? editing.hasSavedPassword
+                      ? "(unchanged if blank)"
+                      : "Enter password to save"
+                    : ""
+                }
                 className={inputCls}
               />
             </Field>

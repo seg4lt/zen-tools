@@ -10,7 +10,7 @@ export type DbDriverId = "postgres" | "mssql";
 /**
  * Connection metadata. The password is only ever set on `db_save_connection`
  * / `db_test_connection`; reads from the backend (`db_list_saved_connections`)
- * never include it (it lives in the OS keychain).
+ * never include it (the backend stores it Base64-encoded locally).
  */
 export interface DbConnectionInput {
   id: string;
@@ -33,6 +33,7 @@ export interface DbConnectionPrefs {
   port: number;
   database: string;
   username: string;
+  hasSavedPassword: boolean;
   trustServerCertificate?: boolean;
 }
 

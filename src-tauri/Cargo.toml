@@ -108,6 +108,7 @@ tracing-subscriber = { workspace = true }
 # folder. Stdout output is preserved via a fanout layer.
 tracing-appender = { workspace = true }
 chrono = { workspace = true }
+base64 = "0.22"
 # Generates TypeScript bindings for the wire DTOs declared inside
 # src-tauri/src/ (the cross-tool DTOs live in their owning crate; this
 # is just for the Tauri-only ones like `PmConfig`, `Preferences`,
