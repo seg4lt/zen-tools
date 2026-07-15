@@ -27,6 +27,7 @@ import {
   type EnrichedPullRequest,
   type RefreshSnapshot,
 } from "../lib/tauri";
+import { aiReviewStore } from "./ai-review-store";
 
 export interface PrMasterState {
   /** Login of the current user (`null` until whoami resolves). */
@@ -214,6 +215,38 @@ export function PrMasterStoreProvider({ children }: { children: ReactNode }) {
       unlisten?.();
     };
   }, []);
+
+  // Hydrate completed AI-review state for every visible tile. Live runs are
+  // still driven by the event store; this supplies the persisted "done" state
+  // without requiring the user to open each PR's AI Review tab first.
+  useEffect(() => {
+    const refs = new Map<string, { owner: string; repo: string; number: number }>();
+    for (const list of [state.mine, state.toReview, state.reviewed]) {
+      for (const row of list) {
+        const [owner, repo] = row.pr.repository.nameWithOwner.split("/", 2);
+        if (!owner || !repo) continue;
+        refs.set(enrichedId(row), { owner, repo, number: row.pr.number });
+      }
+    }
+    if (refs.size === 0) return;
+
+    let alive = true;
+    void prmasterTauri.aiReviewCompletedPrs([...refs.values()]).then(
+      (completed) => {
+        if (!alive) return;
+        aiReviewStore.setCompletedReviewStates(
+          [...refs.keys()],
+          new Set(completed),
+        );
+      },
+      (error) => {
+        console.warn("[prmaster] aiReviewCompletedPrs failed:", error);
+      },
+    );
+    return () => {
+      alive = false;
+    };
+  }, [state.mine, state.toReview, state.reviewed]);
 
   return <StoreCtx.Provider value={value}>{children}</StoreCtx.Provider>;
 }

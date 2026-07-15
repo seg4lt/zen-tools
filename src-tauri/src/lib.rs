@@ -621,6 +621,7 @@ pub fn run() {
             commands::pr_review::prmaster_ai_review_cancel,
             commands::pr_review::prmaster_ai_review_get_report,
             commands::pr_review::prmaster_ai_review_list_runs,
+            commands::pr_review::prmaster_ai_review_completed_prs,
             commands::pr_review::prmaster_ai_review_preview_finding_body,
             commands::pr_review::prmaster_ai_review_post_finding,
             commands::pr_review::prmaster_ai_review_cleanup_merged,

@@ -41,6 +41,8 @@ export interface PrReviewSlot {
   events: AiReviewEvent[];
   /** Persisted-runs index (newest-first); refreshed by `aiReviewListRuns`. */
   runs: AiReviewRunSummary[];
+  /** Whether persistence contains at least one successfully completed run. */
+  hasCompletedReview: boolean;
   /** Path to the persisted HTML report for the most-recent done run. */
   reportPath: string | null;
   /** Cost reported by the live or most-recent run, in USD. */
@@ -62,6 +64,7 @@ const emptySlot: PrReviewSlot = {
   status: "idle",
   events: [],
   runs: [],
+  hasCompletedReview: false,
   reportPath: null,
   costUsd: null,
   durationMs: null,
@@ -99,7 +102,49 @@ export const aiReviewStore = {
   setRuns(key: string, runs: AiReviewRunSummary[]): void {
     const slot = state.slots.get(key) ?? emptySlot;
     if (slot.runs === runs) return;
-    state.slots.set(key, { ...slot, runs });
+    state.slots.set(key, {
+      ...slot,
+      runs,
+      hasCompletedReview: runs.some((run) => run.status === "done"),
+    });
+    notify();
+  },
+
+  /** Hydrate completion state for every currently visible PR in one pass. */
+  setCompletedReviewStates(
+    visibleKeys: string[],
+    completedKeys: ReadonlySet<string>,
+  ): void {
+    let changed = false;
+    for (const key of visibleKeys) {
+      const slot = state.slots.get(key) ?? emptySlot;
+      const hasCompletedReview = completedKeys.has(key);
+      if (slot.hasCompletedReview === hasCompletedReview) continue;
+      state.slots.set(key, { ...slot, hasCompletedReview });
+      changed = true;
+    }
+    if (changed) notify();
+  },
+
+  /** Immediately replace a prior completed badge when the user starts again. */
+  beginRun(key: string): void {
+    const slot = state.slots.get(key) ?? emptySlot;
+    state.slots.set(key, {
+      ...slot,
+      liveRunId: null,
+      status: "starting",
+      events: [],
+      hasCompletedReview: false,
+      reportPath: null,
+      costUsd: null,
+      durationMs: null,
+    });
+    notify();
+  },
+
+  markStartFailed(key: string): void {
+    const slot = state.slots.get(key) ?? emptySlot;
+    state.slots.set(key, { ...slot, status: "error", liveRunId: null });
     notify();
   },
 
@@ -111,6 +156,7 @@ export const aiReviewStore = {
       liveRunId: runId,
       status: "starting",
       events: [],
+      hasCompletedReview: false,
       reportPath: null,
       costUsd: null,
       durationMs: null,
@@ -155,6 +201,7 @@ export const aiReviewStore = {
     if (event.kind === "done") {
       next.status = "done";
       next.liveRunId = null;
+      next.hasCompletedReview = true;
       next.reportPath = event.report_path;
       next.costUsd = event.cost_usd;
       next.durationMs = event.duration_ms;

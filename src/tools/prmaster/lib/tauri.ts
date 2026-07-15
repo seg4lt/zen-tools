@@ -507,6 +507,8 @@ export const prmasterTauri = {
     invoke<AiReviewReportResp>("prmaster_ai_review_get_report", { runId }),
   aiReviewListRuns: (pr: PrRef) =>
     invoke<AiReviewRunSummary[]>("prmaster_ai_review_list_runs", { pr }),
+  aiReviewCompletedPrs: (prs: PrRef[]) =>
+    invoke<string[]>("prmaster_ai_review_completed_prs", { prs }),
   /**
    * Return the default formatted comment body for a finding — what
    * would be posted if the user clicked Post without editing. The

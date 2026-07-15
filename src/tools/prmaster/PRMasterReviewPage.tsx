@@ -37,6 +37,7 @@ import type { DiffViewMode } from "@zen-tools/editor";
 import { PrFilesChangedView } from "./components/shared/PrFilesChangedView";
 import { PrIssueCommentsView } from "./components/shared/PrIssueCommentsView";
 import { PrAiReviewView } from "./components/shared/PrAiReviewView";
+import { AiReviewStatusBadge } from "./components/shared/AiReviewStatusBadge";
 import {
   enrichedId,
   usePrMasterStore,
@@ -89,8 +90,6 @@ export function PRMasterReviewPage() {
   const sessionKey = prKey(owner, repo, Number.isFinite(number) ? number : 0);
   const session = useReviewSession(sessionKey);
   const aiReview = useAiReviewState(sessionKey);
-  const aiReviewRunning =
-    aiReview.status === "starting" || aiReview.status === "running";
 
   const navigate = useNavigate();
   const { state, dispatch } = usePrMasterStore();
@@ -177,16 +176,7 @@ export function PRMasterReviewPage() {
               </span>
             )}
           </div>
-          {aiReviewRunning && (
-            <span className="inline-flex shrink-0 items-center gap-1 rounded border border-violet-500/30 bg-violet-500/10 px-1.5 py-0.5 text-[10px] font-medium text-violet-700 dark:text-violet-300">
-              <Sparkles className="size-3" />
-              <span className="relative flex size-2">
-                <span className="absolute inset-0 animate-ping rounded-full bg-violet-500/60" />
-                <span className="relative inline-flex size-2 rounded-full bg-violet-500" />
-              </span>
-              AI reviewing
-            </span>
-          )}
+          <AiReviewStatusBadge slot={aiReview} />
           <Tabs value={tab} onValueChange={(v) => setTab(v as ReviewTab)}>
             <TabsList className="h-6 gap-0.5 bg-transparent p-0">
               <SectionTabTrigger

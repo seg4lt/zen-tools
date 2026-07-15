@@ -474,6 +474,33 @@ pub async fn prmaster_ai_review_list_runs(
     Ok(review.list_runs(&kv, &pr_key(&pr))?)
 }
 
+/// Return the canonical PR slugs that have at least one completed AI review.
+/// The PR list uses this batch command to hydrate status badges without opening
+/// the AI Review tab (or issuing one command per tile).
+#[tauri::command]
+pub async fn prmaster_ai_review_completed_prs(
+    state: State<'_, Mutex<AppState>>,
+    config: State<'_, UserConfig>,
+    prs: Vec<PrRef>,
+) -> AppResult<Vec<String>> {
+    let review = state.lock().await.review.clone();
+    let kv = config.inner().clone();
+    let mut completed = Vec::new();
+
+    for pr in prs {
+        let key = pr_key(&pr);
+        if review
+            .list_runs(&kv, &key)?
+            .iter()
+            .any(|run| run.status == RunStatus::Done)
+        {
+            completed.push(key.slug());
+        }
+    }
+
+    Ok(completed)
+}
+
 /// Return the **default formatted body** for a finding, exactly as it
 /// would be posted if the user clicked Post without editing. Drives
 /// the inline "Edit before post" textarea: the frontend pre-fills

@@ -340,6 +340,7 @@ export function PrAiReviewView({ pr }: Props) {
     setBusy(true);
     setMissingRepo(null);
     setPromptError(null);
+    aiReviewStore.beginRun(key);
     try {
       const resp = await prmasterTauri.aiReviewStart({
         pr: ref,
@@ -356,6 +357,7 @@ export function PrAiReviewView({ pr }: Props) {
       setLoaded(null);
       reviewSessionStore.patch(key, { loadedRunId: null, aiViewMode: "log" });
     } catch (e) {
+      aiReviewStore.markStartFailed(key);
       const msg = formatErr(e);
       if (msg.toLowerCase().includes("local clone not registered")) {
         setMissingRepo(`${ref.owner}/${ref.repo}`);

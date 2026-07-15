@@ -8757,7 +8757,7 @@ dependencies = [
 
 [[package]]
 name = "zen-ai-cli"
-version = "0.1.61"
+version = "0.1.62"
 dependencies = [
  "async-trait",
  "serde",
@@ -8770,7 +8770,7 @@ dependencies = [
 
 [[package]]
 name = "zen-cleaner"
-version = "0.1.61"
+version = "0.1.62"
 dependencies = [
  "rayon",
  "serde",
@@ -8780,7 +8780,7 @@ dependencies = [
 
 [[package]]
 name = "zen-db"
-version = "0.1.61"
+version = "0.1.62"
 dependencies = [
  "async-trait",
  "bb8",
@@ -8805,7 +8805,7 @@ dependencies = [
 
 [[package]]
 name = "zen-dictation"
-version = "0.1.61"
+version = "0.1.62"
 dependencies = [
  "core-foundation 0.10.1",
  "core-graphics 0.24.0",
@@ -8829,7 +8829,7 @@ dependencies = [
 
 [[package]]
 name = "zen-fs"
-version = "0.1.61"
+version = "0.1.62"
 dependencies = [
  "chrono",
  "tempfile",
@@ -8837,7 +8837,7 @@ dependencies = [
 
 [[package]]
 name = "zen-git"
-version = "0.1.61"
+version = "0.1.62"
 dependencies = [
  "chrono",
  "serde",
@@ -8850,7 +8850,7 @@ dependencies = [
 
 [[package]]
 name = "zen-github"
-version = "0.1.61"
+version = "0.1.62"
 dependencies = [
  "ahash",
  "chrono",
@@ -8866,7 +8866,7 @@ dependencies = [
 
 [[package]]
 name = "zen-http"
-version = "0.1.61"
+version = "0.1.62"
 dependencies = [
  "ahash",
  "async-trait",
@@ -8890,7 +8890,7 @@ dependencies = [
 
 [[package]]
 name = "zen-parser"
-version = "0.1.61"
+version = "0.1.62"
 dependencies = [
  "chrono",
  "humantime-serde",
@@ -8906,7 +8906,7 @@ dependencies = [
 
 [[package]]
 name = "zen-perf"
-version = "0.1.61"
+version = "0.1.62"
 dependencies = [
  "ahash",
  "chrono",
@@ -8928,7 +8928,7 @@ dependencies = [
 
 [[package]]
 name = "zen-pr-review"
-version = "0.1.61"
+version = "0.1.62"
 dependencies = [
  "ahash",
  "chrono",
@@ -8949,7 +8949,7 @@ dependencies = [
 
 [[package]]
 name = "zen-prmaster"
-version = "0.1.61"
+version = "0.1.62"
 dependencies = [
  "ahash",
  "arc-swap",
@@ -8973,7 +8973,7 @@ dependencies = [
 
 [[package]]
 name = "zen-process-monitor"
-version = "0.1.61"
+version = "0.1.62"
 dependencies = [
  "libc",
  "libproc",
@@ -8988,7 +8988,7 @@ dependencies = [
 
 [[package]]
 name = "zen-runs"
-version = "0.1.61"
+version = "0.1.62"
 dependencies = [
  "ahash",
  "chrono",
@@ -9000,7 +9000,7 @@ dependencies = [
 
 [[package]]
 name = "zen-screen-vocab"
-version = "0.1.61"
+version = "0.1.62"
 dependencies = [
  "once_cell",
  "parking_lot",
@@ -9010,7 +9010,7 @@ dependencies = [
 
 [[package]]
 name = "zen-shell"
-version = "0.1.61"
+version = "0.1.62"
 dependencies = [
  "dirs 5.0.1",
  "serde",
@@ -9021,7 +9021,7 @@ dependencies = [
 
 [[package]]
 name = "zen-storage"
-version = "0.1.61"
+version = "0.1.62"
 dependencies = [
  "parking_lot",
  "rusqlite",
@@ -9034,7 +9034,7 @@ dependencies = [
 
 [[package]]
 name = "zen-tools"
-version = "0.1.61"
+version = "0.1.62"
 dependencies = [
  "ahash",
  "anyhow",
@@ -9090,7 +9090,7 @@ dependencies = [
 
 [[package]]
 name = "zen-types"
-version = "0.1.61"
+version = "0.1.62"
 dependencies = [
  "ahash",
  "chrono",
@@ -9101,7 +9101,7 @@ dependencies = [
 
 [[package]]
 name = "zen-whisper"
-version = "0.1.61"
+version = "0.1.62"
 dependencies = [
  "bindgen 0.70.1",
  "cc",
