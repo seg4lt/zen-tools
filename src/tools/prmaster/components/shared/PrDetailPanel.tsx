@@ -34,6 +34,7 @@ import {
   Loader2,
   MessageSquare,
   ShieldQuestion,
+  Sparkles,
   UserPlus,
   X,
 } from "lucide-react";
@@ -55,6 +56,7 @@ import { prefetchReviewPageData } from "../../lib/queries";
 import { Avatar } from "./Avatar";
 import { CiChecks } from "./CiChecks";
 import { ReviewerAvatars } from "./ReviewerAvatars";
+import { prKey, useAiReviewState } from "../../store/ai-review-store";
 
 interface Props {
   pr: EnrichedPullRequest;
@@ -75,6 +77,9 @@ export function PrDetailPanel({ pr, currentUser, onActionDone }: Props) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const ref = prRefFor(pr.pr);
+  const aiReview = useAiReviewState(prKey(ref.owner, ref.repo, ref.number));
+  const aiReviewRunning =
+    aiReview.status === "starting" || aiReview.status === "running";
   const detail = pr.detail;
   const rollup = detail?.commits?.nodes[0]?.commit.statusCheckRollup ?? null;
   const isAlreadyReviewer =
@@ -135,6 +140,16 @@ export function PrDetailPanel({ pr, currentUser, onActionDone }: Props) {
 
       {/* ── 2. Status bar — quick-glance counters ───────────────── */}
       <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+        {aiReviewRunning && (
+          <StatChip
+            tone="primary"
+            icon={<Loader2 className="size-3 animate-spin" />}
+          >
+            <span className="inline-flex items-center gap-1">
+              <Sparkles className="size-3" /> AI review running
+            </span>
+          </StatChip>
+        )}
         {rollup?.state === "SUCCESS" && (
           <StatChip tone="success" icon={<Check className="size-3" />}>
             CI passing

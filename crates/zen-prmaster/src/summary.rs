@@ -204,19 +204,17 @@ impl AiSummaryCache {
 ///
 ///   - Audience: an engineering manager who skims, not a peer who'll
 ///     read every commit. They want headline impact, not mechanics.
-///   - Tone: confident and outcome-focused. Lead with delivered value
-///     (features shipped, problems fixed, reliability / performance
-///     wins, unblocks for the team) and frame mechanics — refactors,
-///     test scaffolding, infra moves — as enablers of that value.
-///   - Style: still factual, no inflation. Don't claim impact that
-///     isn't supported by the diff.
+///   - Tone: confident, evidence-led self-advocacy. Make ownership and
+///     impact clear without sounding inflated or self-congratulatory.
+///   - Style: persuasive but credible. Give work the significance it
+///     earned without inventing or forcing business impact.
 ///
 /// Layout:
 ///   1. **Role + framing** — sets up the manager-report tone.
 ///   2. **Run header** — repo, human-readable date range, commit count.
 ///   3. **Output instructions** — required Markdown shape, plus rules
 ///      about the *style* (highlight outcomes, avoid SHAs / mechanics
-///      narrative, no inflation).
+///      narrative, credible impact).
 ///   4. **Commit messages** — one line per commit so the model can
 ///      cross-reference.
 ///   5. **Diffs** — fenced ```diff blocks per commit, truncated to fit
@@ -237,19 +235,25 @@ pub fn build_prompt(
     let mut buf = String::new();
     // 1 — role + framing (manager-report tone)
     buf.push_str(
-        "You are writing a weekly engineering report **for a manager / \
-         leadership audience**, not a peer code review. Read the commit \
-         messages and diffs below and produce a confident, outcome-focused \
-         summary that highlights what was delivered and why it matters.\n\
+        "Write a concise **manager-ready engineering achievement summary** for \
+         a manager / leadership audience, not a peer code review. Read the \
+         commit messages and diffs below, identify what the engineer delivered, \
+         and explain why it mattered. Make ownership visible and present the \
+         work confidently, but keep the tone grounded, credible, and natural.\n\
          \n\
-         Lean into impact: features shipped, customer-visible bugs fixed, \
-         reliability or performance gains, scope unblocked for the team, \
-         technical debt paid down. Treat refactors / test work / infra \
-         moves as enablers — connect them to the outcome they support \
-         (\"refactored X to unblock the Y rollout\") rather than narrating \
-         them on their own. Do not invent impact the diff doesn't support; \
-         when the work is genuinely internal plumbing, say so plainly but \
-         frame why it matters.\n\n",
+         Translate implementation details into relevant outcomes such as \
+         customer value, delivery speed, team leverage, reliability, risk \
+         reduction, scalability, or quality **when the evidence supports that \
+         connection**. Explain how refactors, tests, tooling, and infrastructure \
+         enabled safer or easier delivery without pretending routine maintenance \
+         was a major strategic win. Prefer specific verbs such as \"shipped,\" \
+         \"fixed,\" \"simplified,\" \"hardened,\" or \"enabled.\" Avoid vague \
+         phrases such as \"worked on\" and avoid hype or superlatives.\n\
+         \n\
+         Sell the achievement through specificity and context, not exaggeration. \
+         Reasonable engineering implications may be stated as likely benefits, \
+         but never fabricate numerical improvements, user adoption, production \
+         results, or business outcomes the evidence cannot support.\n\n",
     );
 
     // 2 — run header
@@ -268,8 +272,8 @@ pub fn build_prompt(
          ```\n\
          ## {date_label} — `{repo}`\n\
          \n\
-         **Highlights:** <one or two sentences naming the headline wins of \
-         the week — what shipped, what got better, what unblocked the team>\n\
+         **Highlights:** <one or two clear sentences naming the headline \
+         achievements, ownership, and why they mattered>\n\
          \n\
          - <outcome-led bullet>\n\
          - <outcome-led bullet>\n\
@@ -280,23 +284,31 @@ pub fn build_prompt(
     ));
     buf.push_str(
         "Rules:\n\
-         - Open every bullet with the **outcome** (what got better, who \
-           benefits) and only then mention the mechanism. Good: \"Cut PR \
-           page load by ~40% by batching the GraphQL detail query.\" Bad: \
+         - Write like a strong weekly update from a trusted engineer, not a \
+           changelog or sales pitch. Make ownership and significance clear; \
+           never merely repeat a commit message.\n\
+         - Open every bullet with the **achievement and its value** (what got \
+           better, who benefits, what risk disappeared), then cite the mechanism \
+           as evidence. Good: \"Simplified PR review and reduced API pressure by \
+           consolidating detail retrieval into a batched GraphQL path.\" Bad: \
            \"Refactored fetchPRs into batched queries.\"\n\
+         - Calibrate the claim to the evidence. Distinguish shipped outcomes from \
+           enabling work, likely benefits from measured results, and individual \
+           ownership from broader team outcomes.\n\
          - Group related commits into a single bullet — one bullet per \
            *theme* or *area*, not one per commit. Aim for 3–7 bullets.\n\
-         - Use present-tense, active voice. Name the subsystem / feature / \
-           customer surface when it matters; avoid the file-by-file play-\
-           by-play.\n\
+         - Use active voice and accomplishment language: past tense for \
+           delivered work (\"shipped,\" \"eliminated\") and present tense for \
+           enduring value (\"protects,\" \"enables\"). Name the subsystem / \
+           feature / customer surface; avoid file-by-file play-by-play.\n\
          - Do **not** mention commit SHAs, list individual commits, or \
            paste diff hunks back. Do not pad the report — if a week is \
            genuinely light, write a short report.\n\
          - Stay under ~250 words across the whole report.\n\
-         - Don't oversell. If the diff is mostly internal cleanup, the \
-           Highlights line should say so honestly (\"quiet week — focus on \
-           paying down test debt before the X launch\") rather than \
-           inflating routine work.\n\n",
+         - Give internal work appropriate credit by explaining the concrete \
+           leverage or risk reduction it creates. If that value is modest, say \
+           so succinctly rather than inflating it. Keep every claim traceable to \
+           the supplied commits and diffs.\n\n",
     );
 
     // 4 — commit messages
@@ -653,6 +665,10 @@ mod tests {
         // Manager-report framing — make sure the audience is clear and
         // SHAs are blocked from the output.
         assert!(prompt.contains("manager / leadership audience"));
+        assert!(prompt.contains("manager-ready engineering achievement summary"));
+        assert!(prompt.contains("grounded, credible, and natural"));
+        assert!(prompt.contains("not exaggeration"));
+        assert!(prompt.contains("never fabricate numerical improvements"));
         assert!(prompt.contains("Do **not** mention commit SHAs"));
         // Required output shape includes Highlights + Watch list.
         assert!(prompt.contains("**Highlights:**"));
@@ -669,16 +685,16 @@ mod tests {
             author_date: ts("2024-01-01T00:00:00Z"),
             diff: Some(huge_diff),
         }];
-        // Budget 1500 tokens × ratio 2 = 3000 chars. The header
-        // instructions alone are ~1.2k chars so the diff has ~1.8k of
-        // room — which the 100kB diff blows past, forcing truncation.
+        // Budget 3000 tokens × ratio 2 = 6000 chars. The achievement-
+        // framing instructions still leave room for a diff excerpt,
+        // which the 100kB diff blows past and therefore truncates.
         let prompt = build_prompt(
             "octo/repo",
             ts("2024-01-01T00:00:00Z"),
             ts("2024-01-02T00:00:00Z"),
             &commits,
             2,
-            1500,
+            3000,
         );
         assert!(prompt.contains("truncated"));
     }

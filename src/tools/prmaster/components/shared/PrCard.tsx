@@ -44,6 +44,7 @@ import {
   GitPullRequestDraft,
   Loader2,
   MessageCircle,
+  Sparkles,
   X,
   XCircle,
 } from "lucide-react";
@@ -55,6 +56,10 @@ import type {
   ReviewState,
   StatusCheckRollup,
 } from "../../lib/tauri";
+import {
+  prKey,
+  useAiReviewState,
+} from "../../store/ai-review-store";
 
 export type PrCardVariant = "mine" | "to-review" | "done";
 
@@ -154,6 +159,12 @@ export function PrCard({
   const ciRollup =
     detail?.commits?.nodes?.[0]?.commit?.statusCheckRollup ?? null;
   const mergeable = detail?.mergeable ?? null;
+  const [owner, repo] = pr.repository.nameWithOwner.split("/", 2);
+  const aiReview = useAiReviewState(
+    prKey(owner ?? "", repo ?? pr.repository.name, pr.number),
+  );
+  const aiReviewRunning =
+    aiReview.status === "starting" || aiReview.status === "running";
 
   const accent = deriveAccent(enriched, variant);
 
@@ -232,6 +243,16 @@ export function PrCard({
               matches "what blocks me from merging" → "what's the
               human verdict". */}
           <div className="flex shrink-0 items-center gap-1.5">
+            {aiReviewRunning && (
+              <span
+                title="AI code review is running"
+                className="inline-flex items-center gap-1 rounded border border-violet-500/30 bg-violet-500/10 px-1.5 py-0.5 text-[10px] font-medium text-violet-700 dark:text-violet-300"
+              >
+                <Sparkles className="size-3" />
+                <Loader2 className="size-3 animate-spin" />
+                AI reviewing
+              </span>
+            )}
             {ciRollup && <CiPill rollup={ciRollup} />}
             {mergeable === "CONFLICTING" && (
               <span

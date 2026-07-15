@@ -14,7 +14,7 @@
  * Wired up as the `filterBar` slot of `EnrichedListView` on the Review
  * and Done tabs.
  */
-import { forwardRef, useEffect, useMemo, useState } from "react";
+import { forwardRef, useMemo, useState } from "react";
 import {
   ChevronDown,
   Filter,
@@ -32,12 +32,12 @@ import {
   DropdownMenuTrigger,
 } from "@zen-tools/ui";
 import { cn } from "@zen-tools/ui";
-import {
-  prmasterTauri,
-  type EnrichedPullRequest,
-  type NotificationFilter,
+import type {
+  EnrichedPullRequest,
+  NotificationFilter,
 } from "../../lib/tauri";
 import { matchesWildcardSearch } from "../../lib/search";
+import { matchesFileGlob } from "../../lib/file-glob";
 
 export interface PrFilterState {
   authors: Set<string>;
@@ -55,13 +55,13 @@ export const emptyFilterState: PrFilterState = {
   savedFilterIds: new Set(),
 };
 
-/** Does a single saved filter match this row? — same predicate the engine
- *  uses for notifications. File globs are intentionally skipped (we don't
- *  always have file paths client-side). */
+/** Does a single saved filter match this row? Mirrors the backend
+ * notification predicate, including changed-file globs. */
 function rowMatchesSavedFilter(
   row: EnrichedPullRequest,
   saved: NotificationFilter,
 ): boolean {
+  if (!saved.enabled) return false;
   const pr = row.pr;
   if (saved.authors.length > 0) {
     const author = pr.author?.login ?? "";
@@ -76,7 +76,17 @@ function rowMatchesSavedFilter(
     try {
       if (!new RegExp(saved.title_regex, "i").test(pr.title)) return false;
     } catch {
-      /* invalid regex -> skip the regex predicate */
+      return false;
+    }
+  }
+  if (saved.file_globs.length > 0) {
+    const paths = row.detail?.files?.nodes.map((file) => file.path) ?? [];
+    if (
+      !paths.some((path) =>
+        saved.file_globs.some((glob) => matchesFileGlob(path, glob)),
+      )
+    ) {
+      return false;
     }
   }
   return true;
@@ -94,11 +104,12 @@ export function applyPrFilters(
   // result rather than narrow it.
   if (state.savedFilterIds.size > 0) {
     const active = savedFilters.filter((f) => state.savedFilterIds.has(f.id));
-    if (active.length > 0) {
-      filtered = filtered.filter((row) =>
-        active.some((f) => rowMatchesSavedFilter(row, f)),
-      );
-    }
+    filtered =
+      active.length === 0
+        ? []
+        : filtered.filter((row) =>
+            active.some((f) => rowMatchesSavedFilter(row, f)),
+          );
   }
 
   if (state.authors.size > 0) {
@@ -127,29 +138,14 @@ export function applyPrFilters(
 export function PrFilterBar({
   rows,
   state,
+  savedFilters,
   onChange,
 }: {
   rows: EnrichedPullRequest[];
   state: PrFilterState;
+  savedFilters: NotificationFilter[];
   onChange: (next: PrFilterState) => void;
 }) {
-  const [savedFilters, setSavedFilters] = useState<NotificationFilter[]>([]);
-
-  useEffect(() => {
-    let alive = true;
-    void (async () => {
-      try {
-        const list = await prmasterTauri.listFilters();
-        if (alive) setSavedFilters(list);
-      } catch {
-        // Filters tab will surface failures; the bar just hides the menu.
-      }
-    })();
-    return () => {
-      alive = false;
-    };
-  }, []);
-
   const allAuthors = useMemo(() => {
     const set = new Set<string>();
     for (const r of rows) {

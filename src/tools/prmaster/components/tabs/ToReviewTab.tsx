@@ -64,6 +64,7 @@ export function ToReviewTab() {
         <PrFilterBar
           rows={state.toReview}
           state={filter}
+          savedFilters={savedFilters}
           onChange={setFilter}
         />
       }

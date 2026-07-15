@@ -66,6 +66,7 @@ export function ReviewedTab() {
         <PrFilterBar
           rows={state.reviewed}
           state={filter}
+          savedFilters={savedFilters}
           onChange={setFilter}
         />
       }
