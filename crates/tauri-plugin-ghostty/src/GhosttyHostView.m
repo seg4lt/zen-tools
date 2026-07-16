@@ -706,12 +706,10 @@ doCommandBySelector:(SEL)commandSelector {
                                          r.size.width *= 0.5; break;
         default: break;
     }
-    // NSView coordinates are flipped, while Ghostty's custom root
-    // IOSurface CALayer may use Core Animation's bottom-left origin.
-    // Convert only when the installed renderer layer isn't flipped.
-    if (!_dropIndicator.superlayer.geometryFlipped) {
-        r.origin.y = self.bounds.size.height - NSMaxY(r);
-    }
+    // Frames added to Ghostty's view-hosted root layer are interpreted in
+    // the host NSView's flipped (top-left) coordinate system in practice.
+    // Submit the view-space rectangle directly. Mirroring Y here makes the
+    // Up and Down previews appear on the opposite side.
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     _dropIndicator.frame = r;
