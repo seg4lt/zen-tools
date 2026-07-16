@@ -399,67 +399,6 @@ body.terminal-route-active main .terminal-chrome * {
   padding: 24px;
 }
 
-.terminal-search {
-  position: absolute;
-  z-index: 10;
-  top: 6px;
-  right: 8px;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  width: min(420px, calc(100% - 16px));
-  min-height: 36px;
-  border: 1px solid var(--term-bar-border);
-  border-radius: 10px;
-  background: var(--term-notice-bg);
-  padding: 4px;
-  color: var(--term-bar-fg);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
-  font: 12px -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
-  backdrop-filter: blur(14px);
-}
-
-.terminal-search__input {
-  min-width: 80px;
-  flex: 1;
-  border: 0;
-  background: transparent;
-  padding: 4px 6px;
-  color: inherit;
-  font: inherit;
-  outline: none;
-}
-
-.terminal-search__input::placeholder,
-.terminal-search__count {
-  color: var(--term-bar-fg-dim);
-}
-
-.terminal-search__count {
-  min-width: 44px;
-  text-align: right;
-  font-variant-numeric: tabular-nums;
-}
-
-.terminal-search__button {
-  display: inline-flex;
-  width: 26px;
-  height: 26px;
-  align-items: center;
-  justify-content: center;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  padding: 0;
-  color: var(--term-bar-fg-dim);
-  font: 15px/1 -apple-system, BlinkMacSystemFont, sans-serif;
-}
-
-.terminal-search__button:hover {
-  background: var(--term-tab-bg-hover);
-  color: var(--term-bar-fg);
-}
-
 .terminal-empty-state__card {
   display: flex;
   max-width: 320px;

@@ -27,7 +27,9 @@
 // expose the conditional-clear via this small helper instead — it's
 // defined after the slot itself further down the file.
 static void clear_host_view_if_matches(void *expected);
+static void clear_last_host_view_if_matches(void *expected);
 static void emit_terminal_interaction_event(ghostty_surface_t surface);
+static ghostty_surface_t active_tab_fallback_surface(void);
 
 @class GhosttyHostView;
 @interface GhosttySplitView : NSSplitView
@@ -78,7 +80,7 @@ static void resync_chrome_and_surfaces(GhosttyHostView *fallback);
 static CGFloat g_inset_top;
 static BOOL g_window_resync_scheduled = NO;
 
-@interface GhosttyHostView : NSView <NSTextInputClient> {
+@interface GhosttyHostView : NSView <NSTextInputClient, NSSearchFieldDelegate> {
     ghostty_surface_t          _surface;
     NSTrackingArea            *_tracking;
     NSMutableAttributedString *_markedText;
@@ -94,11 +96,26 @@ static BOOL g_window_resync_scheduled = NO;
     CALayer                    *_dropIndicator;
     NSString                   *_dragIdentifier;
     GhosttyPaneDropZone         _shownDropZone;
+    NSView                     *_searchOverlay;
+    NSSearchField              *_searchField;
+    NSTextField                *_searchCount;
+    NSButton                   *_searchPreviousButton;
+    NSButton                   *_searchNextButton;
+    NSButton                   *_searchCloseButton;
+    NSUInteger                  _searchGeneration;
+    NSInteger                   _searchTotal;
+    NSInteger                   _searchSelected;
+    BOOL                        _searchQueryPending;
 }
 - (ghostty_surface_t)surface; // Accessor for C-side helpers.
 - (NSString *)dragIdentifier;
 - (void)layoutPaneDragHandle;
 - (void)setPaneDragHandleVisible:(BOOL)visible;
+- (void)beginNativeSearchWithNeedle:(NSString *)needle;
+- (void)endNativeSearch;
+- (BOOL)nativeSearchOwnsFocus;
+- (void)updateNativeSearchTotal:(NSInteger)total;
+- (void)updateNativeSearchSelected:(NSInteger)selected;
 // Exposed so the resize / fullscreen notification handler can
 // re-sync every live host view in the tree (split panes etc.) in
 // one pass via `collect_hosts` — not just `self`.
@@ -117,6 +134,10 @@ static BOOL g_window_resync_scheduled = NO;
     _imeAccumulator = nil;
     _dragIdentifier = NSUUID.UUID.UUIDString;
     _shownDropZone = GhosttyPaneDropZoneNone;
+    _searchGeneration = 0;
+    _searchTotal = -1;
+    _searchSelected = -1;
+    _searchQueryPending = NO;
     self.wantsLayer = YES;
     self.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
 
@@ -324,6 +345,236 @@ static BOOL g_window_resync_scheduled = NO;
     _dragHandle.hidden = !visible;
 }
 
+- (NSButton *)nativeSearchButtonWithTitle:(NSString *)title
+                                    action:(SEL)action
+                        accessibilityLabel:(NSString *)label {
+    NSButton *button = [NSButton buttonWithTitle:title target:self action:action];
+    button.bordered = NO;
+    button.font = [NSFont systemFontOfSize:14 weight:NSFontWeightMedium];
+    button.contentTintColor = NSColor.secondaryLabelColor;
+    button.toolTip = label;
+    button.accessibilityLabel = label;
+    return button;
+}
+
+- (void)ensureNativeSearchOverlay {
+    if (_searchOverlay) return;
+
+    _searchOverlay = [[NSView alloc] initWithFrame:NSZeroRect];
+    _searchOverlay.wantsLayer = YES;
+    _searchOverlay.layer.backgroundColor =
+        [NSColor.windowBackgroundColor colorWithAlphaComponent:0.96].CGColor;
+    _searchOverlay.layer.cornerRadius = 9.0;
+    _searchOverlay.layer.shadowColor = NSColor.blackColor.CGColor;
+    _searchOverlay.layer.shadowOpacity = 0.28;
+    _searchOverlay.layer.shadowRadius = 5.0;
+    _searchOverlay.layer.shadowOffset = NSMakeSize(0, -2);
+    _searchOverlay.hidden = YES;
+
+    _searchField = [[NSSearchField alloc] initWithFrame:NSZeroRect];
+    _searchField.placeholderString = @"Search scrollback";
+    _searchField.delegate = self;
+    _searchField.controlSize = NSControlSizeSmall;
+    _searchField.accessibilityLabel = @"Search terminal scrollback";
+    [_searchOverlay addSubview:_searchField];
+
+    _searchCount = [NSTextField labelWithString:@"…"];
+    _searchCount.alignment = NSTextAlignmentRight;
+    _searchCount.font = [NSFont monospacedDigitSystemFontOfSize:11
+                                                       weight:NSFontWeightRegular];
+    _searchCount.textColor = NSColor.secondaryLabelColor;
+    _searchCount.accessibilityLabel = @"Search result count";
+    [_searchOverlay addSubview:_searchCount];
+
+    _searchPreviousButton = [self nativeSearchButtonWithTitle:@"↑"
+                                                       action:@selector(nativeSearchNext:)
+                                           accessibilityLabel:@"Next match above"];
+    _searchNextButton = [self nativeSearchButtonWithTitle:@"↓"
+                                                   action:@selector(nativeSearchPrevious:)
+                                       accessibilityLabel:@"Previous match below"];
+    _searchCloseButton = [self nativeSearchButtonWithTitle:@"×"
+                                                    action:@selector(nativeSearchClose:)
+                                        accessibilityLabel:@"Close search"];
+    [_searchOverlay addSubview:_searchPreviousButton];
+    [_searchOverlay addSubview:_searchNextButton];
+    [_searchOverlay addSubview:_searchCloseButton];
+
+    [self addSubview:_searchOverlay positioned:NSWindowAbove relativeTo:nil];
+}
+
+- (void)layoutNativeSearchOverlay {
+    if (!_searchOverlay) return;
+    CGFloat width = MIN(360.0, MAX(0.0, self.bounds.size.width - 16.0));
+    CGFloat height = 42.0;
+    _searchOverlay.frame = NSMakeRect(MAX(8.0, self.bounds.size.width - width - 8.0),
+                                      8.0, width, height);
+    CGFloat buttonWidth = 24.0;
+    BOOL showNavigation = width >= 220.0;
+    BOOL showCount = width >= 285.0;
+    _searchPreviousButton.hidden = !showNavigation;
+    _searchNextButton.hidden = !showNavigation;
+    _searchCount.hidden = !showCount;
+    CGFloat padding = width >= 80.0 ? 8.0 : 3.0;
+    CGFloat countWidth = showCount ? 46.0 : 0.0;
+    CGFloat navigationWidth = showNavigation ? buttonWidth * 2.0 : 0.0;
+    CGFloat fieldWidth = MAX(1.0, width - padding * 2.0 - countWidth -
+                             navigationWidth - buttonWidth - 4.0);
+    _searchField.frame = NSMakeRect(padding, 8.0, fieldWidth, 26.0);
+    CGFloat x = NSMaxX(_searchField.frame) + 2.0;
+    if (showCount) {
+        _searchCount.frame = NSMakeRect(x, 11.0, countWidth, 20.0);
+        x += countWidth + 2.0;
+    }
+    if (showNavigation) {
+        _searchPreviousButton.frame = NSMakeRect(x, 9.0, buttonWidth, 24.0);
+        x += buttonWidth;
+        _searchNextButton.frame = NSMakeRect(x, 9.0, buttonWidth, 24.0);
+        x += buttonWidth;
+    }
+    _searchCloseButton.frame = NSMakeRect(MIN(x, MAX(0.0, width - padding - buttonWidth)),
+                                          9.0, buttonWidth, 24.0);
+}
+
+- (BOOL)performSearchBinding:(NSString *)binding {
+    if (!_surface || !binding.length) return NO;
+    const char *utf8 = binding.UTF8String;
+    if (!utf8) return NO;
+    return ghostty_surface_binding_action(_surface, utf8, strlen(utf8));
+}
+
+- (void)updateNativeSearchCountLabel {
+    if (!_searchCount) return;
+    if (_searchTotal < 0) {
+        _searchCount.stringValue = @"…";
+    } else if (_searchTotal == 0) {
+        _searchCount.stringValue = @"0/0";
+    } else if (_searchSelected >= 0) {
+        _searchCount.stringValue = [NSString stringWithFormat:@"%ld/%ld",
+            (long)(_searchSelected + 1), (long)_searchTotal];
+    } else {
+        _searchCount.stringValue = [NSString stringWithFormat:@"0/%ld",
+            (long)_searchTotal];
+    }
+    NSAccessibilityPostNotification(_searchCount,
+                                    NSAccessibilityValueChangedNotification);
+}
+
+- (void)beginNativeSearchWithNeedle:(NSString *)needle {
+    [self ensureNativeSearchOverlay];
+    BOOL wasVisible = !_searchOverlay.hidden;
+    BOOL focusOnly = wasVisible && needle.length == 0;
+    // A focus-only repeat must not cancel the in-flight query debounce.
+    // Its generation remains valid so the pending text is still sent.
+    if (!focusOnly) _searchGeneration += 1;
+    // A second Cmd+F focuses the existing query. A non-empty needle
+    // (search_selection) replaces it and must be forwarded because
+    // start_search itself only asks the embedding UI to open.
+    if (needle.length > 0 || !wasVisible) {
+        _searchQueryPending = NO;
+        _searchTotal = -1;
+        _searchSelected = -1;
+        _searchField.stringValue = needle ?: @"";
+    }
+    [self updateNativeSearchCountLabel];
+    [self layoutNativeSearchOverlay];
+    _searchOverlay.hidden = NO;
+    [self addSubview:_searchOverlay positioned:NSWindowAbove relativeTo:nil];
+    NSUInteger focusGeneration = _searchGeneration;
+    NSResponder *focusSource = self.window.firstResponder;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSView *tabRoot = tab_root_for_descendant(self);
+        if (self->_searchOverlay.hidden || !self.window ||
+            self->_searchGeneration != focusGeneration || !tabRoot ||
+            tabRoot.hidden || (self.window.firstResponder != self &&
+                               ![self nativeSearchOwnsFocus] &&
+                               self.window.firstResponder != focusSource)) return;
+        [self.window makeFirstResponder:self->_searchField];
+        [self->_searchField selectText:nil];
+    });
+    if (needle.length > 0) {
+        [self performSearchBinding:[@"search:" stringByAppendingString:needle]];
+    }
+}
+
+- (void)endNativeSearch {
+    if (!_searchOverlay) return;
+    _searchGeneration += 1;
+    _searchQueryPending = NO;
+    BOOL ownedFocus = _searchField.currentEditor == self.window.firstResponder;
+    _searchOverlay.hidden = YES;
+    if (ownedFocus && ![tab_root_for_descendant(self) isHidden]) {
+        [self.window makeFirstResponder:self];
+    }
+}
+
+- (BOOL)nativeSearchOwnsFocus {
+    return _searchField && _searchField.currentEditor == self.window.firstResponder;
+}
+
+- (void)updateNativeSearchTotal:(NSInteger)total {
+    if (_searchQueryPending) return;
+    _searchTotal = MAX(-1, total);
+    [self updateNativeSearchCountLabel];
+}
+
+- (void)updateNativeSearchSelected:(NSInteger)selected {
+    if (_searchQueryPending) return;
+    _searchSelected = MAX(-1, selected);
+    [self updateNativeSearchCountLabel];
+}
+
+- (void)nativeSearchPrevious:(id)sender {
+    [self performSearchBinding:@"navigate_search:previous"];
+}
+
+- (void)nativeSearchNext:(id)sender {
+    [self performSearchBinding:@"navigate_search:next"];
+}
+
+- (void)nativeSearchClose:(id)sender {
+    [self performSearchBinding:@"end_search"];
+}
+
+- (void)controlTextDidChange:(NSNotification *)notification {
+    if (notification.object != _searchField || _searchOverlay.hidden) return;
+    NSString *query = [_searchField.stringValue copy];
+    NSUInteger generation = ++_searchGeneration;
+    _searchQueryPending = YES;
+    _searchTotal = -1;
+    _searchSelected = -1;
+    [self updateNativeSearchCountLabel];
+    __weak GhosttyHostView *weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 120 * NSEC_PER_MSEC),
+                   dispatch_get_main_queue(), ^{
+        GhosttyHostView *strongSelf = weakSelf;
+        if (!strongSelf || strongSelf->_searchOverlay.hidden ||
+            strongSelf->_searchGeneration != generation) return;
+        strongSelf->_searchQueryPending = NO;
+        [strongSelf performSearchBinding:[@"search:" stringByAppendingString:query]];
+    });
+}
+
+- (BOOL)control:(NSControl *)control
+        textView:(NSTextView *)textView
+doCommandBySelector:(SEL)commandSelector {
+    if (control != _searchField) return NO;
+    if (commandSelector == @selector(cancelOperation:)) {
+        if (_searchField.stringValue.length == 0) {
+            [self nativeSearchClose:nil];
+        } else if (self.window) {
+            [self.window makeFirstResponder:self];
+        }
+        return YES;
+    }
+    if (commandSelector == @selector(insertNewline:) ||
+        commandSelector == @selector(insertNewlineIgnoringFieldEditor:)) {
+        BOOL previous = (NSApp.currentEvent.modifierFlags & NSEventModifierFlagShift) != 0;
+        previous ? [self nativeSearchPrevious:nil] : [self nativeSearchNext:nil];
+        return YES;
+    }
+    return NO;
+}
+
 - (GhosttyPaneDropZone)paneDropZoneForDraggingInfo:(id<NSDraggingInfo>)sender {
     NSPoint p = [self convertPoint:sender.draggingLocation fromView:nil];
     CGFloat w = self.bounds.size.width;
@@ -529,6 +780,10 @@ static BOOL g_window_resync_scheduled = NO;
 }
 
 - (void)setSurface:(ghostty_surface_t)surface {
+    if (!surface && _surface) {
+        _searchGeneration += 1;
+        _searchOverlay.hidden = YES;
+    }
     _surface = surface;
     if (_surface && _dropIndicator.superlayer != self.layer) {
         // ghostty_surface_new installs its IOSurface-backed Metal layer
@@ -544,6 +799,7 @@ static BOOL g_window_resync_scheduled = NO;
         GhosttyRegisterHostView((__bridge void *)self);
     } else {
         clear_host_view_if_matches((__bridge void *)self);
+        clear_last_host_view_if_matches((__bridge void *)self);
     }
     if (_surface && self.window) {
         // Initial size + scale sync. `viewDidMoveToWindow` already fired
@@ -641,6 +897,7 @@ static BOOL g_window_resync_scheduled = NO;
 - (void)setFrameSize:(NSSize)newSize {
     [super setFrameSize:newSize];
     [self layoutPaneDragHandle];
+    [self layoutNativeSearchOverlay];
     if (_shownDropZone != GhosttyPaneDropZoneNone) {
         [self showPaneDropZone:_shownDropZone];
     }
@@ -1268,17 +1525,20 @@ void GhosttyDeferSurfaceFree(ghostty_surface_t surface) {
 // handler can find the right NSWindow.
 
 static _Atomic(void *) g_host_view = NULL;
+static _Atomic(void *) g_last_host_view = NULL;
 static _Atomic(void *) g_app = NULL;
 static _Atomic(void *) g_search_surface = NULL;
 static int tab_id_for_surface(ghostty_surface_t surface);
 
 void GhosttyRegisterHostView(void *view) {
     atomic_store(&g_host_view, view);
+    if (view) atomic_store(&g_last_host_view, view);
 }
 
 bool GhosttyFocusedSurfaceBindingAction(const char *action) {
     if (!action) return false;
-    ghostty_surface_t surface = atomic_load(&g_search_surface);
+    BOOL startingSearch = strcmp(action, "start_search") == 0;
+    ghostty_surface_t surface = startingSearch ? NULL : atomic_load(&g_search_surface);
     // Never dereference a cached surface after its native view has gone
     // away. Pointer comparison while walking the live tree is safe.
     if (surface && tab_id_for_surface(surface) == 0) {
@@ -1286,11 +1546,17 @@ bool GhosttyFocusedSurfaceBindingAction(const char *action) {
         surface = NULL;
     }
     if (!surface) {
-        NSView *view = (__bridge NSView *)atomic_load(&g_host_view);
+        void *candidate = atomic_load(&g_host_view);
+        if (!candidate && startingSearch) candidate = atomic_load(&g_last_host_view);
+        NSView *view = (__bridge NSView *)candidate;
         if ([view isKindOfClass:[GhosttyHostView class]]) {
-            surface = [(GhosttyHostView *)view surface];
+            NSView *tabRoot = tab_root_for_descendant(view);
+            if (tabRoot && !tabRoot.hidden) {
+                surface = [(GhosttyHostView *)view surface];
+            }
         }
     }
+    if (!surface && startingSearch) surface = active_tab_fallback_surface();
     if (!surface) return false;
     return ghostty_surface_binding_action(surface, action, strlen(action));
 }
@@ -1306,6 +1572,12 @@ static void clear_host_view_if_matches(void *expected) {
     void *current = atomic_load(&g_host_view);
     if (current == expected) {
         atomic_store(&g_host_view, NULL);
+    }
+}
+
+static void clear_last_host_view_if_matches(void *expected) {
+    if (atomic_load(&g_last_host_view) == expected) {
+        atomic_store(&g_last_host_view, NULL);
     }
 }
 
@@ -1829,6 +2101,15 @@ int GhosttyTabActiveId(void) {
         if (!child.hidden) return tab_id_get(child);
     }
     return 0;
+}
+
+static ghostty_surface_t active_tab_fallback_surface(void) {
+    if (!g_tab_container) return NULL;
+    for (NSView *tabRoot in g_tab_container.subviews) {
+        if (tabRoot.hidden) continue;
+        return find_first_host_descendant(tabRoot).surface;
+    }
+    return NULL;
 }
 
 // Walk every GhosttyHostView under the tab container and call
@@ -2554,58 +2835,37 @@ bool GhosttyHandleAction(void *app, void *target, void *action) {
             return true;
         }
         case GHOSTTY_ACTION_START_SEARCH: {
-            int tab_id = status_tab_id_for_target(tgt);
-            if (tgt && tgt->tag == GHOSTTY_TARGET_SURFACE) {
-                atomic_store(&g_search_surface, tgt->target.surface);
-            }
+            if (!tgt || tgt->tag != GHOSTTY_TARGET_SURFACE) return false;
+            ghostty_surface_t search_surface = tgt->target.surface;
+            GhosttyHostView *search_host = host_view_for_surface(search_surface);
+            atomic_store(&g_search_surface, search_surface);
             const char *needle_c = act->action.start_search.needle;
             NSString *needle = needle_c ? [NSString stringWithUTF8String:needle_c] : @"";
-            emit_terminal_status_event(
-                TERMINAL_STATUS_EVENT_SEARCH_STARTED,
-                tab_id,
-                0,
-                0,
-                needle,
-                nil);
+            [search_host beginNativeSearchWithNeedle:needle];
             return true;
         }
         case GHOSTTY_ACTION_END_SEARCH: {
-            ghostty_surface_t search_surface =
-                tgt && tgt->tag == GHOSTTY_TARGET_SURFACE
-                    ? tgt->target.surface
-                    : atomic_load(&g_search_surface);
-            emit_terminal_status_event(
-                TERMINAL_STATUS_EVENT_SEARCH_ENDED,
-                status_tab_id_for_target(tgt),
-                0,
-                0,
-                nil,
-                nil);
-            atomic_store(&g_search_surface, NULL);
+            if (!tgt || tgt->tag != GHOSTTY_TARGET_SURFACE) return false;
+            ghostty_surface_t search_surface = tgt->target.surface;
             GhosttyHostView *search_host = host_view_for_surface(search_surface);
-            if (search_host.window) {
-                [search_host.window makeFirstResponder:search_host];
+            [search_host endNativeSearch];
+            if (atomic_load(&g_search_surface) == search_surface) {
+                atomic_store(&g_search_surface, NULL);
             }
             return true;
         }
         case GHOSTTY_ACTION_SEARCH_TOTAL: {
-            emit_terminal_status_event(
-                TERMINAL_STATUS_EVENT_SEARCH_TOTAL,
-                status_tab_id_for_target(tgt),
-                (long long)act->action.search_total.total,
-                0,
-                nil,
-                nil);
+            if (!tgt || tgt->tag != GHOSTTY_TARGET_SURFACE) return false;
+            ghostty_surface_t search_surface = tgt->target.surface;
+            [host_view_for_surface(search_surface)
+                updateNativeSearchTotal:(NSInteger)act->action.search_total.total];
             return true;
         }
         case GHOSTTY_ACTION_SEARCH_SELECTED: {
-            emit_terminal_status_event(
-                TERMINAL_STATUS_EVENT_SEARCH_SELECTED,
-                status_tab_id_for_target(tgt),
-                (long long)act->action.search_selected.selected,
-                0,
-                nil,
-                nil);
+            if (!tgt || tgt->tag != GHOSTTY_TARGET_SURFACE) return false;
+            ghostty_surface_t search_surface = tgt->target.surface;
+            [host_view_for_surface(search_surface)
+                updateNativeSearchSelected:(NSInteger)act->action.search_selected.selected];
             return true;
         }
         case GHOSTTY_ACTION_TOGGLE_FULLSCREEN: {
@@ -2740,7 +3000,9 @@ static void perform_close_pane(GhosttyHostView *pane) {
     if (!pane || !tabRoot) return;
     BOOL shouldRefocus = !tabRoot.hidden &&
         (pane.window.firstResponder == pane ||
+         [pane nativeSearchOwnsFocus] ||
          atomic_load(&g_host_view) == (__bridge void *)pane);
+    if ([pane nativeSearchOwnsFocus]) [pane endNativeSearch];
     clear_tab_zoom_for_descendant(pane);
     NSView *parent = pane.superview;
 
@@ -2794,6 +3056,16 @@ void GhosttyHandleCloseSurface(void *host_view, bool needs_confirmation) {
     NSView *view = (__bridge NSView *)host_view;
     if (![view isKindOfClass:[GhosttyHostView class]]) return;
     perform_close_pane((GhosttyHostView *)view);
+}
+
+static GhosttyHostView *host_owning_native_search_focus(NSWindow *window) {
+    if (!window || !g_tab_container || g_tab_container.window != window) return nil;
+    NSMutableArray<GhosttyHostView *> *hosts = [NSMutableArray array];
+    collect_hosts(g_tab_container, hosts);
+    for (GhosttyHostView *host in hosts) {
+        if ([host nativeSearchOwnsFocus]) return host;
+    }
+    return nil;
 }
 
 // ---- Application-level Cmd-key monitor ----------------------------------
@@ -2873,6 +3145,18 @@ void GhosttyInstallEventMonitor(ghostty_surface_t surface) {
                  NSEventModifierFlagShift   | NSEventModifierFlagControl);
             NSString *chars = event.charactersIgnoringModifiers;
             NSResponder *fr = event.window.firstResponder;
+            GhosttyHostView *searchHost =
+                host_owning_native_search_focus(event.window);
+
+            // While the native search field owns AppKit's shared field
+            // editor, Cmd+F selects its current query again. Without this
+            // special case AppKit sees only an NSTextView responder and the
+            // terminal binding never receives the repeat command.
+            if (searchHost && devMods == NSEventModifierFlagCommand &&
+                [chars isEqualToString:@"f"]) {
+                [searchHost beginNativeSearchWithNeedle:@""];
+                return nil;
+            }
 
             // Cmd+W belongs to the active in-app tab, never the host
             // window. When focus is in the webview, hand the chord to
@@ -2881,7 +3165,7 @@ void GhosttyInstallEventMonitor(ghostty_surface_t surface) {
             // close a split or terminal tab directly.
             if (devMods == NSEventModifierFlagCommand
                 && [chars isEqualToString:@"w"]
-                && ![fr isKindOfClass:[GhosttyHostView class]]) {
+                && ![fr isKindOfClass:[GhosttyHostView class]] && !searchHost) {
                 if (g_host_key_hook_fn) g_host_key_hook_fn("cmd-w");
                 return nil;
             }
@@ -2908,7 +3192,7 @@ void GhosttyInstallEventMonitor(ghostty_surface_t surface) {
             // updates it before keyDown lands), so we use both:
             //   * firstResponder check → SHOULD we intercept at all?
             //   * g_host_view → WHICH surface gets the event?
-            if (![fr isKindOfClass:[GhosttyHostView class]]) {
+            if (![fr isKindOfClass:[GhosttyHostView class]] && !searchHost) {
                 return event; // pass through to AppKit / WKWebView
             }
 
@@ -2966,18 +3250,33 @@ void GhosttyInstallEventMonitor(ghostty_surface_t surface) {
             // pane #1 forever. Falls back to the firstResponder
             // surface itself when the cache is stale.
             ghostty_surface_t target = NULL;
+            if (searchHost) target = searchHost.surface;
             void *vp = atomic_load(&g_host_view);
-            if (vp) {
+            if (!target && vp) {
                 NSView *view = (__bridge NSView *)vp;
                 if ([view isKindOfClass:[GhosttyHostView class]]) {
                     target = [(GhosttyHostView *)view surface];
                 }
             }
-            if (!target) target = [(GhosttyHostView *)fr surface];
+            if (!target && [fr isKindOfClass:[GhosttyHostView class]]) {
+                target = [(GhosttyHostView *)fr surface];
+            }
             if (!target) {
                 // No surface to forward to — let AppKit dispatch
                 // normally rather than swallowing the keystroke.
                 return event;
+            }
+            // Standard editor commands must keep operating on the search
+            // query. Structural shortcuts were consumed above; Cmd+W and
+            // font-size bindings remain terminal-scoped while searching.
+            if (searchHost) {
+                BOOL terminalBinding = devMods == NSEventModifierFlagCommand &&
+                    ([chars isEqualToString:@"w"] ||
+                     [chars isEqualToString:@"="] ||
+                     [chars isEqualToString:@"+"] ||
+                     [chars isEqualToString:@"-"] ||
+                     [chars isEqualToString:@"0"]);
+                if (!terminalBinding) return event;
             }
             send_key_event(target, event, GHOSTTY_ACTION_PRESS);
             return nil;
