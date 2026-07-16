@@ -33,6 +33,29 @@ static void emit_terminal_interaction_event(ghostty_surface_t surface);
 @interface GhosttySplitView : NSSplitView
 @end
 
+@interface GhosttyPaneDragHandle : NSView <NSDraggingSource>
+@property(nonatomic, weak) GhosttyHostView *hostView;
+@property(nonatomic, assign) BOOL dragging;
+@end
+
+typedef NS_ENUM(NSInteger, GhosttyPaneDropZone) {
+    GhosttyPaneDropZoneNone = 0,
+    GhosttyPaneDropZoneTop,
+    GhosttyPaneDropZoneBottom,
+    GhosttyPaneDropZoneLeft,
+    GhosttyPaneDropZoneRight,
+};
+
+static NSPasteboardType const GhosttyPanePasteboardType =
+    @"com.zen-tools.ghostty-pane-id";
+static __weak GhosttyHostView *g_active_pane_drag_source = nil;
+static NSString *g_active_pane_drag_identifier = nil;
+static GhosttyHostView *host_for_drag_identifier(NSString *identifier);
+static NSView *tab_root_for_descendant(NSView *view);
+static BOOL move_pane_to_drop_zone(GhosttyHostView *source,
+                                   GhosttyHostView *destination,
+                                   GhosttyPaneDropZone zone);
+
 // Walk the NSView tree under `root` and append every GhosttyHostView
 // descendant to `out`. Used by the resize / fullscreen handler to
 // re-sync every live ghostty surface in the tree, not just self.
@@ -53,6 +76,7 @@ static void resync_chrome_and_surfaces(GhosttyHostView *fallback);
 // down the file. Needed here so -ghosttySafeSize can read the value
 // without moving the method past the globals block.
 static CGFloat g_inset_top;
+static BOOL g_window_resync_scheduled = NO;
 
 @interface GhosttyHostView : NSView <NSTextInputClient> {
     ghostty_surface_t          _surface;
@@ -66,8 +90,15 @@ static CGFloat g_inset_top;
     // event with the buffered text — preventing double-dispatch
     // (one from send_key_event's text field, one from insertText).
     NSMutableArray<NSString *> *_imeAccumulator;
+    GhosttyPaneDragHandle      *_dragHandle;
+    CALayer                    *_dropIndicator;
+    NSString                   *_dragIdentifier;
+    GhosttyPaneDropZone         _shownDropZone;
 }
 - (ghostty_surface_t)surface; // Accessor for C-side helpers.
+- (NSString *)dragIdentifier;
+- (void)layoutPaneDragHandle;
+- (void)setPaneDragHandleVisible:(BOOL)visible;
 // Exposed so the resize / fullscreen notification handler can
 // re-sync every live host view in the tree (split panes etc.) in
 // one pass via `collect_hosts` — not just `self`.
@@ -84,13 +115,38 @@ static CGFloat g_inset_top;
     _markedRange = NSMakeRange(NSNotFound, 0);
     _selectedRange = NSMakeRange(NSNotFound, 0);
     _imeAccumulator = nil;
+    _dragIdentifier = NSUUID.UUID.UUIDString;
+    _shownDropZone = GhosttyPaneDropZoneNone;
     self.wantsLayer = YES;
     self.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+
+    // A tiny, native-only drag target mirrors Ghostty 1.3's macOS
+    // split grab handle. It stays hidden until the pointer enters the
+    // upper hover band, so normal terminal selection keeps the full
+    // surface area everywhere else.
+    _dragHandle = [[GhosttyPaneDragHandle alloc] initWithFrame:NSZeroRect];
+    _dragHandle.hostView = self;
+    _dragHandle.wantsLayer = YES;
+    _dragHandle.hidden = YES;
+    [self addSubview:_dragHandle];
+    [self layoutPaneDragHandle];
+
+    // The drop preview is a single composited layer. Updating its
+    // frame during dragging avoids view-tree churn and never asks the
+    // Metal terminal surface for a snapshot/readback.
+    _dropIndicator = [CALayer layer];
+    _dropIndicator.hidden = YES;
+    _dropIndicator.zPosition = 1000;
+    _dropIndicator.cornerRadius = 5.0;
+    _dropIndicator.backgroundColor =
+        [NSColor.controlAccentColor colorWithAlphaComponent:0.28].CGColor;
+    [self.layer addSublayer:_dropIndicator];
 
     // Accept file drag-and-drop. Dropped paths are sent to the
     // surface as text (ghostty_surface_text) — typed at the prompt
     // as if the user pasted them. Matches Terminal.app behaviour.
-    [self registerForDraggedTypes:@[NSPasteboardTypeFileURL,
+    [self registerForDraggedTypes:@[GhosttyPanePasteboardType,
+                                     NSPasteboardTypeFileURL,
                                      NSPasteboardTypeString]];
 
     // Listen for app-level activation so we can keep ghostty's
@@ -210,7 +266,13 @@ static CGFloat g_inset_top;
 /// and `contentLayoutRect` only converges after the current call
 /// stack unwinds.
 - (void)windowDidResizeOrEndFullScreen:(NSNotification *)note {
+    // Every pane observes the same window notification. Coalesce them
+    // into one tree walk on the next runloop tick; without this, N panes
+    // each resynced all N surfaces (O(N²)) during live resize.
+    if (g_window_resync_scheduled) return;
+    g_window_resync_scheduled = YES;
     dispatch_async(dispatch_get_main_queue(), ^{
+        g_window_resync_scheduled = NO;
         [self resyncSizeFromWindow];
     });
 }
@@ -248,6 +310,66 @@ static CGFloat g_inset_top;
     [NSNotificationCenter.defaultCenter removeObserver:self];
 }
 
+- (NSString *)dragIdentifier { return _dragIdentifier; }
+
+- (void)layoutPaneDragHandle {
+    static const CGFloat width = 80.0;
+    static const CGFloat height = 14.0;
+    _dragHandle.frame = NSMakeRect(MAX(0, (self.bounds.size.width - width) * 0.5),
+                                   0, MIN(width, self.bounds.size.width), height);
+}
+
+- (void)setPaneDragHandleVisible:(BOOL)visible {
+    if (_dragHandle.dragging) visible = YES;
+    _dragHandle.hidden = !visible;
+}
+
+- (GhosttyPaneDropZone)paneDropZoneForDraggingInfo:(id<NSDraggingInfo>)sender {
+    NSPoint p = [self convertPoint:sender.draggingLocation fromView:nil];
+    CGFloat w = self.bounds.size.width;
+    CGFloat h = self.bounds.size.height;
+    if (w <= 0 || h <= 0) return GhosttyPaneDropZoneNone;
+    CGFloat left = p.x / w;
+    CGFloat right = 1.0 - left;
+    CGFloat top = p.y / h; // GhosttyHostView is flipped: y=0 is top.
+    CGFloat bottom = 1.0 - top;
+    CGFloat nearest = MIN(MIN(left, right), MIN(top, bottom));
+    if (nearest == left) return GhosttyPaneDropZoneLeft;
+    if (nearest == right) return GhosttyPaneDropZoneRight;
+    if (nearest == top) return GhosttyPaneDropZoneTop;
+    return GhosttyPaneDropZoneBottom;
+}
+
+- (void)showPaneDropZone:(GhosttyPaneDropZone)zone {
+    if (zone == GhosttyPaneDropZoneNone) {
+        _dropIndicator.hidden = YES;
+        _shownDropZone = GhosttyPaneDropZoneNone;
+        return;
+    }
+    NSRect r = self.bounds;
+    switch (zone) {
+        case GhosttyPaneDropZoneTop:    r.size.height *= 0.5; break;
+        case GhosttyPaneDropZoneBottom: r.origin.y += r.size.height * 0.5;
+                                         r.size.height *= 0.5; break;
+        case GhosttyPaneDropZoneLeft:   r.size.width *= 0.5; break;
+        case GhosttyPaneDropZoneRight:  r.origin.x += r.size.width * 0.5;
+                                         r.size.width *= 0.5; break;
+        default: break;
+    }
+    // NSView coordinates are flipped, while Ghostty's custom root
+    // IOSurface CALayer may use Core Animation's bottom-left origin.
+    // Convert only when the installed renderer layer isn't flipped.
+    if (!_dropIndicator.superlayer.geometryFlipped) {
+        r.origin.y = self.bounds.size.height - NSMaxY(r);
+    }
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    _dropIndicator.frame = r;
+    _dropIndicator.hidden = NO;
+    _shownDropZone = zone;
+    [CATransaction commit];
+}
+
 - (void)appDidBecomeActive:(NSNotification *)note {
     if (_surface) ghostty_surface_set_focus(_surface, true);
 }
@@ -266,16 +388,67 @@ static CGFloat g_inset_top;
 // --- Drag-and-drop --------------------------------------------------------
 
 - (NSDragOperation)draggingEntered:(id<NSDraggingInfo>)sender {
+    NSPasteboard *pb = sender.draggingPasteboard;
+    if ([pb availableTypeFromArray:@[GhosttyPanePasteboardType]]) {
+        NSString *identifier = [pb stringForType:GhosttyPanePasteboardType];
+        GhosttyHostView *source = host_for_drag_identifier(identifier);
+        if (!source || source == self ||
+            tab_root_for_descendant(source) != tab_root_for_descendant(self)) {
+            [self showPaneDropZone:GhosttyPaneDropZoneNone];
+            return NSDragOperationNone;
+        }
+        [self showPaneDropZone:[self paneDropZoneForDraggingInfo:sender]];
+        return NSDragOperationMove;
+    }
+    if (![pb availableTypeFromArray:@[NSPasteboardTypeFileURL,
+                                      NSPasteboardTypeString]]) {
+        return NSDragOperationNone;
+    }
     return NSDragOperationCopy;
 }
 
+- (NSDragOperation)draggingUpdated:(id<NSDraggingInfo>)sender {
+    NSPasteboard *pb = sender.draggingPasteboard;
+    if (![pb availableTypeFromArray:@[GhosttyPanePasteboardType]]) {
+        return [pb availableTypeFromArray:@[NSPasteboardTypeFileURL,
+                                             NSPasteboardTypeString]]
+            ? NSDragOperationCopy : NSDragOperationNone;
+    }
+    NSString *identifier = [pb stringForType:GhosttyPanePasteboardType];
+    GhosttyHostView *source = host_for_drag_identifier(identifier);
+    if (!source || source == self ||
+        tab_root_for_descendant(source) != tab_root_for_descendant(self)) {
+        [self showPaneDropZone:GhosttyPaneDropZoneNone];
+        return NSDragOperationNone;
+    }
+    [self showPaneDropZone:[self paneDropZoneForDraggingInfo:sender]];
+    return NSDragOperationMove;
+}
+
+- (void)draggingExited:(nullable id<NSDraggingInfo>)sender {
+    [self showPaneDropZone:GhosttyPaneDropZoneNone];
+}
+
 - (BOOL)prepareForDragOperation:(id<NSDraggingInfo>)sender {
-    return YES;
+    return [sender.draggingPasteboard
+        availableTypeFromArray:@[GhosttyPanePasteboardType,
+                                 NSPasteboardTypeFileURL,
+                                 NSPasteboardTypeString]] != nil;
 }
 
 - (BOOL)performDragOperation:(id<NSDraggingInfo>)sender {
-    if (!_surface) return NO;
     NSPasteboard *pb = sender.draggingPasteboard;
+
+    if ([pb availableTypeFromArray:@[GhosttyPanePasteboardType]]) {
+        NSString *identifier = [pb stringForType:GhosttyPanePasteboardType];
+        GhosttyHostView *source = host_for_drag_identifier(identifier);
+        GhosttyPaneDropZone zone = [self paneDropZoneForDraggingInfo:sender];
+        [self showPaneDropZone:GhosttyPaneDropZoneNone];
+        if (!source || source == self || zone == GhosttyPaneDropZoneNone) return NO;
+        return move_pane_to_drop_zone(source, self, zone);
+    }
+
+    if (!_surface) return NO;
 
     // Prefer file URLs — drop-to-paste-path is the main use case.
     NSArray<NSURL *> *urls =
@@ -315,6 +488,12 @@ static CGFloat g_inset_top;
     return NO;
 }
 
+- (void)concludeDragOperation:(nullable id<NSDraggingInfo>)sender {
+    [self showPaneDropZone:GhosttyPaneDropZoneNone];
+}
+
+- (BOOL)wantsPeriodicDraggingUpdates { return NO; }
+
 - (ghostty_surface_t)surface { return _surface; }
 
 - (BOOL)acceptsFirstResponder { return YES; }
@@ -351,9 +530,21 @@ static CGFloat g_inset_top;
 
 - (void)setSurface:(ghostty_surface_t)surface {
     _surface = surface;
+    if (_surface && _dropIndicator.superlayer != self.layer) {
+        // ghostty_surface_new installs its IOSurface-backed Metal layer
+        // as the view's new root layer. Anything attached during init
+        // belongs to the discarded layer, so mount the overlay only
+        // after the renderer has completed that replacement.
+        [_dropIndicator removeFromSuperlayer];
+        [self.layer addSublayer:_dropIndicator];
+    }
     // Register this view globally so action_cb / close_surface_cb
     // can find the NSWindow. Cleared on shutdown via setSurface(NULL).
-    GhosttyRegisterHostView(surface ? (__bridge void *)self : NULL);
+    if (surface) {
+        GhosttyRegisterHostView((__bridge void *)self);
+    } else {
+        clear_host_view_if_matches((__bridge void *)self);
+    }
     if (_surface && self.window) {
         // Initial size + scale sync. `viewDidMoveToWindow` already fired
         // (we were added to the view hierarchy before the surface existed),
@@ -449,6 +640,10 @@ static CGFloat g_inset_top;
 
 - (void)setFrameSize:(NSSize)newSize {
     [super setFrameSize:newSize];
+    [self layoutPaneDragHandle];
+    if (_shownDropZone != GhosttyPaneDropZoneNone) {
+        [self showPaneDropZone:_shownDropZone];
+    }
     if (!_surface) return;
     CGFloat scale = self.window ? self.window.backingScaleFactor : 1.0;
     if (scale <= 0) scale = 1.0;
@@ -712,6 +907,10 @@ static void send_mouse_pos(ghostty_surface_t surface, NSView *view, NSEvent *eve
 
 - (void)mouseMoved:(NSEvent*)event {
     if (!_surface) { [super mouseMoved:event]; return; }
+    NSPoint p = [self ghosttyMousePoint:event];
+    CGFloat revealHeight = MIN(self.bounds.size.height,
+                               MAX(14.0, self.bounds.size.height * 0.20));
+    [self setPaneDragHandleVisible:(p.y >= 0 && p.y <= revealHeight)];
     send_mouse_pos(_surface, self, event);
 }
 
@@ -755,6 +954,8 @@ static void send_mouse_pos(ghostty_surface_t surface, NSView *view, NSEvent *eve
 }
 
 - (void)mouseExited:(NSEvent*)event {
+    NSPoint p = [self ghosttyMousePoint:event];
+    if (!NSPointInRect(p, self.bounds)) [self setPaneDragHandleVisible:NO];
     if (_surface) {
         // Negative coordinates tell ghostty the cursor left the
         // viewport — clears any hover-cell state (link underline,
@@ -924,6 +1125,102 @@ static void send_mouse_pos(ghostty_surface_t surface, NSView *view, NSEvent *eve
 
 static const void * const kSuppressDividerKey = &kSuppressDividerKey;
 
+@implementation GhosttyPaneDragHandle
+
+- (BOOL)isFlipped { return YES; }
+- (BOOL)isOpaque { return NO; }
+- (BOOL)acceptsFirstMouse:(NSEvent *)event { return YES; }
+
+- (void)resetCursorRects {
+    [self addCursorRect:self.bounds
+                 cursor:self.dragging ? NSCursor.closedHandCursor
+                                      : NSCursor.openHandCursor];
+}
+
+- (void)drawRect:(NSRect)dirtyRect {
+    [super drawRect:dirtyRect];
+    NSRect pill = NSInsetRect(self.bounds, 1.0, 2.0);
+    [[NSColor.windowBackgroundColor colorWithAlphaComponent:0.86] setFill];
+    [[NSBezierPath bezierPathWithRoundedRect:pill xRadius:6 yRadius:6] fill];
+
+    NSDictionary *attrs = @{
+        NSFontAttributeName: [NSFont systemFontOfSize:9 weight:NSFontWeightSemibold],
+        NSForegroundColorAttributeName:
+            [NSColor.secondaryLabelColor colorWithAlphaComponent:0.9],
+    };
+    NSAttributedString *dots = [[NSAttributedString alloc] initWithString:@"•••"
+                                                               attributes:attrs];
+    NSSize size = dots.size;
+    [dots drawAtPoint:NSMakePoint((self.bounds.size.width - size.width) * 0.5,
+                                  (self.bounds.size.height - size.height) * 0.5 - 1.0)];
+}
+
+- (void)mouseDown:(NSEvent *)event {
+    // Consume the press. Terminal selection must not start underneath
+    // a pane drag, and the actual session begins only once AppKit sends
+    // mouseDragged after crossing its normal drag threshold.
+}
+
+- (void)mouseDragged:(NSEvent *)event {
+    if (self.dragging || !self.hostView) return;
+    NSString *identifier = self.hostView.dragIdentifier;
+    if (!identifier.length) return;
+
+    NSPasteboardItem *pb = [[NSPasteboardItem alloc] init];
+    [pb setString:identifier forType:GhosttyPanePasteboardType];
+    NSDraggingItem *item = [[NSDraggingItem alloc] initWithPasteboardWriter:pb];
+
+    // Use a tiny vector-like badge rather than reading the Metal layer
+    // back into CPU memory. GPU snapshots are surprisingly expensive
+    // on large retina panes and can stall the renderer at drag start.
+    NSSize imageSize = NSMakeSize(132, 34);
+    NSImage *image = [[NSImage alloc] initWithSize:imageSize];
+    [image lockFocus];
+    [[NSColor.windowBackgroundColor colorWithAlphaComponent:0.94] setFill];
+    [[NSBezierPath bezierPathWithRoundedRect:NSMakeRect(0, 0, imageSize.width,
+                                                        imageSize.height)
+                                     xRadius:8 yRadius:8] fill];
+    NSDictionary *attrs = @{
+        NSFontAttributeName: [NSFont systemFontOfSize:12 weight:NSFontWeightMedium],
+        NSForegroundColorAttributeName: NSColor.labelColor,
+    };
+    [@"Move terminal pane" drawAtPoint:NSMakePoint(12, 9) withAttributes:attrs];
+    [image unlockFocus];
+
+    NSPoint p = [self convertPoint:event.locationInWindow fromView:nil];
+    [item setDraggingFrame:NSMakeRect(p.x - imageSize.width * 0.5,
+                                      p.y - imageSize.height * 0.5,
+                                      imageSize.width, imageSize.height)
+                 contents:image];
+
+    self.dragging = YES;
+    g_active_pane_drag_source = self.hostView;
+    g_active_pane_drag_identifier = identifier;
+    [self setNeedsDisplay:YES];
+    NSDraggingSession *session = [self beginDraggingSessionWithItems:@[item]
+                                                               event:event
+                                                              source:self];
+    session.animatesToStartingPositionsOnCancelOrFail = YES;
+}
+
+- (NSDragOperation)draggingSession:(NSDraggingSession *)session
+    sourceOperationMaskForDraggingContext:(NSDraggingContext)context {
+    return context == NSDraggingContextWithinApplication
+        ? NSDragOperationMove : NSDragOperationNone;
+}
+
+- (void)draggingSession:(NSDraggingSession *)session
+                 endedAtPoint:(NSPoint)screenPoint
+                 operation:(NSDragOperation)operation {
+    self.dragging = NO;
+    g_active_pane_drag_source = nil;
+    g_active_pane_drag_identifier = nil;
+    [self.hostView setPaneDragHandleVisible:NO];
+    [self setNeedsDisplay:YES];
+}
+
+@end
+
 @implementation GhosttySplitView
 
 - (CGFloat)dividerThickness {
@@ -954,6 +1251,13 @@ void GhosttyHostViewSetSurface(NSView* view, ghostty_surface_t surface) {
 void GhosttyHostViewClearSurface(NSView* view) {
     if (![view isKindOfClass:[GhosttyHostView class]]) return;
     [(GhosttyHostView*)view setSurface:NULL];
+}
+
+void GhosttyDeferSurfaceFree(ghostty_surface_t surface) {
+    if (!surface) return;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        ghostty_surface_free(surface);
+    });
 }
 
 // ---- Action / close-surface dispatch ------------------------------------
@@ -1587,6 +1891,156 @@ static void collect_splits(NSView *root, NSMutableArray<NSSplitView *> *out) {
     for (NSView *sub in root.subviews) collect_splits(sub, out);
 }
 
+// Replace a node without changing its slot in the parent. This is the
+// fundamental split-tree mutation: remove+addSubview appends, which was
+// the cause of panes (and sometimes whole tab roots) jumping to the end
+// whenever a cross-axis split was created or collapsed.
+static BOOL replace_view_preserving_position(NSView *oldView, NSView *newView) {
+    NSView *parent = oldView.superview;
+    if (!parent || !newView) return NO;
+
+    NSRect frame = oldView.frame;
+    NSAutoresizingMaskOptions mask = oldView.autoresizingMask;
+    BOOL hidden = oldView.hidden;
+    int rootTabId = parent == g_tab_container ? tab_id_get(oldView) : 0;
+    NSSplitView *splitParent = nil;
+    NSMutableArray<NSNumber *> *dividerRatios = nil;
+
+    if ([parent isKindOfClass:[NSSplitView class]]) {
+        splitParent = (NSSplitView *)parent;
+        NSInteger idx = [splitParent.arrangedSubviews indexOfObject:oldView];
+        if (idx == NSNotFound) return NO;
+        CGFloat axis = splitParent.isVertical ? splitParent.bounds.size.width
+                                              : splitParent.bounds.size.height;
+        dividerRatios = [NSMutableArray array];
+        for (NSInteger i = 0;
+             i < (NSInteger)splitParent.arrangedSubviews.count - 1; i++) {
+            NSView *child = splitParent.arrangedSubviews[i];
+            CGFloat position = splitParent.isVertical
+                ? NSMaxX(child.frame) : NSMaxY(child.frame);
+            [dividerRatios addObject:@(axis > 0 ? position / axis : 0)];
+        }
+        [oldView removeFromSuperview];
+        [splitParent insertArrangedSubview:newView atIndex:idx];
+    } else {
+        [parent replaceSubview:oldView with:newView];
+    }
+
+    newView.frame = frame;
+    newView.autoresizingMask = mask;
+    newView.hidden = hidden;
+    if (rootTabId) tab_id_set(newView, rootTabId);
+    if (splitParent) {
+        [splitParent adjustSubviews];
+        CGFloat axis = splitParent.isVertical ? splitParent.bounds.size.width
+                                              : splitParent.bounds.size.height;
+        for (NSInteger i = 0; i < (NSInteger)dividerRatios.count; i++) {
+            [splitParent setPosition:axis * dividerRatios[i].doubleValue
+                    ofDividerAtIndex:i];
+        }
+    }
+    return YES;
+}
+
+static NSSplitView *wrap_leaf_with_binary_split(
+    GhosttyHostView *destination,
+    GhosttyHostView *inserted,
+    BOOL vertical,
+    BOOL insertAfter
+) {
+    if (!destination || !inserted || !destination.superview) return nil;
+    GhosttySplitView *split = [[GhosttySplitView alloc] initWithFrame:destination.frame];
+    split.vertical = vertical;
+    split.dividerStyle = NSSplitViewDividerStyleThin;
+    split.autoresizingMask = destination.autoresizingMask;
+
+    if (!replace_view_preserving_position(destination, split)) return nil;
+    if (insertAfter) {
+        [split addArrangedSubview:destination];
+        [split addArrangedSubview:inserted];
+    } else {
+        [split addArrangedSubview:inserted];
+        [split addArrangedSubview:destination];
+    }
+    [split adjustSubviews];
+    CGFloat axis = split.isVertical ? split.bounds.size.width : split.bounds.size.height;
+    [split setPosition:axis * 0.5 ofDividerAtIndex:0];
+    return split;
+}
+
+// Normalize after removing a leaf. Existing trees may contain n-ary
+// splits from older builds, so only collapse 0/1-child nodes; 2+ child
+// geometry and ordering remain untouched.
+static void collapse_split_after_removal(NSSplitView *split) {
+    NSSplitView *current = split;
+    while (current) {
+        NSArray<NSView *> *children = current.arrangedSubviews;
+        NSView *parent = current.superview;
+        if (children.count >= 2) {
+            [current adjustSubviews];
+            return;
+        }
+        if (children.count == 1) {
+            NSView *only = children.firstObject;
+            [only removeFromSuperview];
+            if (!replace_view_preserving_position(current, only)) return;
+            current = [parent isKindOfClass:[NSSplitView class]]
+                ? (NSSplitView *)parent : nil;
+            continue;
+        }
+        [current removeFromSuperview];
+        current = [parent isKindOfClass:[NSSplitView class]]
+            ? (NSSplitView *)parent : nil;
+    }
+}
+
+static GhosttyHostView *host_for_drag_identifier(NSString *identifier) {
+    if (!identifier.length || !g_tab_container) return nil;
+    GhosttyHostView *host = g_active_pane_drag_source;
+    if (!host || ![g_active_pane_drag_identifier isEqualToString:identifier]) return nil;
+    return tab_root_for_descendant(host) ? host : nil;
+}
+
+static BOOL move_pane_to_drop_zone(GhosttyHostView *source,
+                                   GhosttyHostView *destination,
+                                   GhosttyPaneDropZone zone) {
+    if (!source || !destination || source == destination) return NO;
+    NSView *sourceRoot = tab_root_for_descendant(source);
+    NSView *destinationRoot = tab_root_for_descendant(destination);
+    // v1 deliberately limits moves to the current tab. Cross-tab moves
+    // need coordination with the HTML tab strip and session snapshot.
+    if (!sourceRoot || sourceRoot != destinationRoot || sourceRoot.hidden) return NO;
+    if (host_for_drag_identifier(source.dragIdentifier) != source) return NO;
+
+    clear_tab_zoom_for_descendant(source);
+    clear_tab_zoom_for_descendant(destination);
+
+    NSSplitView *oldParent = [source.superview isKindOfClass:[NSSplitView class]]
+        ? (NSSplitView *)source.superview : nil;
+    if (!oldParent || oldParent.arrangedSubviews.count < 2) return NO;
+
+    // Keep the exact live host/surface. No process, scrollback, or renderer
+    // state is recreated during a pane move. Wrap the destination first;
+    // adding source to the new split atomically reparents it from oldParent.
+    // This ordering means a failed destination replacement leaves source
+    // completely untouched rather than orphaning a running terminal.
+    BOOL vertical = zone == GhosttyPaneDropZoneLeft ||
+                    zone == GhosttyPaneDropZoneRight;
+    BOOL after = zone == GhosttyPaneDropZoneRight ||
+                 zone == GhosttyPaneDropZoneBottom;
+    NSSplitView *newParent = wrap_leaf_with_binary_split(destination, source,
+                                                          vertical, after);
+    if (!newParent) {
+        NSLog(@"[ghostty] pane drop could not wrap destination: source=%@ destination=%@",
+              source, destination);
+        return NO;
+    }
+    collapse_split_after_removal(oldParent);
+    [source.window makeFirstResponder:source];
+    resync_chrome_and_surfaces(source);
+    return YES;
+}
+
 static void sync_surface_visibility_from_hidden(NSView *root, BOOL visible) {
     if (!root) return;
     BOOL selfVisible = visible && !root.hidden;
@@ -1902,6 +2356,7 @@ static void perform_new_split(NSView *focused,
     // to ghostty as the platform handle.
     NSRect frame = focused.bounds;
     GhosttyHostView *newHost = (GhosttyHostView *)GhosttyHostViewCreate(frame);
+    sc.userdata = (__bridge void *)newHost;
     sc.platform_tag = GHOSTTY_PLATFORM_MACOS;
     sc.platform.macos.nsview = (__bridge void *)newHost;
 
@@ -1913,61 +2368,22 @@ static void perform_new_split(NSView *focused,
     }
     [newHost setSurface:newSurface];
 
-    // Insertion: if focused's superview is already an NSSplitView with
-    // the requested orientation, append the new pane there. Otherwise
-    // wrap focused in a fresh NSSplitView.
+    // Always wrap the focused leaf in a fresh binary split. Matching
+    // Ghostty's immutable SplitTree semantics means only the selected
+    // pane is halved; unrelated siblings keep their order and divider
+    // geometry. The previous n-ary flatten/equalize path moved every
+    // sibling whenever a same-axis split was created.
     BOOL wantHorizontal = split_is_horizontal(dir);
-    NSView *parent = focused.superview;
-    NSSplitView *targetSplit = nil;
-
-    if ([parent isKindOfClass:[NSSplitView class]]
-        && ((NSSplitView *)parent).isVertical == wantHorizontal) {
-        targetSplit = (NSSplitView *)parent;
-    } else {
-        // Wrap: replace focused in its parent with a new split view
-        // containing focused as the only pane, then we'll add newHost.
-        targetSplit = [[GhosttySplitView alloc] initWithFrame:focused.frame];
-        targetSplit.vertical = wantHorizontal;
-        targetSplit.dividerStyle = NSSplitViewDividerStyleThin;
-        targetSplit.autoresizingMask = focused.autoresizingMask;
-
-        NSView *grandparent = parent;
-        if (grandparent) {
-            // BUG FIX (tab + split): if `focused` was the tab's root
-            // (i.e. its parent IS the tab container), the tab_id is
-            // attached to `focused`. After the wrap, `targetSplit`
-            // becomes the new direct child of the tab container —
-            // root_for_tab_id walks `g_tab_container.subviews` and
-            // would see `targetSplit` (tab_id 0) instead of `focused`,
-            // making the tab unselectable until the split is unwrapped
-            // again. Transfer the tab_id BEFORE swapping. (The mirror
-            // operation already exists on the unwrap side — see
-            // perform_close_focused_pane lines 1446-1452 of the
-            // pre-fix file: `int tag = tab_id_get(split); ...; if
-            // (tag) tab_id_set(only, tag);`.)
-            int tab_tag = tab_id_get(focused);
-
-            // Remove focused from its parent, place split there, then
-            // re-add focused as the split's first pane.
-            [focused removeFromSuperview];
-            [grandparent addSubview:targetSplit];
-            [targetSplit addSubview:focused];
-
-            if (tab_tag != 0 && grandparent == g_tab_container) {
-                tab_id_set(targetSplit, tab_tag);
-                // Leave tab_id on `focused` too — harmless (it's no
-                // longer a direct child of g_tab_container, so
-                // root_for_tab_id never queries it). Clearing would
-                // lose the value if a future op rewrapped — keeping
-                // it makes the move resilient to deeper nesting.
-            }
-        } else {
-            // No parent (shouldn't happen) — just add to split.
-            [targetSplit addSubview:focused];
-        }
+    NSSplitView *targetSplit = wrap_leaf_with_binary_split(
+        focusedHost, newHost, wantHorizontal, split_inserts_after(dir));
+    if (!targetSplit) {
+        [newHost setSurface:NULL];
+        ghostty_surface_free(newSurface);
+        NSLog(@"[ghostty] new_split: failed to insert split tree node");
+        return;
     }
 
-    // BUG FIX (tab + split close): tag every split-created host view
+    // Tag every split-created host view
     // so GhosttyTabClose can distinguish it from the original
     // Rust-tracked host view and free its surface during tab close.
     // Without this, splits created via cmd+d/cmd+\ would leak surfaces
@@ -1977,37 +2393,6 @@ static void perform_new_split(NSView *focused,
     // pointer would crash the next event dispatch.
     objc_setAssociatedObject(newHost, kSplitCreatedKey, @YES,
                              OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-
-    // Add newHost as a pane in the chosen split.
-    NSArray<__kindof NSView *> *existing = targetSplit.arrangedSubviews;
-    NSInteger focusedIdx = [existing indexOfObject:focused];
-    if (focusedIdx == NSNotFound) focusedIdx = existing.count - 1;
-    NSInteger insertIdx = split_inserts_after(dir) ? focusedIdx + 1 : focusedIdx;
-    if (insertIdx < 0) insertIdx = 0;
-    if (insertIdx > (NSInteger)targetSplit.arrangedSubviews.count) {
-        insertIdx = targetSplit.arrangedSubviews.count;
-    }
-    [targetSplit insertArrangedSubview:newHost atIndex:insertIdx];
-
-    // Equalise pane sizes. adjustSubviews alone doesn't reliably
-    // produce equal panes; we set the divider position explicitly to
-    // 50% of the split's primary axis and then let adjustSubviews
-    // proportionally distribute any remaining children.
-    [targetSplit adjustSubviews];
-    if (targetSplit.arrangedSubviews.count == 2) {
-        CGFloat axis = targetSplit.isVertical ? targetSplit.bounds.size.width
-                                              : targetSplit.bounds.size.height;
-        [targetSplit setPosition:axis * 0.5 ofDividerAtIndex:0];
-    } else {
-        // 3+ panes: distribute evenly along the primary axis.
-        CGFloat axis = targetSplit.isVertical ? targetSplit.bounds.size.width
-                                              : targetSplit.bounds.size.height;
-        NSUInteger n = targetSplit.arrangedSubviews.count;
-        for (NSUInteger i = 0; i < n - 1; i++) {
-            [targetSplit setPosition:axis * (CGFloat)(i + 1) / (CGFloat)n
-                    ofDividerAtIndex:i];
-        }
-    }
 
     // Move focus to the new pane so subsequent input goes there.
     // Explicitly resign the previous focus first because some
@@ -2038,9 +2423,15 @@ enum {
     TAB_ACTION_GOTO  = 3, // arg = ghostty GotoTab enum (positive = 1-based, neg = enum)
 };
 static GhosttyTabActionFn g_tab_action_fn = NULL;
+typedef bool (*GhosttyPaneClosedFn)(void *surface);
+static GhosttyPaneClosedFn g_pane_closed_fn = NULL;
 
 void GhosttyRegisterTabActionCallback(GhosttyTabActionFn fn) {
     g_tab_action_fn = fn;
+}
+
+void GhosttyRegisterPaneClosedCallback(GhosttyPaneClosedFn fn) {
+    g_pane_closed_fn = fn;
 }
 
 static void dispatch_tab_action(int kind, long arg) {
@@ -2241,7 +2632,11 @@ bool GhosttyHandleAction(void *app, void *target, void *action) {
         }
         case GHOSTTY_ACTION_NEW_SPLIT: {
             NSLog(@"[ghostty] action: NEW_SPLIT direction=%d", act->action.new_split);
-            NSView *focused = (__bridge NSView *)atomic_load(&g_host_view);
+            NSView *focused = nil;
+            if (tgt && tgt->tag == GHOSTTY_TARGET_SURFACE) {
+                focused = host_view_for_surface(tgt->target.surface);
+            }
+            if (!focused) focused = (__bridge NSView *)atomic_load(&g_host_view);
             if (focused) {
                 perform_new_split(focused, act->action.new_split);
             }
@@ -2269,7 +2664,10 @@ bool GhosttyHandleAction(void *app, void *target, void *action) {
         }
         case GHOSTTY_ACTION_CLOSE_TAB: {
             NSLog(@"[ghostty] action: CLOSE_TAB");
-            dispatch_tab_action(TAB_ACTION_CLOSE, 0);
+            int tabId = tab_id_for_target(tgt);
+            dispatch_async(dispatch_get_main_queue(), ^{
+                dispatch_tab_action(TAB_ACTION_CLOSE, tabId);
+            });
             return true;
         }
         case GHOSTTY_ACTION_OPEN_URL: {
@@ -2337,76 +2735,65 @@ bool GhosttyHandleAction(void *app, void *target, void *action) {
 // This is the path Cmd+W takes; the explicit JS-driven close path
 // (terminal_close_tab from the HTML × button) skips this and goes
 // straight to step 2.
-static void perform_close_focused_pane(void) {
-    NSView *focused = (__bridge NSView *)atomic_load(&g_host_view);
-    if (![focused isKindOfClass:[GhosttyHostView class]]) {
-        // No focused pane — fall back to old window-close behaviour.
-        NSWindow *win = active_window();
-        if (win) [win performClose:nil];
-        return;
-    }
-    GhosttyHostView *pane = (GhosttyHostView *)focused;
+static void perform_close_pane(GhosttyHostView *pane) {
+    NSView *tabRoot = pane ? tab_root_for_descendant(pane) : nil;
+    if (!pane || !tabRoot) return;
+    BOOL shouldRefocus = !tabRoot.hidden &&
+        (pane.window.firstResponder == pane ||
+         atomic_load(&g_host_view) == (__bridge void *)pane);
     clear_tab_zoom_for_descendant(pane);
     NSView *parent = pane.superview;
 
     // Case 1: parent is an NSSplitView with siblings.
     if ([parent isKindOfClass:[NSSplitView class]]
-        && parent.subviews.count > 1) {
-        // Free this pane's surface, remove from split, then move
-        // focus to a sibling.
-        ghostty_surface_t s = pane.surface;
-        [pane setSurface:NULL];
-        if (s) ghostty_surface_free(s);
-        NSUInteger idx = [parent.subviews indexOfObject:pane];
-        [pane removeFromSuperview];
-        // Re-equalise remaining panes.
+        && ((NSSplitView *)parent).arrangedSubviews.count > 1) {
         NSSplitView *split = (NSSplitView *)parent;
-        [split adjustSubviews];
-        NSUInteger n = split.arrangedSubviews.count;
-        if (n >= 2) {
-            CGFloat axis = split.isVertical ? split.bounds.size.width
-                                            : split.bounds.size.height;
-            for (NSUInteger i = 0; i < n - 1; i++) {
-                [split setPosition:axis * (CGFloat)(i + 1) / (CGFloat)n
-                  ofDividerAtIndex:i];
-            }
+        NSArray<NSView *> *children = split.arrangedSubviews;
+        NSUInteger idx = [children indexOfObject:pane];
+        if (idx == NSNotFound) return;
+        NSView *sibling = idx + 1 < children.count
+            ? children[idx + 1]
+            : (idx > 0 ? children[idx - 1] : nil);
+        GhosttyHostView *next = find_first_host_descendant(sibling);
+
+        // Surface ownership is split between Rust (original tab pane)
+        // and ObjC (split-created panes). Notify Rust synchronously for
+        // its pane so its View is removed and dropped exactly once.
+        ghostty_surface_t s = pane.surface;
+        BOOL accepted = s == NULL;
+        if (s && is_split_created(pane)) {
+            accepted = YES;
+        } else if (s && g_pane_closed_fn) {
+            accepted = g_pane_closed_fn((void *)s);
         }
-        // If only one child remains, unwrap the split — replace it
-        // with its sole child in the grandparent.
-        if (n == 1) {
-            NSView *only = split.arrangedSubviews.firstObject;
-            NSView *grand = split.superview;
-            if (grand) {
-                only.frame = split.frame;
-                only.autoresizingMask = split.autoresizingMask;
-                // Preserve tab id if the split was a tab root.
-                int tag = tab_id_get(split);
-                [only removeFromSuperview];
-                [split removeFromSuperview];
-                [grand addSubview:only];
-                if (tag) tab_id_set(only, tag);
-            }
+        if (!accepted) {
+            NSLog(@"[ghostty] refusing to detach Rust-owned pane not found by owner");
+            return;
         }
-        // Move focus to the sibling that took our place.
-        NSView *neighbour;
-        if (idx < parent.subviews.count) {
-            neighbour = parent.subviews[idx];
-        } else {
-            neighbour = parent.subviews.lastObject;
+        [pane setSurface:NULL];
+        if (s && is_split_created(pane)) {
+            GhosttyClearClipboardSurfaceIfMatches(s);
+            GhosttyDeferSurfaceFree(s);
         }
-        GhosttyHostView *next = find_first_host_descendant(neighbour);
-        if (next) [next.window makeFirstResponder:next];
+        [pane removeFromSuperview];
+        collapse_split_after_removal(split);
+        if (next && shouldRefocus) [next.window makeFirstResponder:next];
         return;
     }
 
     // Case 2: only pane in this tab — dispatch CLOSE_TAB to Rust which
     // handles the close-window-on-last-tab policy + Tauri events.
-    dispatch_tab_action(TAB_ACTION_CLOSE, 0);
+    int tabId = tab_id_get(tabRoot);
+    dispatch_async(dispatch_get_main_queue(), ^{
+        dispatch_tab_action(TAB_ACTION_CLOSE, tabId);
+    });
 }
 
-void GhosttyHandleCloseSurface(bool process_alive) {
-    (void)process_alive; // v1: no confirm dialog on dirty exit
-    perform_close_focused_pane();
+void GhosttyHandleCloseSurface(void *host_view, bool needs_confirmation) {
+    (void)needs_confirmation; // Confirmation UI remains a future host policy.
+    NSView *view = (__bridge NSView *)host_view;
+    if (![view isKindOfClass:[GhosttyHostView class]]) return;
+    perform_close_pane((GhosttyHostView *)view);
 }
 
 // ---- Application-level Cmd-key monitor ----------------------------------
@@ -2748,6 +3135,11 @@ static _Atomic(void *) g_clipboard_surface = NULL;
 
 void GhosttyRegisterSurfaceForClipboard(ghostty_surface_t surface) {
     atomic_store(&g_clipboard_surface, surface);
+}
+
+void GhosttyClearClipboardSurfaceIfMatches(ghostty_surface_t surface) {
+    void *expected = surface;
+    atomic_compare_exchange_strong(&g_clipboard_surface, &expected, NULL);
 }
 
 static NSPasteboard *clipboard_for_kind(int kind) {

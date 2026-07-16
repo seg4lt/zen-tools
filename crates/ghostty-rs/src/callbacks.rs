@@ -109,6 +109,7 @@ extern "C" {
     pub fn GhosttyRegisterAppForWakeup(app: *mut std::ffi::c_void);
     pub fn GhosttyRegisterApp(app: *mut std::ffi::c_void);
     pub fn GhosttyRegisterSurfaceForClipboard(surface: *mut std::ffi::c_void);
+    pub fn GhosttyClearClipboardSurfaceIfMatches(surface: *mut std::ffi::c_void);
     fn GhosttyHandleReadClipboard(kind: i32, state: *mut std::ffi::c_void) -> bool;
     fn GhosttyHandleWriteClipboard(
         kind: i32,
@@ -121,7 +122,10 @@ extern "C" {
         target: *const std::ffi::c_void,
         action: *const std::ffi::c_void,
     ) -> bool;
-    fn GhosttyHandleCloseSurface(process_alive: bool);
+    fn GhosttyHandleCloseSurface(
+        host_view: *mut std::ffi::c_void,
+        needs_confirmation: bool,
+    );
 }
 
 unsafe extern "C" fn trampoline_wakeup(userdata: *mut std::ffi::c_void) {
@@ -222,14 +226,14 @@ unsafe extern "C" fn trampoline_write_clipboard(
 
 unsafe extern "C" fn trampoline_close_surface(
     userdata: *mut std::ffi::c_void,
-    process_alive: bool,
+    needs_confirmation: bool,
 ) {
     if let Err(p) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        // Forward to the ObjC handler which closes the registered
-        // window. The user-supplied callback (if any) is also called
-        // for hosts that want to add custom shutdown logic.
-        GhosttyHandleCloseSurface(process_alive);
-        if let Some(c) = cbs(userdata) { (c.close_surface)(process_alive); }
+        // Per-surface userdata is the exact native host NSView. This
+        // avoids closing an unrelated focused pane when a background
+        // child exits. RuntimeCallbacks.close_surface was never usable
+        // here because surface userdata is distinct from app userdata.
+        GhosttyHandleCloseSurface(userdata, needs_confirmation);
     })) {
         log_panic("close_surface", p);
     }

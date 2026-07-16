@@ -23,6 +23,10 @@ void GhosttyHostViewSetSurface(NSView* view, ghostty_surface_t surface);
 /// responder chain during destruction).
 void GhosttyHostViewClearSurface(NSView* view);
 
+/// Free a libghostty surface on the next main-queue turn. This avoids
+/// destroying a surface reentrantly from inside one of its callbacks.
+void GhosttyDeferSurfaceFree(ghostty_surface_t surface);
+
 /// Install an application-level NSEvent monitor for Cmd-modified
 /// keyDown events. The monitor runs *before* AppKit dispatches the
 /// event into the responder chain, lets us route the event into the
@@ -122,6 +126,7 @@ void GhosttyDispatchAppTick(void);
 /// to forward `complete_clipboard_request` to the right surface.
 /// Pass NULL on teardown.
 void GhosttyRegisterSurfaceForClipboard(ghostty_surface_t surface);
+void GhosttyClearClipboardSurfaceIfMatches(ghostty_surface_t surface);
 
 /// Implements `read_clipboard_cb`: read NSPasteboard text and call
 /// `ghostty_surface_complete_clipboard_request` against the registered
@@ -148,10 +153,10 @@ bool GhosttyFocusedSurfaceBindingAction(const char *action);
 /// and visibility, etc. Returns true if the action was handled.
 bool GhosttyHandleAction(void *app, void *target, void *action);
 
-/// Implements `close_surface_cb`. Closes the window the surface lives
-/// in. `process_alive` indicates whether the child process exited
-/// cleanly; we currently don't show a confirm dialog (v1).
-void GhosttyHandleCloseSurface(bool process_alive);
+/// Implements `close_surface_cb` for the exact per-surface host view.
+/// `needs_confirmation` comes from Ghostty's quit policy; the embedded
+/// host currently closes immediately and leaves confirmation UI for v2.
+void GhosttyHandleCloseSurface(void * _Nullable host_view, bool needs_confirmation);
 
 /// Register the singleton GhosttyApp so action_cb's NEW_SPLIT /
 /// NEW_TAB handlers can call `ghostty_surface_new` to allocate the
@@ -184,6 +189,12 @@ typedef void (*GhosttyTabEventFn)(int kind, int tab_id, const char * _Nullable v
 /// Install the callback that receives tab lifecycle events. Pass NULL
 /// to clear. Calls happen on the main thread.
 void GhosttyRegisterTabEventCallback(GhosttyTabEventFn _Nullable fn);
+
+/// Called when native split chrome closes a pane whose surface is owned
+/// by Rust. The callback must synchronously remove/drop the matching View;
+/// split-created panes remain owned and freed by the native host.
+typedef bool (*GhosttyPaneClosedFn)(void *surface);
+void GhosttyRegisterPaneClosedCallback(GhosttyPaneClosedFn _Nullable fn);
 
 /// Lazily create (or return) the tab content container — an NSView
 /// hosted as a subview of `contentView`, sized inside the chrome

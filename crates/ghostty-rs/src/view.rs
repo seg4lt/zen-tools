@@ -72,7 +72,10 @@ impl View {
         let mut sc: ghostty_surface_config_s = ghostty_surface_config_new();
         sc.platform_tag = ghostty_platform_e_GHOSTTY_PLATFORM_MACOS;
         sc.platform.macos = ghostty_platform_macos_s { nsview: ns_view };
-        sc.userdata = std::ptr::null_mut();
+        // Embedded apprt forwards per-surface userdata to clipboard and
+        // close callbacks. The macOS host uses the NSView pointer to
+        // attribute close requests to the exact pane (not global focus).
+        sc.userdata = ns_view;
         sc.scale_factor = if cfg.scale_factor > 0.0 { cfg.scale_factor } else { 1.0 };
         sc.font_size = cfg.font_size;
         sc.working_directory = wd
@@ -107,6 +110,22 @@ impl View {
 
     pub fn raw(&self) -> ghostty_surface_t {
         self.inner
+    }
+
+    /// Relinquish ownership without freeing the surface. Used by hosts
+    /// that must defer destruction until a libghostty callback unwinds.
+    pub fn into_raw(mut self) -> ghostty_surface_t {
+        unsafe {
+            // Match Drop's teardown side effect before disarming Drop;
+            // otherwise the global clipboard target could retain this
+            // soon-to-be-freed surface through the deferred interval.
+            crate::callbacks::GhosttyClearClipboardSurfaceIfMatches(
+                self.inner as *mut std::ffi::c_void,
+            );
+        }
+        let inner = self.inner;
+        self.inner = std::ptr::null_mut();
+        inner
     }
 
     pub fn set_size(&self, width: u32, height: u32) {
@@ -242,7 +261,9 @@ impl Drop for View {
             unsafe {
                 // Unregister BEFORE freeing so any in-flight clipboard
                 // callback sees null and skips the surface call.
-                crate::callbacks::GhosttyRegisterSurfaceForClipboard(std::ptr::null_mut());
+                crate::callbacks::GhosttyClearClipboardSurfaceIfMatches(
+                    self.inner as *mut std::ffi::c_void,
+                );
                 ghostty_surface_free(self.inner);
             }
         }

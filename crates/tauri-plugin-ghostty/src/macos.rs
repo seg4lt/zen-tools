@@ -20,6 +20,7 @@ use objc2_foundation::NSRect;
 extern "C" {
     fn GhosttyHostViewCreate(frame: NSRect) -> *mut AnyObject;
     fn GhosttyHostViewSetSurface(view: *mut AnyObject, surface: *mut c_void);
+    fn GhosttyDeferSurfaceFree(surface: *mut c_void);
     fn GhosttyInstallEventMonitor(surface: *mut c_void);
     fn GhosttyDisarmWryParentKeyDown();
     fn GhosttyDisarmTaoSendEvent();
@@ -37,6 +38,9 @@ extern "C" {
         fn_ptr: Option<extern "C" fn(kind: i32, tab_id: i32, value: *const c_char)>,
     );
     fn GhosttyRegisterTabActionCallback(fn_ptr: Option<extern "C" fn(kind: i32, arg: i64)>);
+    fn GhosttyRegisterPaneClosedCallback(
+        fn_ptr: Option<extern "C" fn(surface: *mut c_void) -> bool>,
+    );
 
     // Embedding-host passthrough chords (for example cmd+opt+f,
     // cmd+[ / cmd+], cmd+shift+[ / cmd+shift+], cmd+n, cmd+shift+n).
@@ -321,6 +325,20 @@ pub unsafe fn focused_surface_binding_action(action: &std::ffi::CStr) -> bool {
 /// it sees NEW_TAB / CLOSE_TAB / GOTO_TAB. Runs on the main thread.
 pub unsafe fn register_tab_action_callback(fn_ptr: extern "C" fn(kind: i32, arg: i64)) {
     GhosttyRegisterTabActionCallback(Some(fn_ptr));
+}
+
+/// Install the callback used when AppKit closes a Rust-owned original
+/// pane from a native split. The callback drops the matching View so
+/// the libghostty surface has one clear owner and is freed exactly once.
+pub unsafe fn register_pane_closed_callback(
+    fn_ptr: extern "C" fn(surface: *mut c_void) -> bool,
+) {
+    GhosttyRegisterPaneClosedCallback(Some(fn_ptr));
+}
+
+/// Schedule a surface free after the current libghostty callback returns.
+pub unsafe fn defer_surface_free(surface: *mut c_void) {
+    GhosttyDeferSurfaceFree(surface);
 }
 
 /// Install the embedding-host key-hook callback. Fires when the

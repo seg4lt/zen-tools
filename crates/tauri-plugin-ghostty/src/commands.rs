@@ -174,6 +174,7 @@ pub fn terminal_new(
         unsafe {
             macos::register_tab_event_callback(tab_event_trampoline);
             macos::register_tab_action_callback(tab_action_trampoline);
+            macos::register_pane_closed_callback(pane_closed_trampoline);
             macos::register_host_key_hook_callback(host_key_hook_trampoline);
             macos::register_reload_config_callback(reload_config_trampoline);
             macos::register_terminal_status_event_callback(terminal_status_event_trampoline);
@@ -1208,6 +1209,46 @@ extern "C" fn tab_action_trampoline(kind: i32, arg: i64) {
             unsafe { macos::tab_focus(target) };
         }
     }
+}
+
+extern "C" fn pane_closed_trampoline(surface: *mut std::ffi::c_void) -> bool {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        pane_closed_impl(surface)
+    }))
+    .unwrap_or(false)
+}
+
+fn pane_closed_impl(surface: *mut std::ffi::c_void) -> bool {
+    if surface.is_null() {
+        return false;
+    }
+    let app = match APP_HANDLE_FOR_TABS.get() {
+        Some(app) => app,
+        None => return false,
+    };
+    let state = app.state::<PluginState>();
+    let removed = {
+        let mut inner = state.inner.lock();
+        let surface_id = inner.surfaces.iter().find_map(|(&id, view)| {
+            (view.raw() as *mut std::ffi::c_void == surface).then_some(id)
+        });
+        let Some(surface_id) = surface_id else {
+            return false;
+        };
+        for tab in &mut inner.tabs {
+            tab.surfaces.retain(|&id| id != surface_id);
+        }
+        inner.surfaces.remove(&surface_id)
+    };
+    let Some(view) = removed else {
+        return false;
+    };
+    // Transfer the pointer out of View so Drop cannot destroy it while
+    // this libghostty callback is still on the stack. ObjC frees it on
+    // the next main-queue turn.
+    let raw = view.into_raw();
+    unsafe { macos::defer_surface_free(raw as *mut std::ffi::c_void) };
+    true
 }
 
 /// Embedding-host passthrough trampoline. Fired by the NSEvent monitor
