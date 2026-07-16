@@ -57,6 +57,10 @@ static NSView *tab_root_for_descendant(NSView *view);
 static BOOL move_pane_to_drop_zone(GhosttyHostView *source,
                                    GhosttyHostView *destination,
                                    GhosttyPaneDropZone zone);
+static BOOL swap_pane_in_direction(GhosttyHostView *source,
+                                   ghostty_action_goto_split_e direction);
+static GhosttyHostView *neighbour_pane(GhosttyHostView *current,
+                                       ghostty_action_goto_split_e direction);
 
 // Walk the NSView tree under `root` and append every GhosttyHostView
 // descendant to `out`. Used by the resize / fullscreen handler to
@@ -116,6 +120,9 @@ static BOOL g_window_resync_scheduled = NO;
 - (BOOL)nativeSearchOwnsFocus;
 - (void)updateNativeSearchTotal:(NSInteger)total;
 - (void)updateNativeSearchSelected:(NSInteger)selected;
+- (void)contextMenuSplit:(NSMenuItem *)sender;
+- (void)contextMenuFind:(NSMenuItem *)sender;
+- (void)contextMenuSwap:(NSMenuItem *)sender;
 // Exposed so the resize / fullscreen notification handler can
 // re-sync every live host view in the tree (split panes etc.) in
 // one pass via `collect_hosts` — not just `self`.
@@ -345,6 +352,94 @@ static BOOL g_window_resync_scheduled = NO;
     _dragHandle.hidden = !visible;
 }
 
+- (NSMenuItem *)contextMenuItemWithTitle:(NSString *)title
+                                  symbol:(NSString *)symbol
+                                  action:(SEL)action {
+    NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:title
+                                                 action:action
+                                          keyEquivalent:@""];
+    item.target = self;
+    if (@available(macOS 11.0, *)) {
+        item.image = [NSImage imageWithSystemSymbolName:symbol
+                               accessibilityDescription:title];
+    }
+    return item;
+}
+
+- (NSMenu *)menuForEvent:(NSEvent *)event {
+    BOOL contextClick = event.type == NSEventTypeRightMouseDown ||
+        (event.type == NSEventTypeLeftMouseDown &&
+         (event.modifierFlags & NSEventModifierFlagControl));
+    if (!_surface || !contextClick) return nil;
+
+    NSMenu *menu = [[NSMenu alloc] initWithTitle:@"Terminal Pane"];
+    menu.autoenablesItems = NO;
+
+    [menu addItem:[self contextMenuItemWithTitle:@"Find…"
+                                          symbol:@"magnifyingglass"
+                                          action:@selector(contextMenuFind:)]];
+    [menu addItem:NSMenuItem.separatorItem];
+
+    NSArray<NSDictionary *> *splits = @[
+        @{@"title": @"Split Right", @"symbol": @"rectangle.righthalf.inset.filled",
+          @"direction": @(GHOSTTY_SPLIT_DIRECTION_RIGHT)},
+        @{@"title": @"Split Left", @"symbol": @"rectangle.leadinghalf.inset.filled",
+          @"direction": @(GHOSTTY_SPLIT_DIRECTION_LEFT)},
+        @{@"title": @"Split Down", @"symbol": @"rectangle.bottomhalf.inset.filled",
+          @"direction": @(GHOSTTY_SPLIT_DIRECTION_DOWN)},
+        @{@"title": @"Split Up", @"symbol": @"rectangle.tophalf.inset.filled",
+          @"direction": @(GHOSTTY_SPLIT_DIRECTION_UP)},
+    ];
+    for (NSDictionary *entry in splits) {
+        NSMenuItem *item = [self contextMenuItemWithTitle:entry[@"title"]
+                                                   symbol:entry[@"symbol"]
+                                                   action:@selector(contextMenuSplit:)];
+        item.tag = [entry[@"direction"] integerValue];
+        item.enabled = YES;
+        [menu addItem:item];
+    }
+
+    if (neighbour_pane(self, GHOSTTY_GOTO_SPLIT_PREVIOUS)) {
+        [menu addItem:NSMenuItem.separatorItem];
+        NSArray<NSDictionary *> *swaps = @[
+            @{@"title": @"Swap Pane Right", @"symbol": @"arrow.right",
+              @"direction": @(GHOSTTY_GOTO_SPLIT_RIGHT)},
+            @{@"title": @"Swap Pane Left", @"symbol": @"arrow.left",
+              @"direction": @(GHOSTTY_GOTO_SPLIT_LEFT)},
+            @{@"title": @"Swap Pane Down", @"symbol": @"arrow.down",
+              @"direction": @(GHOSTTY_GOTO_SPLIT_DOWN)},
+            @{@"title": @"Swap Pane Up", @"symbol": @"arrow.up",
+              @"direction": @(GHOSTTY_GOTO_SPLIT_UP)},
+        ];
+        for (NSDictionary *entry in swaps) {
+            ghostty_action_goto_split_e direction =
+                (ghostty_action_goto_split_e)[entry[@"direction"] integerValue];
+            NSMenuItem *item = [self contextMenuItemWithTitle:entry[@"title"]
+                                                       symbol:entry[@"symbol"]
+                                                       action:@selector(contextMenuSwap:)];
+            item.tag = direction;
+            item.enabled = neighbour_pane(self, direction) != nil;
+            [menu addItem:item];
+        }
+    }
+    return menu;
+}
+
+- (void)contextMenuSplit:(NSMenuItem *)sender {
+    if (!_surface) return;
+    ghostty_surface_split(_surface,
+        (ghostty_action_split_direction_e)sender.tag);
+}
+
+- (void)contextMenuFind:(NSMenuItem *)sender {
+    [self performSearchBinding:@"start_search"];
+}
+
+- (void)contextMenuSwap:(NSMenuItem *)sender {
+    swap_pane_in_direction(self,
+        (ghostty_action_goto_split_e)sender.tag);
+}
+
 - (NSButton *)nativeSearchButtonWithTitle:(NSString *)title
                                     action:(SEL)action
                         accessibilityLabel:(NSString *)label {
@@ -422,7 +517,11 @@ static BOOL g_window_resync_scheduled = NO;
     _searchField.frame = NSMakeRect(padding, 8.0, fieldWidth, 26.0);
     CGFloat x = NSMaxX(_searchField.frame) + 2.0;
     if (showCount) {
-        _searchCount.frame = NSMakeRect(x, 11.0, countWidth, 20.0);
+        // The overlay is a standard (bottom-up) NSView even though its terminal
+        // parent is flipped. Lower Y moves this label down on screen. The
+        // four-point optical correction aligns its glyph centre with the
+        // NSSearchField text and adjacent arrow controls.
+        _searchCount.frame = NSMakeRect(x, 7.0, countWidth, 20.0);
         x += countWidth + 2.0;
     }
     if (showNavigation) {
@@ -1131,18 +1230,23 @@ static void send_mouse_pos(ghostty_surface_t surface, NSView *view, NSEvent *eve
 - (void)rightMouseDown:(NSEvent*)event {
     if (!_surface) { [super rightMouseDown:event]; return; }
     emit_terminal_interaction_event(_surface);
-    send_mouse_pos(_surface, self, event);
-    ghostty_surface_mouse_button(_surface, GHOSTTY_MOUSE_PRESS,
-                                 ghostty_button_from_ns(1),
-                                 ghostty_mods_from_ns(event.modifierFlags));
+    // This class overrides rightMouseDown to forward mouse-reporting events
+    // to Ghostty, so NSView's default implementation never gets a chance to
+    // call menuForEvent:. Pop the deliberately small native pane menu here
+    // and consume the click so TUI mouse handlers (including Neovim) cannot
+    // take it over first.
+    NSMenu *menu = [self menuForEvent:event];
+    if (menu) {
+        [NSMenu popUpContextMenu:menu withEvent:event forView:self];
+        return;
+    }
+    [super rightMouseDown:event];
 }
 
 - (void)rightMouseUp:(NSEvent*)event {
-    if (!_surface) { [super rightMouseUp:event]; return; }
-    send_mouse_pos(_surface, self, event);
-    ghostty_surface_mouse_button(_surface, GHOSTTY_MOUSE_RELEASE,
-                                 ghostty_button_from_ns(1),
-                                 ghostty_mods_from_ns(event.modifierFlags));
+    // The matching down event opens and owns the context-menu tracking loop;
+    // don't emit a release without a press into the terminal protocol.
+    [super rightMouseUp:event];
 }
 
 - (void)otherMouseDown:(NSEvent*)event {
@@ -2553,6 +2657,54 @@ static GhosttyHostView *neighbour_pane(GhosttyHostView *current,
         }
     }
     return best;
+}
+
+// Exchange two live pane views in-place. The host views themselves move,
+// so their PTYs, scrollback, renderer layers, search UI, and drag identity
+// all survive unchanged. Temporary placeholders let this work both within
+// one NSSplitView and across nested split parents without recreating either
+// side of the tree.
+static BOOL swap_pane_in_direction(GhosttyHostView *source,
+                                   ghostty_action_goto_split_e direction) {
+    if (!source) return NO;
+    GhosttyHostView *destination = neighbour_pane(source, direction);
+    if (!destination || destination == source) return NO;
+    NSView *tabRoot = tab_root_for_descendant(source);
+    if (!tabRoot || tabRoot != tab_root_for_descendant(destination) || tabRoot.hidden) {
+        return NO;
+    }
+
+    clear_tab_zoom_for_descendant(source);
+    NSArray<NSDictionary *> *layout = snapshot_subtree_layout(tabRoot);
+    NSView *sourceSlot = [[NSView alloc] initWithFrame:source.frame];
+    NSView *destinationSlot = [[NSView alloc] initWithFrame:destination.frame];
+
+    if (!replace_view_preserving_position(source, sourceSlot)) return NO;
+    if (!replace_view_preserving_position(destination, destinationSlot)) {
+        replace_view_preserving_position(sourceSlot, source);
+        restore_subtree_layout(layout);
+        return NO;
+    }
+    if (!replace_view_preserving_position(sourceSlot, destination)) {
+        replace_view_preserving_position(destinationSlot, destination);
+        replace_view_preserving_position(sourceSlot, source);
+        restore_subtree_layout(layout);
+        return NO;
+    }
+    if (!replace_view_preserving_position(destinationSlot, source)) {
+        // This should be unreachable after both placeholders are mounted,
+        // but restore the original slots rather than orphaning either PTY.
+        replace_view_preserving_position(destination, sourceSlot);
+        replace_view_preserving_position(sourceSlot, source);
+        replace_view_preserving_position(destinationSlot, destination);
+        restore_subtree_layout(layout);
+        return NO;
+    }
+
+    restore_subtree_layout(layout);
+    [source.window makeFirstResponder:source];
+    resync_chrome_and_surfaces(source);
+    return YES;
 }
 
 static void perform_goto_split(ghostty_action_goto_split_e dir) {
