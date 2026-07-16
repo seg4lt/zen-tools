@@ -30,6 +30,8 @@ const SHORTCUT_GROUPS: ShortcutGroup[] = [
       { keys: key(mod, "⇧", "E"), action: "Show or hide the workspace rail" },
       { keys: key(mod, alt, "F"), action: "Toggle distraction-free mode" },
       { keys: key(mod, "F"), action: "Search the active terminal" },
+      { keys: key(mod, "D"), action: "Split vertically" },
+      { keys: key(mod, "⇧", "D"), action: "Split horizontally" },
       { keys: key(mod, "[ / ]"), action: "Previous / next pane" },
       { keys: key(mod, "⇧", "[ / ]"), action: "Previous / next workspace" },
       { keys: key(mod, "N"), action: "New pane" },
