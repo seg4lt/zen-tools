@@ -43,6 +43,10 @@ export interface PrReviewSlot {
   runs: AiReviewRunSummary[];
   /** Whether persistence contains at least one successfully completed run. */
   hasCompletedReview: boolean;
+  /** Commit heads with a successfully completed persisted review. */
+  reviewedHeadShas: string[];
+  /** Commit head targeted by the currently live run. */
+  liveHeadSha: string | null;
   /** Path to the persisted HTML report for the most-recent done run. */
   reportPath: string | null;
   /** Cost reported by the live or most-recent run, in USD. */
@@ -65,6 +69,8 @@ const emptySlot: PrReviewSlot = {
   events: [],
   runs: [],
   hasCompletedReview: false,
+  reviewedHeadShas: [],
+  liveHeadSha: null,
   reportPath: null,
   costUsd: null,
   durationMs: null,
@@ -90,6 +96,10 @@ function notify(): void {
   for (const cb of listeners) cb();
 }
 
+function sameStrings(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value, i) => value === right[i]);
+}
+
 /** Imperative mutation helpers. The store is intentionally tiny —
  *  every component reads via `useAiReviewState` and dispatches by
  *  calling these directly; no reducer indirection. */
@@ -106,6 +116,11 @@ export const aiReviewStore = {
       ...slot,
       runs,
       hasCompletedReview: runs.some((run) => run.status === "done"),
+      reviewedHeadShas: [
+        ...new Set(
+          runs.filter((run) => run.status === "done").map((run) => run.head_sha),
+        ),
+      ],
     });
     notify();
   },
@@ -113,28 +128,32 @@ export const aiReviewStore = {
   /** Hydrate completion state for every currently visible PR in one pass. */
   setCompletedReviewStates(
     visibleKeys: string[],
-    completedKeys: ReadonlySet<string>,
+    completedHeads: ReadonlyMap<string, readonly string[]>,
   ): void {
     let changed = false;
     for (const key of visibleKeys) {
       const slot = state.slots.get(key) ?? emptySlot;
-      const hasCompletedReview = completedKeys.has(key);
-      if (slot.hasCompletedReview === hasCompletedReview) continue;
-      state.slots.set(key, { ...slot, hasCompletedReview });
+      const reviewedHeadShas = [...(completedHeads.get(key) ?? [])];
+      const hasCompletedReview = reviewedHeadShas.length > 0;
+      if (
+        slot.hasCompletedReview === hasCompletedReview &&
+        sameStrings(slot.reviewedHeadShas, reviewedHeadShas)
+      ) continue;
+      state.slots.set(key, { ...slot, hasCompletedReview, reviewedHeadShas });
       changed = true;
     }
     if (changed) notify();
   },
 
   /** Immediately replace a prior completed badge when the user starts again. */
-  beginRun(key: string): void {
+  beginRun(key: string, headSha: string): void {
     const slot = state.slots.get(key) ?? emptySlot;
     state.slots.set(key, {
       ...slot,
       liveRunId: null,
       status: "starting",
       events: [],
-      hasCompletedReview: false,
+      liveHeadSha: headSha,
       reportPath: null,
       costUsd: null,
       durationMs: null,
@@ -144,19 +163,29 @@ export const aiReviewStore = {
 
   markStartFailed(key: string): void {
     const slot = state.slots.get(key) ?? emptySlot;
-    state.slots.set(key, { ...slot, status: "error", liveRunId: null });
+    state.slots.set(key, {
+      ...slot,
+      status: "error",
+      liveRunId: null,
+      liveHeadSha: null,
+    });
     notify();
   },
 
   /** Mark a new live run, replacing any prior live state. */
-  startRun(key: string, runId: string, worktreePath?: string | null): void {
+  startRun(
+    key: string,
+    runId: string,
+    headSha: string,
+    worktreePath?: string | null,
+  ): void {
     const slot = state.slots.get(key) ?? emptySlot;
     state.slots.set(key, {
       ...slot,
       liveRunId: runId,
       status: "starting",
       events: [],
-      hasCompletedReview: false,
+      liveHeadSha: headSha,
       reportPath: null,
       costUsd: null,
       durationMs: null,
@@ -173,14 +202,26 @@ export const aiReviewStore = {
     status: AiReviewStatusKind,
     events: AiReviewEvent[],
     reportPath: string | null,
+    headSha?: string | null,
     worktreePath?: string | null,
   ): void {
     const slot = state.slots.get(key) ?? emptySlot;
+    const completedHead = status === "done" ? headSha : null;
+    const reviewedHeadShas =
+      completedHead && !slot.reviewedHeadShas.includes(completedHead)
+        ? [completedHead, ...slot.reviewedHeadShas]
+        : slot.reviewedHeadShas;
     state.slots.set(key, {
       ...slot,
       liveRunId: status === "running" || status === "starting" ? runId : null,
       status,
       events: [...events],
+      hasCompletedReview: slot.hasCompletedReview || status === "done",
+      reviewedHeadShas,
+      liveHeadSha:
+        status === "running" || status === "starting"
+          ? headSha ?? slot.liveHeadSha
+          : null,
       reportPath,
       worktreePath: worktreePath ?? slot.worktreePath,
     });
@@ -202,12 +243,17 @@ export const aiReviewStore = {
       next.status = "done";
       next.liveRunId = null;
       next.hasCompletedReview = true;
+      if (next.liveHeadSha && !next.reviewedHeadShas.includes(next.liveHeadSha)) {
+        next.reviewedHeadShas = [next.liveHeadSha, ...next.reviewedHeadShas];
+      }
+      next.liveHeadSha = null;
       next.reportPath = event.report_path;
       next.costUsd = event.cost_usd;
       next.durationMs = event.duration_ms;
     } else if (event.kind === "error") {
       next.status = "error";
       next.liveRunId = null;
+      next.liveHeadSha = null;
     }
     state.slots.set(key, next);
     notify();
@@ -218,7 +264,12 @@ export const aiReviewStore = {
     const key = state.runIdToPrKey.get(runId);
     if (!key) return;
     const slot = state.slots.get(key) ?? emptySlot;
-    state.slots.set(key, { ...slot, status: "cancelled", liveRunId: null });
+    state.slots.set(key, {
+      ...slot,
+      status: "cancelled",
+      liveRunId: null,
+      liveHeadSha: null,
+    });
     notify();
   },
 

@@ -474,27 +474,43 @@ pub async fn prmaster_ai_review_list_runs(
     Ok(review.list_runs(&kv, &pr_key(&pr))?)
 }
 
-/// Return the canonical PR slugs that have at least one completed AI review.
-/// The PR list uses this batch command to hydrate status badges without opening
-/// the AI Review tab (or issuing one command per tile).
+/// Completed review heads for one PR, used to distinguish a current review
+/// from a preserved review of an older commit.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiReviewCompletedHeads {
+    /// Canonical `owner/repo#number` key.
+    pub pr_key: String,
+    /// Distinct head SHAs with a successfully completed review.
+    pub head_shas: Vec<String>,
+}
+
+/// Return completed review heads for the requested PRs. The PR list uses this
+/// batch command to hydrate status badges without opening each AI Review tab
+/// or issuing one command per tile.
 #[tauri::command]
 pub async fn prmaster_ai_review_completed_prs(
     state: State<'_, Mutex<AppState>>,
     config: State<'_, UserConfig>,
     prs: Vec<PrRef>,
-) -> AppResult<Vec<String>> {
+) -> AppResult<Vec<AiReviewCompletedHeads>> {
     let review = state.lock().await.review.clone();
     let kv = config.inner().clone();
     let mut completed = Vec::new();
 
     for pr in prs {
         let key = pr_key(&pr);
-        if review
-            .list_runs(&kv, &key)?
-            .iter()
-            .any(|run| run.status == RunStatus::Done)
-        {
-            completed.push(key.slug());
+        let mut head_shas = Vec::new();
+        for run in review.list_runs(&kv, &key)? {
+            if run.status == RunStatus::Done && !head_shas.contains(&run.head_sha) {
+                head_shas.push(run.head_sha);
+            }
+        }
+        if !head_shas.is_empty() {
+            completed.push(AiReviewCompletedHeads {
+                pr_key: key.slug(),
+                head_shas,
+            });
         }
     }
 

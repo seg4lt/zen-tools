@@ -55,6 +55,8 @@ interface Props {
   posting?: boolean;
   /** True after a successful post; flips the button to a confirmation. */
   posted?: boolean;
+  /** This report targets an older PR commit. */
+  reviewOutdated?: boolean;
 }
 
 export function AiReviewFindingCard({
@@ -63,6 +65,7 @@ export function AiReviewFindingCard({
   onLoadDraft,
   posting,
   posted,
+  reviewOutdated,
 }: Props) {
   const sev = severityKey(finding.severity);
   const accent = SEVERITY_ACCENT[sev];
@@ -145,6 +148,7 @@ export function AiReviewFindingCard({
           onLoadDraft={onLoadDraft}
           posting={posting}
           posted={posted}
+          reviewOutdated={reviewOutdated}
         />
       </div>
     </article>
@@ -513,12 +517,14 @@ function CommentAction({
   onLoadDraft,
   posting,
   posted,
+  reviewOutdated,
 }: {
   finding: AiReviewFinding;
   onPost: (findingId: string, body: string) => Promise<void> | void;
   onLoadDraft: (findingId: string) => Promise<string>;
   posting?: boolean;
   posted?: boolean;
+  reviewOutdated?: boolean;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
@@ -625,6 +631,15 @@ function CommentAction({
           </span>
         </div>
       </div>
+      {reviewOutdated && (
+        <div className="flex items-start gap-1.5 rounded border border-amber-500/30 bg-amber-500/10 px-2 py-1.5 text-[10px] text-amber-800 dark:text-amber-300">
+          <AlertTriangle className="mt-0.5 size-3 shrink-0" />
+          <span>
+            This finding is from an older commit. Check that the code and line
+            still apply before posting.
+          </span>
+        </div>
+      )}
       <textarea
         ref={textareaRef}
         value={draft}

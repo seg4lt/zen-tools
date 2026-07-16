@@ -176,7 +176,10 @@ export function PRMasterReviewPage() {
               </span>
             )}
           </div>
-          <AiReviewStatusBadge slot={aiReview} />
+          <AiReviewStatusBadge
+            slot={aiReview}
+            currentHeadSha={pr?.detail?.commits?.nodes?.[0]?.commit?.oid ?? null}
+          />
           <Tabs value={tab} onValueChange={(v) => setTab(v as ReviewTab)}>
             <TabsList className="h-6 gap-0.5 bg-transparent p-0">
               <SectionTabTrigger

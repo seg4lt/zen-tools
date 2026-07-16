@@ -206,6 +206,9 @@ pub struct CommitNode {
 /// Commit fields needed for the rollup.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommitInfo {
+    /// Git object id for the PR's current head commit.
+    #[serde(default)]
+    pub oid: Option<String>,
     /// Status-check rollup attached to the commit.
     #[serde(default, rename = "statusCheckRollup")]
     pub status_check_rollup: Option<StatusCheckRollup>,

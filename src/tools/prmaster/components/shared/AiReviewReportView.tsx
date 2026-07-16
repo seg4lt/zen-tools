@@ -16,6 +16,7 @@
 import { useMemo, useState } from "react";
 import { Button, cn } from "@zen-tools/ui";
 import {
+  AlertTriangle,
   ChevronDown,
   ChevronUp,
   CheckCircle2,
@@ -44,6 +45,8 @@ interface Props {
   finishedAtMs: number | null;
   /** Head SHA the review ran against. */
   headSha: string;
+  /** Current PR head SHA, used to flag historical reports. */
+  currentHeadSha: string;
   /** Prompt sent to Claude, for the audit disclosure. */
   prompt: string;
   /** Legacy HTML body (older runs only). */
@@ -84,6 +87,7 @@ export function AiReviewReportView(props: Props) {
     props.findings,
   ]);
   const totalCount = props.findings.length;
+  const isOutdated = props.headSha !== props.currentHeadSha;
   const severityCounts = useMemo(
     () =>
       Object.fromEntries(
@@ -104,6 +108,7 @@ export function AiReviewReportView(props: Props) {
         costUsd={props.costUsd}
         finishedAtMs={props.finishedAtMs}
         headSha={props.headSha}
+        currentHeadSha={props.currentHeadSha}
         totalCount={totalCount}
         severityCounts={severityCounts}
         prompt={props.prompt}
@@ -133,6 +138,7 @@ export function AiReviewReportView(props: Props) {
                         onLoadDraft={props.onLoadFindingDraft}
                         posting={props.postingIds.has(f.id)}
                         posted={props.postedIds.has(f.id)}
+                        reviewOutdated={isOutdated}
                       />
                     ))}
                   </div>
@@ -153,6 +159,7 @@ function ReportHeader({
   costUsd,
   finishedAtMs,
   headSha,
+  currentHeadSha,
   totalCount,
   severityCounts,
   prompt,
@@ -169,6 +176,7 @@ function ReportHeader({
   costUsd: number | null;
   finishedAtMs: number | null;
   headSha: string;
+  currentHeadSha: string;
   totalCount: number;
   severityCounts: Record<SeverityBucket, number>;
   prompt: string;
@@ -182,6 +190,8 @@ function ReportHeader({
   const [openPanel, setOpenPanel] = useState<
     "history" | "prompt" | "raw" | null
   >(null);
+  const [summaryExpanded, setSummaryExpanded] = useState(false);
+  const isOutdated = headSha !== currentHeadSha;
   const togglePanel = (next: "history" | "prompt" | "raw") =>
     setOpenPanel((prev) => (prev === next ? null : next));
 
@@ -220,6 +230,12 @@ function ReportHeader({
             Log
           </Button>
           <DisclosureButton
+            label="Summary"
+            icon={<ListChecks className="size-2.5" />}
+            active={summaryExpanded}
+            onClick={() => setSummaryExpanded((open) => !open)}
+          />
+          <DisclosureButton
             label="History"
             icon={<History className="size-2.5" />}
             count={history.length || undefined}
@@ -242,12 +258,25 @@ function ReportHeader({
           )}
         </div>
       </div>
-      <p className="mt-3 text-sm font-medium leading-relaxed text-foreground">
+      {isOutdated && (
+        <div className="mt-3 flex items-start gap-2 rounded-md border border-amber-500/35 bg-amber-500/10 px-3 py-2 text-xs text-amber-800 dark:text-amber-300">
+          <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
+          <span>
+            This report reviewed <code className="font-mono">{headSha.slice(0, 8)}</code>,
+            but the PR is now at <code className="font-mono">{currentHeadSha.slice(0, 8)}</code>.
+            Findings and inline anchors may be outdated.
+          </span>
+        </div>
+      )}
+      <p className={cn(
+        "mt-3 text-sm font-medium leading-relaxed text-foreground",
+        !summaryExpanded && "line-clamp-1",
+      )}>
         {overallSummary || (totalCount === 0
           ? "The review completed without identifying an actionable defect."
           : "The review identified issues that need attention.")}
       </p>
-      {changeSummary.length > 0 && (
+      {summaryExpanded && changeSummary.length > 0 && (
         <div className="mt-3 rounded-md border border-border/60 bg-background/45 px-3 py-2.5">
           <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">
             What changed
@@ -284,6 +313,7 @@ function ReportHeader({
         <HistoryPanel
           history={history}
           currentRunId={currentRunId}
+          currentHeadSha={currentHeadSha}
           onSelectReport={onSelectRun}
           onSelectLog={onSelectRunLog}
         />
@@ -352,11 +382,13 @@ function DisclosureButton({
 function HistoryPanel({
   history,
   currentRunId,
+  currentHeadSha,
   onSelectReport,
   onSelectLog,
 }: {
   history: AiReviewRunSummary[];
   currentRunId: string | null;
+  currentHeadSha: string;
   /** Open the **report** for this run (severity-grouped findings). */
   onSelectReport: (runId: string) => void;
   /** Open the **streaming log** for this run (the original session
@@ -406,7 +438,17 @@ function HistoryPanel({
                   {run.model}
                 </td>
                 <td className="px-2 py-1.5 font-mono text-muted-foreground">
-                  {run.head_sha.slice(0, 8)}
+                  <div className="flex flex-col gap-0.5">
+                    <span>{run.head_sha.slice(0, 8)}</span>
+                    <span className={cn(
+                      "font-sans text-[9px]",
+                      run.head_sha === currentHeadSha
+                        ? "text-emerald-600 dark:text-emerald-400"
+                        : "text-amber-600 dark:text-amber-400",
+                    )}>
+                      {run.head_sha === currentHeadSha ? "Current commit" : "Older commit"}
+                    </span>
+                  </div>
                 </td>
                 <td className="px-2 py-1.5 text-muted-foreground">
                   {fmtCost(run.cost_usd)}

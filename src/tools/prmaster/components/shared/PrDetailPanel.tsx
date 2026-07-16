@@ -80,6 +80,7 @@ export function PrDetailPanel({ pr, currentUser, onActionDone }: Props) {
   const aiReview = useAiReviewState(prKey(ref.owner, ref.repo, ref.number));
   const detail = pr.detail;
   const rollup = detail?.commits?.nodes[0]?.commit.statusCheckRollup ?? null;
+  const headSha = detail?.commits?.nodes[0]?.commit.oid ?? null;
   const isAlreadyReviewer =
     !!currentUser &&
     (pr.requestedReviewers.includes(currentUser) ||
@@ -138,7 +139,7 @@ export function PrDetailPanel({ pr, currentUser, onActionDone }: Props) {
 
       {/* ── 2. Status bar — quick-glance counters ───────────────── */}
       <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
-        <AiReviewStatusBadge slot={aiReview} />
+        <AiReviewStatusBadge slot={aiReview} currentHeadSha={headSha} />
         {rollup?.state === "SUCCESS" && (
           <StatChip tone="success" icon={<Check className="size-3" />}>
             CI passing

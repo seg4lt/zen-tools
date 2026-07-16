@@ -153,6 +153,7 @@ export function PrCard({
   const authorLogin = pr.author?.login ?? null;
   const showTitleAuthor = variant !== "mine" && authorLogin;
   const headRef = detail?.headRefName ?? null;
+  const headSha = detail?.commits?.nodes?.[0]?.commit?.oid ?? null;
   const baseRef = detail?.baseRefName ?? null;
   const fileCount = detail?.files?.nodes?.length ?? null;
   const commentCount = detail?.comments?.totalCount ?? 0;
@@ -240,7 +241,7 @@ export function PrCard({
               matches "what blocks me from merging" → "what's the
               human verdict". */}
           <div className="flex shrink-0 items-center gap-1.5">
-            <AiReviewStatusBadge slot={aiReview} />
+            <AiReviewStatusBadge slot={aiReview} currentHeadSha={headSha} />
             {ciRollup && <CiPill rollup={ciRollup} />}
             {mergeable === "CONFLICTING" && (
               <span

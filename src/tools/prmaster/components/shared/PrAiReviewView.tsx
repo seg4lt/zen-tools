@@ -296,6 +296,7 @@ export function PrAiReviewView({ pr }: Props) {
           status.status,
           status.events,
           status.report_path,
+          status.head_sha,
           status.worktree_path,
         );
         if (status.worktree_path) {
@@ -340,7 +341,7 @@ export function PrAiReviewView({ pr }: Props) {
     setBusy(true);
     setMissingRepo(null);
     setPromptError(null);
-    aiReviewStore.beginRun(key);
+    aiReviewStore.beginRun(key, headSha);
     try {
       const resp = await prmasterTauri.aiReviewStart({
         pr: ref,
@@ -351,7 +352,7 @@ export function PrAiReviewView({ pr }: Props) {
         promptOverride,
       });
       writeStoredModel(model);
-      aiReviewStore.startRun(key, resp.run_id, resp.worktree_path);
+      aiReviewStore.startRun(key, resp.run_id, resp.head_sha, resp.worktree_path);
       setWorktreePath(resp.worktree_path);
       setPromptDraft(null);
       setLoaded(null);
@@ -545,7 +546,7 @@ export function PrAiReviewView({ pr }: Props) {
               disabled={!headSha || busy}
             >
               <RotateCw className="size-3" />
-              Re-run
+              {loaded.headSha !== headSha ? "Review latest" : "Re-run"}
             </Button>
           ) : (
             <Button
@@ -591,6 +592,7 @@ export function PrAiReviewView({ pr }: Props) {
             costUsd={loaded.costUsd}
             finishedAtMs={loaded.finishedAtMs}
             headSha={loaded.headSha}
+            currentHeadSha={headSha ?? loaded.headSha}
             prompt={loaded.prompt}
             legacyHtml={loaded.legacyHtml}
             history={history}
@@ -614,6 +616,7 @@ export function PrAiReviewView({ pr }: Props) {
           <PreRunHero
             costHint={history.length > 0 ? history[0] : null}
             history={history}
+            currentHeadSha={headSha ?? ""}
             onSelectReport={onSelectRunReport}
             onSelectLog={onSelectRunLog}
           />
@@ -760,11 +763,13 @@ function statusBadgeClass(status: string): string {
 function PreRunHero({
   costHint,
   history,
+  currentHeadSha,
   onSelectReport,
   onSelectLog,
 }: {
   costHint: AiReviewRunSummary | null;
   history: AiReviewRunSummary[];
+  currentHeadSha: string;
   onSelectReport: (runId: string) => void;
   onSelectLog: (runId: string) => void;
 }) {
@@ -800,6 +805,14 @@ function PreRunHero({
                 <span className="flex min-w-0 items-center gap-2">
                   <span className="font-mono text-muted-foreground">
                     {run.head_sha.slice(0, 8)}
+                  </span>
+                  <span className={cn(
+                    "rounded px-1 py-0.5 text-[9px]",
+                    run.head_sha === currentHeadSha
+                      ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+                      : "bg-amber-500/10 text-amber-600 dark:text-amber-400",
+                  )}>
+                    {run.head_sha === currentHeadSha ? "Current" : "Older"}
                   </span>
                   <span className="font-medium text-foreground">
                     {run.status}

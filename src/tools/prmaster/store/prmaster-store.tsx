@@ -236,7 +236,7 @@ export function PrMasterStoreProvider({ children }: { children: ReactNode }) {
         if (!alive) return;
         aiReviewStore.setCompletedReviewStates(
           [...refs.keys()],
-          new Set(completed),
+          new Map(completed.map((item) => [item.prKey, item.headShas])),
         );
       },
       (error) => {

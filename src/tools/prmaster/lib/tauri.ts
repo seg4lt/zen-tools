@@ -191,7 +191,7 @@ export interface PrDetail {
   mergeStateStatus: string | null;
   commits: {
     nodes: Array<{
-      commit: { statusCheckRollup: StatusCheckRollup | null };
+      commit: { oid: string | null; statusCheckRollup: StatusCheckRollup | null };
     }>;
   } | null;
   files: { nodes: ChangedFile[] } | null;
@@ -508,7 +508,7 @@ export const prmasterTauri = {
   aiReviewListRuns: (pr: PrRef) =>
     invoke<AiReviewRunSummary[]>("prmaster_ai_review_list_runs", { pr }),
   aiReviewCompletedPrs: (prs: PrRef[]) =>
-    invoke<string[]>("prmaster_ai_review_completed_prs", { prs }),
+    invoke<AiReviewCompletedHeads[]>("prmaster_ai_review_completed_prs", { prs }),
   /**
    * Return the default formatted comment body for a finding — what
    * would be posted if the user clicked Post without editing. The
@@ -724,6 +724,12 @@ export interface AiReviewReportResp {
   model: string;
   cost_usd: number | null;
   finished_at_ms: number | null;
+}
+
+/** Completed AI-review commit heads for one PR. */
+export interface AiReviewCompletedHeads {
+  prKey: string;
+  headShas: string[];
 }
 
 export interface AiReviewRunSummary {

@@ -1412,6 +1412,7 @@ const PR_FRAGMENT: &str = r#"      headRefName
       commits(last: 1) {
         nodes {
           commit {
+            oid
             statusCheckRollup {
               state
               contexts(first: 100) {
