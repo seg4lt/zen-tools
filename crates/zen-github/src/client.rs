@@ -374,7 +374,15 @@ impl GhClient {
             if let Some(num_str) = key.strip_prefix("pr") {
                 if let Ok(num) = num_str.parse::<u64>() {
                     match serde_json::from_value::<PrDetail>(val.clone()) {
-                        Ok(detail) => {
+                        Ok(mut detail) => {
+                            if let Some(rollup) = detail
+                                .commits
+                                .as_mut()
+                                .and_then(|commits| commits.nodes.first_mut())
+                                .and_then(|node| node.commit.status_check_rollup.as_mut())
+                            {
+                                rollup.retain_latest_contexts();
+                            }
                             out.insert(num, detail);
                         }
                         Err(e) => {
@@ -1430,15 +1438,25 @@ const PR_FRAGMENT: &str = r#"      headRefName
               contexts(first: 100) {
                 nodes {
                   ... on CheckRun {
+                    databaseId
                     name
                     status
                     conclusion
                     detailsUrl
+                    startedAt
+                    completedAt
+                    checkSuite {
+                      app { slug }
+                      workflowRun {
+                        workflow { name }
+                      }
+                    }
                   }
                   ... on StatusContext {
                     context
                     state
                     targetUrl
+                    createdAt
                   }
                 }
               }

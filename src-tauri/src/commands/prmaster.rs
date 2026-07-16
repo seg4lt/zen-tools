@@ -88,6 +88,7 @@ pub async fn prmaster_get_gh_status(
 pub async fn prmaster_get_mine(
     state: State<'_, Mutex<AppState>>,
     config: State<'_, UserConfig>,
+    force: Option<bool>,
 ) -> AppResult<Vec<EnrichedPullRequest>> {
     let engine = {
         let s = state.lock().await;
@@ -96,7 +97,11 @@ pub async fn prmaster_get_mine(
     let settings = config
         .get::<PrMasterSettings>(PRMASTER_SETTINGS_KEY)?
         .unwrap_or_default();
-    Ok(engine.list_mine(&settings).await?)
+    if force.unwrap_or(false) {
+        Ok(engine.refresh_lists(&settings).await?.mine.clone())
+    } else {
+        Ok(engine.list_mine(&settings).await?)
+    }
 }
 
 /// Open PRs requesting the current user as reviewer, enriched with
@@ -166,7 +171,6 @@ pub async fn prmaster_approve_pr(
     engine.approve(&pr).await?;
     Ok(())
 }
-
 /// Submit a REQUEST_CHANGES review on `pr` with `body`.
 #[tauri::command]
 pub async fn prmaster_request_changes(

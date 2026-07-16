@@ -28,7 +28,7 @@ export function MineTab() {
       loading={state.loading.mine}
       error={state.errors.mine}
       emptyText="No open PRs you authored."
-      onRefresh={() => void loadMine(dispatch)}
+      onRefresh={() => void loadMine(dispatch, true)}
     />
   );
 }

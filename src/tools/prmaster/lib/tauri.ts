@@ -373,7 +373,8 @@ export interface PendingNotification {
 export const prmasterTauri = {
   whoami: () => invoke<string>("prmaster_whoami"),
   ghStatus: () => invoke<GhStatus>("prmaster_get_gh_status"),
-  getMine: () => invoke<EnrichedPullRequest[]>("prmaster_get_mine"),
+  getMine: (force = false) =>
+    invoke<EnrichedPullRequest[]>("prmaster_get_mine", { force }),
   getToReview: () => invoke<EnrichedPullRequest[]>("prmaster_get_to_review"),
   /** Ad-hoc open-PR watchlist for another GitHub user. */
   getOpenPrsByAuthor: (author: string) =>

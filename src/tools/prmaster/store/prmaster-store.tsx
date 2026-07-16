@@ -244,10 +244,13 @@ export function usePrMasterStore() {
 // dispatch + invoke pairing.
 // ────────────────────────────────────────────────────────────────────────
 
-export async function loadMine(dispatch: Dispatch<PrMasterAction>) {
+export async function loadMine(
+  dispatch: Dispatch<PrMasterAction>,
+  force = false,
+) {
   dispatch({ type: "loadStart", tab: "mine" });
   try {
-    const data = await prmasterTauri.getMine();
+    const data = await prmasterTauri.getMine(force);
     dispatch({ type: "loadMineDone", data });
   } catch (err) {
     dispatch({
