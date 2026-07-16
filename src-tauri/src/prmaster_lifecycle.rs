@@ -116,6 +116,7 @@ async fn start_inner(app: &AppHandle) {
                     let _ = bridge_app.emit("prmaster:refreshed", &snapshot);
                     let cfg = bridge_app.state::<UserConfig>();
                     commands::prmaster::persist_pr_snapshot(cfg.inner(), &snapshot);
+                    commands::pr_review::schedule_closed_pr_cleanup(&bridge_app, &snapshot);
                 }
                 Ok(PrMasterEvent::BadgeChanged(text)) => {
                     prmaster_tray::set_badge(&bridge_app, &text);

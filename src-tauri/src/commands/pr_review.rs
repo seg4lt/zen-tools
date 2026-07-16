@@ -22,10 +22,11 @@
 //!   existing `add_review_comment` engine method so the user can post
 //!   the suggestion as a real GitHub inline comment.
 //!
-//! `prmaster_ai_review_cleanup_merged` is hooked into the existing
-//! `prmaster:refreshed` broadcast so reviews for merged-or-no-longer-
-//! visible PRs are dropped automatically.
+//! The backend refresh bridge schedules best-effort cleanup after every
+//! successful PR refresh so reviews for merged-or-no-longer-visible PRs
+//! are dropped without involving or blocking the frontend.
 
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -301,7 +302,6 @@ pub async fn prmaster_ai_review_start(
         let kv = config.inner().clone();
         let run_id = handles.run_id.clone();
         let worktree_path = handles.worktree_path.clone();
-        let local_repo_for_run = local_repo.clone();
         let reports_root = app_root.join("reports");
         let cancel = handles.cancel.clone();
         tokio::spawn(async move {
@@ -309,7 +309,6 @@ pub async fn prmaster_ai_review_start(
                 .run(
                     &run_id,
                     worktree_path,
-                    local_repo_for_run,
                     reports_root,
                     kv,
                     prompt_text,
@@ -333,7 +332,7 @@ pub async fn prmaster_ai_review_start(
 
 /// Build the default prompt for a proposed AI review run without
 /// starting Claude. The worktree path is deterministic for
-/// `(repo, PR number, head SHA)`, so this preview matches the prompt
+/// the PR, so this preview matches the prompt
 /// `prmaster_ai_review_start` would build if the user clicks Go
 /// unchanged.
 #[tauri::command]
@@ -354,7 +353,6 @@ pub async fn prmaster_ai_review_preview_prompt(
         &pr.owner,
         &pr.repo,
         pr.number,
-        &head_sha,
     );
     Ok(zen_pr_review::prompt::build_review_prompt(
         None,
@@ -366,7 +364,7 @@ pub async fn prmaster_ai_review_preview_prompt(
     ))
 }
 
-/// Resolve the deterministic detached worktree path for `(pr, head_sha)`.
+/// Resolve the stable deterministic detached worktree path for a PR.
 /// Same location `prmaster_ai_review_start` would create.
 #[tauri::command]
 pub async fn prmaster_ai_review_resolve_worktree_path(
@@ -384,8 +382,8 @@ pub async fn prmaster_ai_review_resolve_worktree_path(
         &pr.owner,
         &pr.repo,
         pr.number,
-        &head_sha,
     );
+    let _ = head_sha;
     Ok(worktree_path.to_string_lossy().into_owned())
 }
 
@@ -794,23 +792,149 @@ pub async fn prmaster_ai_review_open_reports_dir(app: AppHandle) -> AppResult<()
     crate::dictation::commands::open_path_in_finder(&reports).await
 }
 
-/// Drop everything we know about every PR not in `visible_slugs`.
-/// Wired to the `prmaster:refreshed` broadcast so a merged or
-/// no-longer-visible PR's review artefacts purge automatically.
-#[tauri::command]
-pub async fn prmaster_ai_review_cleanup_merged(
-    app: AppHandle,
-    state: State<'_, Mutex<AppState>>,
-    config: State<'_, UserConfig>,
-    visible_slugs: Vec<String>,
-) -> AppResult<u32> {
-    let review = state.lock().await.review.clone();
-    let kv = config.inner().clone();
-    let root = ai_review_root(&app)?;
-    let reports_root = root.join("reports");
-    let purged = review.cleanup_for_visible(&kv, &reports_root, &visible_slugs)?;
-    if purged > 0 {
-        tracing::info!(purged, "ai-review: purged review artefacts for closed/merged PRs");
+/// Enqueue cleanup from the backend's authoritative refresh snapshot.
+/// The refresh/event bridge never awaits this work; failures are logged
+/// and the next successful refresh naturally retries them.
+pub fn schedule_closed_pr_cleanup(
+    app: &AppHandle,
+    snapshot: &zen_prmaster::RefreshSnapshot,
+) {
+    let mut visible_slugs = Vec::new();
+    for list in [&snapshot.to_review, &snapshot.reviewed, &snapshot.mine] {
+        for row in list {
+            visible_slugs.push(format!(
+                "{}#{}",
+                row.pr.repository.name_with_owner,
+                row.pr.number
+            ));
+        }
     }
-    Ok(purged)
+
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = cleanup_closed_prs(&app, visible_slugs).await {
+            tracing::warn!(%error, "ai-review: background cleanup failed; will retry after next refresh");
+        }
+    });
+}
+
+async fn cleanup_closed_prs(app: &AppHandle, visible_slugs: Vec<String>) -> AppResult<u32> {
+    let (review, prmaster) = {
+        let state = app.state::<Mutex<AppState>>();
+        let state = state.lock().await;
+        (state.review.clone(), state.prmaster.clone())
+    };
+    let config = app.state::<UserConfig>();
+    let kv = config.inner().clone();
+    let settings = config
+        .get::<PrMasterSettings>(PRMASTER_SETTINGS_KEY)?
+        .unwrap_or_default();
+    let root = ai_review_root(app)?;
+    let reports_root = root.join("reports");
+    let worktrees_root = resolve_worktrees_root(app, &settings)?;
+    let visible: HashSet<&str> = visible_slugs.iter().map(String::as_str).collect();
+    let mut candidates: HashMap<PrKey, Vec<PathBuf>> = HashMap::new();
+    for (pr, path) in zen_pr_review::worktree::managed_worktrees(&worktrees_root)? {
+        candidates.entry(pr).or_default().push(path);
+    }
+    for pr in review.stored_prs_not_visible(&kv, &visible_slugs)? {
+        candidates.entry(pr).or_default();
+    }
+
+    let mut removed_worktrees = 0u32;
+    let mut purged = 0u32;
+
+    for (pr, paths) in candidates {
+        if visible.contains(pr.slug().as_str()) {
+            continue;
+        }
+
+        let github_pr = PrRef {
+            owner: pr.owner.clone(),
+            repo: pr.repo.clone(),
+            number: pr.number,
+        };
+        match prmaster.gh().is_pr_merged(&github_pr).await {
+            Ok(true) => {}
+            Ok(false) => continue,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    pr = %pr.slug(),
+                    "ai-review: could not verify merged state; will retry after next refresh"
+                );
+                continue;
+            }
+        }
+
+        // Prevent a just-merged live run from recreating persisted state.
+        review.cancel_and_evict_pr(&pr);
+        for path in paths {
+            match local_repo_path(&settings, &pr) {
+                Ok(local_repo) => {
+                    let exec = zen_pr_review::worktree::build_git_executor();
+                    if let Err(error) =
+                        zen_pr_review::worktree::remove_worktree(&exec, &local_repo, &path).await
+                    {
+                        tracing::warn!(
+                            %error,
+                            path = %path.display(),
+                            "ai-review: worktree removal failed; will retry after next refresh"
+                        );
+                        continue;
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        path = %path.display(),
+                        "ai-review: local clone unavailable; force-removing worktree directory"
+                    );
+                    if path.exists() && tokio::fs::remove_dir_all(&path).await.is_err() {
+                        tracing::warn!(
+                            path = %path.display(),
+                            "ai-review: directory removal failed; will retry after next refresh"
+                        );
+                        continue;
+                    }
+                }
+            }
+            removed_worktrees += 1;
+        }
+
+        let review_for_cleanup = review.clone();
+        let kv_for_cleanup = kv.clone();
+        let reports_for_cleanup = reports_root.clone();
+        let pr_for_cleanup = pr.clone();
+        match tauri::async_runtime::spawn_blocking(move || {
+            review_for_cleanup.cleanup_pr(
+                &kv_for_cleanup,
+                &reports_for_cleanup,
+                &pr_for_cleanup,
+            )
+        })
+        .await
+        {
+            Ok(Ok(count)) => purged = purged.saturating_add(count),
+            Ok(Err(error)) => tracing::warn!(
+                %error,
+                pr = %pr.slug(),
+                "ai-review: report cleanup failed; will retry after next refresh"
+            ),
+            Err(error) => tracing::warn!(
+                %error,
+                pr = %pr.slug(),
+                "ai-review: report cleanup worker failed; will retry after next refresh"
+            ),
+        }
+    }
+
+    if purged > 0 || removed_worktrees > 0 {
+        tracing::info!(
+            purged,
+            removed_worktrees,
+            "ai-review: purged review artefacts for confirmed merged PRs"
+        );
+    }
+    Ok(purged.saturating_add(removed_worktrees))
 }

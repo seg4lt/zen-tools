@@ -624,7 +624,6 @@ pub fn run() {
             commands::pr_review::prmaster_ai_review_completed_prs,
             commands::pr_review::prmaster_ai_review_preview_finding_body,
             commands::pr_review::prmaster_ai_review_post_finding,
-            commands::pr_review::prmaster_ai_review_cleanup_merged,
             commands::pr_review::prmaster_ai_review_open_reports_dir,
             // git (merge editor + commit log)
             commands::git::git_list_repos,

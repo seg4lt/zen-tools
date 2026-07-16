@@ -25,9 +25,9 @@ pub enum ReviewError {
     #[error("local clone path does not exist: {0}")]
     LocalRepoPathMissing(PathBuf),
 
-    /// We tried to start a duplicate review for the same `(pr, head_sha)`
-    /// while another one was still running.
-    #[error("an AI review is already running for this PR + head commit")]
+    /// We tried to start another review while this PR's persistent
+    /// worktree was already in use by a live run.
+    #[error("an AI review is already running for this PR")]
     AlreadyRunning,
 
     /// The Claude CLI exited 0 but did not write the expected report

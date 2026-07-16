@@ -198,6 +198,18 @@ impl GhClient {
         })
     }
 
+    /// Return whether GitHub considers the pull request merged.
+    /// Used by background cleanup where absence from an open-PR search
+    /// alone is not strong enough evidence to delete local state.
+    pub async fn is_pr_merged(&self, pr: &PrRef) -> GhResult<bool> {
+        let path = format!("repos/{}/{}/pulls/{}", pr.owner, pr.repo, pr.number);
+        let label = format!("pr merged {}/{}#{}", pr.owner, pr.repo, pr.number);
+        let stdout = self
+            .gh_retry(&label, &["api", &path, "-q", ".merged"])
+            .await?;
+        serde_json::from_str(stdout.trim()).map_err(|error| GhError::decode(label, error))
+    }
+
     // ─── PR searches ─────────────────────────────────────────────────────
 
     /// Open PRs the current user authored.

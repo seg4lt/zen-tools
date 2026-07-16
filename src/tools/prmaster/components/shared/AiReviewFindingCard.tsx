@@ -220,14 +220,65 @@ function CallGraph({ graph }: { graph: AiReviewCallGraph }) {
 }
 
 function CallGraphNode({ node }: { node: AiReviewCallGraphNode }) {
-  return (
-    <div className={cn("min-w-0 rounded-md border px-2.5 py-2", callGraphNodeClass(node.kind))}>
-      <div className="truncate font-mono text-[11px] font-semibold" title={node.label}>{node.label}</div>
-      {node.path && (
-        <div className="mt-0.5 truncate font-mono text-[9px] text-muted-foreground" title={node.path}>
-          {node.path}{node.line ? `:${node.line}` : ""}
+  const [copied, setCopied] = useState(false);
+  const copyValue = node.path
+    ? `${node.path}${node.line ? `:${node.line}` : ""}`
+    : null;
+  const onCopy = useCallback(async () => {
+    if (!copyValue) return;
+    try {
+      await writeText(copyValue);
+    } catch {
+      try {
+        await navigator.clipboard.writeText(copyValue);
+      } catch {
+        return;
+      }
+    }
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1200);
+  }, [copyValue]);
+
+  const content = (
+    <>
+      <div className="flex min-w-0 items-center gap-1.5">
+        <div className="min-w-0 flex-1 truncate font-mono text-[11px] font-semibold" title={node.label}>
+          {node.label}
+        </div>
+        {copyValue && (
+          copied
+            ? <Check className="size-3 shrink-0 text-emerald-500" />
+            : <Copy className="size-3 shrink-0 opacity-0 transition-opacity group-hover:opacity-70" />
+        )}
+      </div>
+      {copyValue && (
+        <div className="mt-0.5 truncate font-mono text-[9px] text-muted-foreground" title={copyValue}>
+          {copyValue}
         </div>
       )}
+    </>
+  );
+
+  if (copyValue) {
+    return (
+      <button
+        type="button"
+        onClick={() => void onCopy()}
+        className={cn(
+          "group min-w-0 rounded-md border px-2.5 py-2 text-left transition-colors hover:brightness-125",
+          callGraphNodeClass(node.kind),
+        )}
+        title={copied ? "Copied!" : `Copy ${copyValue}`}
+        aria-label={copied ? `Copied ${copyValue}` : `Copy ${copyValue}`}
+      >
+        {content}
+      </button>
+    );
+  }
+
+  return (
+    <div className={cn("min-w-0 rounded-md border px-2.5 py-2", callGraphNodeClass(node.kind))}>
+      {content}
     </div>
   );
 }

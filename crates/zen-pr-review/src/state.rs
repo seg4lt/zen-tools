@@ -94,10 +94,10 @@ pub struct RunRegistry {
 struct RegistryInner {
     /// All runs we know about, keyed by `run_id`.
     runs: HashMap<String, RunEntry>,
-    /// Maps `(pr_slug, head_sha)` → `run_id` for the currently-live run
-    /// matching that pair, used to enforce "only one active review per
-    /// (PR, head sha)".
-    live_keys: HashMap<(String, String), String>,
+    /// Maps `pr_slug` → `run_id` for the currently-live run. A PR owns
+    /// one persistent worktree, so different head SHAs may not run at
+    /// the same time either.
+    live_keys: HashMap<String, String>,
     /// Maps `run_id` → cancel handle (`AbortHandle`-style closure).
     /// We keep a `tokio::sync::Notify` per run; cancelling fires it,
     /// which the runner observes via `tokio::select!`.
@@ -111,7 +111,7 @@ impl RunRegistry {
     }
 
     /// Allocate a new `run_id` and register it as `Starting` for the
-    /// given `(pr, head_sha)`. Returns the run id and the cancel
+    /// given PR. Returns the run id and the cancel
     /// notifier the runner should listen on.
     pub fn start(
         &self,
@@ -121,7 +121,7 @@ impl RunRegistry {
         model: String,
     ) -> Result<(String, Arc<tokio::sync::Notify>), AlreadyLive> {
         let mut inner = self.inner.lock();
-        let key = (pr.slug(), head_sha.clone());
+        let key = pr.slug();
         if inner.live_keys.contains_key(&key) {
             return Err(AlreadyLive);
         }
@@ -182,7 +182,7 @@ impl RunRegistry {
         entry.cost_usd = cost_usd;
         entry.duration_ms = duration_ms;
         let snapshot = entry.clone();
-        let key = (snapshot.pr.slug(), snapshot.head_sha.clone());
+        let key = snapshot.pr.slug();
         inner.live_keys.remove(&key);
         inner.cancels.remove(run_id);
         Some(snapshot)
@@ -199,18 +199,40 @@ impl RunRegistry {
         let cancel = self.inner.lock().cancels.get(run_id).cloned();
         match cancel {
             Some(n) => {
-                n.notify_waiters();
+                n.notify_one();
                 true
             }
             None => false,
         }
     }
 
+    /// Cancel and forget every live run for `pr`. Used when the PR has
+    /// merged or closed and its persistent worktree must be removed.
+    pub fn cancel_and_evict_pr(&self, pr: &PrKey) {
+        let slug = pr.slug();
+        let mut inner = self.inner.lock();
+        let run_ids: Vec<String> = inner
+            .runs
+            .values()
+            .filter(|entry| entry.pr == *pr && entry.finished_at_ms.is_none())
+            .map(|entry| entry.run_id.clone())
+            .collect();
+        for run_id in run_ids {
+            if let Some(cancel) = inner.cancels.remove(&run_id) {
+                // `notify_one` retains a permit if the runner has not
+                // reached its cancellation select yet.
+                cancel.notify_one();
+            }
+            inner.runs.remove(&run_id);
+        }
+        inner.live_keys.remove(&slug);
+    }
+
     /// Drop a run from the in-memory map (after persisting it).
     pub fn evict(&self, run_id: &str) {
         let mut inner = self.inner.lock();
         if let Some(entry) = inner.runs.remove(run_id) {
-            let key = (entry.pr.slug(), entry.head_sha.clone());
+            let key = entry.pr.slug();
             inner.live_keys.remove(&key);
         }
         inner.cancels.remove(run_id);
@@ -218,7 +240,7 @@ impl RunRegistry {
 }
 
 /// Returned by [`RunRegistry::start`] when a duplicate review for the
-/// same `(pr, head_sha)` is already live.
+/// same PR is already live.
 #[derive(Debug, Clone, Copy)]
 pub struct AlreadyLive;
 
@@ -235,13 +257,15 @@ mod tests {
     }
 
     #[test]
-    fn start_rejects_duplicate_pr_sha_pair() {
+    fn start_rejects_a_second_run_for_the_same_pr() {
         let reg = RunRegistry::new();
         let _ = reg
             .start(pr(1), "abc".into(), "/tmp/x".into(), "sonnet".into())
             .unwrap();
         let dup = reg.start(pr(1), "abc".into(), "/tmp/x".into(), "sonnet".into());
         assert!(dup.is_err());
+        let other_sha = reg.start(pr(1), "def".into(), "/tmp/x".into(), "sonnet".into());
+        assert!(other_sha.is_err());
     }
 
     #[test]
@@ -252,7 +276,7 @@ mod tests {
             .unwrap();
         reg.finish(&run_id, RunStatus::Done, Some("/tmp/r.html".into()), Some(0.1), Some(2000))
             .unwrap();
-        // Same PR + sha can run again now.
+        // The PR can run again now.
         assert!(reg
             .start(pr(2), "abc".into(), "/tmp/y".into(), "sonnet".into())
             .is_ok());

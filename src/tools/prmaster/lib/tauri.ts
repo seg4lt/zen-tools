@@ -531,8 +531,6 @@ export const prmasterTauri = {
       findingId,
       body,
     }),
-  aiReviewCleanupMerged: (visibleSlugs: string[]) =>
-    invoke<number>("prmaster_ai_review_cleanup_merged", { visibleSlugs }),
   /**
    * Reveal `<app_data>/prmaster/ai-review/reports/` in the system
    * file manager. Surfaced from the global Settings → Paths section

@@ -7,12 +7,12 @@
 //!   and resolves the on-disk paths used for worktrees / reports.
 //! * The four async entry points the Tauri commands wrap:
 //!   [`ReviewEngine::start`], [`ReviewEngine::cancel`],
-//!   [`ReviewEngine::status`], and [`ReviewEngine::cleanup_for_visible`].
+//!   [`ReviewEngine::status`], and persisted-review cleanup helpers.
 //!
 //! Storage layout, under `<app_data>/prmaster/ai-review/`:
 //!
 //! ```text
-//! worktrees/<owner>__<repo>__<number>__<short_sha>/   ← detached worktree
+//! worktrees/<owner>__<repo>__<number>/                ← persistent detached worktree
 //! reports/<run_id>.html                               ← persisted HTML
 //! reports/<run_id>.json                               ← findings JSON
 //! ```
@@ -73,7 +73,8 @@ pub struct StartInputs<'a> {
     /// fallback to `<app_data>/prmaster/ai-review/worktrees/`); we
     /// take it as an explicit input so the engine never has to know
     /// about the user-config plumbing. Each worktree is created at
-    /// `<worktrees_root>/<owner>__<repo>__<number>__<short_sha>/`.
+    /// `<worktrees_root>/<owner>__<repo>__<number>/` and reused until
+    /// the PR is merged or closed.
     pub worktrees_root: &'a Path,
 }
 
@@ -105,7 +106,7 @@ impl ReviewEngine {
         &self.inner.registry
     }
 
-    /// Prepare the worktree, register the run, and return immediately
+    /// Reserve the PR, prepare its worktree, and return immediately
     /// with the handles the frontend needs. The caller is responsible
     /// for spawning [`Self::run`] on a tokio task with the same
     /// `run_id`.
@@ -117,19 +118,7 @@ impl ReviewEngine {
             &inputs.pr.owner,
             &inputs.pr.repo,
             inputs.pr.number,
-            &inputs.head_sha,
         );
-
-        let exec = worktree::build_git_executor();
-        worktree::prepare_worktree(
-            &exec,
-            inputs.local_repo,
-            inputs.head_branch.as_deref(),
-            inputs.base_branch.as_deref(),
-            &inputs.head_sha,
-            &target,
-        )
-        .await?;
 
         let model = inputs
             .model
@@ -137,6 +126,8 @@ impl ReviewEngine {
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "sonnet".to_string());
 
+        // Reserve the whole PR before touching its shared worktree. This
+        // prevents a second head SHA from moving files under a live run.
         let (run_id, cancel) = self
             .inner
             .registry
@@ -147,6 +138,21 @@ impl ReviewEngine {
                 model,
             )
             .map_err(|_| ReviewError::AlreadyRunning)?;
+
+        let exec = worktree::build_git_executor();
+        if let Err(error) = worktree::prepare_worktree(
+            &exec,
+            inputs.local_repo,
+            inputs.head_branch.as_deref(),
+            inputs.base_branch.as_deref(),
+            &inputs.head_sha,
+            &target,
+        )
+        .await
+        {
+            self.inner.registry.evict(&run_id);
+            return Err(error);
+        }
         Ok(StartHandles {
             run_id,
             worktree_path: target,
@@ -164,14 +170,13 @@ impl ReviewEngine {
     /// 1. Reads `<worktree>/.zen-review/report.{html,json}`.
     /// 2. Copies them to `<reports_root>/<run_id>.{html,json}`.
     /// 3. Persists a [`RunRecord`] to `kv` and updates the per-PR index.
-    /// 4. Best-effort `git worktree remove --force` on the temp worktree.
+    /// 4. Leaves the per-PR worktree in place for IDE inspection.
     /// 5. Sends a final [`AiReviewEvent::Done`] with the report path.
     #[allow(clippy::too_many_arguments)]
     pub async fn run(
         &self,
         run_id: &str,
         worktree_path: PathBuf,
-        local_repo: PathBuf,
         reports_root: PathBuf,
         kv: KvStore,
         prompt_text: String,
@@ -241,8 +246,6 @@ impl ReviewEngine {
                             Some(out.duration_ms),
                             &reports_root,
                             &kv,
-                            &local_repo,
-                            &worktree_path,
                         )
                         .await;
                         return Err(e);
@@ -272,8 +275,6 @@ impl ReviewEngine {
                             Some(out.duration_ms),
                             &reports_root,
                             &kv,
-                            &local_repo,
-                            &worktree_path,
                         )
                         .await;
                         return Err(e);
@@ -299,8 +300,6 @@ impl ReviewEngine {
                     Some(out.duration_ms),
                     &reports_root,
                     &kv,
-                    &local_repo,
-                    &worktree_path,
                 )
                 .await;
                 if persisted {
@@ -342,8 +341,6 @@ impl ReviewEngine {
                     Some(out.duration_ms),
                     &reports_root,
                     &kv,
-                    &local_repo,
-                    &worktree_path,
                 )
                 .await;
                 Err(ReviewError::Other("claude exited non-zero".into()))
@@ -362,8 +359,6 @@ impl ReviewEngine {
                     None,
                     &reports_root,
                     &kv,
-                    &local_repo,
-                    &worktree_path,
                 )
                 .await;
                 Err(ReviewError::Cancelled)
@@ -382,8 +377,6 @@ impl ReviewEngine {
                     None,
                     &reports_root,
                     &kv,
-                    &local_repo,
-                    &worktree_path,
                 )
                 .await;
                 Err(e)
@@ -399,6 +392,11 @@ impl ReviewEngine {
     /// Cancel a running review.
     pub fn cancel(&self, run_id: &str) -> bool {
         self.inner.registry.cancel(run_id)
+    }
+
+    /// Cancel and forget live reviews for a PR that has merged or closed.
+    pub fn cancel_and_evict_pr(&self, pr: &PrKey) {
+        self.inner.registry.cancel_and_evict_pr(pr);
     }
 
     /// Per-PR index for the AI Review tab's "do we already have a
@@ -428,16 +426,14 @@ impl ReviewEngine {
             .ok_or_else(|| ReviewError::UnknownFinding(finding_id.to_string()))
     }
 
-    /// Drop everything we know about every PR not in `visible_slugs`
-    /// (i.e. the ones the user can still see in the To Review / Done /
-    /// Mine lists). Called from the `prmaster:refreshed` bridge so a
-    /// merged-or-closed PR's review artefacts don't linger.
-    pub fn cleanup_for_visible(
+    /// Return persisted review PRs that are absent from the latest open-PR
+    /// snapshot. The caller must still verify they actually merged before
+    /// deleting anything.
+    pub fn stored_prs_not_visible(
         &self,
         kv: &KvStore,
-        reports_root: &Path,
         visible_slugs: &[String],
-    ) -> ReviewResult<u32> {
+    ) -> ReviewResult<Vec<PrKey>> {
         let visible: ahash::HashSet<&str> = visible_slugs.iter().map(|s| s.as_str()).collect();
         // Walk all keys with the `ai_review:index:` prefix. KvStore
         // doesn't expose a key iterator, so we go through the
@@ -459,22 +455,31 @@ impl ReviewEngine {
                 keys.push(k.map_err(|e| ReviewError::Other(format!("kv scan: {e}")))?);
             }
         }
-        let mut purged = 0u32;
+        let mut prs = Vec::new();
         for key in keys {
             let slug = key.trim_start_matches(prefix).to_string();
             if visible.contains(slug.as_str()) {
                 continue;
             }
             if let Some(pr) = parse_slug(&slug) {
-                purged += persist::purge_pr(kv, &pr, reports_root)?;
+                prs.push(pr);
             }
         }
-        Ok(purged)
+        Ok(prs)
     }
 
-    /// Internal helper: persist final state, copy reports if any, and
-    /// remove the worktree. Errors here are logged but never propagated
-    /// — the user has already seen the run finish.
+    /// Purge persisted reports and run history for one confirmed-merged PR.
+    pub fn cleanup_pr(
+        &self,
+        kv: &KvStore,
+        reports_root: &Path,
+        pr: &PrKey,
+    ) -> ReviewResult<u32> {
+        persist::purge_pr(kv, pr, reports_root)
+    }
+
+    /// Internal helper: persist final state. Errors here are logged but
+    /// never propagated — the user has already seen the run finish.
     #[allow(clippy::too_many_arguments)]
     async fn finalize(
         &self,
@@ -490,8 +495,6 @@ impl ReviewEngine {
         duration_ms: Option<u64>,
         reports_root: &Path,
         kv: &KvStore,
-        local_repo: &Path,
-        worktree_path: &Path,
     ) -> bool {
         let entry = self.inner.registry.finish(
             run_id,
@@ -532,16 +535,6 @@ impl ReviewEngine {
                 persisted = true;
             }
         }
-        // Worktree cleanup is best-effort and should not delay the Done event
-        // after the report is safely persisted.
-        let local_repo = local_repo.to_path_buf();
-        let worktree_path = worktree_path.to_path_buf();
-        tokio::spawn(async move {
-            let exec = worktree::build_git_executor();
-            if let Err(e) = worktree::remove_worktree(&exec, &local_repo, &worktree_path).await {
-                tracing::warn!(?e, "ai-review: worktree cleanup failed");
-            }
-        });
         persisted
     }
 }

@@ -159,7 +159,7 @@ export function PrAiReviewView({ pr }: Props) {
     };
   }, [pr.detail?.baseRefName, pr.detail?.headRefName, ref]);
 
-  // Resolve the deterministic worktree path for this PR + head SHA.
+  // Resolve the stable deterministic worktree path for this PR.
   useEffect(() => {
     if (!headSha) return;
     let alive = true;
