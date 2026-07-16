@@ -26,6 +26,15 @@ use crate::user_config::UserConfig;
 use crate::error::AppResult;
 use crate::state::AppState;
 
+const PRMASTER_REVIEW_QUEUE_KEY: &str = "prmaster.review_queue";
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReviewQueuePreferences {
+    #[serde(default)]
+    low_priority_pr_ids: Vec<String>,
+}
+
 /// Snapshot of a single CI check used by the Mine tab's detail panel.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckSummaryDto {
@@ -119,6 +128,37 @@ pub async fn prmaster_get_to_review(
         .get::<PrMasterSettings>(PRMASTER_SETTINGS_KEY)?
         .unwrap_or_default();
     Ok(engine.list_to_review(&settings).await?)
+}
+
+/// Return PR ids the user has moved below the main review queue.
+#[tauri::command]
+pub async fn prmaster_get_low_priority_prs(
+    config: State<'_, UserConfig>,
+) -> AppResult<Vec<String>> {
+    let preferences = config
+        .get::<ReviewQueuePreferences>(PRMASTER_REVIEW_QUEUE_KEY)?
+        .unwrap_or_default();
+    Ok(preferences.low_priority_pr_ids)
+}
+
+/// Persist a PR's queue priority and return the canonical updated id list.
+#[tauri::command]
+pub async fn prmaster_set_low_priority_pr(
+    config: State<'_, UserConfig>,
+    id: String,
+    low_priority: bool,
+) -> AppResult<Vec<String>> {
+    let mut preferences = config
+        .get::<ReviewQueuePreferences>(PRMASTER_REVIEW_QUEUE_KEY)?
+        .unwrap_or_default();
+
+    preferences.low_priority_pr_ids.retain(|saved| saved != &id);
+    if low_priority {
+        preferences.low_priority_pr_ids.push(id);
+    }
+
+    config.set(PRMASTER_REVIEW_QUEUE_KEY, &preferences)?;
+    Ok(preferences.low_priority_pr_ids)
 }
 
 /// Open PRs authored by a specified GitHub user. This team-member watchlist

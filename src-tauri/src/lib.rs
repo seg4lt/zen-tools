@@ -578,6 +578,8 @@ pub fn run() {
             commands::prmaster::prmaster_get_gh_status,
             commands::prmaster::prmaster_get_mine,
             commands::prmaster::prmaster_get_to_review,
+            commands::prmaster::prmaster_get_low_priority_prs,
+            commands::prmaster::prmaster_set_low_priority_pr,
             commands::prmaster::prmaster_get_open_prs_by_author,
             commands::prmaster::prmaster_get_reviewed,
             commands::prmaster::prmaster_list_review_comments,

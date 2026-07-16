@@ -42,6 +42,10 @@ interface Props {
    * tab — keeps unchanged call sites looking right.
    */
   variant?: PrCardVariant;
+  /** PR ids placed in the secondary group below the main review queue. */
+  lowPriorityIds?: ReadonlySet<string>;
+  /** Enables the per-row move/restore priority action. */
+  onToggleLowPriority?: (id: string) => void;
 }
 
 export function EnrichedListView({
@@ -53,8 +57,16 @@ export function EnrichedListView({
   onRefresh,
   filterBar,
   variant = "to-review",
+  lowPriorityIds,
+  onToggleLowPriority,
 }: Props) {
   const { state, dispatch } = usePrMasterStore();
+  const standardRows = lowPriorityIds
+    ? rows.filter((row) => !lowPriorityIds.has(enrichedId(row)))
+    : rows;
+  const lowPriorityRows = lowPriorityIds
+    ? rows.filter((row) => lowPriorityIds.has(enrichedId(row)))
+    : [];
 
   // Resolve the selected row *in this list* — selection persists across
   // tabs, so we ignore selections that don't belong here.
@@ -168,7 +180,7 @@ export function EnrichedListView({
         )}
 
         <div className="flex flex-col gap-2">
-          {rows.map((row) => {
+          {standardRows.map((row) => {
             const id = enrichedId(row);
             return (
               <PrCard
@@ -177,6 +189,40 @@ export function EnrichedListView({
                 selected={false}
                 variant={variant}
                 onSelect={() => dispatch({ type: "select", id })}
+                onToggleLowPriority={
+                  onToggleLowPriority
+                    ? () => onToggleLowPriority(id)
+                    : undefined
+                }
+              />
+            );
+          })}
+
+          {lowPriorityRows.length > 0 && (
+            <div className="mb-0.5 mt-3 flex items-center gap-2 px-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+              <span>Low Priority</span>
+              <span className="font-mono font-normal normal-case tracking-normal">
+                {lowPriorityRows.length}
+              </span>
+              <span className="h-px flex-1 bg-border" />
+            </div>
+          )}
+
+          {lowPriorityRows.map((row) => {
+            const id = enrichedId(row);
+            return (
+              <PrCard
+                key={id}
+                enriched={row}
+                selected={false}
+                variant={variant}
+                isLowPriority
+                onSelect={() => dispatch({ type: "select", id })}
+                onToggleLowPriority={
+                  onToggleLowPriority
+                    ? () => onToggleLowPriority(id)
+                    : undefined
+                }
               />
             );
           })}

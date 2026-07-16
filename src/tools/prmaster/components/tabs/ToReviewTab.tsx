@@ -4,8 +4,12 @@
  * matching PRMaster's classification).
  */
 
-import { useEffect, useMemo, useState } from "react";
-import { loadToReview, usePrMasterStore } from "../../store/prmaster-store";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  enrichedId,
+  loadToReview,
+  usePrMasterStore,
+} from "../../store/prmaster-store";
 import { EnrichedListView } from "../shared/EnrichedListView";
 import {
   applyPrFilters,
@@ -14,12 +18,32 @@ import {
   type PrFilterState,
   useSavedFilterMatches,
 } from "../shared/PrFilterBar";
-import { prmasterTauri, type NotificationFilter } from "../../lib/tauri";
+import {
+  prmasterTauri,
+  type EnrichedPullRequest,
+  type NotificationFilter,
+} from "../../lib/tauri";
+
+function compareByTitle(
+  left: EnrichedPullRequest,
+  right: EnrichedPullRequest,
+): number {
+  const leftTitle = left.pr.title.toLowerCase();
+  const rightTitle = right.pr.title.toLowerCase();
+  if (leftTitle < rightTitle) return -1;
+  if (leftTitle > rightTitle) return 1;
+
+  // Ensure duplicate titles also have a deterministic order.
+  const leftId = enrichedId(left);
+  const rightId = enrichedId(right);
+  return leftId < rightId ? -1 : leftId > rightId ? 1 : 0;
+}
 
 export function ToReviewTab() {
   const { state, dispatch } = usePrMasterStore();
   const [filter, setFilter] = useState<PrFilterState>(emptyFilterState);
   const [savedFilters, setSavedFilters] = useState<NotificationFilter[]>([]);
+  const [lowPriorityIds, setLowPriorityIds] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     if (
@@ -35,11 +59,16 @@ export function ToReviewTab() {
   useEffect(() => {
     let alive = true;
     void (async () => {
-      try {
-        const list = await prmasterTauri.listFilters();
-        if (alive) setSavedFilters(list);
-      } catch {
-        // non-fatal — Filters tab surfaces errors
+      const [filters, priorityIds] = await Promise.allSettled([
+        prmasterTauri.listFilters(),
+        prmasterTauri.getLowPriorityPrs(),
+      ]);
+      if (!alive) return;
+      if (filters.status === "fulfilled") {
+        setSavedFilters(filters.value);
+      }
+      if (priorityIds.status === "fulfilled") {
+        setLowPriorityIds(new Set(priorityIds.value));
       }
     })();
     return () => {
@@ -52,15 +81,32 @@ export function ToReviewTab() {
     filter.savedFilterIds,
   );
   const filteredRows = useMemo(
-    () => applyPrFilters(state.toReview, filter, savedFilterMatches),
+    () =>
+      [...applyPrFilters(state.toReview, filter, savedFilterMatches)].sort(
+        compareByTitle,
+      ),
     [state.toReview, filter, savedFilterMatches],
   );
+
+  const toggleLowPriority = useCallback(async (id: string) => {
+    try {
+      const priorityIds = await prmasterTauri.setLowPriorityPr(
+        id,
+        !lowPriorityIds.has(id),
+      );
+      setLowPriorityIds(new Set(priorityIds));
+    } catch (error) {
+      console.warn("[prmaster] failed to update PR priority:", error);
+    }
+  }, [lowPriorityIds]);
 
   return (
     <EnrichedListView
       title="Review Queue"
       variant="to-review"
       rows={filteredRows}
+      lowPriorityIds={lowPriorityIds}
+      onToggleLowPriority={toggleLowPriority}
       loading={state.loading.toReview}
       error={state.errors.toReview}
       emptyText="No PRs are awaiting your review or being watched."

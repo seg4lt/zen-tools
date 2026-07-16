@@ -36,6 +36,8 @@ import {
   Check,
   CircleDashed,
   CircleHelp,
+  ChevronsDown,
+  ChevronsUp,
   ExternalLink,
   FileDiff,
   GitBranch,
@@ -73,6 +75,8 @@ interface Props {
    */
   variant?: PrCardVariant;
   onSelect?: () => void;
+  isLowPriority?: boolean;
+  onToggleLowPriority?: () => void;
 }
 
 /**
@@ -148,6 +152,8 @@ export function PrCard({
   selected = false,
   variant = "to-review",
   onSelect,
+  isLowPriority = false,
+  onToggleLowPriority,
 }: Props) {
   const { pr, detail, reviews, requestedReviewers, reviewDecision } = enriched;
   const authorLogin = pr.author?.login ?? null;
@@ -192,6 +198,15 @@ export function PrCard({
       window.open(pr.url, "_blank", "noopener,noreferrer");
     },
     [pr.url],
+  );
+
+  const onPriorityClick = useCallback(
+    (e: React.MouseEvent | React.KeyboardEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      onToggleLowPriority?.();
+    },
+    [onToggleLowPriority],
   );
 
   const TitleIcon = pr.isDraft ? GitPullRequestDraft : GitPullRequest;
@@ -254,6 +269,38 @@ export function PrCard({
             )}
             {reviewDecision && reviewDecision !== "Unknown" && (
               <DecisionBadge decision={reviewDecision} />
+            )}
+            {onToggleLowPriority && (
+              <span
+                role="button"
+                tabIndex={-1}
+                aria-label={
+                  isLowPriority
+                    ? "Restore to normal priority"
+                    : "Move to low priority"
+                }
+                title={
+                  isLowPriority
+                    ? "Restore to normal priority"
+                    : "Move to Low Priority"
+                }
+                onClick={onPriorityClick}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") onPriorityClick(e);
+                }}
+                className={cn(
+                  "inline-flex size-5 cursor-pointer items-center justify-center rounded text-muted-foreground transition-opacity hover:bg-accent hover:text-foreground",
+                  isLowPriority
+                    ? "opacity-70 group-hover:opacity-100"
+                    : "opacity-0 group-hover:opacity-100",
+                )}
+              >
+                {isLowPriority ? (
+                  <ChevronsUp className="size-3" />
+                ) : (
+                  <ChevronsDown className="size-3" />
+                )}
+              </span>
             )}
             {/* Hover-revealed open-in-browser. Render unconditionally
                 so the layout doesn't reflow on hover; opacity flips

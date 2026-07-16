@@ -376,6 +376,10 @@ export const prmasterTauri = {
   getMine: (force = false) =>
     invoke<EnrichedPullRequest[]>("prmaster_get_mine", { force }),
   getToReview: () => invoke<EnrichedPullRequest[]>("prmaster_get_to_review"),
+  getLowPriorityPrs: () =>
+    invoke<string[]>("prmaster_get_low_priority_prs"),
+  setLowPriorityPr: (id: string, lowPriority: boolean) =>
+    invoke<string[]>("prmaster_set_low_priority_pr", { id, lowPriority }),
   /** Ad-hoc open-PR watchlist for another GitHub user. */
   getOpenPrsByAuthor: (author: string) =>
     invoke<EnrichedPullRequest[]>("prmaster_get_open_prs_by_author", { author }),
