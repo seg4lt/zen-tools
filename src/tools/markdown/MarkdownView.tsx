@@ -634,34 +634,77 @@ export function MarkdownView() {
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           {hasFile ? (
             isExcalidraw ? (
-              // Drawings get a remount per tab id so the lazy
-              // import + initial-data load run once per file.
-              // The fallback shows while the ~3 MB chunk loads.
-              <Suspense
-                fallback={
-                  <div className="flex h-full w-full items-center justify-center text-xs text-muted-foreground">
-                    <Loader2 className="mr-2 size-4 animate-spin" /> loading
-                    drawing…
-                  </div>
-                }
-              >
-                <ExcalidrawEditor
-                  key={tab!.id}
-                  path={tab!.path}
-                  theme={theme}
-                  onDirty={() =>
-                    dispatch({
-                      type: "editDoc",
-                      doc: "__excalidraw_dirty__",
-                    })
-                  }
-                  // Excalidraw hands us either a serialised SVG
-                  // string or PNG `Uint8Array` depending on the
-                  // file's extension — `saveCurrent` routes both.
-                  onSave={(data) => saveCurrent(data, tab!.path)}
-                  onAutoSave={(data) => saveCurrent(data, tab!.path)}
-                />
-              </Suspense>
+              <div className="flex h-full min-h-0 min-w-0 flex-col">
+                {/* Excalidraw bypasses SplitLayout, so it needs the same
+                    workspace tab strip explicitly. Canvas fullscreen is
+                    owned by ExcalidrawEditor and covers this header only
+                    after the user presses its expand control. */}
+                <div className="shrink-0 bg-muted/60">
+                  <TabStrip
+                    tabs={state.tabs}
+                    activeTabId={tab!.id}
+                    onSelect={(tabId) => {
+                      const leafId = workspace.focusedLeafId;
+                      setLeafTabs((prev) =>
+                        prev[leafId] === tabId
+                          ? prev
+                          : { ...prev, [leafId]: tabId },
+                      );
+                      if (state.activeTabId !== tabId) {
+                        dispatch({ type: "selectTab", id: tabId });
+                      }
+                    }}
+                    onClose={(tabId) => {
+                      const closing = state.tabs.find(
+                        (candidate) => candidate.id === tabId,
+                      );
+                      if (
+                        closing?.kind === "terminal" &&
+                        closing.terminal?.paneId != null
+                      ) {
+                        void terminalCloseTab(closing.terminal.paneId).catch(
+                          (err) =>
+                            console.error(
+                              "[markdown] close terminal tab failed",
+                              err,
+                            ),
+                        );
+                        return;
+                      }
+                      dispatch({ type: "closeTab", id: tabId });
+                    }}
+                  />
+                </div>
+                <div className="min-h-0 min-w-0 flex-1">
+                  {/* Drawings get a remount per tab id so the lazy import +
+                      initial-data load run once per file. */}
+                  <Suspense
+                    fallback={
+                      <div className="flex h-full w-full items-center justify-center text-xs text-muted-foreground">
+                        <Loader2 className="mr-2 size-4 animate-spin" /> loading
+                        drawing…
+                      </div>
+                    }
+                  >
+                    <ExcalidrawEditor
+                      key={tab!.id}
+                      path={tab!.path}
+                      theme={theme}
+                      onDirty={() =>
+                        dispatch({
+                          type: "editDoc",
+                          doc: "__excalidraw_dirty__",
+                        })
+                      }
+                      // Excalidraw hands us either a serialised SVG
+                      // string or PNG `Uint8Array` depending on the
+                      // file's extension — `saveCurrent` routes both.
+                      onSave={(data) => saveCurrent(data, tab!.path)}
+                      onAutoSave={(data) => saveCurrent(data, tab!.path)}
+                    />
+                  </Suspense>
+                </div>
+              </div>
             ) : (
               // One CodeMirror instance per split leaf — each gets
               // its own cursor, scroll position and undo history.
