@@ -57,6 +57,7 @@ import type {
 } from "@excalidraw/excalidraw/element/types";
 import type { AppState, BinaryFiles } from "@excalidraw/excalidraw/types";
 import { convertFileSrc } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { open as openExternalUrl } from "@tauri-apps/plugin-shell";
 import {
   ChevronLeft,
@@ -1051,6 +1052,9 @@ export default function ExcalidrawEditor({
   const thumbnailTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const thumbnailUrlsRef = useRef<string[]>([]);
   const lastSpacePressRef = useRef(0);
+  const lastHistoryKeydownRef = useRef<{ key: string; at: number } | null>(
+    null,
+  );
 
   const apiRef = useRef<ExcalidrawImperativeAPI | null>(null);
   const sceneRef = useRef<LiveScene | null>(null);
@@ -1888,6 +1892,19 @@ export default function ExcalidrawEditor({
         target?.closest("input, textarea, [contenteditable='true']"),
       );
 
+      const isHistoryShortcut =
+        (e.metaKey || e.ctrlKey) &&
+        !e.altKey &&
+        e.key.toLowerCase() === "z";
+      if (isHistoryShortcut && !isTyping && !presentationMode) {
+        // The native AppKit bridge uses this timestamp to avoid synthesizing
+        // a second undo when WKWebView delivered the real keydown normally.
+        lastHistoryKeydownRef.current = {
+          key: e.shiftKey ? "cmd-shift-z" : "cmd-z",
+          at: performance.now(),
+        };
+      }
+
       if (e.key === "Escape" && architecturePanelOpen) {
         e.preventDefault();
         e.stopPropagation();
@@ -1988,6 +2005,53 @@ export default function ExcalidrawEditor({
     serializeScene,
     startPresentation,
   ]);
+
+  // On macOS, AppKit can execute the native Edit > Undo command without
+  // delivering Cmd+Z to WKWebView. The native key monitor emits these hooks
+  // without consuming the original event. Wait briefly for a real DOM event;
+  // only relay to Excalidraw when none arrived. Editable fields are excluded
+  // so their responder-chain undo remains untouched.
+  useEffect(() => {
+    const timers = new Set<number>();
+    const unlisteners: Array<() => void> = [];
+    let cancelled = false;
+
+    const register = async (key: "cmd-z" | "cmd-shift-z") => {
+      const unlisten = await listen(`terminal:host-key-hook:${key}`, () => {
+        const timer = window.setTimeout(() => {
+          timers.delete(timer);
+          if (cancelled || presentationMode) return;
+          const target = document.activeElement as HTMLElement | null;
+          if (target?.closest("input, textarea, [contenteditable='true']")) {
+            return;
+          }
+          const last = lastHistoryKeydownRef.current;
+          if (last?.key === key && performance.now() - last.at < 200) return;
+          document.dispatchEvent(
+            new KeyboardEvent("keydown", {
+              key: key === "cmd-shift-z" ? "Z" : "z",
+              code: "KeyZ",
+              metaKey: true,
+              shiftKey: key === "cmd-shift-z",
+              bubbles: true,
+              cancelable: true,
+            }),
+          );
+        }, 50);
+        timers.add(timer);
+      });
+      if (cancelled) unlisten();
+      else unlisteners.push(unlisten);
+    };
+
+    void register("cmd-z");
+    void register("cmd-shift-z");
+    return () => {
+      cancelled = true;
+      timers.forEach((timer) => window.clearTimeout(timer));
+      unlisteners.forEach((unlisten) => unlisten());
+    };
+  }, [presentationMode]);
 
   // ────────────────────────────────────────────────────────────────
   // Render

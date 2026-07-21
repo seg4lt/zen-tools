@@ -3320,6 +3320,21 @@ void GhosttyInstallEventMonitor(ghostty_surface_t surface) {
                 return nil;
             }
 
+            // AppKit may route Cmd+Z through the native Edit menu without
+            // delivering a DOM keydown to WKWebView. Notify the embedding
+            // host so canvas-style editors can provide a fallback. Unlike
+            // Cmd+W, keep returning the event: native text fields and web
+            // editors must retain their normal responder-chain undo.
+            if (![fr isKindOfClass:[GhosttyHostView class]] && !searchHost) {
+                if (devMods == NSEventModifierFlagCommand
+                    && ([chars isEqualToString:@"z"] || [chars isEqualToString:@"Z"])) {
+                    if (g_host_key_hook_fn) g_host_key_hook_fn("cmd-z");
+                } else if (devMods == (NSEventModifierFlagCommand | NSEventModifierFlagShift)
+                    && ([chars isEqualToString:@"z"] || [chars isEqualToString:@"Z"])) {
+                    if (g_host_key_hook_fn) g_host_key_hook_fn("cmd-shift-z");
+                }
+            }
+
             if (devMods == (NSEventModifierFlagCommand | NSEventModifierFlagOption)
                 && [chars isEqualToString:@"f"]) {
                 if (g_host_key_hook_fn) g_host_key_hook_fn("cmd-opt-f");
