@@ -40,6 +40,7 @@ import {
   exportToSvg,
   getCommonBounds,
   getNonDeletedElements,
+  getSceneVersion,
   loadFromBlob,
   newElementWith,
   restoreElements,
@@ -1061,8 +1062,10 @@ export default function ExcalidrawEditor({
   const fullscreenBeforePresentationRef = useRef(false);
   const dirtiedRef = useRef(false);
   const changeVersionRef = useRef(0);
+  const lastSceneVersionRef = useRef<number | null>(null);
   const readyRef = useRef(false);
   const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const autoSaveChainRef = useRef<Promise<void>>(Promise.resolve());
   const onAutoSaveRef = useRef(onAutoSave);
 
   useEffect(() => {
@@ -1102,6 +1105,29 @@ export default function ExcalidrawEditor({
       return new XMLSerializer().serializeToString(svgEl);
     },
     [path],
+  );
+
+  const enqueueAutoSave = useCallback(
+    (scene: LiveScene, savingVersion: number) => {
+      // PNG rasterization is asynchronous and materially slower than SVG
+      // serialization. Keep exports and writes strictly ordered so an older
+      // PNG can never finish last and overwrite a newer canvas revision.
+      autoSaveChainRef.current = autoSaveChainRef.current
+        .catch(() => {
+          // A failed revision must not prevent later revisions from saving.
+        })
+        .then(async () => {
+          const data = await serializeScene(scene);
+          await onAutoSaveRef.current(data);
+          if (savingVersion === changeVersionRef.current) {
+            dirtiedRef.current = false;
+          }
+        })
+        .catch((err) => {
+          console.error("[excalidraw] auto-save failed", err);
+        });
+    },
+    [serializeScene],
   );
 
   const growMarkdownCard = useCallback(
@@ -1775,11 +1801,7 @@ export default function ExcalidrawEditor({
         // the pending scene so that a fast navigation never drops the edit.
         const latest = sceneRef.current;
         if (latest && dirtiedRef.current) {
-          void serializeScene(latest)
-            .then((data) => onAutoSaveRef.current(data))
-            .catch((err) =>
-              console.error("[excalidraw] final auto-save failed", err),
-            );
+          enqueueAutoSave(latest, changeVersionRef.current);
         }
       }
       if (thumbnailTimerRef.current !== null) {
@@ -1788,7 +1810,7 @@ export default function ExcalidrawEditor({
       thumbnailUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
       thumbnailUrlsRef.current = [];
     };
-  }, [serializeScene]);
+  }, [enqueueAutoSave]);
 
   // Match the terminal's app-viewport mode on macOS: HTML covers the whole
   // webview and AppKit's traffic lights are hidden until the user exits.
@@ -1814,6 +1836,7 @@ export default function ExcalidrawEditor({
     let cancelled = false;
     dirtiedRef.current = false;
     changeVersionRef.current = 0;
+    lastSceneVersionRef.current = null;
     setPresentationMode(false);
     setFullscreen(false);
     fullscreenBeforePresentationRef.current = false;
@@ -1986,7 +2009,7 @@ export default function ExcalidrawEditor({
       e.preventDefault();
       e.stopPropagation();
       try {
-        onSave(await serializeScene(scene));
+        await onSave(await serializeScene(scene));
       } catch (err) {
         console.error("[excalidraw] export failed", err);
       }
@@ -2758,6 +2781,7 @@ export default function ExcalidrawEditor({
         onChange={(elements, appState, files) => {
           const scene = { elements, appState, files };
           sceneRef.current = scene;
+          const sceneVersion = getSceneVersion(elements);
 
           refreshFrameThumbnails(scene);
           const selectedElement = elements.find(
@@ -2942,7 +2966,19 @@ export default function ExcalidrawEditor({
               });
             return unchanged ? current : flowPaths;
           });
-          if (!readyRef.current) return;
+          if (!readyRef.current) {
+            // Establish the loaded document's baseline without scheduling an
+            // autosave for Excalidraw's initial app-state callbacks.
+            lastSceneVersionRef.current = sceneVersion;
+            return;
+          }
+          if (lastSceneVersionRef.current === sceneVersion) {
+            // Selection, hover, focus, viewport, and other transient app-state
+            // updates can fire onChange continuously. They must not postpone
+            // the content autosave timer.
+            return;
+          }
+          lastSceneVersionRef.current = sceneVersion;
           changeVersionRef.current += 1;
           if (!dirtiedRef.current) {
             dirtiedRef.current = true;
@@ -2955,19 +2991,7 @@ export default function ExcalidrawEditor({
             autoSaveTimerRef.current = null;
             const latest = sceneRef.current;
             if (!latest) return;
-            const savingVersion = changeVersionRef.current;
-            void serializeScene(latest)
-              .then((data) => onAutoSaveRef.current(data))
-              .then(() => {
-                // A slower disk write must not mark a newer canvas revision
-                // clean; that newer revision has its own pending timer.
-                if (savingVersion === changeVersionRef.current) {
-                  dirtiedRef.current = false;
-                }
-              })
-              .catch((err) =>
-                console.error("[excalidraw] auto-save failed", err),
-              );
+            enqueueAutoSave(latest, changeVersionRef.current);
           }, 500);
         }}
       />

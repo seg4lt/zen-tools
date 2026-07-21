@@ -107,6 +107,10 @@ export function useOpenFile() {
         dispatch({ type: "markSaved", path: tab.path });
       } catch (err) {
         console.error("[markdown] save failed", err);
+        // Autosave callers must be able to distinguish a completed write
+        // from a failed one. In particular, PNG exports are queued and must
+        // not mark a newer canvas revision clean after an IPC write failure.
+        throw err;
       }
     },
     [dispatch, state],
