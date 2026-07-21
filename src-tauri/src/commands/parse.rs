@@ -2,8 +2,10 @@
 
 use crate::dto::{EnvironmentFileDto, OpenedHttpFileDto};
 use crate::error::{AppError, AppResult};
+use crate::file_tree_watcher::FileTreeWatcher;
 use crate::state::AppState;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::debug;
 use zen_parser::{find_env_file, parse_env_file, pick_default_env_name};
@@ -79,8 +81,10 @@ pub async fn write_file_content(
     path: String,
     content: String,
     state: tauri::State<'_, Mutex<AppState>>,
+    watcher: tauri::State<'_, Arc<FileTreeWatcher>>,
 ) -> AppResult<()> {
     let path_buf = PathBuf::from(&path);
+    watcher.mark_internal_write(&path_buf);
     std::fs::write(&path_buf, content)?;
     state.lock().await.file_registry.invalidate(&path_buf);
     Ok(())

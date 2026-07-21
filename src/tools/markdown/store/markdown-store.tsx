@@ -94,6 +94,8 @@ export interface TabState {
   kind: TabKind;
   /** Present only for Ghostty-backed terminal tabs. */
   terminal: TerminalTabState | null;
+  /** Incremented when a clean drawing changes outside Zen Tools. */
+  externalRevision?: number;
 }
 
 /**
@@ -346,6 +348,7 @@ export type MarkdownAction =
    * tab's state.
    */
   | { type: "markSaved"; path?: string }
+  | { type: "externalFileChanged"; path: string; doc: string | null }
   | { type: "setRecents"; recents: string[] }
   | { type: "setSearchPalette"; open: boolean; mode?: SearchMode }
   | { type: "setSearchMode"; mode: SearchMode }
@@ -448,6 +451,7 @@ function reducer(state: MarkdownState, action: MarkdownAction): MarkdownState {
         dirty: false,
         kind: action.kind ?? "markdown",
         terminal: null,
+        externalRevision: 0,
       };
       return {
         ...state,
@@ -593,6 +597,26 @@ function reducer(state: MarkdownState, action: MarkdownAction): MarkdownState {
         t.id === id ? { ...t, dirty: false } : t,
       );
       return { ...state, tabs };
+    }
+
+    case "externalFileChanged": {
+      let changed = false;
+      const tabs = state.tabs.map((tab) => {
+        if (tab.path !== action.path || tab.dirty || tab.kind === "terminal") {
+          return tab;
+        }
+        if (tab.kind === "excalidraw") {
+          changed = true;
+          return {
+            ...tab,
+            externalRevision: (tab.externalRevision ?? 0) + 1,
+          };
+        }
+        if (action.doc === null || action.doc === tab.doc) return tab;
+        changed = true;
+        return { ...tab, doc: action.doc };
+      });
+      return changed ? { ...state, tabs } : state;
     }
 
     case "setRecents":
@@ -898,8 +922,31 @@ export function MarkdownStoreProvider({ children }: { children: ReactNode }) {
     let refreshing = false;
     let unlisten: (() => void) | undefined;
 
-    void onFileTreeChanged(({ scope }) => {
-      if (scope !== "markdown" || refreshing) return;
+    void onFileTreeChanged(({ scope, paths = [] }) => {
+      if (scope !== "markdown") return;
+
+      // Content reloads must not be gated by the slower sidebar discovery.
+      // Editors often produce several watcher batches for one atomic save;
+      // dropping a batch while `refreshing` is true can drop the only event
+      // carrying the final destination path.
+      for (const path of paths) {
+        void markdownTauri
+          .readFile(path)
+          .then((doc) => {
+            if (!disposed) {
+              dispatch({ type: "externalFileChanged", path, doc });
+            }
+          })
+          .catch(() => {
+            // PNG drawings are binary, so text reading is expected to fail.
+            // The path alone tells the reducer to remount a clean drawing.
+            if (!disposed) {
+              dispatch({ type: "externalFileChanged", path, doc: null });
+            }
+          });
+      }
+
+      if (refreshing) return;
       refreshing = true;
       void (async () => {
         try {

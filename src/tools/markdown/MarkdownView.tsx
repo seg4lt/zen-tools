@@ -687,7 +687,7 @@ export function MarkdownView() {
                     }
                   >
                     <ExcalidrawEditor
-                      key={tab!.id}
+                      key={`${tab!.id}:${tab!.externalRevision ?? 0}`}
                       path={tab!.path}
                       theme={theme}
                       onDirty={() =>

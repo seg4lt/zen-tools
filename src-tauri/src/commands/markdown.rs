@@ -767,6 +767,7 @@ pub async fn markdown_save_pasted_image(
 pub async fn markdown_write_bytes(
     path: String,
     bytes: Vec<u8>,
+    watcher: tauri::State<'_, Arc<FileTreeWatcher>>,
 ) -> AppResult<()> {
     let pb = PathBuf::from(&path);
     let parent = pb
@@ -778,6 +779,7 @@ pub async fn markdown_write_bytes(
             parent.display()
         )));
     }
+    watcher.mark_internal_write(&pb);
     tokio::fs::write(&pb, &bytes)
         .await
         .map_err(|e| AppError::Other(format!("write {path}: {e}")))?;

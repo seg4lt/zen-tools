@@ -6,6 +6,8 @@ export type FileTreeScope = "http" | "sql" | "markdown";
 
 export interface FileTreeChangedEvent {
   scope: FileTreeScope;
+  /** Absolute paths reported by the native watcher. Empty means rescan. */
+  paths: string[];
 }
 
 /** Subscribe to the Rust filesystem watcher's debounced change events. */
