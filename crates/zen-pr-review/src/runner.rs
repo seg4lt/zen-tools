@@ -40,6 +40,10 @@ pub struct RunOutcome {
     pub cost_usd: Option<f64>,
     /// Captured stderr (truncated).
     pub stderr_tail: String,
+    /// Claude Code session id, used to resume this investigation.
+    pub session_id: Option<String>,
+    /// Concatenated assistant text emitted during the invocation.
+    pub response_text: String,
 }
 
 /// Trait so the runner can emit events without depending on the
@@ -72,6 +76,29 @@ pub async fn spawn_claude<S: EventSink>(
     cancel: Arc<Notify>,
     sink: S,
 ) -> ReviewResult<RunOutcome> {
+    spawn_claude_session(worktree, prompt, model, None, cancel, sink).await
+}
+
+/// Resume an existing Claude Code session for a clarification turn.
+pub async fn resume_claude<S: EventSink>(
+    worktree: PathBuf,
+    prompt: String,
+    model: Option<String>,
+    session_id: String,
+    cancel: Arc<Notify>,
+    sink: S,
+) -> ReviewResult<RunOutcome> {
+    spawn_claude_session(worktree, prompt, model, Some(session_id), cancel, sink).await
+}
+
+async fn spawn_claude_session<S: EventSink>(
+    worktree: PathBuf,
+    prompt: String,
+    model: Option<String>,
+    resume_session_id: Option<String>,
+    cancel: Arc<Notify>,
+    sink: S,
+) -> ReviewResult<RunOutcome> {
     let mut args: Vec<String> = vec![
         "-p".into(),
         prompt,
@@ -83,6 +110,10 @@ pub async fn spawn_claude<S: EventSink>(
         "--disallowedTools".into(),
         "Edit Write MultiEdit NotebookEdit".into(),
     ];
+    if let Some(session_id) = resume_session_id.as_deref() {
+        args.push("--resume".into());
+        args.push(session_id.to_string());
+    }
     if let Some(m) = model.as_deref() {
         if !m.is_empty() {
             args.push("--model".into());
@@ -149,6 +180,8 @@ pub async fn spawn_claude<S: EventSink>(
     let mut last_cost: Option<f64> = None;
     let mut last_duration_ms: u64 = 0;
     let mut stderr_tail = String::new();
+    let mut session_id = resume_session_id;
+    let mut response_parts: Vec<String> = Vec::new();
 
     let exit_status = loop {
         tokio::select! {
@@ -180,10 +213,16 @@ pub async fn spawn_claude<S: EventSink>(
             line = reader.next_line() => {
                 match line {
                     Ok(Some(text)) => {
+                        if let Some(found) = extract_session_id(&text) {
+                            session_id = Some(found);
+                        }
                         for event in classify_line(&text) {
                             if let AiReviewEvent::Done { cost_usd, duration_ms, .. } = &event {
                                 last_cost = *cost_usd;
                                 last_duration_ms = *duration_ms;
+                            }
+                            if let AiReviewEvent::Text { text } = &event {
+                                response_parts.push(text.clone());
                             }
                             sink.emit(event);
                         }
@@ -228,7 +267,18 @@ pub async fn spawn_claude<S: EventSink>(
         duration_ms,
         cost_usd: last_cost,
         stderr_tail,
+        session_id,
+        response_text: response_parts.join("\n"),
     })
+}
+
+fn extract_session_id(line: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(line)
+        .ok()?
+        .get("session_id")?
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 /// Compute the same PATH list `zen_shell::ShellExecutor::new` uses, so
@@ -253,4 +303,23 @@ fn augmented_path() -> String {
     ];
     parts.push(std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin:/usr/sbin:/sbin".into()));
     parts.join(":")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_session_id;
+
+    #[test]
+    fn extracts_session_id_from_stream_frame() {
+        assert_eq!(
+            extract_session_id(r#"{"type":"system","session_id":"session-123"}"#),
+            Some("session-123".into())
+        );
+    }
+
+    #[test]
+    fn ignores_frames_without_a_session_id() {
+        assert_eq!(extract_session_id(r#"{"type":"assistant"}"#), None);
+        assert_eq!(extract_session_id("not json"), None);
+    }
 }

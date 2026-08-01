@@ -85,6 +85,50 @@ pub struct RunRecord {
     /// this field existed deserialise with an empty list.
     #[serde(default)]
     pub events: Vec<AiReviewEvent>,
+    /// Claude Code session created by the review. Follow-up questions
+    /// resume this session so they retain the original investigation.
+    #[serde(default)]
+    pub session_id: Option<String>,
+    /// Persisted user/assistant follow-up conversation for this review.
+    #[serde(default)]
+    pub clarifications: Vec<ClarificationTurn>,
+    /// Reconciliation of findings from the immediately preceding review.
+    #[serde(default)]
+    pub previous_findings: Vec<PreviousFindingResult>,
+}
+
+/// One persisted follow-up question and Claude's response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClarificationTurn {
+    /// Stable UI key.
+    pub id: String,
+    /// User-authored question.
+    pub question: String,
+    /// Claude's completed answer.
+    pub answer: String,
+    /// UNIX milliseconds when the question was submitted.
+    pub asked_at_ms: i64,
+}
+
+/// Result of re-checking one finding from the preceding completed review.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PreviousFindingResult {
+    /// Stable id from the previous report.
+    pub finding_id: String,
+    /// Previous finding title, echoed for a readable reconciliation UI.
+    #[serde(default)]
+    pub title: String,
+    /// `fixed`, `still_present`, or `cannot_verify`.
+    pub status: String,
+    /// Evidence-based explanation of the classification.
+    #[serde(default)]
+    pub explanation: String,
+    /// Current repository-relative evidence path, when available.
+    #[serde(default)]
+    pub path: Option<String>,
+    /// Current one-based evidence line, when available.
+    #[serde(default)]
+    pub line: Option<u32>,
 }
 
 /// One severity-tagged finding extracted from `report.json`.
@@ -207,6 +251,9 @@ pub struct ReportPayload {
     /// Findings, in author-preferred order.
     #[serde(default)]
     pub findings: Vec<Finding>,
+    /// Status of each finding supplied from the previous completed review.
+    #[serde(default)]
+    pub previous_findings: Vec<PreviousFindingResult>,
 }
 
 /// Build the index key for a PR.
@@ -229,6 +276,19 @@ pub fn load_index(kv: &KvStore, pr: &PrKey) -> ReviewResult<Vec<RunSummary>> {
 /// Read a single run record.
 pub fn load_run(kv: &KvStore, run_id: &str) -> ReviewResult<Option<RunRecord>> {
     Ok(kv.get::<RunRecord>(&run_key(run_id))?)
+}
+
+/// Append a completed clarification turn to an existing run record.
+pub fn append_clarification(
+    kv: &KvStore,
+    run_id: &str,
+    turn: ClarificationTurn,
+) -> ReviewResult<()> {
+    let mut record = load_run(kv, run_id)?
+        .ok_or_else(|| ReviewError::Other(format!("unknown run id: {run_id}")))?;
+    record.clarifications.push(turn);
+    kv.set(&run_key(run_id), &record)?;
+    Ok(())
 }
 
 /// Persist a completed run. Updates the per-PR index (capped, newest-first).
@@ -347,6 +407,9 @@ mod tests {
             prompt: String::new(),
             findings: Vec::new(),
             events: Vec::new(),
+            session_id: None,
+            clarifications: Vec::new(),
+            previous_findings: Vec::new(),
         }
     }
 

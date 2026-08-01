@@ -28,14 +28,16 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, Mutex, Notify};
 
 use zen_github::PrRef;
 use zen_pr_review::{
-    AiReviewEvent, Finding, PrKey, RunStatus, RunSummary, StartInputs,
+    AiReviewEvent, ClarificationTurn, Finding, PrKey, PreviousFindingResult, RunStatus, RunSummary,
+    StartInputs,
 };
 use zen_prmaster::PrMasterSettings;
 
@@ -89,10 +91,7 @@ fn resolve_worktrees_root(app: &AppHandle, settings: &PrMasterSettings) -> AppRe
         None => ai_review_root(app)?.join("worktrees"),
     };
     std::fs::create_dir_all(&root)
-        .map_err(|e| AppError::Other(format!(
-            "create worktrees dir {}: {e}",
-            root.display()
-        )))?;
+        .map_err(|e| AppError::Other(format!("create worktrees dir {}: {e}", root.display())))?;
     Ok(root)
 }
 
@@ -126,6 +125,47 @@ fn local_repo_path(settings: &PrMasterSettings, pr: &PrKey) -> AppResult<PathBuf
         )));
     }
     Ok(path)
+}
+
+fn previous_review_context(
+    review: &zen_pr_review::ReviewEngine,
+    kv: &zen_storage::KvStore,
+    pr: &PrKey,
+) -> AppResult<Option<String>> {
+    let previous_summary = review
+        .list_runs(kv, pr)?
+        .into_iter()
+        .find(|run| run.status == RunStatus::Done);
+    let Some(previous_summary) = previous_summary else {
+        return Ok(None);
+    };
+    let Some(record) = review.get_record(kv, &previous_summary.run_id)? else {
+        return Ok(None);
+    };
+    let report = record
+        .report_json_path
+        .as_ref()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .unwrap_or_else(|| {
+            serde_json::json!({
+                "summary": record.overall_summary,
+                "change_summary": record.change_summary,
+                "head_sha": record.summary.head_sha,
+                "findings": record.findings,
+                "previous_findings": record.previous_findings,
+            })
+        });
+    let context = serde_json::json!({
+        "run_id": record.summary.run_id,
+        "head_sha": record.summary.head_sha,
+        "model": record.summary.model,
+        "report": report,
+        "clarifications": record.clarifications,
+    });
+    Ok(Some(serde_json::to_string_pretty(&context).map_err(
+        |error| AppError::Other(format!("serialize previous review context: {error}")),
+    )?))
 }
 
 /// Wire shape returned to the frontend after a successful start.
@@ -201,6 +241,12 @@ pub struct AiReviewReportResp {
     pub cost_usd: Option<f64>,
     /// UNIX millis when the run finished.
     pub finished_at_ms: Option<i64>,
+    /// Follow-up conversation attached to this completed review.
+    pub clarifications: Vec<ClarificationTurn>,
+    /// Results of checking the preceding review's findings.
+    pub previous_findings: Vec<PreviousFindingResult>,
+    /// Whether this run retained a resumable Claude session.
+    pub can_ask: bool,
 }
 
 /// Spawn a new AI review for `pr` at `head_sha`. Returns immediately;
@@ -235,6 +281,8 @@ pub async fn prmaster_ai_review_start(
     let app_root = ai_review_root(&app)?;
     let worktrees_root = resolve_worktrees_root(&app, &settings)?;
     let review = state.lock().await.review.clone();
+    let kv = config.inner().clone();
+    let previous_context = previous_review_context(&review, &kv, &pr_key)?;
 
     let model_for_run = model
         .clone()
@@ -256,7 +304,7 @@ pub async fn prmaster_ai_review_start(
     // pass a `base_sha` because the frontend doesn't currently know it
     // — the prompt template instructs Claude to derive it itself via
     // `git merge-base origin/<base_branch> HEAD` inside the worktree.
-    let prompt_text = prompt_override
+    let mut prompt_text = prompt_override
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| {
             zen_pr_review::prompt::build_review_prompt(
@@ -268,6 +316,25 @@ pub async fn prmaster_ai_review_start(
                 &handles.worktree_path.to_string_lossy(),
             )
         });
+    if let Some(previous) = previous_context {
+        prompt_text.push_str(&format!(
+            r#"
+
+PREVIOUS REVIEW CONTEXT
+The JSON below is the latest completed review. It is context, not a limit on scope.
+Perform the complete current PR review required above. Independently inspect all current
+changes, including code not mentioned previously. Then re-check every previous finding
+against the current code and add exactly one `previous_findings` result for each previous
+finding id. Allowed statuses are `fixed`, `still_present`, and `cannot_verify`. Never call
+a finding fixed merely because its old line or commit disappeared; use `cannot_verify`
+when the current code does not provide enough evidence.
+
+```json
+{previous}
+```
+"#
+        ));
+    }
 
     // Spin up the channel that bridges `ReviewEngine::run` events into
     // Tauri events. The receiver task lives until the sender drops at
@@ -348,12 +415,8 @@ pub async fn prmaster_ai_review_preview_prompt(
         .get::<PrMasterSettings>(PRMASTER_SETTINGS_KEY)?
         .unwrap_or_default();
     let worktrees_root = resolve_worktrees_root(&app, &settings)?;
-    let worktree_path = zen_pr_review::worktree::worktree_path(
-        &worktrees_root,
-        &pr.owner,
-        &pr.repo,
-        pr.number,
-    );
+    let worktree_path =
+        zen_pr_review::worktree::worktree_path(&worktrees_root, &pr.owner, &pr.repo, pr.number);
     Ok(zen_pr_review::prompt::build_review_prompt(
         None,
         head_sha.as_str(),
@@ -377,12 +440,8 @@ pub async fn prmaster_ai_review_resolve_worktree_path(
         .get::<PrMasterSettings>(PRMASTER_SETTINGS_KEY)?
         .unwrap_or_default();
     let worktrees_root = resolve_worktrees_root(&app, &settings)?;
-    let worktree_path = zen_pr_review::worktree::worktree_path(
-        &worktrees_root,
-        &pr.owner,
-        &pr.repo,
-        pr.number,
-    );
+    let worktree_path =
+        zen_pr_review::worktree::worktree_path(&worktrees_root, &pr.owner, &pr.repo, pr.number);
     let _ = head_sha;
     Ok(worktree_path.to_string_lossy().into_owned())
 }
@@ -444,6 +503,7 @@ pub async fn prmaster_ai_review_get_report(
         .report_html_path
         .as_ref()
         .and_then(|p| std::fs::read_to_string(p).ok());
+    let can_ask = record.session_id.is_some();
     Ok(AiReviewReportResp {
         html,
         findings: record.findings,
@@ -455,8 +515,100 @@ pub async fn prmaster_ai_review_get_report(
         model: record.summary.model.clone(),
         cost_usd: record.summary.cost_usd,
         finished_at_ms: record.summary.finished_at_ms,
+        clarifications: record.clarifications,
+        previous_findings: record.previous_findings,
+        can_ask,
         pr: record.pr,
     })
+}
+
+/// Ask a focused follow-up question by resuming the completed review's
+/// Claude Code session. This does not regenerate or replace the report.
+#[tauri::command]
+pub async fn prmaster_ai_review_ask(
+    app: AppHandle,
+    state: State<'_, Mutex<AppState>>,
+    config: State<'_, UserConfig>,
+    run_id: String,
+    question: String,
+) -> AppResult<ClarificationTurn> {
+    let question = question.trim().to_string();
+    if question.is_empty() {
+        return Err(AppError::BadRequest("question cannot be empty".into()));
+    }
+    let review = state.lock().await.review.clone();
+    // Claude resumes mutate shared session state. Keep every exchange for a
+    // run strictly ordered, including requests coming from another window.
+    let _clarification_guard = review.lock_clarification(&run_id).await;
+    let kv = config.inner().clone();
+    let record = review
+        .get_record(&kv, &run_id)?
+        .ok_or_else(|| AppError::BadRequest(format!("unknown run_id: {run_id}")))?;
+    let session_id = record.session_id.clone().ok_or_else(|| {
+        AppError::BadRequest(
+            "This review predates follow-up support and has no resumable Claude session.".into(),
+        )
+    })?;
+    let settings = config
+        .get::<PrMasterSettings>(PRMASTER_SETTINGS_KEY)?
+        .unwrap_or_default();
+    let worktree = zen_pr_review::worktree::worktree_path(
+        &resolve_worktrees_root(&app, &settings)?,
+        &record.pr.owner,
+        &record.pr.repo,
+        record.pr.number,
+    );
+    if !worktree.exists() {
+        return Err(AppError::BadRequest(
+            "The review worktree no longer exists; run a new review before asking follow-ups."
+                .into(),
+        ));
+    }
+    let worktree_head = zen_pr_review::worktree::worktree_head(
+        &zen_pr_review::worktree::build_git_executor(),
+        &worktree,
+    )
+    .await?;
+    if worktree_head != record.summary.head_sha {
+        return Err(AppError::BadRequest(format!(
+            "This review used {}, but its worktree has moved to {}. Open the latest review to ask follow-ups.",
+            &record.summary.head_sha[..record.summary.head_sha.len().min(8)],
+            &worktree_head[..worktree_head.len().min(8)]
+        )));
+    }
+    let prompt = format!(
+        "Answer this clarification about the code review you just completed. This is strictly a code-review-only task and nothing else. Be concise, cite concrete files and symbols, and inspect the repository with read-only tools if needed. Do not implement fixes; do not edit, create, delete, format, or commit files; and do not make any repository changes or regenerate .zen-review/report.json, even if the question asks you to. Only inspect the code and answer the question.\n\nQUESTION:\n{question}"
+    );
+    let outcome = zen_pr_review::resume_claude(
+        worktree,
+        prompt,
+        Some(record.summary.model.clone()),
+        session_id,
+        Arc::new(Notify::new()),
+        |_| {},
+    )
+    .await?;
+    if !outcome.success {
+        return Err(AppError::Other(format!(
+            "Claude follow-up failed: {}",
+            outcome.stderr_tail.chars().take(400).collect::<String>()
+        )));
+    }
+    let answer = outcome.response_text.trim().to_string();
+    if answer.is_empty() {
+        return Err(AppError::Other(
+            "Claude completed the follow-up without returning an answer.".into(),
+        ));
+    }
+    let asked_at_ms = chrono::Utc::now().timestamp_millis();
+    let turn = ClarificationTurn {
+        id: format!("{run_id}-q-{asked_at_ms}"),
+        question,
+        answer,
+        asked_at_ms,
+    };
+    review.add_clarification(&kv, &run_id, turn.clone())?;
+    Ok(turn)
 }
 
 /// Per-PR run history, newest-first. Drives the "previous review"
@@ -577,9 +729,7 @@ pub async fn prmaster_ai_review_post_finding(
 ) -> AppResult<()> {
     let body_trimmed = body.trim();
     if body_trimmed.is_empty() {
-        return Err(AppError::BadRequest(
-            "comment body cannot be empty".into(),
-        ));
+        return Err(AppError::BadRequest("comment body cannot be empty".into()));
     }
     let (review, prmaster) = {
         let s = state.lock().await;
@@ -728,8 +878,16 @@ mod tests {
             let body = format_finding_body(&f);
             let lower = body.to_ascii_lowercase();
             for forbidden in [
-                "ai review", "ai-review", "[ai", "claude", "anthropic",
-                "automated", "generated by", "model:", "bot ", "[bot]",
+                "ai review",
+                "ai-review",
+                "[ai",
+                "claude",
+                "anthropic",
+                "automated",
+                "generated by",
+                "model:",
+                "bot ",
+                "[bot]",
             ] {
                 assert!(
                     !lower.contains(forbidden),
@@ -795,17 +953,13 @@ pub async fn prmaster_ai_review_open_reports_dir(app: AppHandle) -> AppResult<()
 /// Enqueue cleanup from the backend's authoritative refresh snapshot.
 /// The refresh/event bridge never awaits this work; failures are logged
 /// and the next successful refresh naturally retries them.
-pub fn schedule_closed_pr_cleanup(
-    app: &AppHandle,
-    snapshot: &zen_prmaster::RefreshSnapshot,
-) {
+pub fn schedule_closed_pr_cleanup(app: &AppHandle, snapshot: &zen_prmaster::RefreshSnapshot) {
     let mut visible_slugs = Vec::new();
     for list in [&snapshot.to_review, &snapshot.reviewed, &snapshot.mine] {
         for row in list {
             visible_slugs.push(format!(
                 "{}#{}",
-                row.pr.repository.name_with_owner,
-                row.pr.number
+                row.pr.repository.name_with_owner, row.pr.number
             ));
         }
     }
@@ -907,11 +1061,7 @@ async fn cleanup_closed_prs(app: &AppHandle, visible_slugs: Vec<String>) -> AppR
         let reports_for_cleanup = reports_root.clone();
         let pr_for_cleanup = pr.clone();
         match tauri::async_runtime::spawn_blocking(move || {
-            review_for_cleanup.cleanup_pr(
-                &kv_for_cleanup,
-                &reports_for_cleanup,
-                &pr_for_cleanup,
-            )
+            review_for_cleanup.cleanup_pr(&kv_for_cleanup, &reports_for_cleanup, &pr_for_cleanup)
         })
         .await
         {

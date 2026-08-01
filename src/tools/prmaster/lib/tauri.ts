@@ -511,6 +511,12 @@ export const prmasterTauri = {
     invoke<boolean>("prmaster_ai_review_cancel", { runId }),
   aiReviewGetReport: (runId: string) =>
     invoke<AiReviewReportResp>("prmaster_ai_review_get_report", { runId }),
+  /** Ask a focused question by resuming a completed review session. */
+  aiReviewAsk: (runId: string, question: string) =>
+    invoke<AiReviewClarificationTurn>("prmaster_ai_review_ask", {
+      runId,
+      question,
+    }),
   aiReviewListRuns: (pr: PrRef) =>
     invoke<AiReviewRunSummary[]>("prmaster_ai_review_list_runs", { pr }),
   aiReviewCompletedPrs: (prs: PrRef[]) =>
@@ -728,6 +734,25 @@ export interface AiReviewReportResp {
   model: string;
   cost_usd: number | null;
   finished_at_ms: number | null;
+  clarifications: AiReviewClarificationTurn[];
+  previous_findings: AiReviewPreviousFindingResult[];
+  can_ask: boolean;
+}
+
+export interface AiReviewClarificationTurn {
+  id: string;
+  question: string;
+  answer: string;
+  asked_at_ms: number;
+}
+
+export interface AiReviewPreviousFindingResult {
+  finding_id: string;
+  title: string;
+  status: "fixed" | "still_present" | "cannot_verify" | string;
+  explanation: string;
+  path: string | null;
+  line: number | null;
 }
 
 /** Completed AI-review commit heads for one PR. */

@@ -24,10 +24,18 @@ import {
   FileSearch,
   History,
   ListChecks,
+  Loader2,
+  MessageSquareText,
+  Send,
   ScrollText,
   Sparkles,
 } from "lucide-react";
-import type { AiReviewFinding, AiReviewRunSummary } from "../../lib/tauri";
+import type {
+  AiReviewClarificationTurn,
+  AiReviewFinding,
+  AiReviewPreviousFindingResult,
+  AiReviewRunSummary,
+} from "../../lib/tauri";
 import { AiReviewFindingCard } from "./AiReviewFindingCard";
 
 interface Props {
@@ -77,6 +85,12 @@ interface Props {
   postingIds: Set<string>;
   /** Set of finding ids that have been successfully posted in this session. */
   postedIds: Set<string>;
+  clarifications: AiReviewClarificationTurn[];
+  previousFindings: AiReviewPreviousFindingResult[];
+  canAsk: boolean;
+  asking: boolean;
+  askError: string | null;
+  onAsk: (question: string) => Promise<void>;
 }
 
 const SEVERITY_ORDER = ["critical", "high", "medium", "low"] as const;
@@ -119,7 +133,10 @@ export function AiReviewReportView(props: Props) {
         onSelectRunLog={props.onSelectRunLog}
         onShowLog={props.onShowLog}
       />
-      <div className="min-h-0 flex-1 overflow-y-auto px-1 pb-4 pr-2">
+      <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-1 pb-4 pr-2">
+        {props.previousFindings.length > 0 && (
+          <PreviousFindings results={props.previousFindings} />
+        )}
         {totalCount === 0 ? (
           <EmptyFindings overallSummary={props.overallSummary} />
         ) : (
@@ -147,6 +164,13 @@ export function AiReviewReportView(props: Props) {
             })}
           </div>
         )}
+        <ClarificationThread
+          turns={props.clarifications}
+          canAsk={props.canAsk}
+          asking={props.asking}
+          error={props.askError}
+          onAsk={props.onAsk}
+        />
       </div>
     </div>
   );
@@ -553,7 +577,7 @@ function SeveritySection({
 
 function EmptyFindings({ overallSummary }: { overallSummary: string }) {
   return (
-    <div className="flex h-full min-h-0 items-center justify-center">
+    <div className="flex min-h-48 items-center justify-center">
       <div className="grid max-w-lg gap-3 rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-8 text-center shadow-sm">
         <CheckCircle2 className="mx-auto size-7 text-emerald-500" />
         <div className="text-base font-semibold text-emerald-700 dark:text-emerald-400">
@@ -564,6 +588,164 @@ function EmptyFindings({ overallSummary }: { overallSummary: string }) {
         </p>
       </div>
     </div>
+  );
+}
+
+function PreviousFindings({
+  results,
+}: {
+  results: AiReviewPreviousFindingResult[];
+}) {
+  const labels: Record<string, string> = {
+    fixed: "Fixed",
+    still_present: "Still present",
+    cannot_verify: "Cannot verify",
+  };
+  return (
+    <section className="rounded-lg border bg-card/45 p-3">
+      <div className="mb-2 text-[11px] font-bold uppercase tracking-[0.14em] text-muted-foreground">
+        Previous findings
+      </div>
+      <div className="space-y-2">
+        {results.map((result) => (
+          <div
+            key={result.finding_id}
+            className="rounded-md border border-border/60 bg-background/45 px-3 py-2"
+          >
+            <div className="flex flex-wrap items-center gap-2">
+              <span
+                className={cn(
+                  "rounded-full border px-2 py-0.5 text-[10px] font-semibold",
+                  result.status === "fixed" &&
+                    "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400",
+                  result.status === "still_present" &&
+                    "border-destructive/30 bg-destructive/10 text-destructive",
+                  result.status === "cannot_verify" &&
+                    "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-400",
+                )}
+              >
+                {labels[result.status] ?? result.status}
+              </span>
+              <span className="text-xs font-medium">
+                {result.title || result.finding_id}
+              </span>
+              {result.path && (
+                <span className="ml-auto font-mono text-[10px] text-muted-foreground">
+                  {result.path}{result.line ? `:${result.line}` : ""}
+                </span>
+              )}
+            </div>
+            {result.explanation && (
+              <p className="mt-1.5 text-xs leading-relaxed text-foreground/80">
+                {result.explanation}
+              </p>
+            )}
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function ClarificationThread({
+  turns,
+  canAsk,
+  asking,
+  error,
+  onAsk,
+}: {
+  turns: AiReviewClarificationTurn[];
+  canAsk: boolean;
+  asking: boolean;
+  error: string | null;
+  onAsk: (question: string) => Promise<void>;
+}) {
+  const [question, setQuestion] = useState("");
+  const submit = async () => {
+    const trimmed = question.trim();
+    if (!trimmed || asking || !canAsk) return;
+    try {
+      await onAsk(trimmed);
+      setQuestion("");
+    } catch {
+      // Keep the question intact for retry; the parent supplies the error.
+    }
+  };
+
+  return (
+    <section className="rounded-lg border bg-card/45 p-3">
+      <div className="mb-3 flex items-center gap-2">
+        <MessageSquareText className="size-3.5 text-blue-500" />
+        <div>
+          <div className="text-xs font-semibold">Ask about this review</div>
+          <div className="text-[10px] text-muted-foreground">
+            Continue the original review session without running another full review.
+          </div>
+        </div>
+      </div>
+      {turns.length > 0 && (
+        <div className="mb-3 space-y-3">
+          {turns.map((turn) => (
+            <div key={turn.id} className="space-y-2">
+              <div className="ml-auto max-w-[85%] rounded-lg bg-primary px-3 py-2 text-xs leading-relaxed text-primary-foreground">
+                {turn.question}
+              </div>
+              <div className="max-w-[92%] whitespace-pre-wrap rounded-lg border bg-background/70 px-3 py-2 text-xs leading-relaxed text-foreground/85">
+                {turn.answer}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      {asking && (
+        <div className="mb-3 space-y-2">
+          {question.trim() && (
+            <div className="ml-auto max-w-[85%] rounded-lg bg-primary px-3 py-2 text-xs leading-relaxed text-primary-foreground">
+              {question.trim()}
+            </div>
+          )}
+          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+            <Loader2 className="size-3 animate-spin" />
+            Investigating…
+          </div>
+        </div>
+      )}
+      {error && (
+        <div className="mb-2 rounded-md border border-destructive/30 bg-destructive/10 px-2 py-1.5 text-xs text-destructive">
+          {error}
+        </div>
+      )}
+      {canAsk ? (
+        <div className="flex items-end gap-2">
+          <textarea
+            rows={2}
+            value={question}
+            onChange={(event) => setQuestion(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+                event.preventDefault();
+                void submit();
+              }
+            }}
+            disabled={asking}
+            placeholder="Ask a clarifying question… (⌘+Enter to send)"
+            className="min-h-16 flex-1 resize-y rounded-md border bg-background px-3 py-2 text-xs outline-none placeholder:text-muted-foreground focus:ring-2 focus:ring-primary/30"
+          />
+          <Button
+            size="sm"
+            onClick={() => void submit()}
+            disabled={asking || question.trim().length === 0}
+          >
+            {asking ? <Loader2 className="size-3 animate-spin" /> : <Send className="size-3" />}
+            Ask
+          </Button>
+        </div>
+      ) : (
+        <div className="rounded-md border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+          Follow-up questions are unavailable for reviews created before session support.
+        </div>
+      )}
+    </section>
   );
 }
 

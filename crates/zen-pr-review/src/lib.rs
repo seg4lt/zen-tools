@@ -27,16 +27,19 @@ pub mod runner;
 pub mod state;
 pub mod worktree;
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex, OwnedMutexGuard};
 use zen_storage::KvStore;
 
 pub use crate::error::{ReviewError, ReviewResult};
 pub use crate::events::AiReviewEvent;
-pub use crate::persist::{Finding, ReportPayload, RunRecord, RunSummary};
-pub use crate::runner::{spawn_claude, EventSink, RunOutcome, MAX_RUN_SECS};
+pub use crate::persist::{
+    ClarificationTurn, Finding, PreviousFindingResult, ReportPayload, RunRecord, RunSummary,
+};
+pub use crate::runner::{resume_claude, spawn_claude, EventSink, RunOutcome, MAX_RUN_SECS};
 pub use crate::state::{PrKey, RunEntry, RunRegistry, RunStatus};
 
 /// Cheap-to-clone (`Arc`-backed) review controller. Holds the in-memory
@@ -51,6 +54,7 @@ pub struct ReviewEngine {
 #[derive(Debug, Default)]
 struct Inner {
     registry: RunRegistry,
+    clarification_locks: Mutex<HashMap<String, Weak<Mutex<()>>>>,
 }
 
 /// Inputs the Tauri layer hands to [`ReviewEngine::start`].
@@ -104,6 +108,24 @@ impl ReviewEngine {
     /// needs to look up a snapshot for `prmaster_ai_review_status`.
     pub fn registry(&self) -> &RunRegistry {
         &self.inner.registry
+    }
+
+    /// Serialize follow-up questions that resume the same Claude session.
+    /// Different reviews can still process clarifications concurrently.
+    pub async fn lock_clarification(&self, run_id: &str) -> OwnedMutexGuard<()> {
+        let lock = {
+            let mut locks = self.inner.clarification_locks.lock().await;
+            locks.retain(|_, lock| lock.strong_count() > 0);
+            match locks.get(run_id).and_then(Weak::upgrade) {
+                Some(lock) => lock,
+                None => {
+                    let lock = Arc::new(Mutex::new(()));
+                    locks.insert(run_id.to_string(), Arc::downgrade(&lock));
+                    lock
+                }
+            }
+        };
+        lock.lock_owned().await
     }
 
     /// Reserve the PR, prepare its worktree, and return immediately
@@ -242,6 +264,8 @@ impl ReviewEngine {
                             Vec::new(),
                             prompt_text_for_record.clone(),
                             Vec::new(),
+                            Vec::new(),
+                            out.session_id.clone(),
                             out.cost_usd,
                             Some(out.duration_ms),
                             &reports_root,
@@ -271,6 +295,8 @@ impl ReviewEngine {
                             Vec::new(),
                             String::new(),
                             Vec::new(),
+                            Vec::new(),
+                            out.session_id.clone(),
                             out.cost_usd,
                             Some(out.duration_ms),
                             &reports_root,
@@ -287,21 +313,24 @@ impl ReviewEngine {
                 // legacy / debug artefact.
                 let report_path = dst_json.to_string_lossy().into_owned();
                 let html_path = dst_html_opt.map(|p| p.to_string_lossy().into_owned());
-                let persisted = self.finalize(
-                    run_id,
-                    RunStatus::Done,
-                    html_path,
-                    Some(report_path),
-                    report_payload.summary.clone(),
-                    report_payload.change_summary.clone(),
-                    prompt_text_for_record.clone(),
-                    report_payload.findings,
-                    out.cost_usd,
-                    Some(out.duration_ms),
-                    &reports_root,
-                    &kv,
-                )
-                .await;
+                let persisted = self
+                    .finalize(
+                        run_id,
+                        RunStatus::Done,
+                        html_path,
+                        Some(report_path),
+                        report_payload.summary.clone(),
+                        report_payload.change_summary.clone(),
+                        prompt_text_for_record.clone(),
+                        report_payload.findings,
+                        report_payload.previous_findings,
+                        out.session_id.clone(),
+                        out.cost_usd,
+                        Some(out.duration_ms),
+                        &reports_root,
+                        &kv,
+                    )
+                    .await;
                 if persisted {
                     // Emit Done only after finalize has written the run record
                     // and history index. The frontend immediately loads it.
@@ -337,6 +366,8 @@ impl ReviewEngine {
                     Vec::new(),
                     prompt_text_for_record.clone(),
                     Vec::new(),
+                    Vec::new(),
+                    out.session_id.clone(),
                     out.cost_usd,
                     Some(out.duration_ms),
                     &reports_root,
@@ -355,6 +386,8 @@ impl ReviewEngine {
                     Vec::new(),
                     prompt_text_for_record.clone(),
                     Vec::new(),
+                    Vec::new(),
+                    None,
                     None,
                     None,
                     &reports_root,
@@ -373,6 +406,8 @@ impl ReviewEngine {
                     Vec::new(),
                     prompt_text_for_record.clone(),
                     Vec::new(),
+                    Vec::new(),
+                    None,
                     None,
                     None,
                     &reports_root,
@@ -387,6 +422,16 @@ impl ReviewEngine {
     /// Snapshot a run for re-attach.
     pub fn status(&self, run_id: &str) -> Option<RunEntry> {
         self.inner.registry.snapshot(run_id)
+    }
+
+    /// Persist one completed follow-up exchange on an existing review.
+    pub fn add_clarification(
+        &self,
+        kv: &KvStore,
+        run_id: &str,
+        turn: ClarificationTurn,
+    ) -> ReviewResult<()> {
+        persist::append_clarification(kv, run_id, turn)
     }
 
     /// Cancel a running review.
@@ -469,12 +514,7 @@ impl ReviewEngine {
     }
 
     /// Purge persisted reports and run history for one confirmed-merged PR.
-    pub fn cleanup_pr(
-        &self,
-        kv: &KvStore,
-        reports_root: &Path,
-        pr: &PrKey,
-    ) -> ReviewResult<u32> {
+    pub fn cleanup_pr(&self, kv: &KvStore, reports_root: &Path, pr: &PrKey) -> ReviewResult<u32> {
         persist::purge_pr(kv, pr, reports_root)
     }
 
@@ -491,6 +531,8 @@ impl ReviewEngine {
         change_summary: Vec<String>,
         prompt_text: String,
         findings: Vec<Finding>,
+        previous_findings: Vec<PreviousFindingResult>,
+        session_id: Option<String>,
         cost_usd: Option<f64>,
         duration_ms: Option<u64>,
         reports_root: &Path,
@@ -499,7 +541,9 @@ impl ReviewEngine {
         let entry = self.inner.registry.finish(
             run_id,
             status,
-            report_json_path.clone().or_else(|| report_html_path.clone()),
+            report_json_path
+                .clone()
+                .or_else(|| report_html_path.clone()),
             cost_usd,
             duration_ms,
         );
@@ -528,6 +572,9 @@ impl ReviewEngine {
                 prompt: prompt_text,
                 findings,
                 events,
+                session_id,
+                clarifications: Vec::new(),
+                previous_findings,
             };
             if let Err(e) = persist::record_completion(kv, &entry.pr, &record, reports_root) {
                 tracing::warn!(?e, "ai-review: persisting run record failed");
@@ -554,6 +601,33 @@ fn parse_slug(slug: &str) -> Option<PrKey> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn clarification_locks_serialize_each_run_independently() {
+        let engine = ReviewEngine::new();
+        let first = engine.lock_clarification("run-1").await;
+
+        assert!(tokio::time::timeout(
+            std::time::Duration::from_millis(20),
+            engine.lock_clarification("run-1"),
+        )
+        .await
+        .is_err());
+        assert!(tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            engine.lock_clarification("run-2"),
+        )
+        .await
+        .is_ok());
+
+        drop(first);
+        assert!(tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            engine.lock_clarification("run-1"),
+        )
+        .await
+        .is_ok());
+    }
 
     #[test]
     fn parses_slugs() {

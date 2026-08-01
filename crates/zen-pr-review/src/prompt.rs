@@ -270,10 +270,21 @@ SCHEMA:
         ]
       }}
     }}
+  ],
+  "previous_findings": [
+    {{
+      "finding_id": "exact id from PREVIOUS REVIEW CONTEXT",
+      "title": "exact title from the previous finding",
+      "status": "fixed" | "still_present" | "cannot_verify",
+      "explanation": "concise current-code evidence for this classification",
+      "path": "current/repository/path.ext",
+      "line": 120
+    }}
   ]
 }}
 
 FIELD RULES — read carefully, the host UI depends on every one of these:
+- `previous_findings` is required and must be an empty array when no PREVIOUS REVIEW CONTEXT is supplied. When previous context is supplied, include exactly one result for every previous finding id. Review the entire current PR regardless; this reconciliation is an additional task, not a reduced diff review.
 - `change_summary` is required. Provide 3-6 concise, high-level bullet strings that summarize what the PR changes before discussing findings. Focus on user-visible behavior, important implementation shifts, data/model changes, tests, and operational impact. Do not mention line numbers here.
 - `path` is relative to the worktree root (so e.g. `src/foo/bar.rs`). NEVER use absolute paths.
 - `side` is "RIGHT" for findings on new/changed code (the common case), "LEFT" only for lines that the PR removed.
@@ -326,6 +337,8 @@ mod tests {
         assert!(p.contains("PR-ready"));
         assert!(p.contains("Try to disprove yourself before reporting"));
         assert!(p.contains("concrete trigger"));
+        assert!(p.contains("previous_findings"));
+        assert!(p.contains("still_present"));
     }
 
     #[test]

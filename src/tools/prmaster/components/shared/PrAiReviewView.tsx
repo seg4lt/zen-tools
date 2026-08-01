@@ -46,7 +46,9 @@ import {
   prmasterTauri,
   prRefFor,
   type AiReviewEvent,
+  type AiReviewClarificationTurn,
   type AiReviewFinding,
+  type AiReviewPreviousFindingResult,
   type AiReviewReportResp,
   type AiReviewRunSummary,
   type EnrichedPullRequest,
@@ -88,6 +90,9 @@ interface LoadedRun {
   costUsd: number | null;
   finishedAtMs: number | null;
   headSha: string;
+  clarifications: AiReviewClarificationTurn[];
+  previousFindings: AiReviewPreviousFindingResult[];
+  canAsk: boolean;
 }
 
 /** Which body view is active when there's a loaded run. */
@@ -124,6 +129,8 @@ export function PrAiReviewView({ pr }: Props) {
   const [history, setHistory] = useState<AiReviewRunSummary[]>([]);
   const [postingIds, setPostingIds] = useState<Set<string>>(new Set());
   const [postedIds, setPostedIds] = useState<Set<string>>(new Set());
+  const [asking, setAsking] = useState(false);
+  const [askError, setAskError] = useState<string | null>(null);
   const subscribedRef = useRef(false);
   const prevRunStatusRef = useRef(slot.status);
 
@@ -413,6 +420,32 @@ export function PrAiReviewView({ pr }: Props) {
     [loaded],
   );
 
+  const onAsk = useCallback(
+    async (question: string) => {
+      if (!loaded || asking) return;
+      const runId = loaded.runId;
+      setAsking(true);
+      setAskError(null);
+      try {
+        const turn = await prmasterTauri.aiReviewAsk(runId, question);
+        setLoaded((current) =>
+          current && current.runId === runId
+            ? {
+                ...current,
+                clarifications: [...current.clarifications, turn],
+              }
+            : current,
+        );
+      } catch (error) {
+        setAskError(formatErr(error));
+        throw error;
+      } finally {
+        setAsking(false);
+      }
+    },
+    [asking, loaded],
+  );
+
   const loadRun = useCallback(
     async (runId: string, mode: ViewMode) => {
       try {
@@ -604,6 +637,12 @@ export function PrAiReviewView({ pr }: Props) {
             onLoadFindingDraft={onLoadFindingDraft}
             postingIds={postingIds}
             postedIds={postedIds}
+            clarifications={loaded.clarifications}
+            previousFindings={loaded.previousFindings}
+            canAsk={loaded.canAsk}
+            asking={asking}
+            askError={askError}
+            onAsk={onAsk}
           />
         ) : loaded || logEvents.length > 0 ? (
           // Log mode: either a loaded run's persisted events, or
@@ -686,6 +725,9 @@ function reportRespToLoaded(
     costUsd: resp.cost_usd,
     finishedAtMs: resp.finished_at_ms,
     headSha: resp.head_sha,
+    clarifications: resp.clarifications ?? [],
+    previousFindings: resp.previous_findings ?? [],
+    canAsk: resp.can_ask,
   };
 }
 

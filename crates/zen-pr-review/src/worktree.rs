@@ -107,13 +107,11 @@ pub async fn prepare_worktree(
                 );
                 // Clean first so an untracked path cannot obstruct files
                 // introduced by the requested commit.
-                exec.run_in_dir(target, "git", &["clean", "-ffdx"])
-                    .await?;
+                exec.run_in_dir(target, "git", &["clean", "-ffdx"]).await?;
                 exec.run_in_dir(target, "git", &["reset", "--hard", head_sha])
                     .await?;
                 // Reset does not remove every unrelated untracked path.
-                exec.run_in_dir(target, "git", &["clean", "-ffdx"])
-                    .await?;
+                exec.run_in_dir(target, "git", &["clean", "-ffdx"]).await?;
                 return Ok(());
             }
             Err(e) => {
@@ -211,7 +209,8 @@ async fn add_worktree(
     Ok(())
 }
 
-async fn worktree_head(exec: &ShellExecutor, target: &Path) -> ReviewResult<String> {
+/// Resolve the commit currently checked out in a managed worktree.
+pub async fn worktree_head(exec: &ShellExecutor, target: &Path) -> ReviewResult<String> {
     let out = exec
         .run_in_dir(target, "git", &["rev-parse", "HEAD"])
         .await?;
@@ -286,7 +285,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(git(&target, &["rev-parse", "HEAD"]), new_sha);
-        assert_eq!(std::fs::read_to_string(target.join("review.txt")).unwrap(), "new\n");
+        assert_eq!(
+            std::fs::read_to_string(target.join("review.txt")).unwrap(),
+            "new\n"
+        );
         assert!(!target.join("scratch.txt").exists());
         assert!(!target.join("build.ignored").exists());
         assert!(git(&target, &["status", "--porcelain"]).is_empty());
