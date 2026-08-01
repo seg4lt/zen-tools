@@ -38,3 +38,16 @@ pub async fn app_hide_main_window(app_handle: AppHandle) -> AppResult<()> {
     }
     Ok(())
 }
+
+/// Read a PRMaster route that could not be delivered while the main webview
+/// was being recreated. It remains pending until explicitly acknowledged.
+#[tauri::command]
+pub fn app_peek_pending_focus_route() -> Option<crate::prmaster_lifecycle::PendingFocusRoute> {
+    crate::prmaster_lifecycle::peek_pending_focus_route()
+}
+
+/// Clear a delivered pending route without erasing a newer activation.
+#[tauri::command]
+pub fn app_ack_pending_focus_route(generation: u64) {
+    crate::prmaster_lifecycle::acknowledge_pending_focus_route(generation);
+}

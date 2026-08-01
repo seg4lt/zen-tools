@@ -21,6 +21,7 @@ import { CleanerShell } from "@/tools/cleaner/CleanerShell";
 import { MarkdownShell } from "@/tools/markdown/MarkdownShell";
 import { DatabaseExplorerShell } from "@/tools/database-explorer/DatabaseExplorerShell";
 import { PRMasterShell } from "@/tools/prmaster/PRMasterShell";
+import { PRMasterDetailPage } from "@/tools/prmaster/PRMasterDetailPage";
 import { PRMasterReviewPage } from "@/tools/prmaster/PRMasterReviewPage";
 import { SettingsView } from "@/tools/settings/SettingsView";
 import { TerminalShell } from "@/tools/terminal/TerminalShell";
@@ -86,21 +87,44 @@ function FocusRouteListener() {
   const navigate = useNavigate();
   useEffect(() => {
     let unlisten: (() => void) | null = null;
+    let unlistenActivation: (() => void) | null = null;
+    let alive = true;
+    const applyRoute = (target: string) => {
+      if (!alive) return;
+      try {
+        void navigate({ to: target });
+      } catch {
+        window.location.hash = `#${target}`;
+      }
+    };
+    let latestGeneration = 0;
+    const applyActivation = (activation: { generation: number; route: string }) => {
+      if (!alive) return;
+      if (activation.generation > latestGeneration) {
+        latestGeneration = activation.generation;
+        applyRoute(activation.route);
+      }
+      void invoke("app_ack_pending_focus_route", {
+        generation: activation.generation,
+      });
+    };
     (async () => {
       unlisten = await listen<string>("prmaster:focus-route", (event) => {
-        const target = event.payload || "/prmaster";
-        try {
-          void navigate({ to: target });
-        } catch {
-          // Router may not be ready on the very first event (extremely
-          // unlikely outside dev hot-reload) — falling back to a hash
-          // change keeps the UX correct.
-          window.location.hash = `#${target}`;
-        }
+        applyRoute(event.payload || "/prmaster");
       });
+      unlistenActivation = await listen<{ generation: number; route: string }>(
+        "prmaster:focus-route-activation",
+        (event) => applyActivation(event.payload),
+      );
+      const pending = await invoke<{ generation: number; route: string } | null>(
+        "app_peek_pending_focus_route",
+      );
+      if (pending) applyActivation(pending);
     })();
     return () => {
+      alive = false;
       unlisten?.();
+      unlistenActivation?.();
     };
   }, [navigate]);
   return null;
@@ -289,6 +313,16 @@ const prmasterRoute = createRoute({
   ),
 });
 
+const prmasterDetailRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/prmaster/detail/$owner/$repo/$number",
+  component: () => (
+    <DisabledGuard toolId="prmaster">
+      <PRMasterDetailPage />
+    </DisabledGuard>
+  ),
+});
+
 // Dedicated review page — see `PRMasterReviewPage.tsx`. Sits one
 // level deep under the prmaster shell so list → detail → review
 // is a clean linear chain, deep-linkable via URL params.
@@ -330,6 +364,7 @@ const routeTree = rootRoute.addChildren([
   markdownRoute,
   databaseExplorerRoute,
   prmasterRoute,
+  prmasterDetailRoute,
   prmasterReviewRoute,
   terminalRoute,
   settingsRoute,

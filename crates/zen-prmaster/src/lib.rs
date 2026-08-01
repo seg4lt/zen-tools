@@ -179,6 +179,8 @@ pub struct PendingNotification {
     pub body: String,
     /// PR url to open when the user clicks the banner.
     pub url: String,
+    /// Internal app route to open when the user clicks the banner.
+    pub route: String,
     /// Whether to suppress the system sound (only Sound+Banner uses it).
     pub silent: bool,
     /// Whether the banner should be hidden completely (badge-only / mute).
@@ -433,6 +435,7 @@ impl PrMasterEngine {
                 filter.name
             ),
             url: String::new(),
+            route: "/prmaster".into(),
             silent,
             badge_only,
             muted,
@@ -1027,6 +1030,7 @@ fn build_review_notification(
         title,
         body,
         url: pr.pr.url.clone(),
+        route: pr_detail_route(pr),
         silent,
         badge_only,
         muted: false,
@@ -1065,10 +1069,20 @@ fn build_my_pr_notification(
         title,
         body,
         url: pr.pr.url.clone(),
+        route: pr_detail_route(pr),
         silent: false,
         badge_only: false,
         muted: false,
     })
+}
+
+fn pr_detail_route(pr: &EnrichedPullRequest) -> String {
+    format!(
+        "/prmaster/detail/{}/{}/{}",
+        pr.pr.repository.split().0,
+        pr.pr.repository.short_name(),
+        pr.pr.number,
+    )
 }
 
 #[cfg(test)]
@@ -1102,6 +1116,33 @@ mod tests {
             author: Some(ReviewAuthor { login: login.into() }),
             state,
         }
+    }
+
+    #[test]
+    fn notification_targets_deep_linkable_pr_detail() {
+        let pr = enriched(make_pr(42, "alice"), vec![], vec![]);
+        let note = build_review_notification(
+            &pr,
+            ReviewNotificationReason::NewPr,
+            &[],
+            &PrMasterSettings::default(),
+        )
+        .expect("default settings should produce a banner");
+
+        assert_eq!(note.route, "/prmaster/detail/octo/repo/42");
+    }
+
+    #[test]
+    fn own_pr_notification_targets_the_same_detail_route() {
+        let pr = enriched(make_pr(7, "me"), vec![], vec![]);
+        let note = build_my_pr_notification(
+            &pr,
+            &MyPrNotificationReason::NewComment,
+            &PrMasterSettings::default(),
+        )
+        .expect("own-PR change should produce a banner");
+
+        assert_eq!(note.route, "/prmaster/detail/octo/repo/7");
     }
 
     fn enriched(

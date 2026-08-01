@@ -362,6 +362,7 @@ export interface PendingNotification {
   title: string;
   body: string;
   url: string;
+  route: string;
   silent: boolean;
   badge_only: boolean;
   muted: boolean;

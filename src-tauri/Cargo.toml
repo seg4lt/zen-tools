@@ -60,6 +60,10 @@ tauri-plugin-shell = "2"
 tauri-plugin-clipboard-manager = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-global-shortcut = "2"
+# The Tauri notification plugin's desktop wrapper discards notification
+# response handles, so it cannot observe banner clicks. Use notify-rust
+# directly for PRMaster banners until the plugin exposes desktop actions.
+notify-rust = "4.18"
 # In-app auto-update: queries the GitHub Releases endpoint configured in
 # tauri.conf.json's `plugins.updater.endpoints` and verifies the .sig
 # against `plugins.updater.pubkey`. The publishing side (artifacts +

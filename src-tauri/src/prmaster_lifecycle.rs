@@ -37,6 +37,7 @@
 //! Idempotent — calling [`start`] when PRMaster is already running, or
 //! [`stop`] when it's already off, is a no-op.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use tauri::{AppHandle, Emitter, Manager};
@@ -47,6 +48,154 @@ use crate::commands;
 use crate::prmaster_tray;
 use crate::state::AppState;
 use crate::user_config::UserConfig;
+
+#[derive(Clone, serde::Serialize)]
+/// Buffered notification activation awaiting frontend acknowledgement.
+pub struct PendingFocusRoute {
+    /// Monotonic identifier used to reject stale activation races.
+    pub generation: u64,
+    /// Internal application route for the activated notification.
+    pub route: String,
+}
+
+static NEXT_FOCUS_ROUTE_GENERATION: AtomicU64 = AtomicU64::new(1);
+static PENDING_FOCUS_ROUTE: std::sync::Mutex<Option<PendingFocusRoute>> =
+    std::sync::Mutex::new(None);
+
+fn pending_focus_route() -> std::sync::MutexGuard<'static, Option<PendingFocusRoute>> {
+    PENDING_FOCUS_ROUTE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Read the most recent notification route without clearing it.
+pub(crate) fn peek_pending_focus_route() -> Option<PendingFocusRoute> {
+    pending_focus_route().clone()
+}
+
+/// Clear a delivered activation without erasing a newer generation.
+pub(crate) fn acknowledge_pending_focus_route(generation: u64) {
+    let mut pending = pending_focus_route();
+    if pending.as_ref().map(|activation| activation.generation) == Some(generation) {
+        pending.take();
+    }
+}
+
+fn notification_response_opens(response: &notify_rust::NotificationResponse) -> bool {
+    match response {
+        notify_rust::NotificationResponse::Default => true,
+        notify_rust::NotificationResponse::Action(action) => action == "default",
+        _ => false,
+    }
+}
+
+fn focus_main_window_at_route(app: &AppHandle, route: String) {
+    let activation = PendingFocusRoute {
+        generation: NEXT_FOCUS_ROUTE_GENERATION.fetch_add(1, Ordering::Relaxed),
+        route,
+    };
+    *pending_focus_route() = Some(activation.clone());
+    crate::show_or_create_main_window(app);
+    if let Err(error) = app.emit_to(
+        tauri::EventTarget::any(),
+        "prmaster:focus-route-activation",
+        activation,
+    ) {
+        tracing::warn!(%error, "notification route emit failed");
+    }
+}
+
+/// Present a native PRMaster notification and retain its response handle.
+///
+/// `tauri-plugin-notification` intentionally drops the desktop handle after
+/// showing a banner, which makes the notification display-only. Keeping the
+/// notify-rust handle alive lets us distinguish a click from a dismissal and
+/// route the main window to the PR that produced the banner.
+fn show_pr_notification(app: &AppHandle, note: zen_prmaster::PendingNotification) {
+    let app = app.clone();
+    let spawn_result = std::thread::Builder::new()
+        .name("prmaster-notification-response".into())
+        .spawn(move || {
+            #[cfg(target_os = "macos")]
+            {
+                let bundle_id = if tauri::is_dev() {
+                    "com.apple.Terminal"
+                } else {
+                    app.config().identifier.as_str()
+                };
+                // mac-notification-sys permits setting the application only once.
+                // A repeated call is harmless and simply returns an error.
+                let _ = notify_rust::set_application(bundle_id);
+            }
+
+            let mut notification = notify_rust::Notification::new();
+            notification
+                .summary(&note.title)
+                .body(&note.body)
+                .action("default", "Open PR");
+            #[cfg(windows)]
+            notification.app_id(&app.config().identifier);
+            if note.silent {
+                notification.sound_name("");
+            }
+
+            let handle = match notification.show() {
+                Ok(handle) => handle,
+                Err(error) => {
+                    tracing::warn!(%error, "notification show failed");
+                    return;
+                }
+            };
+
+            let route = note.route;
+            if let Err(error) =
+                handle.wait_for_response(move |response: &notify_rust::NotificationResponse| {
+                    if notification_response_opens(response) {
+                        focus_main_window_at_route(&app, route);
+                    }
+                })
+            {
+                tracing::warn!(%error, "notification response wait failed");
+            }
+        });
+    if let Err(error) = spawn_result {
+        tracing::warn!(%error, "notification response thread spawn failed");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use notify_rust::{CloseReason, NotificationResponse};
+
+    #[test]
+    fn opens_for_body_and_named_default_action_only() {
+        assert!(notification_response_opens(&NotificationResponse::Default));
+        assert!(notification_response_opens(&NotificationResponse::Action(
+            "default".into()
+        )));
+        assert!(!notification_response_opens(&NotificationResponse::Action(
+            "other".into()
+        )));
+        assert!(!notification_response_opens(&NotificationResponse::Closed(
+            CloseReason::Dismissed
+        )));
+    }
+
+    #[test]
+    fn acknowledgement_does_not_erase_a_newer_route() {
+        *pending_focus_route() = Some(PendingFocusRoute {
+            generation: 2,
+            route: "/prmaster/detail/new/repo/2".into(),
+        });
+        acknowledge_pending_focus_route(1);
+        let pending = peek_pending_focus_route().expect("newer route should remain pending");
+        assert_eq!(pending.generation, 2);
+        assert_eq!(pending.route, "/prmaster/detail/new/repo/2");
+        acknowledge_pending_focus_route(2);
+        assert!(peek_pending_focus_route().is_none());
+    }
+}
 
 /// The chord registered as PRMaster's global hotkey. Mirrors the
 /// `Shortcut` constructed inside `build_global_shortcut_plugin` —
@@ -109,7 +258,6 @@ async fn start_inner(app: &AppHandle) {
     let mut prmaster_rx = prmaster_engine.subscribe();
     let bridge_app = app.clone();
     let bridge_task = tauri::async_runtime::spawn(async move {
-        use tauri_plugin_notification::NotificationExt;
         loop {
             match prmaster_rx.recv().await {
                 Ok(PrMasterEvent::Refreshed(snapshot)) => {
@@ -127,17 +275,7 @@ async fn start_inner(app: &AppHandle) {
                     if note.badge_only || note.muted {
                         continue;
                     }
-                    let mut builder = bridge_app
-                        .notification()
-                        .builder()
-                        .title(&note.title)
-                        .body(&note.body);
-                    if note.silent {
-                        builder = builder.sound("");
-                    }
-                    if let Err(e) = builder.show() {
-                        tracing::warn!(?e, "notification show failed");
-                    }
+                    show_pr_notification(&bridge_app, note);
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,

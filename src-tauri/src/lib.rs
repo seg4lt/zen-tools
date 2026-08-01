@@ -499,6 +499,8 @@ pub fn run() {
             // misc
             commands::misc::open_in_editor,
             commands::misc::app_hide_main_window,
+            commands::misc::app_peek_pending_focus_route,
+            commands::misc::app_ack_pending_focus_route,
             // preferences
             commands::preferences::get_preferences,
             commands::preferences::save_preferences,
