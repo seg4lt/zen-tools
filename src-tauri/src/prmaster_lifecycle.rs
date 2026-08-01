@@ -157,7 +157,14 @@ async fn start_inner(app: &AppHandle) {
                 .flatten()
                 .unwrap_or_default()
         };
-        if let Err(e) = bg_engine.refresh_lists_and_notify(&initial_settings).await {
+        let initial_low_priority = {
+            let cfg = bg_app.state::<UserConfig>();
+            commands::prmaster::load_low_priority_pr_ids(cfg.inner()).unwrap_or_default()
+        };
+        if let Err(e) = bg_engine
+            .refresh_lists_and_notify(&initial_settings, &initial_low_priority)
+            .await
+        {
             tracing::warn!(error = %e, "initial refresh failed");
         }
 
@@ -172,7 +179,14 @@ async fn start_inner(app: &AppHandle) {
                     .flatten()
                     .unwrap_or_default()
             };
-            if let Err(e) = bg_engine.refresh_lists_and_notify(&settings).await {
+            let low_priority_pr_ids = {
+                let cfg = bg_app.state::<UserConfig>();
+                commands::prmaster::load_low_priority_pr_ids(cfg.inner()).unwrap_or_default()
+            };
+            if let Err(e) = bg_engine
+                .refresh_lists_and_notify(&settings, &low_priority_pr_ids)
+                .await
+            {
                 tracing::warn!(error = %e, "background refresh failed");
             }
         }

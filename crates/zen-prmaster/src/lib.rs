@@ -247,6 +247,7 @@ impl PrMasterEngine {
     pub async fn refresh_lists_and_notify(
         &self,
         settings: &PrMasterSettings,
+        low_priority_pr_ids: &[String],
     ) -> GhResult<Arc<RefreshSnapshot>> {
         let snapshot = self.refresh_lists(settings).await?;
         let _ = self.inner.tx.send(PrMasterEvent::Refreshed((*snapshot).clone()));
@@ -286,9 +287,45 @@ impl PrMasterEngine {
             }
         }
 
+        self.broadcast_badge_for_snapshot(settings, &snapshot, low_priority_pr_ids);
+
+        Ok(snapshot)
+    }
+
+    /// Recompute and broadcast the badge from the last cached snapshot.
+    /// This lets queue-priority changes update the menu bar immediately,
+    /// without performing another GitHub refresh.
+    pub fn refresh_badge(
+        &self,
+        settings: &PrMasterSettings,
+        low_priority_pr_ids: &[String],
+    ) {
+        if let Some(snapshot) = self.last_snapshot() {
+            self.broadcast_badge_for_snapshot(settings, &snapshot, low_priority_pr_ids);
+        }
+    }
+
+    fn broadcast_badge_for_snapshot(
+        &self,
+        settings: &PrMasterSettings,
+        snapshot: &RefreshSnapshot,
+        low_priority_pr_ids: &[String],
+    ) {
+        let low_priority: ahash::AHashSet<&str> =
+            low_priority_pr_ids.iter().map(String::as_str).collect();
+        let countable_to_review: Vec<&EnrichedPullRequest> = snapshot
+            .to_review
+            .iter()
+            .filter(|pr| {
+                let id = pr.id();
+                !low_priority.contains(id.as_str())
+            })
+            .collect();
+
         // Pre-compute filter counts only if any badge entry actually
-        // requests one. Each match runs against the To Review bucket
-        // (mirrors the Swift `MenuBarLabel.countFor("filter:…")`).
+        // requests one. Each match runs against the countable To Review
+        // bucket; low-priority rows remain in the snapshot/UI but do not
+        // contribute to any menu-bar count.
         let needs_filters = settings
             .badge_configs
             .iter()
@@ -303,8 +340,7 @@ impl PrMasterEngine {
             let Some(filter) = filters.iter().find(|f| f.id == id && f.enabled) else {
                 return 0;
             };
-            snapshot
-                .to_review
+            countable_to_review
                 .iter()
                 .filter(|enriched| {
                     let file_paths: Vec<String> = enriched
@@ -320,14 +356,12 @@ impl PrMasterEngine {
 
         let badge = render_badge(
             &settings.badge_configs,
-            snapshot.to_review.len(),
+            countable_to_review.len(),
             snapshot.reviewed.len(),
             snapshot.mine.len(),
             filter_count,
         );
         let _ = self.inner.tx.send(PrMasterEvent::BadgeChanged(badge));
-
-        Ok(snapshot)
     }
 
     /// Borrow the inner [`GhClient`] (used by the API Stats tab).
@@ -1166,5 +1200,59 @@ mod tests {
         let (to_review, done) = classify_review_buckets(&[pr], "me");
         assert_eq!(to_review.len(), 1);
         assert_eq!(done.len(), 0);
+    }
+
+    #[test]
+    fn low_priority_prs_are_excluded_only_from_review_badge_count() {
+        let engine = PrMasterEngine::new();
+        let mut events = engine.subscribe();
+        let settings = PrMasterSettings {
+            badge_configs: vec![
+                BadgeSourceConfig {
+                    source: BadgeSource::ToReview,
+                    filter_id: None,
+                    prefix: "R".into(),
+                    suffix: String::new(),
+                    enabled: true,
+                },
+                BadgeSourceConfig {
+                    source: BadgeSource::Reviewed,
+                    filter_id: None,
+                    prefix: "D".into(),
+                    suffix: String::new(),
+                    enabled: true,
+                },
+                BadgeSourceConfig {
+                    source: BadgeSource::MyPrs,
+                    filter_id: None,
+                    prefix: "M".into(),
+                    suffix: String::new(),
+                    enabled: true,
+                },
+            ],
+            ..PrMasterSettings::default()
+        };
+        let snapshot = RefreshSnapshot {
+            current_user: Some("me".into()),
+            to_review: vec![
+                enriched(make_pr(1, "alice"), vec![], vec![]),
+                enriched(make_pr(2, "bob"), vec![], vec![]),
+            ],
+            reviewed: vec![enriched(make_pr(3, "carol"), vec![], vec![])],
+            mine: vec![enriched(make_pr(4, "me"), vec![], vec![])],
+            fetched_at_ms: 0,
+        };
+
+        engine.broadcast_badge_for_snapshot(
+            &settings,
+            &snapshot,
+            &["octo/repo#1".to_string()],
+        );
+
+        let PrMasterEvent::BadgeChanged(badge) = events.try_recv().unwrap() else {
+            panic!("expected badge event");
+        };
+        assert_eq!(badge, "R1 D1 M1");
+        assert_eq!(snapshot.to_review.len(), 2, "UI snapshot remains unchanged");
     }
 }

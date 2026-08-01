@@ -135,6 +135,10 @@ pub async fn prmaster_get_to_review(
 pub async fn prmaster_get_low_priority_prs(
     config: State<'_, UserConfig>,
 ) -> AppResult<Vec<String>> {
+    load_low_priority_pr_ids(config.inner())
+}
+
+pub(crate) fn load_low_priority_pr_ids(config: &UserConfig) -> AppResult<Vec<String>> {
     let preferences = config
         .get::<ReviewQueuePreferences>(PRMASTER_REVIEW_QUEUE_KEY)?
         .unwrap_or_default();
@@ -144,6 +148,7 @@ pub async fn prmaster_get_low_priority_prs(
 /// Persist a PR's queue priority and return the canonical updated id list.
 #[tauri::command]
 pub async fn prmaster_set_low_priority_pr(
+    state: State<'_, Mutex<AppState>>,
     config: State<'_, UserConfig>,
     id: String,
     low_priority: bool,
@@ -158,6 +163,14 @@ pub async fn prmaster_set_low_priority_pr(
     }
 
     config.set(PRMASTER_REVIEW_QUEUE_KEY, &preferences)?;
+    let settings = config
+        .get::<PrMasterSettings>(PRMASTER_SETTINGS_KEY)?
+        .unwrap_or_default();
+    let engine = {
+        let s = state.lock().await;
+        engine(&s)
+    };
+    engine.refresh_badge(&settings, &preferences.low_priority_pr_ids);
     Ok(preferences.low_priority_pr_ids)
 }
 
@@ -452,7 +465,10 @@ pub async fn prmaster_refresh(
     let settings = config
         .get::<PrMasterSettings>(PRMASTER_SETTINGS_KEY)?
         .unwrap_or_default();
-    let snapshot = engine.refresh_lists_and_notify(&settings).await?;
+    let low_priority_pr_ids = load_low_priority_pr_ids(config.inner())?;
+    let snapshot = engine
+        .refresh_lists_and_notify(&settings, &low_priority_pr_ids)
+        .await?;
     Ok((*snapshot).clone())
 }
 
