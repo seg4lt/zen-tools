@@ -55,7 +55,11 @@ import { prefetchReviewPageData } from "../../lib/queries";
 import { Avatar } from "./Avatar";
 import { CiChecks } from "./CiChecks";
 import { ReviewerAvatars } from "./ReviewerAvatars";
-import { prKey, useAiReviewState } from "../../store/ai-review-store";
+import {
+  prKey,
+  startDefaultAiReview,
+  useAiReviewState,
+} from "../../store/ai-review-store";
 import { AiReviewStatusBadge } from "./AiReviewStatusBadge";
 
 interface Props {
@@ -139,7 +143,11 @@ export function PrDetailPanel({ pr, currentUser, onActionDone }: Props) {
 
       {/* ── 2. Status bar — quick-glance counters ───────────────── */}
       <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
-        <AiReviewStatusBadge slot={aiReview} currentHeadSha={headSha} />
+        <AiReviewStatusBadge
+          slot={aiReview}
+          currentHeadSha={headSha}
+          onRunReview={() => startDefaultAiReview(pr)}
+        />
         {rollup?.state === "SUCCESS" && (
           <StatChip tone="success" icon={<Check className="size-3" />}>
             CI passing

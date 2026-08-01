@@ -449,11 +449,14 @@ function AnnotationBlock({
   // same path — both share `submitError`. Cleared when the user
   // edits the composer body or cancels it.
   const [submitError, setSubmitError] = useState<string | null>(null);
-  // Thread root = first comment chronologically. We pass its id to
-  // GitHub's `replies` endpoint; GitHub attaches the reply to the
-  // same thread regardless, so this is robust even if the user
-  // tries to reply to a mid-thread comment.
-  const threadRoot = comments[0];
+  // GitHub only accepts the canonical numeric id of a top-level
+  // review comment here. Optimistic entries use `local-*` ids and
+  // replies point at another comment, so neither is a valid target.
+  // Picking the first canonical root avoids the intermittent failure
+  // where a just-posted optimistic reply was previously comments[0].
+  const threadRoot = comments.find(
+    (comment) => !comment.inReplyToId && /^\d+$/.test(comment.id),
+  );
 
   const cardStyle: React.CSSProperties = {
     margin: "8px 0 8px 32px",

@@ -50,6 +50,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { useCallback, useMemo, useState } from "react";
+import { open as openUrl } from "@tauri-apps/plugin-shell";
 import { Badge, cn } from "@zen-tools/ui";
 import type {
   EnrichedPullRequest,
@@ -59,6 +60,7 @@ import type {
 } from "../../lib/tauri";
 import {
   prKey,
+  startDefaultAiReview,
   useAiReviewState,
 } from "../../store/ai-review-store";
 import { AiReviewStatusBadge } from "./AiReviewStatusBadge";
@@ -193,9 +195,7 @@ export function PrCard({
   const onOpenInBrowser = useCallback(
     (e: React.MouseEvent) => {
       e.stopPropagation();
-      // Use a real anchor — no Tauri shell-open round-trip needed
-      // (CSP is null per `tauri.conf.json`).
-      window.open(pr.url, "_blank", "noopener,noreferrer");
+      void openUrl(pr.url);
     },
     [pr.url],
   );
@@ -256,7 +256,11 @@ export function PrCard({
               matches "what blocks me from merging" → "what's the
               human verdict". */}
           <div className="flex shrink-0 items-center gap-1.5">
-            <AiReviewStatusBadge slot={aiReview} currentHeadSha={headSha} />
+            <AiReviewStatusBadge
+              slot={aiReview}
+              currentHeadSha={headSha}
+              onRunReview={() => startDefaultAiReview(enriched)}
+            />
             {ciRollup && <CiPill rollup={ciRollup} />}
             {mergeable === "CONFLICTING" && (
               <span

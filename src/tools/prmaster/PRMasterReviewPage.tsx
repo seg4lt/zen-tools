@@ -48,7 +48,11 @@ import {
   type ReviewTab,
 } from "./store/review-session-store";
 import { prRefFor, type EnrichedPullRequest } from "./lib/tauri";
-import { prKey, useAiReviewState } from "./store/ai-review-store";
+import {
+  prKey,
+  startDefaultAiReview,
+  useAiReviewState,
+} from "./store/ai-review-store";
 
 const VIEW_MODE_KEY = "prmaster.reviewViewMode";
 
@@ -179,6 +183,7 @@ export function PRMasterReviewPage() {
           <AiReviewStatusBadge
             slot={aiReview}
             currentHeadSha={pr?.detail?.commits?.nodes?.[0]?.commit?.oid ?? null}
+            onRunReview={pr ? () => startDefaultAiReview(pr) : undefined}
           />
           <Tabs value={tab} onValueChange={(v) => setTab(v as ReviewTab)}>
             <TabsList className="h-6 gap-0.5 bg-transparent p-0">

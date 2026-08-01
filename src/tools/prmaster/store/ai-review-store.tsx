@@ -25,10 +25,13 @@ import { useSyncExternalStore } from "react";
 import {
   listenAiReviewEvent,
   parseAiReviewEvent,
+  prmasterTauri,
+  prRefFor,
   type AiReviewEvent,
   type AiReviewEventPayload,
   type AiReviewRunSummary,
   type AiReviewStatusKind,
+  type EnrichedPullRequest,
 } from "../lib/tauri";
 
 /** Per-PR slot held by the store. */
@@ -310,6 +313,39 @@ export async function ensureAiReviewSubscription(): Promise<void> {
   };
   const fn = await listenAiReviewEvent(handler);
   unlistenFn = fn;
+}
+
+/** Start a review directly from a status chip using the model the user
+ * selected as their PR Master default and the backend's standard prompt. */
+export async function startDefaultAiReview(
+  pr: EnrichedPullRequest,
+): Promise<void> {
+  const ref = prRefFor(pr.pr);
+  const key = prKey(ref.owner, ref.repo, ref.number);
+  const headSha = pr.detail?.commits?.nodes?.[0]?.commit?.oid ?? null;
+  if (!headSha) throw new Error("Cannot start AI review: PR head SHA is missing");
+
+  await ensureAiReviewSubscription();
+  const settings = await prmasterTauri.getSettings();
+  const defaultModel = settings.ai_model.trim();
+  if (!defaultModel) {
+    throw new Error("Cannot start AI review: no default model is selected in PR Master settings");
+  }
+  aiReviewStore.beginRun(key, headSha);
+  try {
+    const resp = await prmasterTauri.aiReviewStart({
+      pr: ref,
+      headSha,
+      headBranch: pr.detail?.headRefName ?? null,
+      baseBranch: pr.detail?.baseRefName ?? null,
+      model: defaultModel,
+      promptOverride: null,
+    });
+    aiReviewStore.startRun(key, resp.run_id, resp.head_sha, resp.worktree_path);
+  } catch (error) {
+    aiReviewStore.markStartFailed(key);
+    throw error;
+  }
 }
 
 /** Test-only / hot-reload helper: tear down the global subscription. */

@@ -358,8 +358,15 @@ export function PrFilesChangedView({ pr, viewMode }: Props) {
         setComments((prev) => prev.filter((c) => c.id !== optimisticId));
         throw err;
       }
+      // Reconciliation failure must not make a successful GitHub POST
+      // look failed (and invite the user to submit a duplicate). Keep
+      // the optimistic entry until a canonical refresh succeeds.
+      const refreshed = await commentsQuery.refetch();
+      if (refreshed.isSuccess) {
+        setComments((prev) => prev.filter((c) => c.id !== optimisticId));
+      }
     },
-    [selected, diff, ref, currentUser],
+    [selected, diff, ref, currentUser, commentsQuery],
   );
 
   // Post a reply to an existing inline thread. We resolve the
@@ -401,8 +408,12 @@ export function PrFilesChangedView({ pr, viewMode }: Props) {
         setComments((prev) => prev.filter((c) => c.id !== optimisticId));
         throw err;
       }
+      const refreshed = await commentsQuery.refetch();
+      if (refreshed.isSuccess) {
+        setComments((prev) => prev.filter((c) => c.id !== optimisticId));
+      }
     },
-    [allComments, ref, currentUser],
+    [allComments, ref, currentUser, commentsQuery],
   );
 
   // Edit an existing inline review comment. We don't optimistically

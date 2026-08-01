@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { AlertTriangle, Check, CircleDashed, Loader2, Sparkles } from "lucide-react";
 import { cn } from "@zen-tools/ui";
 import type { PrReviewSlot } from "../../store/ai-review-store";
@@ -21,26 +22,62 @@ export function AiReviewStatusBadge({
   slot,
   currentHeadSha,
   className,
+  onRunReview,
 }: {
   slot: PrReviewSlot;
   currentHeadSha?: string | null;
   className?: string;
+  /** When supplied, the missing/outdated chip becomes a one-click
+   *  review action. Running and completed chips remain informational. */
+  onRunReview?: () => Promise<void> | void;
 }) {
   const state = aiReviewIndicatorState(slot, currentHeadSha);
+  const [runError, setRunError] = useState<string | null>(null);
+  const canRun = !!onRunReview && (state === "none" || state === "outdated");
+
+  const title = runError
+    ? `AI review could not start: ${runError}. Click to retry.`
+    : state === "reviewing"
+      ? "AI code review is running"
+      : state === "done"
+        ? "AI code review completed"
+        : state === "outdated"
+          ? canRun
+            ? "AI review is outdated — click to review the latest commit with the default model"
+            : "AI review exists, but only for an older commit"
+          : canRun
+            ? "Click to run AI review with the default model"
+            : "No completed AI code review";
+
+  const activate = async (event: React.MouseEvent | React.KeyboardEvent) => {
+    if (!canRun) return;
+    event.preventDefault();
+    event.stopPropagation();
+    setRunError(null);
+    try {
+      await onRunReview();
+    } catch (error) {
+      setRunError(formatError(error));
+    }
+  };
 
   return (
     <span
-      title={
-        state === "reviewing"
-          ? "AI code review is running"
-          : state === "done"
-            ? "AI code review completed"
-            : state === "outdated"
-              ? "AI review exists, but only for an older commit"
-            : "No completed AI code review"
+      title={title}
+      role={canRun ? "button" : undefined}
+      tabIndex={canRun ? 0 : undefined}
+      aria-label={canRun ? title : undefined}
+      onClick={canRun ? activate : undefined}
+      onKeyDown={
+        canRun
+          ? (event) => {
+              if (event.key === "Enter" || event.key === " ") void activate(event);
+            }
+          : undefined
       }
       className={cn(
         "inline-flex shrink-0 items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] font-medium",
+        canRun && "cursor-pointer transition-colors hover:ring-1 hover:ring-current/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50",
         state === "reviewing" &&
           "border-violet-500/30 bg-violet-500/10 text-violet-700 dark:text-violet-300",
         state === "done" &&
@@ -71,4 +108,8 @@ export function AiReviewStatusBadge({
             : "No AI review"}
     </span>
   );
+}
+
+function formatError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
