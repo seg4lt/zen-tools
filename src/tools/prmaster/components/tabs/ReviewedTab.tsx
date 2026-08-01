@@ -6,6 +6,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   loadReviewed,
+  refreshAll,
   usePrMasterStore,
 } from "../../store/prmaster-store";
 import { EnrichedListView } from "../shared/EnrichedListView";
@@ -66,7 +67,7 @@ export function ReviewedTab() {
       loading={state.loading.reviewed}
       error={state.errors.reviewed}
       emptyText="You haven't reviewed any open PRs yet."
-      onRefresh={() => void loadReviewed(dispatch)}
+      onRefresh={() => void refreshAll(dispatch)}
       filterBar={
         <PrFilterBar
           rows={state.reviewed}

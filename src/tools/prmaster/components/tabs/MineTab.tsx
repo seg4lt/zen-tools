@@ -7,7 +7,11 @@
  */
 
 import { useEffect } from "react";
-import { loadMine, usePrMasterStore } from "../../store/prmaster-store";
+import {
+  loadMine,
+  refreshAll,
+  usePrMasterStore,
+} from "../../store/prmaster-store";
 import { EnrichedListView } from "../shared/EnrichedListView";
 
 export function MineTab() {
@@ -28,7 +32,7 @@ export function MineTab() {
       loading={state.loading.mine}
       error={state.errors.mine}
       emptyText="No open PRs you authored."
-      onRefresh={() => void loadMine(dispatch, true)}
+      onRefresh={() => void refreshAll(dispatch)}
     />
   );
 }

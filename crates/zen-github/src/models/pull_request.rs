@@ -111,6 +111,11 @@ pub struct PrDetail {
     /// Submitted reviews.
     #[serde(default)]
     pub reviews: Option<ReviewNodes>,
+    /// GitHub's latest opinionated review for each reviewer. Unlike
+    /// `reviews`, this does not expose stale historical approvals as if
+    /// they were the reviewer's current decision.
+    #[serde(default, rename = "latestOpinionatedReviews")]
+    pub latest_opinionated_reviews: Option<ReviewNodes>,
     /// Pending review requests.
     #[serde(default, rename = "reviewRequests")]
     pub review_requests: Option<ReviewRequestNodes>,
@@ -239,6 +244,9 @@ pub struct EnrichedPullRequest {
     /// All submitted reviews on the PR.
     #[serde(default)]
     pub reviews: Vec<Review>,
+    /// Latest approval / changes-requested status per reviewer.
+    #[serde(default, rename = "latestOpinionatedReviews")]
+    pub latest_opinionated_reviews: Vec<Review>,
     /// Logins/team names that still owe a review.
     #[serde(default, rename = "requestedReviewers")]
     pub requested_reviewers: Vec<String>,
@@ -272,5 +280,29 @@ impl EnrichedPullRequest {
             .filter(|name| !reviewed.contains(name.as_str()))
             .cloned()
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::review::ReviewState;
+
+    #[test]
+    fn decodes_latest_opinionated_reviews_from_graphql() {
+        let detail: PrDetail = serde_json::from_value(serde_json::json!({
+            "latestOpinionatedReviews": {
+                "nodes": [{
+                    "author": { "login": "octocat" },
+                    "state": "APPROVED"
+                }]
+            }
+        }))
+        .unwrap();
+
+        let reviews = detail.latest_opinionated_reviews.unwrap().nodes;
+        assert_eq!(reviews.len(), 1);
+        assert_eq!(reviews[0].state, ReviewState::Approved);
+        assert_eq!(reviews[0].author.as_ref().unwrap().login, "octocat");
     }
 }

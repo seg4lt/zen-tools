@@ -201,6 +201,7 @@ export interface EnrichedPullRequest {
   pr: PullRequest;
   reviewDecision: ReviewDecision | null;
   reviews: Review[];
+  latestOpinionatedReviews: Review[];
   requestedReviewers: string[];
   mergedBy: string | null;
   mergedAt: string | null;
@@ -451,7 +452,7 @@ export const prmasterTauri = {
     invoke<void>("prmaster_resolve_review_thread", { threadId }),
   getCallLog: () => invoke<GhCall[]>("prmaster_get_call_log"),
   getAiRuns: () => invoke<AiRunRecord[]>("prmaster_get_ai_runs"),
-  refresh: () => invoke<void>("prmaster_refresh"),
+  refresh: () => invoke<RefreshSnapshot>("prmaster_refresh"),
   getSettings: () => invoke<PrMasterSettings>("prmaster_get_settings"),
   saveSettings: (settings: PrMasterSettings) =>
     invoke<void>("prmaster_save_settings", { settings }),

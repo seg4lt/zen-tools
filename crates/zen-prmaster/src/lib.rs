@@ -8,8 +8,7 @@
 //!   in the UI don't re-fetch.
 //! * Client-side reclassification of `--review-requested @me` /
 //!   `--reviewed-by @me` overlap into **To Review** vs **Done** by
-//!   inspecting whether the current user has submitted an approving or
-//!   changes-requested review.
+//!   inspecting the current user's latest opinionated review status.
 //! * On-demand refresh (`refresh_lists_and_notify`) plus a broadcast
 //!   channel of [`PrMasterEvent`]s so subscribers (Tauri command layer,
 //!   tray badge, notifications) react to state changes.
@@ -54,7 +53,7 @@ use tracing::warn;
 use zen_github::{
     DiffSide, EnrichedPullRequest, GhCall, GhClient, GhResult, IssueComment, PrDiff, PrRef,
     ReviewComment,
-    PullRequest, ReviewEvent, ReviewState,
+    ReviewEvent, ReviewState,
 };
 
 
@@ -585,21 +584,15 @@ impl PrMasterEngine {
 
     // ─── PR lists (cached behind a 30 s TTL refresh) ─────────────────────
 
-    /// Force a full refresh: parallel fetch of `to_review`, `reviewed`,
-    /// `mine`; enrich each via the batched GraphQL query; classify into
-    /// To Review / Done buckets matching the Swift `refresh()` exactly.
+    /// Force a full refresh: fetch and deduplicate the review universe,
+    /// enrich it via GraphQL, then classify by latest reviewer status.
     pub async fn refresh_lists(
         &self,
         settings: &PrMasterSettings,
     ) -> GhResult<Arc<RefreshSnapshot>> {
-        // Identify the current user first so classification can run.
-        let current_user = match self.inner.gh.whoami().await {
-            Ok(u) => Some(u),
-            Err(e) => {
-                warn!(error = %e, "whoami failed during refresh_lists");
-                None
-            }
-        };
+        // Classification is unsafe without identity: treating an unknown
+        // user as having no reviews would move every PR to To Review.
+        let current_user = self.inner.gh.whoami().await?;
 
         let to_review_fut = self.inner.gh.search_to_review();
         let reviewed_fut = self.inner.gh.search_reviewed();
@@ -607,30 +600,9 @@ impl PrMasterEngine {
         let (to_review, reviewed, mine) =
             tokio::join!(to_review_fut, reviewed_fut, mine_fut);
 
-        let to_review = match to_review {
-            Ok(v) => v,
-            Err(e) => {
-                warn!(error = %e, "search_to_review failed");
-                Vec::<PullRequest>::new()
-            }
-        };
-        let reviewed = match reviewed {
-            Ok(v) => v,
-            Err(e) => {
-                warn!(error = %e, "search_reviewed failed");
-                Vec::<PullRequest>::new()
-            }
-        };
+        let mut review_universe = to_review?;
+        review_universe.extend(reviewed?);
         let mine = mine?;
-
-        let (enriched_to_review, enriched_reviewed, enriched_mine) = tokio::join!(
-            self.inner.gh.enrich(to_review),
-            self.inner.gh.enrich(reviewed),
-            self.inner.gh.enrich(mine),
-        );
-        let mut enriched_to_review = enriched_to_review.unwrap_or_default();
-        let enriched_reviewed = enriched_reviewed.unwrap_or_default();
-        let enriched_mine = enriched_mine?;
 
         // Team-watchlist PRs are part of the same review universe as direct
         // review requests. Merge them before classification so PRs the user
@@ -642,18 +614,27 @@ impl PrMasterEngine {
             if author.is_empty() {
                 continue;
             }
-            match self.list_open_prs_by_author(author).await {
-                Ok(mut prs) => enriched_to_review.append(&mut prs),
-                Err(e) => warn!(author, error = %e, "watched-author PR lookup failed"),
-            }
+            review_universe.extend(self.inner.gh.search_authored_by(author).await?);
         }
 
-        let user = current_user.as_deref();
+        // Deduplicate before enrichment so overlapping searches cannot
+        // produce independently enriched copies with conflicting status.
+        let mut seen = ahash::AHashSet::new();
+        review_universe.retain(|pr| seen.insert(pr.id()));
+
+        // Do not publish a snapshot unless all classification data exists.
+        let (enriched_reviews, enriched_mine) = tokio::join!(
+            self.inner.gh.enrich(review_universe),
+            self.inner.gh.enrich(mine),
+        );
+        let enriched_reviews = enriched_reviews?;
+        let enriched_mine = enriched_mine?;
+
         let (to_review_bucket, done_bucket) =
-            classify_review_buckets(&enriched_to_review, &enriched_reviewed, user);
+            classify_review_buckets(&enriched_reviews, &current_user);
 
         let snapshot = RefreshSnapshot {
-            current_user,
+            current_user: Some(current_user),
             to_review: to_review_bucket,
             reviewed: done_bucket,
             mine: enriched_mine,
@@ -891,61 +872,45 @@ impl Default for PrMasterEngine {
     }
 }
 
-/// Apply PRMaster's client-side reclassification to the union of the
-/// `--review-requested @me` and `--reviewed-by @me` searches.
+/// Apply PRMaster's client-side reclassification to the deduplicated union
+/// of the `--review-requested @me` and `--reviewed-by @me` searches.
 ///
 /// **Returns** `(to_review_bucket, reviewed_bucket)`.
 ///
-/// Rules (mirror `Sources/PRMaster/ViewModels/PRListViewModel.swift:165–197`):
+/// Rules:
 ///
 ///   * skip PRs the user authored (those belong in **Mine**);
-///   * a PR with **no** `APPROVED` / `CHANGES_REQUESTED` review by the user
-///     goes to **To Review** (a comment-only review keeps it here);
-///   * a PR with at least one `APPROVED` / `CHANGES_REQUESTED` review by
-///     the user goes to **Done**.
-///
-/// Dedups by stable PR id so a PR present in both `gh` searches doesn't
-/// appear twice.
+///   * the user's latest opinionated status is authoritative;
+///   * a latest `APPROVED` / `CHANGES_REQUESTED` goes to **Done**;
+///   * no latest opinion, or a dismissed/non-decisive status, goes to
+///     **To Review**.
 fn classify_review_buckets(
-    to_review: &[EnrichedPullRequest],
-    reviewed: &[EnrichedPullRequest],
-    current_user: Option<&str>,
+    prs: &[EnrichedPullRequest],
+    current_user: &str,
 ) -> (Vec<EnrichedPullRequest>, Vec<EnrichedPullRequest>) {
-    let mut to_review_out = Vec::with_capacity(to_review.len() + reviewed.len());
-    let mut done_out = Vec::with_capacity(to_review.len() + reviewed.len());
-    let mut seen_to_review = ahash::AHashSet::new();
-    let mut seen_done = ahash::AHashSet::new();
+    let mut to_review_out = Vec::with_capacity(prs.len());
+    let mut done_out = Vec::with_capacity(prs.len());
+    let mut seen = ahash::AHashSet::new();
 
-    let mut classify = |pr: &EnrichedPullRequest| {
+    for pr in prs {
         // Skip my own PRs (those go in the Mine bucket).
-        if let Some(user) = current_user {
-            if pr.pr.author.as_ref().map(|a| a.login.as_str()) == Some(user) {
-                return;
-            }
+        if pr.pr.author.as_ref().map(|a| a.login.as_str()) == Some(current_user) {
+            continue;
         }
         let id = pr.id();
-        let has_submitted = match current_user {
-            Some(user) => pr.reviews.iter().any(|r| {
-                r.author.as_ref().map(|a| a.login.as_str()) == Some(user)
-                    && matches!(r.state, ReviewState::Approved | ReviewState::ChangesRequested)
-            }),
-            None => false,
-        };
+        if !seen.insert(id) {
+            continue;
+        }
+        let has_current_decision = pr.latest_opinionated_reviews.iter().any(|r| {
+            r.author.as_ref().map(|a| a.login.as_str()) == Some(current_user)
+                && matches!(r.state, ReviewState::Approved | ReviewState::ChangesRequested)
+        });
 
-        if has_submitted {
-            if seen_done.insert(id) {
-                done_out.push(pr.clone());
-            }
-        } else if seen_to_review.insert(id) {
+        if has_current_decision {
+            done_out.push(pr.clone());
+        } else {
             to_review_out.push(pr.clone());
         }
-    };
-
-    for pr in to_review {
-        classify(pr);
-    }
-    for pr in reviewed {
-        classify(pr);
     }
 
     (to_review_out, done_out)
@@ -1098,20 +1063,23 @@ mod tests {
         }
     }
 
-    fn enriched(pr: PullRequest, reviewer: Option<(&str, ReviewState)>) -> EnrichedPullRequest {
+    fn review(login: &str, state: ReviewState) -> Review {
+        Review {
+            author: Some(ReviewAuthor { login: login.into() }),
+            state,
+        }
+    }
+
+    fn enriched(
+        pr: PullRequest,
+        historical: Vec<Review>,
+        latest: Vec<Review>,
+    ) -> EnrichedPullRequest {
         EnrichedPullRequest {
             pr,
             review_decision: None,
-            reviews: reviewer
-                .map(|(login, state)| {
-                    vec![Review {
-                        author: Some(ReviewAuthor {
-                            login: login.into(),
-                        }),
-                        state,
-                    }]
-                })
-                .unwrap_or_default(),
+            reviews: historical,
+            latest_opinionated_reviews: latest,
             requested_reviewers: vec![],
             merged_by: None,
             merged_at: None,
@@ -1121,42 +1089,82 @@ mod tests {
 
     #[test]
     fn classifies_no_review_as_to_review() {
-        let pr = enriched(make_pr(1, "alice"), None);
-        let (to_review, done) = classify_review_buckets(&[pr], &[], Some("me"));
+        let pr = enriched(make_pr(1, "alice"), vec![], vec![]);
+        let (to_review, done) = classify_review_buckets(&[pr], "me");
         assert_eq!(to_review.len(), 1);
         assert_eq!(done.len(), 0);
     }
 
     #[test]
     fn classifies_approved_as_done() {
-        let pr = enriched(make_pr(2, "alice"), Some(("me", ReviewState::Approved)));
-        let (to_review, done) = classify_review_buckets(&[pr], &[], Some("me"));
+        let approved = review("me", ReviewState::Approved);
+        let pr = enriched(make_pr(2, "alice"), vec![approved.clone()], vec![approved]);
+        let (to_review, done) = classify_review_buckets(&[pr], "me");
         assert_eq!(to_review.len(), 0);
         assert_eq!(done.len(), 1);
     }
 
     #[test]
     fn comment_only_keeps_in_to_review() {
-        let pr = enriched(make_pr(3, "alice"), Some(("me", ReviewState::Commented)));
-        let (to_review, done) = classify_review_buckets(&[], &[pr], Some("me"));
+        let pr = enriched(make_pr(3, "alice"), vec![review("me", ReviewState::Commented)], vec![]);
+        let (to_review, done) = classify_review_buckets(&[pr], "me");
         assert_eq!(to_review.len(), 1);
         assert_eq!(done.len(), 0);
     }
 
     #[test]
     fn skips_my_own_prs() {
-        let pr = enriched(make_pr(4, "me"), None);
-        let (to_review, done) = classify_review_buckets(&[pr.clone()], &[pr], Some("me"));
+        let pr = enriched(make_pr(4, "me"), vec![], vec![]);
+        let (to_review, done) = classify_review_buckets(&[pr], "me");
         assert!(to_review.is_empty());
         assert!(done.is_empty());
     }
 
     #[test]
-    fn dedupes_pr_present_in_both_searches() {
-        let pr = enriched(make_pr(5, "alice"), Some(("me", ReviewState::Approved)));
-        let (to_review, done) =
-            classify_review_buckets(&[pr.clone()], &[pr], Some("me"));
+    fn dedupes_pr_present_more_than_once() {
+        let approved = review("me", ReviewState::Approved);
+        let pr = enriched(make_pr(5, "alice"), vec![approved.clone()], vec![approved]);
+        let (to_review, done) = classify_review_buckets(&[pr.clone(), pr], "me");
         assert_eq!(to_review.len(), 0);
         assert_eq!(done.len(), 1);
+    }
+
+    #[test]
+    fn latest_dismissed_overrides_historical_approval() {
+        let pr = enriched(
+            make_pr(6, "alice"),
+            vec![review("me", ReviewState::Approved)],
+            vec![review("me", ReviewState::Dismissed)],
+        );
+        let (to_review, done) = classify_review_buckets(&[pr], "me");
+        assert_eq!(to_review.len(), 1);
+        assert_eq!(done.len(), 0);
+    }
+
+    #[test]
+    fn latest_approval_wins_when_history_page_does_not_contain_it() {
+        let historical = (0..50)
+            .map(|_| review("someone-else", ReviewState::Commented))
+            .collect();
+        let pr = enriched(
+            make_pr(7, "alice"),
+            historical,
+            vec![review("me", ReviewState::Approved)],
+        );
+        let (to_review, done) = classify_review_buckets(&[pr], "me");
+        assert_eq!(to_review.len(), 0);
+        assert_eq!(done.len(), 1);
+    }
+
+    #[test]
+    fn another_reviewers_approval_does_not_mark_mine_done() {
+        let pr = enriched(
+            make_pr(8, "alice"),
+            vec![],
+            vec![review("bob", ReviewState::Approved)],
+        );
+        let (to_review, done) = classify_review_buckets(&[pr], "me");
+        assert_eq!(to_review.len(), 1);
+        assert_eq!(done.len(), 0);
     }
 }

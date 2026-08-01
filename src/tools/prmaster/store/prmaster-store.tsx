@@ -71,6 +71,7 @@ export type PrMasterAction =
   | { type: "loadMineDone"; data: EnrichedPullRequest[] }
   | { type: "loadToReviewDone"; data: EnrichedPullRequest[] }
   | { type: "loadReviewedDone"; data: EnrichedPullRequest[] }
+  | { type: "refreshStart" }
   | { type: "applyRefresh"; snapshot: RefreshSnapshot }
   | { type: "loadFail"; tab: Tab; message: string }
   | { type: "select"; id: string | null }
@@ -107,6 +108,13 @@ function reducer(state: PrMasterState, action: PrMasterAction): PrMasterState {
         ...state,
         reviewed: action.data,
         loading: { ...state.loading, reviewed: false },
+      };
+
+    case "refreshStart":
+      return {
+        ...state,
+        loading: { mine: true, toReview: true, reviewed: true },
+        errors: { mine: null, toReview: null, reviewed: null },
       };
 
     case "applyRefresh":
@@ -286,6 +294,23 @@ export async function loadReviewed(dispatch: Dispatch<PrMasterAction>) {
       tab: "reviewed",
       message: errorMessage(err),
     });
+  }
+}
+
+/** Force one backend refresh and atomically replace all three buckets.
+ * The backend also broadcasts this snapshot for background consumers;
+ * applying the returned value directly guarantees the button completes
+ * even if event delivery is delayed. */
+export async function refreshAll(dispatch: Dispatch<PrMasterAction>) {
+  dispatch({ type: "refreshStart" });
+  try {
+    const snapshot = await prmasterTauri.refresh();
+    dispatch({ type: "applyRefresh", snapshot });
+  } catch (err) {
+    const message = errorMessage(err);
+    for (const tab of ["mine", "toReview", "reviewed"] as const) {
+      dispatch({ type: "loadFail", tab, message });
+    }
   }
 }
 

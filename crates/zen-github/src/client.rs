@@ -373,22 +373,17 @@ impl GhClient {
         for (key, val) in repo_obj {
             if let Some(num_str) = key.strip_prefix("pr") {
                 if let Ok(num) = num_str.parse::<u64>() {
-                    match serde_json::from_value::<PrDetail>(val.clone()) {
-                        Ok(mut detail) => {
-                            if let Some(rollup) = detail
-                                .commits
-                                .as_mut()
-                                .and_then(|commits| commits.nodes.first_mut())
-                                .and_then(|node| node.commit.status_check_rollup.as_mut())
-                            {
-                                rollup.retain_latest_contexts();
-                            }
-                            out.insert(num, detail);
-                        }
-                        Err(e) => {
-                            tracing::warn!(pr = num, error = %e, "failed to decode PR detail");
-                        }
+                    let mut detail = serde_json::from_value::<PrDetail>(val.clone())
+                        .map_err(|e| GhError::decode(format!("{label} PR #{num}"), e))?;
+                    if let Some(rollup) = detail
+                        .commits
+                        .as_mut()
+                        .and_then(|commits| commits.nodes.first_mut())
+                        .and_then(|node| node.commit.status_check_rollup.as_mut())
+                    {
+                        rollup.retain_latest_contexts();
                     }
+                    out.insert(num, detail);
                 }
             }
         }
@@ -416,68 +411,74 @@ impl GhClient {
 
         let mut detail_map: HashMap<String, HashMap<u64, PrDetail>> = HashMap::new();
         for (repo, numbers) in by_repo {
-            let (owner, name) = match repo.split_once('/') {
-                Some(parts) => parts,
-                None => continue,
-            };
-            match self.batch_pr_details(owner, name, &numbers).await {
-                Ok(m) => {
-                    detail_map.insert(repo, m);
-                }
-                Err(e) => {
-                    tracing::warn!(%repo, error = %e, "batch_pr_details failed; continuing with empty details");
-                    detail_map.insert(repo, HashMap::new());
-                }
-            }
+            let (owner, name) = repo.split_once('/').ok_or_else(|| {
+                GhError::Unexpected(format!("invalid repository name in PR result: {repo}"))
+            })?;
+            let details = self.batch_pr_details(owner, name, &numbers).await?;
+            detail_map.insert(repo, details);
         }
 
         let mut enriched = Vec::with_capacity(prs.len());
         for pr in prs {
             let detail = detail_map
                 .get_mut(&pr.repository.name_with_owner)
-                .and_then(|m| m.remove(&pr.number));
+                .and_then(|m| m.remove(&pr.number))
+                .ok_or_else(|| {
+                    GhError::Unexpected(format!("missing PR detail for {}", pr.id()))
+                })?;
 
-            let (review_decision, reviews, requested_reviewers, merged_by, merged_at) =
-                match detail.as_ref() {
-                    Some(d) => {
-                        let reviews = d
-                            .reviews
-                            .as_ref()
-                            .map(|n| n.nodes.clone())
-                            .unwrap_or_default();
-                        let requested = d
-                            .review_requests
-                            .as_ref()
-                            .map(|n| {
-                                n.nodes
-                                    .iter()
-                                    .filter_map(|node| {
-                                        node.requested_reviewer
-                                            .as_ref()
-                                            .map(|r| r.display_name().to_string())
-                                    })
-                                    .collect::<Vec<_>>()
+            let (
+                review_decision,
+                reviews,
+                latest_opinionated_reviews,
+                requested_reviewers,
+                merged_by,
+                merged_at,
+            ) = {
+                let d = &detail;
+                let reviews = d
+                    .reviews
+                    .as_ref()
+                    .map(|n| n.nodes.clone())
+                    .unwrap_or_default();
+                let latest_opinionated_reviews = d
+                    .latest_opinionated_reviews
+                    .as_ref()
+                    .map(|n| n.nodes.clone())
+                    .unwrap_or_default();
+                let requested = d
+                    .review_requests
+                    .as_ref()
+                    .map(|n| {
+                        n.nodes
+                            .iter()
+                            .filter_map(|node| {
+                                node.requested_reviewer
+                                    .as_ref()
+                                    .map(|r| r.display_name().to_string())
                             })
-                            .unwrap_or_default();
-                        (
-                            d.review_decision,
-                            reviews,
-                            requested,
-                            d.merged_by.as_ref().map(|m| m.login.clone()),
-                            d.merged_at,
-                        )
-                    }
-                    None => (None, Vec::new(), Vec::new(), None, None),
-                };
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                (
+                    d.review_decision,
+                    reviews,
+                    latest_opinionated_reviews,
+                    requested,
+                    d.merged_by.as_ref().map(|m| m.login.clone()),
+                    d.merged_at,
+                )
+            };
 
             enriched.push(EnrichedPullRequest {
                 pr,
                 review_decision,
                 reviews,
+                latest_opinionated_reviews,
                 requested_reviewers,
                 merged_by,
                 merged_at,
-                detail,
+                detail: Some(detail),
             });
         }
         Ok(enriched)
@@ -1408,7 +1409,13 @@ async fn git_show(
 const PR_FRAGMENT: &str = r#"      headRefName
       baseRefName
       reviewDecision
-      reviews(first: 50) {
+      reviews(last: 50) {
+        nodes {
+          author { login }
+          state
+        }
+      }
+      latestOpinionatedReviews(first: 100) {
         nodes {
           author { login }
           state

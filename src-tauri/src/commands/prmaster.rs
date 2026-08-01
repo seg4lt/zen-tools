@@ -18,7 +18,7 @@ use zen_github::{
     ReviewComment,
 };
 use zen_prmaster::{
-    AiSummaryParams, NotificationFilter, PrMasterSettings, SummaryCard,
+    AiSummaryParams, NotificationFilter, PrMasterSettings, RefreshSnapshot, SummaryCard,
 };
 
 use crate::user_config::UserConfig;
@@ -444,7 +444,7 @@ const PRMASTER_SETTINGS_KEY: &str = "prmaster";
 pub async fn prmaster_refresh(
     state: State<'_, Mutex<AppState>>,
     config: State<'_, UserConfig>,
-) -> AppResult<()> {
+) -> AppResult<RefreshSnapshot> {
     let engine = {
         let s = state.lock().await;
         engine(&s)
@@ -452,8 +452,8 @@ pub async fn prmaster_refresh(
     let settings = config
         .get::<PrMasterSettings>(PRMASTER_SETTINGS_KEY)?
         .unwrap_or_default();
-    engine.refresh_lists_and_notify(&settings).await?;
-    Ok(())
+    let snapshot = engine.refresh_lists_and_notify(&settings).await?;
+    Ok((*snapshot).clone())
 }
 
 /// Read persisted PRMaster settings (returns defaults if nothing saved).

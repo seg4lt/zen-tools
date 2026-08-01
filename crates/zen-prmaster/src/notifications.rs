@@ -320,6 +320,7 @@ mod tests {
             pr,
             review_decision: None,
             reviews,
+            latest_opinionated_reviews: vec![],
             requested_reviewers: vec![],
             merged_by: None,
             merged_at: None,

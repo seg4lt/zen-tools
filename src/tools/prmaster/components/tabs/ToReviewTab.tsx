@@ -8,6 +8,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   enrichedId,
   loadToReview,
+  refreshAll,
   usePrMasterStore,
 } from "../../store/prmaster-store";
 import { EnrichedListView } from "../shared/EnrichedListView";
@@ -110,7 +111,7 @@ export function ToReviewTab() {
       loading={state.loading.toReview}
       error={state.errors.toReview}
       emptyText="No PRs are awaiting your review or being watched."
-      onRefresh={() => void loadToReview(dispatch)}
+      onRefresh={() => void refreshAll(dispatch)}
       filterBar={
         <PrFilterBar
           rows={state.toReview}
