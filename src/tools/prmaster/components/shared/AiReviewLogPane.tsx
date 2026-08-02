@@ -17,18 +17,32 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Button, cn } from "@zen-tools/ui";
-import { ChevronDown, AlertTriangle, MessageSquare, Wrench, FileText, BrainCog } from "lucide-react";
+import {
+  AlertTriangle,
+  BrainCog,
+  ChevronDown,
+  Cpu,
+  FileText,
+  MessageSquare,
+  Wrench,
+} from "lucide-react";
 import type { AiReviewEvent } from "../../lib/tauri";
 
 interface Props {
   events: AiReviewEvent[];
+  /** Resolved model used for this run. Rendered before every event. */
+  model: string | null;
+  /** Final provider cost, once known. */
+  costUsd: number | null;
+  /** Whether cost is still being calculated by the provider. */
+  costPending: boolean;
 }
 
 /** Distance (in px) from the bottom we treat as "still tracking the
  *  live tail". Beyond it we stop auto-scrolling. */
 const STICK_TO_BOTTOM_PX = 64;
 
-export function AiReviewLogPane({ events }: Props) {
+export function AiReviewLogPane({ events, model, costUsd, costPending }: Props) {
   const ref = useRef<HTMLDivElement | null>(null);
   const [stuck, setStuck] = useState(true);
 
@@ -59,6 +73,18 @@ export function AiReviewLogPane({ events }: Props) {
         onScroll={onScroll}
         className="h-full min-h-0 overflow-y-auto px-3 py-2 font-mono text-[11px] leading-snug"
       >
+        {model && (
+          <Row icon={<Cpu className="size-3 text-blue-500" />} accent="blue">
+            <span className="font-semibold text-foreground">Model: {model}</span>
+            <span className="text-muted-foreground">
+              {costUsd != null
+                ? ` · Cost: $${costUsd.toFixed(4)}`
+                : costPending
+                  ? " · Cost: calculated when finished"
+                  : " · Cost: not reported"}
+            </span>
+          </Row>
+        )}
         {items.length === 0 ? (
           <div className="text-muted-foreground">
             Waiting for the first event…

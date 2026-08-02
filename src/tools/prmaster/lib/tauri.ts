@@ -698,6 +698,8 @@ export interface AiReviewStartResp {
   run_id: string;
   worktree_path: string;
   head_sha: string;
+  /** Resolved model actually handed to the review runner. */
+  model: string;
 }
 
 export interface AiReviewStatusResp {

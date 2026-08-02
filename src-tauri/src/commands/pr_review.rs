@@ -177,6 +177,8 @@ pub struct AiReviewStartResp {
     pub worktree_path: String,
     /// Echo of the head SHA the worktree was pinned to.
     pub head_sha: String,
+    /// Resolved model handed to Claude for this run.
+    pub model: String,
 }
 
 /// Wire shape for the live status of a run. Sent back when the
@@ -287,14 +289,15 @@ pub async fn prmaster_ai_review_start(
     let model_for_run = model
         .clone()
         .filter(|s| !s.is_empty())
-        .or_else(|| Some(settings.ai_model.clone()).filter(|s| !s.is_empty()));
+        .or_else(|| Some(settings.ai_model.clone()).filter(|s| !s.is_empty()))
+        .unwrap_or_else(|| "sonnet".to_string());
 
     let inputs = StartInputs {
         pr: pr_key.clone(),
         head_sha: head_sha.clone(),
         head_branch: head_branch.clone(),
         base_branch: base_branch.clone(),
-        model: model_for_run.clone(),
+        model: Some(model_for_run.clone()),
         local_repo: &local_repo,
         worktrees_root: &worktrees_root,
     };
@@ -371,6 +374,7 @@ when the current code does not provide enough evidence.
         let worktree_path = handles.worktree_path.clone();
         let reports_root = app_root.join("reports");
         let cancel = handles.cancel.clone();
+        let model_for_task = model_for_run.clone();
         tokio::spawn(async move {
             let res = review
                 .run(
@@ -379,7 +383,7 @@ when the current code does not provide enough evidence.
                     reports_root,
                     kv,
                     prompt_text,
-                    model_for_run,
+                    Some(model_for_task),
                     cancel,
                     tx,
                 )
@@ -394,6 +398,7 @@ when the current code does not provide enough evidence.
         run_id: handles.run_id,
         worktree_path: handles.worktree_path.to_string_lossy().into_owned(),
         head_sha: handles.head_sha,
+        model: model_for_run,
     })
 }
 

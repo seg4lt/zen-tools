@@ -54,6 +54,8 @@ export interface PrReviewSlot {
   reportPath: string | null;
   /** Cost reported by the live or most-recent run, in USD. */
   costUsd: number | null;
+  /** Resolved model used by the live or most-recent run. */
+  model: string | null;
   /** Wall-clock duration in ms (mirrors backend's `duration_ms`). */
   durationMs: number | null;
   /** Absolute path to the detached worktree for the live / latest run. */
@@ -76,6 +78,7 @@ const emptySlot: PrReviewSlot = {
   liveHeadSha: null,
   reportPath: null,
   costUsd: null,
+  model: null,
   durationMs: null,
   worktreePath: null,
 };
@@ -149,7 +152,7 @@ export const aiReviewStore = {
   },
 
   /** Immediately replace a prior completed badge when the user starts again. */
-  beginRun(key: string, headSha: string): void {
+  beginRun(key: string, headSha: string, model: string): void {
     const slot = state.slots.get(key) ?? emptySlot;
     state.slots.set(key, {
       ...slot,
@@ -159,6 +162,7 @@ export const aiReviewStore = {
       liveHeadSha: headSha,
       reportPath: null,
       costUsd: null,
+      model,
       durationMs: null,
     });
     notify();
@@ -181,6 +185,7 @@ export const aiReviewStore = {
     runId: string,
     headSha: string,
     worktreePath?: string | null,
+    model?: string | null,
   ): void {
     const slot = state.slots.get(key) ?? emptySlot;
     state.slots.set(key, {
@@ -191,6 +196,7 @@ export const aiReviewStore = {
       liveHeadSha: headSha,
       reportPath: null,
       costUsd: null,
+      model: model ?? slot.model,
       durationMs: null,
       worktreePath: worktreePath ?? slot.worktreePath,
     });
@@ -207,6 +213,8 @@ export const aiReviewStore = {
     reportPath: string | null,
     headSha?: string | null,
     worktreePath?: string | null,
+    model?: string | null,
+    costUsd?: number | null,
   ): void {
     const slot = state.slots.get(key) ?? emptySlot;
     const completedHead = status === "done" ? headSha : null;
@@ -227,6 +235,8 @@ export const aiReviewStore = {
           : null,
       reportPath,
       worktreePath: worktreePath ?? slot.worktreePath,
+      model: model ?? slot.model,
+      costUsd: costUsd ?? slot.costUsd,
     });
     state.runIdToPrKey.set(runId, key);
     notify();
@@ -331,7 +341,7 @@ export async function startDefaultAiReview(
   if (!defaultModel) {
     throw new Error("Cannot start AI review: no default model is selected in PR Master settings");
   }
-  aiReviewStore.beginRun(key, headSha);
+  aiReviewStore.beginRun(key, headSha, defaultModel);
   try {
     const resp = await prmasterTauri.aiReviewStart({
       pr: ref,
@@ -341,7 +351,13 @@ export async function startDefaultAiReview(
       model: defaultModel,
       promptOverride: null,
     });
-    aiReviewStore.startRun(key, resp.run_id, resp.head_sha, resp.worktree_path);
+    aiReviewStore.startRun(
+      key,
+      resp.run_id,
+      resp.head_sha,
+      resp.worktree_path,
+      resp.model,
+    );
   } catch (error) {
     aiReviewStore.markStartFailed(key);
     throw error;

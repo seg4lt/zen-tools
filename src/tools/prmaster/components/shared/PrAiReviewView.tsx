@@ -305,6 +305,8 @@ export function PrAiReviewView({ pr }: Props) {
           status.report_path,
           status.head_sha,
           status.worktree_path,
+          status.model,
+          status.cost_usd,
         );
         if (status.worktree_path) {
           setWorktreePath(status.worktree_path);
@@ -348,7 +350,7 @@ export function PrAiReviewView({ pr }: Props) {
     setBusy(true);
     setMissingRepo(null);
     setPromptError(null);
-    aiReviewStore.beginRun(key, headSha);
+    aiReviewStore.beginRun(key, headSha, model || "sonnet");
     try {
       const resp = await prmasterTauri.aiReviewStart({
         pr: ref,
@@ -359,7 +361,13 @@ export function PrAiReviewView({ pr }: Props) {
         promptOverride,
       });
       writeStoredModel(model);
-      aiReviewStore.startRun(key, resp.run_id, resp.head_sha, resp.worktree_path);
+      aiReviewStore.startRun(
+        key,
+        resp.run_id,
+        resp.head_sha,
+        resp.worktree_path,
+        resp.model,
+      );
       setWorktreePath(resp.worktree_path);
       setPromptDraft(null);
       setLoaded(null);
@@ -501,11 +509,7 @@ export function PrAiReviewView({ pr }: Props) {
     );
   }
 
-  const isLive =
-    slot.liveRunId !== null &&
-    slot.status !== "done" &&
-    slot.status !== "error" &&
-    slot.status !== "cancelled";
+  const isLive = slot.status === "starting" || slot.status === "running";
 
   // While a live run is in flight, prefer `slot.events` (which the
   // mpsc subscription pushes into in real time). After the run
@@ -567,9 +571,14 @@ export function PrAiReviewView({ pr }: Props) {
             />
           )}
           {isLive ? (
-            <Button size="xs" variant="outline" onClick={onCancel}>
+            <Button
+              size="xs"
+              variant="outline"
+              onClick={onCancel}
+              disabled={!slot.liveRunId}
+            >
               <Square className="size-3" />
-              Cancel
+              {slot.liveRunId ? "Cancel" : "Starting…"}
             </Button>
           ) : loaded ? (
             <Button
@@ -615,7 +624,12 @@ export function PrAiReviewView({ pr }: Props) {
             onGo={() => void onStart(promptDraft)}
           />
         ) : isLive ? (
-          <AiReviewLogPane events={logEvents} />
+          <AiReviewLogPane
+            events={logEvents}
+            model={slot.model ?? model}
+            costUsd={slot.costUsd}
+            costPending
+          />
         ) : loaded && viewMode === "report" ? (
           <AiReviewReportView
             findings={loaded.findings}
@@ -650,7 +664,12 @@ export function PrAiReviewView({ pr }: Props) {
           // into a `loaded` snapshot (very narrow race window
           // between `status === "done"` firing and the post-finish
           // effect resolving `aiReviewGetReport`).
-          <AiReviewLogPane events={logEvents} />
+          <AiReviewLogPane
+            events={logEvents}
+            model={loaded?.model ?? slot.model}
+            costUsd={loaded?.costUsd ?? slot.costUsd}
+            costPending={false}
+          />
         ) : (
           <PreRunHero
             costHint={history.length > 0 ? history[0] : null}
