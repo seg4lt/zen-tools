@@ -1,31 +1,79 @@
-name: Build
+name: Release Zen Tools
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches: [main]
   workflow_dispatch:
 
-# Releases publish to this repo (github.repository). No cross-repo
-# auth needed — default GITHUB_TOKEN is enough because softprops/
-# action-gh-release defaults `repository` to the current repo.
-#
-# Mirrors the flowstate build pipeline: a `build` matrix job assembles
-# the Tauri bundle on each runner, a separate `release` job downloads
-# the artifacts and publishes a GitHub Release.
+concurrency:
+  group: zen-tools-release-main
+  cancel-in-progress: true
+
+permissions:
+  contents: write
 
 jobs:
+  version:
+    name: Auto-bump patch version
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.bump.outputs.version }}
+      tag: ${{ steps.bump.outputs.tag }}
+      commit: ${{ steps.push.outputs.commit }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Make sure this is still the newest push
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git merge --ff-only origin/main
+
+      - name: Increment patch version everywhere
+        id: bump
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(node scripts/bump-patch.mjs)"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Commit generated version
+        id: push
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.bump.outputs.version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package.json Cargo.toml Cargo.lock src-tauri/tauri.conf.json
+          git commit -m "chore(release): v$VERSION [skip ci]"
+          git push origin HEAD:main
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
   # Build libghostty.a on macos-15 where the CLT ships MacOSX15.x SDKs
   # with TBD v4 format that Zig 0.15.2 can parse correctly. On macos-26
   # even the MacOSX15.4.sdk in the CLT uses TBD v5+ format, causing Zig
   # to silently emit only ~4 symbols instead of ~97.
   build-ghostty:
     name: build libghostty.a (macos-15)
+    needs: version
     runs-on: macos-15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
+          ref: ${{ needs.version.outputs.commit }}
           submodules: recursive
 
       - name: Install mise toolchain (zig 0.15.2)
@@ -126,7 +174,7 @@ jobs:
           retention-days: 7
 
   build:
-    needs: build-ghostty
+    needs: [version, build-ghostty]
     strategy:
       fail-fast: false
       matrix:
@@ -163,6 +211,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
+          ref: ${{ needs.version.outputs.commit }}
           # Pulls `vendor/ghostty` (submodule pinned in `.gitmodules`).
           # Required for bindgen to find `vendor/ghostty/include/ghostty.h`.
           submodules: recursive
@@ -287,7 +336,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p release-assets
-          TAG="${{ github.ref_name }}"
+          TAG="${{ needs.version.outputs.tag }}"
 
           if [ "${{ runner.os }}" = "macOS" ]; then
             # Tauri produces a .dmg + a .app.tar.gz/.sig pair on every
@@ -329,9 +378,8 @@ jobs:
 
   release:
     name: Publish Release
-    needs: build
+    needs: [version, build]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       # Required so the default GITHUB_TOKEN can create releases.
       contents: write
@@ -361,14 +409,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          TAG="${{ github.ref_name }}"
+          TAG="${{ needs.version.outputs.tag }}"
+          VERSION="${{ needs.version.outputs.version }}"
           REPO="${{ github.repository }}"
           PUB_DATE="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
           MAC_SIG_FILE="release-assets/Zen-Tools-${TAG}-macos-arm64.app.tar.gz.sig"
           MAC_SIG="$(cat "$MAC_SIG_FILE")"
           cat > release-assets/latest.json <<EOF
           {
-            "version": "${TAG}",
+            "version": "${VERSION}",
             "notes": "See the release page for details.",
             "pub_date": "${PUB_DATE}",
             "platforms": {
@@ -388,10 +437,11 @@ jobs:
           # No `repository:` override — defaults to github.repository
           # (this repo).  No `token:` override — default GITHUB_TOKEN
           # has `contents: write` from the permissions block above.
-          tag_name: ${{ github.ref_name }}
-          name: Zen Tools ${{ github.ref_name }}
+          tag_name: ${{ needs.version.outputs.tag }}
+          target_commitish: ${{ needs.version.outputs.commit }}
+          name: Zen Tools ${{ needs.version.outputs.tag }}
           body: |
-            ## Zen Tools ${{ github.ref_name }}
+            ## Zen Tools ${{ needs.version.outputs.tag }}
 
             ### One-line install
             ```sh
@@ -402,7 +452,7 @@ jobs:
             ### Downloads
             | Platform | File |
             |----------|------|
-            | macOS (Apple Silicon) | `Zen-Tools-${{ github.ref_name }}-macos-arm64.dmg` |
+            | macOS (Apple Silicon) | `Zen-Tools-${{ needs.version.outputs.tag }}-macos-arm64.dmg` |
 
             ### macOS Installation (manual)
             1. Download the `.dmg`, open it, drag the app to `/Applications`.
