@@ -939,7 +939,7 @@ fn classify_review_buckets(
             continue;
         }
         let has_current_decision = matches!(
-            pr.latest_review_state_for(current_user),
+            pr.current_user_review_state,
             Some(ReviewState::Approved | ReviewState::ChangesRequested)
         );
 
@@ -1150,11 +1150,22 @@ mod tests {
         historical: Vec<Review>,
         latest: Vec<Review>,
     ) -> EnrichedPullRequest {
+        let current_user_review_state = historical
+            .iter()
+            .rev()
+            .find(|review| review.author.as_ref().map(|a| a.login.as_str()) == Some("me"))
+            .or_else(|| {
+                latest.iter().find(|review| {
+                    review.author.as_ref().map(|a| a.login.as_str()) == Some("me")
+                })
+            })
+            .map(|review| review.state);
         EnrichedPullRequest {
             pr,
             review_decision: None,
             reviews: historical,
             latest_opinionated_reviews: latest,
+            current_user_review_state,
             requested_reviewers: vec![],
             merged_by: None,
             merged_at: None,
@@ -1249,14 +1260,25 @@ mod tests {
 
     #[test]
     fn latest_comment_overrides_historical_approval() {
-        let pr = enriched(
+        let mut pr = enriched(
             make_pr(11, "alice"),
-            vec![
-                review("me", ReviewState::Approved),
-                review("me", ReviewState::Commented),
-            ],
+            vec![review("me", ReviewState::Approved)],
             vec![review("me", ReviewState::Approved)],
         );
+        pr.current_user_review_state = Some(ReviewState::Commented);
+        let (to_review, done) = classify_review_buckets(&[pr], "me");
+        assert_eq!(to_review.len(), 1);
+        assert_eq!(done.len(), 0);
+    }
+
+    #[test]
+    fn viewer_pending_overrides_historical_changes_requested() {
+        let mut pr = enriched(
+            make_pr(12, "alice"),
+            vec![review("me", ReviewState::ChangesRequested)],
+            vec![review("me", ReviewState::ChangesRequested)],
+        );
+        pr.current_user_review_state = Some(ReviewState::Pending);
         let (to_review, done) = classify_review_buckets(&[pr], "me");
         assert_eq!(to_review.len(), 1);
         assert_eq!(done.len(), 0);

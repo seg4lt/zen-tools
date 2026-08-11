@@ -431,6 +431,7 @@ impl GhClient {
                 review_decision,
                 reviews,
                 latest_opinionated_reviews,
+                current_user_review_state,
                 requested_reviewers,
                 merged_by,
                 merged_at,
@@ -446,6 +447,8 @@ impl GhClient {
                     .as_ref()
                     .map(|n| n.nodes.clone())
                     .unwrap_or_default();
+                let current_user_review_state =
+                    d.viewer_latest_review.as_ref().map(|review| review.state);
                 let requested = d
                     .review_requests
                     .as_ref()
@@ -464,6 +467,7 @@ impl GhClient {
                     d.review_decision,
                     reviews,
                     latest_opinionated_reviews,
+                    current_user_review_state,
                     requested,
                     d.merged_by.as_ref().map(|m| m.login.clone()),
                     d.merged_at,
@@ -475,6 +479,7 @@ impl GhClient {
                 review_decision,
                 reviews,
                 latest_opinionated_reviews,
+                current_user_review_state,
                 requested_reviewers,
                 merged_by,
                 merged_at,
@@ -1420,6 +1425,9 @@ const PR_FRAGMENT: &str = r#"      headRefName
           author { login }
           state
         }
+      }
+      viewerLatestReview {
+        state
       }
       reviewRequests(first: 20) {
         nodes {

@@ -178,6 +178,7 @@ export interface PrDetail {
   headRefName: string | null;
   baseRefName: string | null;
   reviewDecision: ReviewDecision | null;
+  viewerLatestReview: Review | null;
   reviews: { nodes: Review[] } | null;
   reviewRequests: {
     nodes: Array<{
@@ -202,6 +203,7 @@ export interface EnrichedPullRequest {
   reviewDecision: ReviewDecision | null;
   reviews: Review[];
   latestOpinionatedReviews: Review[];
+  currentUserReviewState: ReviewState | null;
   requestedReviewers: string[];
   mergedBy: string | null;
   mergedAt: string | null;

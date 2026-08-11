@@ -114,6 +114,11 @@ pub struct PrDetail {
     /// GitHub's latest opinionated review for each reviewer.
     #[serde(default, rename = "latestOpinionatedReviews")]
     pub latest_opinionated_reviews: Option<ReviewNodes>,
+    /// The authenticated viewer's latest review, as resolved directly by
+    /// GitHub. Unlike the bounded review history, this is authoritative for
+    /// the current user's To Review / Done placement.
+    #[serde(default, rename = "viewerLatestReview")]
+    pub viewer_latest_review: Option<Review>,
     /// Pending review requests.
     #[serde(default, rename = "reviewRequests")]
     pub review_requests: Option<ReviewRequestNodes>,
@@ -245,6 +250,9 @@ pub struct EnrichedPullRequest {
     /// Latest approval / changes-requested status per reviewer.
     #[serde(default, rename = "latestOpinionatedReviews")]
     pub latest_opinionated_reviews: Vec<Review>,
+    /// State from GraphQL's `viewerLatestReview` for the authenticated user.
+    #[serde(default, rename = "currentUserReviewState")]
+    pub current_user_review_state: Option<ReviewState>,
     /// Logins/team names that still owe a review.
     #[serde(default, rename = "requestedReviewers")]
     pub requested_reviewers: Vec<String>,
@@ -263,23 +271,6 @@ impl EnrichedPullRequest {
     /// Stable id (delegates to the underlying [`PullRequest`]).
     pub fn id(&self) -> String {
         self.pr.id()
-    }
-
-    /// Newest displayed review state for `login`. This mirrors the UI's
-    /// reviewer-chip reduction: later entries replace earlier ones. The
-    /// latest-opinion connection is only a fallback when the bounded review
-    /// history does not contain the user.
-    pub fn latest_review_state_for(&self, login: &str) -> Option<ReviewState> {
-        self.reviews
-            .iter()
-            .rev()
-            .find(|review| review.author.as_ref().map(|a| a.login.as_str()) == Some(login))
-            .or_else(|| {
-                self.latest_opinionated_reviews.iter().find(|review| {
-                    review.author.as_ref().map(|a| a.login.as_str()) == Some(login)
-                })
-            })
-            .map(|review| review.state)
     }
 
     /// Reviewers with a pending request who haven't yet submitted a review
@@ -319,5 +310,18 @@ mod tests {
         assert_eq!(reviews.len(), 1);
         assert_eq!(reviews[0].state, ReviewState::Approved);
         assert_eq!(reviews[0].author.as_ref().unwrap().login, "octocat");
+    }
+
+    #[test]
+    fn decodes_viewer_latest_review_from_graphql() {
+        let detail: PrDetail = serde_json::from_value(serde_json::json!({
+            "viewerLatestReview": { "state": "COMMENTED" }
+        }))
+        .unwrap();
+
+        assert_eq!(
+            detail.viewer_latest_review.unwrap().state,
+            ReviewState::Commented
+        );
     }
 }
