@@ -917,7 +917,9 @@ impl Default for PrMasterEngine {
 /// Rules:
 ///
 ///   * skip PRs the user authored (those belong in **Mine**);
-///   * the user's latest opinionated status is authoritative;
+///   * a live direct review request for the user goes to **To Review**,
+///     even when GitHub still reports an older approval / changes request;
+///   * otherwise the user's latest opinionated status is authoritative;
 ///   * a latest `APPROVED` / `CHANGES_REQUESTED` goes to **Done**;
 ///   * no latest opinion, or a dismissed/non-decisive status, goes to
 ///     **To Review**.
@@ -938,10 +940,15 @@ fn classify_review_buckets(
         if !seen.insert(id) {
             continue;
         }
-        let has_current_decision = matches!(
-            pr.current_user_review_state,
-            Some(ReviewState::Approved | ReviewState::ChangesRequested)
-        );
+        let review_requested_again = pr
+            .requested_reviewers
+            .iter()
+            .any(|reviewer| reviewer.eq_ignore_ascii_case(current_user));
+        let has_current_decision = !review_requested_again
+            && matches!(
+                pr.current_user_review_state,
+                Some(ReviewState::Approved | ReviewState::ChangesRequested)
+            );
 
         if has_current_decision {
             done_out.push(pr.clone());
@@ -1198,6 +1205,48 @@ mod tests {
             vec![changes_requested.clone()],
             vec![changes_requested],
         );
+        let (to_review, done) = classify_review_buckets(&[pr], "me");
+        assert_eq!(to_review.len(), 0);
+        assert_eq!(done.len(), 1);
+    }
+
+    #[test]
+    fn direct_rerequest_overrides_historical_approval() {
+        let approved = review("me", ReviewState::Approved);
+        let mut pr = enriched(
+            make_pr(13, "alice"),
+            vec![approved.clone()],
+            vec![approved],
+        );
+        pr.requested_reviewers = vec!["ME".into()];
+        let (to_review, done) = classify_review_buckets(&[pr], "me");
+        assert_eq!(to_review.len(), 1);
+        assert_eq!(done.len(), 0);
+    }
+
+    #[test]
+    fn direct_rerequest_overrides_historical_changes_requested() {
+        let changes_requested = review("me", ReviewState::ChangesRequested);
+        let mut pr = enriched(
+            make_pr(14, "alice"),
+            vec![changes_requested.clone()],
+            vec![changes_requested],
+        );
+        pr.requested_reviewers = vec!["me".into()];
+        let (to_review, done) = classify_review_buckets(&[pr], "me");
+        assert_eq!(to_review.len(), 1);
+        assert_eq!(done.len(), 0);
+    }
+
+    #[test]
+    fn another_users_request_does_not_override_my_approval() {
+        let approved = review("me", ReviewState::Approved);
+        let mut pr = enriched(
+            make_pr(15, "alice"),
+            vec![approved.clone()],
+            vec![approved],
+        );
+        pr.requested_reviewers = vec!["someone-else".into()];
         let (to_review, done) = classify_review_buckets(&[pr], "me");
         assert_eq!(to_review.len(), 0);
         assert_eq!(done.len(), 1);
