@@ -385,6 +385,12 @@ jobs:
       contents: write
 
     steps:
+      - name: Checkout release commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.commit }}
+          fetch-depth: 0
+
       - name: Download all release assets
         uses: actions/download-artifact@v4
         with:
@@ -463,3 +469,23 @@ jobs:
           draft: false
           prerelease: false
           files: release-assets/*
+
+      - name: Keep only the latest three release tags
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --force --tags origin
+          mapfile -t RELEASE_TAGS < <(
+            git tag --list \
+              | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+              | sort --version-sort --reverse
+          )
+
+          if (( ${#RELEASE_TAGS[@]} <= 3 )); then
+            echo "Found ${#RELEASE_TAGS[@]} release tags; nothing to prune."
+            exit 0
+          fi
+
+          OLD_TAGS=("${RELEASE_TAGS[@]:3}")
+          printf 'Deleting old release tag: %s\n' "${OLD_TAGS[@]}"
+          git push origin --delete "${OLD_TAGS[@]}"
