@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use super::author::Author;
 use super::check::StatusCheckRollup;
 use super::repository::Repository;
-use super::review::{RequestedReviewer, Review, ReviewDecision};
+use super::review::{RequestedReviewer, Review, ReviewDecision, ReviewState};
 
 /// Top-level PR list-view DTO returned by `gh search prs --json …`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -111,15 +111,9 @@ pub struct PrDetail {
     /// Submitted reviews.
     #[serde(default)]
     pub reviews: Option<ReviewNodes>,
-    /// GitHub's latest opinionated review for each reviewer. This is useful
-    /// for display, but is not used for dismissal-aware bucket placement.
+    /// GitHub's latest opinionated review for each reviewer.
     #[serde(default, rename = "latestOpinionatedReviews")]
     pub latest_opinionated_reviews: Option<ReviewNodes>,
-    /// The current viewer's newest approval, changes-requested, or
-    /// dismissed review. Populated by review-list enrichment so a stale
-    /// dismissal wins over GitHub's historical `latestOpinionatedReviews`.
-    #[serde(default, rename = "viewerOpinionatedReviews")]
-    pub viewer_opinionated_reviews: Option<ReviewNodes>,
     /// Pending review requests.
     #[serde(default, rename = "reviewRequests")]
     pub review_requests: Option<ReviewRequestNodes>,
@@ -251,11 +245,6 @@ pub struct EnrichedPullRequest {
     /// Latest approval / changes-requested status per reviewer.
     #[serde(default, rename = "latestOpinionatedReviews")]
     pub latest_opinionated_reviews: Vec<Review>,
-    /// Current user's newest decisive/dismissed review state. `DISMISSED`
-    /// means a previously submitted decision is stale and must be reviewed
-    /// again.
-    #[serde(default, rename = "currentUserReviewState")]
-    pub current_user_review_state: Option<super::review::ReviewState>,
     /// Logins/team names that still owe a review.
     #[serde(default, rename = "requestedReviewers")]
     pub requested_reviewers: Vec<String>,
@@ -274,6 +263,23 @@ impl EnrichedPullRequest {
     /// Stable id (delegates to the underlying [`PullRequest`]).
     pub fn id(&self) -> String {
         self.pr.id()
+    }
+
+    /// Newest displayed review state for `login`. This mirrors the UI's
+    /// reviewer-chip reduction: later entries replace earlier ones. The
+    /// latest-opinion connection is only a fallback when the bounded review
+    /// history does not contain the user.
+    pub fn latest_review_state_for(&self, login: &str) -> Option<ReviewState> {
+        self.reviews
+            .iter()
+            .rev()
+            .find(|review| review.author.as_ref().map(|a| a.login.as_str()) == Some(login))
+            .or_else(|| {
+                self.latest_opinionated_reviews.iter().find(|review| {
+                    review.author.as_ref().map(|a| a.login.as_str()) == Some(login)
+                })
+            })
+            .map(|review| review.state)
     }
 
     /// Reviewers with a pending request who haven't yet submitted a review
@@ -313,22 +319,5 @@ mod tests {
         assert_eq!(reviews.len(), 1);
         assert_eq!(reviews[0].state, ReviewState::Approved);
         assert_eq!(reviews[0].author.as_ref().unwrap().login, "octocat");
-    }
-
-    #[test]
-    fn decodes_viewer_dismissed_review_from_graphql() {
-        let detail: PrDetail = serde_json::from_value(serde_json::json!({
-            "viewerOpinionatedReviews": {
-                "nodes": [{
-                    "author": { "login": "octocat" },
-                    "state": "DISMISSED"
-                }]
-            }
-        }))
-        .unwrap();
-
-        let reviews = detail.viewer_opinionated_reviews.unwrap().nodes;
-        assert_eq!(reviews.len(), 1);
-        assert_eq!(reviews[0].state, ReviewState::Dismissed);
     }
 }

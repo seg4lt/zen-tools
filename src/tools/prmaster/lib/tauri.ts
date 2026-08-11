@@ -202,7 +202,6 @@ export interface EnrichedPullRequest {
   reviewDecision: ReviewDecision | null;
   reviews: Review[];
   latestOpinionatedReviews: Review[];
-  currentUserReviewState: ReviewState | null;
   requestedReviewers: string[];
   mergedBy: string | null;
   mergedAt: string | null;
