@@ -329,15 +329,39 @@ impl GhClient {
         repo: &str,
         numbers: &[u64],
     ) -> GhResult<std::collections::HashMap<u64, PrDetail>> {
+        self.batch_pr_details_for_reviewer(owner, repo, numbers, None)
+            .await
+    }
+
+    /// Batched detail fetch with an optional dismissal-aware review lookup
+    /// scoped to one reviewer. This only extends the existing per-repository
+    /// GraphQL batch; it does not add requests or per-PR calls.
+    async fn batch_pr_details_for_reviewer(
+        &self,
+        owner: &str,
+        repo: &str,
+        numbers: &[u64],
+        reviewer: Option<&str>,
+    ) -> GhResult<std::collections::HashMap<u64, PrDetail>> {
         let mut out = std::collections::HashMap::new();
         if numbers.is_empty() {
             return Ok(out);
         }
 
+        let reviewer_fragment = reviewer
+            .map(|login| {
+                let login = serde_json::to_string(login)
+                    .expect("serializing a GitHub login cannot fail");
+                format!(
+                    "\n      viewerOpinionatedReviews: reviews(last: 1, states: [APPROVED, CHANGES_REQUESTED, DISMISSED], author: {login}) {{\n        nodes {{\n          author {{ login }}\n          state\n        }}\n      }}"
+                )
+            })
+            .unwrap_or_default();
+
         let pr_blocks: Vec<String> = numbers
             .iter()
             .map(|n| format!(
-                "    pr{n}: pullRequest(number: {n}) {{\n{PR_FRAGMENT}\n    }}"
+                "    pr{n}: pullRequest(number: {n}) {{\n{PR_FRAGMENT}{reviewer_fragment}\n    }}"
             ))
             .collect();
 
@@ -399,6 +423,24 @@ impl GhClient {
         &self,
         prs: Vec<PullRequest>,
     ) -> GhResult<Vec<EnrichedPullRequest>> {
+        self.enrich_for_optional_reviewer(prs, None).await
+    }
+
+    /// Enrich PRs and resolve `reviewer`'s newest decisive/dismissed state.
+    /// Used by PR Master's To Review / Done classification.
+    pub async fn enrich_for_reviewer(
+        &self,
+        prs: Vec<PullRequest>,
+        reviewer: &str,
+    ) -> GhResult<Vec<EnrichedPullRequest>> {
+        self.enrich_for_optional_reviewer(prs, Some(reviewer)).await
+    }
+
+    async fn enrich_for_optional_reviewer(
+        &self,
+        prs: Vec<PullRequest>,
+        reviewer: Option<&str>,
+    ) -> GhResult<Vec<EnrichedPullRequest>> {
         use std::collections::HashMap;
 
         let mut by_repo: HashMap<String, Vec<u64>> = HashMap::new();
@@ -414,7 +456,9 @@ impl GhClient {
             let (owner, name) = repo.split_once('/').ok_or_else(|| {
                 GhError::Unexpected(format!("invalid repository name in PR result: {repo}"))
             })?;
-            let details = self.batch_pr_details(owner, name, &numbers).await?;
+            let details = self
+                .batch_pr_details_for_reviewer(owner, name, &numbers, reviewer)
+                .await?;
             detail_map.insert(repo, details);
         }
 
@@ -431,6 +475,7 @@ impl GhClient {
                 review_decision,
                 reviews,
                 latest_opinionated_reviews,
+                current_user_review_state,
                 requested_reviewers,
                 merged_by,
                 merged_at,
@@ -446,6 +491,11 @@ impl GhClient {
                     .as_ref()
                     .map(|n| n.nodes.clone())
                     .unwrap_or_default();
+                let current_user_review_state = d
+                    .viewer_opinionated_reviews
+                    .as_ref()
+                    .and_then(|n| n.nodes.last())
+                    .map(|review| review.state);
                 let requested = d
                     .review_requests
                     .as_ref()
@@ -464,6 +514,7 @@ impl GhClient {
                     d.review_decision,
                     reviews,
                     latest_opinionated_reviews,
+                    current_user_review_state,
                     requested,
                     d.merged_by.as_ref().map(|m| m.login.clone()),
                     d.merged_at,
@@ -475,6 +526,7 @@ impl GhClient {
                 review_decision,
                 reviews,
                 latest_opinionated_reviews,
+                current_user_review_state,
                 requested_reviewers,
                 merged_by,
                 merged_at,

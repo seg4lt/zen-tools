@@ -321,6 +321,7 @@ mod tests {
             review_decision: None,
             reviews,
             latest_opinionated_reviews: vec![],
+            current_user_review_state: None,
             requested_reviewers: vec![],
             merged_by: None,
             merged_at: None,

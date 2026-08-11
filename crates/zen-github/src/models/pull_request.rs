@@ -111,11 +111,15 @@ pub struct PrDetail {
     /// Submitted reviews.
     #[serde(default)]
     pub reviews: Option<ReviewNodes>,
-    /// GitHub's latest opinionated review for each reviewer. Unlike
-    /// `reviews`, this does not expose stale historical approvals as if
-    /// they were the reviewer's current decision.
+    /// GitHub's latest opinionated review for each reviewer. This is useful
+    /// for display, but is not used for dismissal-aware bucket placement.
     #[serde(default, rename = "latestOpinionatedReviews")]
     pub latest_opinionated_reviews: Option<ReviewNodes>,
+    /// The current viewer's newest approval, changes-requested, or
+    /// dismissed review. Populated by review-list enrichment so a stale
+    /// dismissal wins over GitHub's historical `latestOpinionatedReviews`.
+    #[serde(default, rename = "viewerOpinionatedReviews")]
+    pub viewer_opinionated_reviews: Option<ReviewNodes>,
     /// Pending review requests.
     #[serde(default, rename = "reviewRequests")]
     pub review_requests: Option<ReviewRequestNodes>,
@@ -247,6 +251,11 @@ pub struct EnrichedPullRequest {
     /// Latest approval / changes-requested status per reviewer.
     #[serde(default, rename = "latestOpinionatedReviews")]
     pub latest_opinionated_reviews: Vec<Review>,
+    /// Current user's newest decisive/dismissed review state. `DISMISSED`
+    /// means a previously submitted decision is stale and must be reviewed
+    /// again.
+    #[serde(default, rename = "currentUserReviewState")]
+    pub current_user_review_state: Option<super::review::ReviewState>,
     /// Logins/team names that still owe a review.
     #[serde(default, rename = "requestedReviewers")]
     pub requested_reviewers: Vec<String>,
@@ -304,5 +313,22 @@ mod tests {
         assert_eq!(reviews.len(), 1);
         assert_eq!(reviews[0].state, ReviewState::Approved);
         assert_eq!(reviews[0].author.as_ref().unwrap().login, "octocat");
+    }
+
+    #[test]
+    fn decodes_viewer_dismissed_review_from_graphql() {
+        let detail: PrDetail = serde_json::from_value(serde_json::json!({
+            "viewerOpinionatedReviews": {
+                "nodes": [{
+                    "author": { "login": "octocat" },
+                    "state": "DISMISSED"
+                }]
+            }
+        }))
+        .unwrap();
+
+        let reviews = detail.viewer_opinionated_reviews.unwrap().nodes;
+        assert_eq!(reviews.len(), 1);
+        assert_eq!(reviews[0].state, ReviewState::Dismissed);
     }
 }

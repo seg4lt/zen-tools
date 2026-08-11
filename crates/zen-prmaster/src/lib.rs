@@ -661,7 +661,9 @@ impl PrMasterEngine {
 
         // Do not publish a snapshot unless all classification data exists.
         let (enriched_reviews, enriched_mine) = tokio::join!(
-            self.inner.gh.enrich(review_universe),
+            self.inner
+                .gh
+                .enrich_for_reviewer(review_universe, &current_user),
             self.inner.gh.enrich(mine),
         );
         let enriched_reviews = enriched_reviews?;
@@ -938,10 +940,10 @@ fn classify_review_buckets(
         if !seen.insert(id) {
             continue;
         }
-        let has_current_decision = pr.latest_opinionated_reviews.iter().any(|r| {
-            r.author.as_ref().map(|a| a.login.as_str()) == Some(current_user)
-                && matches!(r.state, ReviewState::Approved | ReviewState::ChangesRequested)
-        });
+        let has_current_decision = matches!(
+            pr.current_user_review_state,
+            Some(ReviewState::Approved | ReviewState::ChangesRequested)
+        );
 
         if has_current_decision {
             done_out.push(pr.clone());
@@ -1150,11 +1152,16 @@ mod tests {
         historical: Vec<Review>,
         latest: Vec<Review>,
     ) -> EnrichedPullRequest {
+        let current_user_review_state = latest
+            .iter()
+            .find(|review| review.author.as_ref().map(|a| a.login.as_str()) == Some("me"))
+            .map(|review| review.state);
         EnrichedPullRequest {
             pr,
             review_decision: None,
             reviews: historical,
             latest_opinionated_reviews: latest,
+            current_user_review_state,
             requested_reviewers: vec![],
             merged_by: None,
             merged_at: None,
@@ -1209,6 +1216,18 @@ mod tests {
         let pr = enriched(
             make_pr(6, "alice"),
             vec![review("me", ReviewState::Approved)],
+            vec![review("me", ReviewState::Dismissed)],
+        );
+        let (to_review, done) = classify_review_buckets(&[pr], "me");
+        assert_eq!(to_review.len(), 1);
+        assert_eq!(done.len(), 0);
+    }
+
+    #[test]
+    fn latest_dismissed_overrides_historical_changes_requested() {
+        let pr = enriched(
+            make_pr(9, "alice"),
+            vec![review("me", ReviewState::ChangesRequested)],
             vec![review("me", ReviewState::Dismissed)],
         );
         let (to_review, done) = classify_review_buckets(&[pr], "me");
