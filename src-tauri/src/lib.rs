@@ -469,6 +469,7 @@ pub fn run() {
             commands::files::remove_working_dir,
             commands::files::list_working_dirs,
             commands::files::pick_directory,
+            commands::files::create_http_file,
             // parse
             commands::parse::open_http_file,
             commands::parse::read_file_content,

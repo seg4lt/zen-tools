@@ -179,6 +179,63 @@ pub async fn pick_directory(app_handle: AppHandle) -> AppResult<Option<String>> 
     }
 }
 
+/// Create an empty HTTP request file inside one of the open project roots.
+/// `.http` is appended unless the supplied name already ends in `.http` or
+/// `.rest`. Sibling collisions are resolved with the same ` 2`, ` 3`, …
+/// convention used by the Database Explorer workspace.
+#[tauri::command]
+pub async fn create_http_file(
+    parent_dir: String,
+    name: String,
+    state: tauri::State<'_, Mutex<AppState>>,
+) -> AppResult<String> {
+    let parent = PathBuf::from(&parent_dir);
+    if !parent.is_dir() {
+        return Err(AppError::BadRequest(format!(
+            "parent is not a directory: {}",
+            parent.display()
+        )));
+    }
+
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::BadRequest("name cannot be empty".into()));
+    }
+    if trimmed.contains('/') || trimmed.contains('\\') {
+        return Err(AppError::BadRequest(
+            "name must not contain path separators".into(),
+        ));
+    }
+
+    // Canonicalize both sides so a symlinked directory cannot escape an open
+    // project. File creation is intentionally limited to the HTTP workspace.
+    let canonical_parent = parent
+        .canonicalize()
+        .map_err(|e| AppError::Other(format!("resolve parent directory: {e}")))?;
+    let roots = state.lock().await.working_dirs.clone();
+    let inside_open_project = roots.iter().any(|root| {
+        root.canonicalize()
+            .is_ok_and(|canonical_root| canonical_parent.starts_with(canonical_root))
+    });
+    if !inside_open_project {
+        return Err(AppError::BadRequest(
+            "parent directory is not inside an open HTTP project".into(),
+        ));
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
+    let with_ext = if lower.ends_with(".http") || lower.ends_with(".rest") {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed}.http")
+    };
+    let resolved = zen_fs::unique_sibling(&canonical_parent, &with_ext);
+    tokio::fs::write(&resolved, b"")
+        .await
+        .map_err(|e| AppError::Other(format!("create HTTP file: {e}")))?;
+    Ok(resolved.to_string_lossy().to_string())
+}
+
 /// Returns the [`FileType`] for a relevant http-runner file given its
 /// lowercased basename, or `None` if the file is not interesting.
 ///

@@ -3,6 +3,7 @@ import {
   BarChart3,
   ChevronDown,
   ChevronRight,
+  FilePlus,
   FileText,
   Folder,
   FolderOpen,
@@ -12,7 +13,14 @@ import {
   Trash2,
   Variable,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent,
+} from "react";
 import {
   tauri,
   type DiscoveredProject,
@@ -20,6 +28,13 @@ import {
   type FileType,
 } from "../lib/tauri";
 import { Button } from "@zen-tools/ui";
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuTrigger,
+} from "@zen-tools/ui";
 import { cn } from "@zen-tools/ui";
 import { useProjectActions } from "../hooks/use-projects";
 import { onFileTreeChanged } from "@/lib/file-tree-events";
@@ -129,6 +144,7 @@ export function HttpFileTree({ selectedPath, onSelect }: HttpFileTreeProps) {
 
   const { addProject, removeProject } = useProjectActions();
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
+  const [createParent, setCreateParent] = useState<string | null>(null);
   const hydratedRef = useRef(false);
 
   // Hydrate the expanded set once from disk preferences. Skip persisting
@@ -208,6 +224,30 @@ export function HttpFileTree({ selectedPath, onSelect }: HttpFileTreeProps) {
     }
   };
 
+  const startCreate = useCallback(
+    (parentDir: string) => {
+      setExplicit(parentDir, true);
+      setCreateParent(parentDir);
+    },
+    [setExplicit],
+  );
+
+  const finishCreate = useCallback(
+    async (path: string) => {
+      setCreateParent(null);
+      await queryClient.invalidateQueries({ queryKey: ["http-files"] });
+      onSelect({
+        name: path.split(/[\\/]/).pop() ?? path,
+        path,
+        isDir: false,
+        depth: 0,
+        expanded: false,
+        fileType: "httpFile",
+      });
+    },
+    [onSelect, queryClient],
+  );
+
   if (isLoading) {
     return <div className="p-3 text-xs text-muted-foreground">Scanning…</div>;
   }
@@ -255,10 +295,11 @@ export function HttpFileTree({ selectedPath, onSelect }: HttpFileTreeProps) {
                   open={open}
                   onToggle={() => setExplicit(project.root, !open)}
                   onRemove={() => void removeProject(project.root)}
+                  onStartCreate={() => startCreate(project.root)}
                 />
                 {open && (
                   <ul role="group" className="text-sm">
-                    {tree.length === 0 ? (
+                    {tree.length === 0 && createParent !== project.root ? (
                       <li className="py-1 pl-9 pr-2 text-[10px] italic text-muted-foreground">
                         No HTTP files in this project.
                       </li>
@@ -271,8 +312,20 @@ export function HttpFileTree({ selectedPath, onSelect }: HttpFileTreeProps) {
                           isExpanded={isExpanded}
                           onToggle={toggleExpanded}
                           onSelect={onSelect}
+                          createParent={createParent}
+                          onStartCreate={startCreate}
+                          onCreate={finishCreate}
+                          onCancelCreate={() => setCreateParent(null)}
                         />
                       ))
+                    )}
+                    {createParent === project.root && (
+                      <CreateFilePlaceholder
+                        parentDir={project.root}
+                        depth={0}
+                        onCreate={finishCreate}
+                        onCancel={() => setCreateParent(null)}
+                      />
                     )}
                   </ul>
                 )}
@@ -291,6 +344,7 @@ interface ProjectHeaderProps {
   open: boolean;
   onToggle: () => void;
   onRemove: () => void;
+  onStartCreate: () => void;
 }
 
 function ProjectHeader({
@@ -299,12 +353,15 @@ function ProjectHeader({
   open,
   onToggle,
   onRemove,
+  onStartCreate,
 }: ProjectHeaderProps) {
   return (
-    <div
-      className="group flex items-center gap-1 px-2 py-1 hover:bg-muted/50"
-      title={root}
-    >
+    <ContextMenu>
+      <ContextMenuTrigger asChild>
+        <div
+          className="group flex items-center gap-1 px-2 py-1 hover:bg-muted/50"
+          title={root}
+        >
       <button
         type="button"
         onClick={onToggle}
@@ -334,7 +391,23 @@ function ProjectHeader({
       >
         <Trash2 className="size-3" />
       </button>
-    </div>
+        </div>
+      </ContextMenuTrigger>
+      <ContextMenuContent onCloseAutoFocus={(e) => e.preventDefault()} className="w-48">
+        <ContextMenuItem onSelect={onStartCreate}>New HTTP file</ContextMenuItem>
+        <ContextMenuSeparator />
+        <ContextMenuItem onSelect={() => void navigator.clipboard.writeText(root)}>
+          Copy path
+        </ContextMenuItem>
+        <ContextMenuSeparator />
+        <ContextMenuItem
+          onSelect={onRemove}
+          className="text-destructive focus:text-destructive"
+        >
+          Remove project
+        </ContextMenuItem>
+      </ContextMenuContent>
+    </ContextMenu>
   );
 }
 
@@ -344,6 +417,10 @@ interface TreeRowProps {
   isExpanded: (path: string) => boolean;
   onToggle: (path: string) => void;
   onSelect: (item: FileTreeItem) => void;
+  createParent: string | null;
+  onStartCreate: (parentDir: string) => void;
+  onCreate: (path: string) => void;
+  onCancelCreate: () => void;
 }
 
 function TreeRow({
@@ -352,6 +429,10 @@ function TreeRow({
   isExpanded,
   onToggle,
   onSelect,
+  createParent,
+  onStartCreate,
+  onCreate,
+  onCancelCreate,
 }: TreeRowProps) {
   const { item, children } = node;
   // Indent: outermost project content sits flush at depth 0 plus a
@@ -368,6 +449,8 @@ function TreeRow({
 
   return (
     <li role="treeitem" aria-expanded={item.isDir ? open : undefined}>
+      <ContextMenu>
+        <ContextMenuTrigger asChild>
       <button
         type="button"
         onClick={onClick}
@@ -398,6 +481,21 @@ function TreeRow({
         />
         <span className="truncate font-mono text-xs">{item.name}</span>
       </button>
+        </ContextMenuTrigger>
+        <ContextMenuContent onCloseAutoFocus={(e) => e.preventDefault()} className="w-48">
+          {item.isDir && (
+            <>
+              <ContextMenuItem onSelect={() => onStartCreate(item.path)}>
+                New HTTP file
+              </ContextMenuItem>
+              <ContextMenuSeparator />
+            </>
+          )}
+          <ContextMenuItem onSelect={() => void navigator.clipboard.writeText(item.path)}>
+            Copy path
+          </ContextMenuItem>
+        </ContextMenuContent>
+      </ContextMenu>
       {item.isDir && open && children.length > 0 && (
         <ul role="group">
           {children.map((child) => (
@@ -408,10 +506,91 @@ function TreeRow({
               isExpanded={isExpanded}
               onToggle={onToggle}
               onSelect={onSelect}
+              createParent={createParent}
+              onStartCreate={onStartCreate}
+              onCreate={onCreate}
+              onCancelCreate={onCancelCreate}
             />
           ))}
         </ul>
       )}
+      {item.isDir && open && createParent === item.path && (
+        <CreateFilePlaceholder
+          parentDir={item.path}
+          depth={item.depth + 1}
+          onCreate={onCreate}
+          onCancel={onCancelCreate}
+        />
+      )}
     </li>
+  );
+}
+
+function CreateFilePlaceholder({
+  parentDir,
+  depth,
+  onCreate,
+  onCancel,
+}: {
+  parentDir: string;
+  depth: number;
+  onCreate: (path: string) => void;
+  onCancel: () => void;
+}) {
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const committedRef = useRef(false);
+  const [value, setValue] = useState("");
+
+  useEffect(() => {
+    const focus = () => inputRef.current?.focus();
+    focus();
+    const timer = setTimeout(focus, 0);
+    return () => clearTimeout(timer);
+  }, []);
+
+  async function commit() {
+    if (committedRef.current) return;
+    committedRef.current = true;
+    const trimmed = value.trim();
+    if (!trimmed) {
+      onCancel();
+      return;
+    }
+    try {
+      onCreate(await tauri.createHttpFile(parentDir, trimmed));
+    } catch (err) {
+      // eslint-disable-next-line no-alert
+      alert(`Create HTTP file failed: ${String((err as { message?: string })?.message ?? err)}`);
+      onCancel();
+    }
+  }
+
+  function handleKeyDown(e: KeyboardEvent<HTMLInputElement>) {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      void commit();
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      onCancel();
+    }
+  }
+
+  return (
+    <div
+      className="flex items-center gap-1.5 py-1 pr-2"
+      style={{ paddingLeft: `${depth * 12 + 33}px` }}
+    >
+      <FilePlus className="size-3.5 shrink-0 text-muted-foreground" />
+      <input
+        ref={inputRef}
+        type="text"
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        onKeyDown={handleKeyDown}
+        onBlur={() => void commit()}
+        placeholder="Untitled.http"
+        className="min-w-0 flex-1 rounded border border-border bg-background px-1 py-0 font-mono text-xs outline-none focus:border-foreground/30"
+      />
+    </div>
   );
 }

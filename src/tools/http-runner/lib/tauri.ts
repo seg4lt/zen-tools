@@ -152,6 +152,8 @@ export const tauri = {
     invoke<string[]>("remove_working_dir", { path }),
   listWorkingDirs: () => invoke<string[]>("list_working_dirs"),
   pickDirectory: () => invoke<string | null>("pick_directory"),
+  createHttpFile: (parentDir: string, name: string) =>
+    invoke<string>("create_http_file", { parentDir, name }),
 
   // parse
   openHttpFile: (path: string) =>
