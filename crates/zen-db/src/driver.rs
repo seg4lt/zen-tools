@@ -129,8 +129,9 @@ pub trait DbConnection: Send + Sync {
     ///
     /// - Postgres: `schema` becomes the head of `search_path`. `database`
     ///   is ignored (sqlx connections are bound to one DB).
-    /// - MSSQL: `database` triggers `USE [db]`. `schema` is ignored —
-    ///   T-SQL doesn't have a session-level schema, callers qualify.
+    /// - MSSQL: `database` selects that database (`USE [db]` on SQL Server,
+    ///   a database-specific connection on Azure SQL Database). `schema` is
+    ///   ignored — T-SQL doesn't have a session-level schema, callers qualify.
     async fn execute_batch(
         &self,
         database: Option<&str>,

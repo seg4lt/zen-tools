@@ -21,10 +21,10 @@
 //!
 //! Per-batch session pinning is preserved: `execute_batch_with_options`
 //! checks out **one** connection from the pool up-front and runs every
-//! statement (including the leading `USE [db]` and the `@@SPID`
-//! capture for lock telemetry) on that one connection — same reason
-//! Postgres pins a `PgPool` connection: `USE` and other session-state
-//! sets don't carry across the pool boundary.
+//! statement (including database-context setup and the `@@SPID` capture for
+//! lock telemetry) on that one connection. Regular SQL Server uses `USE`;
+//! Azure SQL Database selects a database-specific pool because it cannot
+//! switch database within an established session.
 
 use std::time::{Duration, Instant};
 
@@ -55,6 +55,13 @@ type MsPool = Pool<ConnectionManager>;
 
 pub struct MsSqlConnection {
     pool: MsPool,
+    /// Azure SQL Database (EngineEdition 5) cannot change database with
+    /// `USE`. Keep one lazily-created pool per selected database so the UI can
+    /// still expose a seamless database switcher.
+    database_pools: dashmap::DashMap<String, MsPool>,
+    pool_create_lock: tokio::sync::Mutex<()>,
+    engine_edition: i32,
+    default_database: String,
     /// Stored so the lock sampler can spin up its own sidecar
     /// `tiberius::Client` against the same server. The sampler
     /// intentionally does NOT use the user pool — sampling is a
@@ -78,96 +85,21 @@ impl MsSqlConnection {
         // Microsoft-style protocol marker users sometimes copy).
         let (host, port) = parse_host_port(&cfg.host, cfg.port);
 
-        let mut tib_cfg = Config::new();
-        tib_cfg.host(&host);
-        tib_cfg.port(port);
-        if !cfg.database.is_empty() {
-            tib_cfg.database(&cfg.database);
-        }
-        tib_cfg.authentication(AuthMethod::sql_server(&cfg.username, &cfg.password));
-        // Dev/CI containers ship with self-signed certs.
-        if cfg.trust_server_certificate {
-            tib_cfg.trust_cert();
-        }
-        // Azure SQL Edge / mssql-server containers default to TLS-on;
-        // keep encryption negotiated.
-        tib_cfg.encryption(EncryptionLevel::Required);
-
-        // bb8-tiberius default sets `tcp.set_nodelay(true)` for us
-        // (see ConnectionManager::new in the upstream source). No
-        // extra `with_modify_tcp_stream` hook needed.
-        let mgr = ConnectionManager::new(tib_cfg);
-
-        // Pool sizing — mirrors the Postgres tuning rationale in
-        // `postgres.rs::PostgresConnection::connect`:
-        //
-        //   - `max_size(4)`           — small ceiling matches the
-        //                                per-id registry mutex; we
-        //                                only run one user query at a
-        //                                time per connection, the
-        //                                extra slots are headroom for
-        //                                catalog/sampler side-channels.
-        //   - `min_idle(Some(1))`     — keep one warm connection so
-        //                                the first query after macOS
-        //                                wake doesn't pay a full
-        //                                handshake.
-        //   - `connection_timeout(30s)`— Azure SQL needs the headroom.
-        //                                A cold first connect on Azure
-        //                                does TLS + PRELOGIN + LOGIN7
-        //                                + a routing-token redirect to
-        //                                the actual node + a SECOND
-        //                                full handshake. 5–15s is
-        //                                normal; 8s (the original
-        //                                value, kept for parity with
-        //                                Postgres) timed out before the
-        //                                routing redirect could land.
-        //                                Local mssql containers still
-        //                                connect well under 30s, so
-        //                                this is purely additive
-        //                                headroom.
-        //   - `idle_timeout(10 min)`  — recycle long-idle pool conns
-        //                                proactively so we don't hold
-        //                                a fleet of server-side
-        //                                sleeping sessions.
-        //   - `test_on_check_out(true)`— PING `SELECT 1` before each
-        //                                handout; bb8-tiberius's
-        //                                `is_valid` impl does this.
-        //                                **Load-bearing for sleep/wake
-        //                                survival**: if the server
-        //                                killed our backend while we
-        //                                slept, the test fails and bb8
-        //                                replaces the entry silently.
-        let pool = Pool::builder()
-            .max_size(4)
-            .min_idle(Some(1))
-            .connection_timeout(Duration::from_secs(30))
-            .idle_timeout(Some(Duration::from_secs(10 * 60)))
-            .test_on_check_out(true)
-            .build(mgr)
-            .await
-            .map_err(|e| {
-                // bb8's `RunError` wraps the underlying tiberius error;
-                // its `Display` impl flattens the chain to just the
-                // outer "pool error" string and drops the actual cause
-                // ("certificate verification failed", "Login failed
-                // for user", "tcp connect: connection refused", etc.).
-                // Walk the cause chain manually so the user sees the
-                // root reason — that's the difference between a
-                // useless "connect failed" toast and an actionable
-                // "your username needs the @servername suffix on
-                // Azure SQL" message.
-                let chain = format_error_chain(&e);
-                tracing::warn!(error = %chain, host = %host, port = port, "mssql connect failed");
-                DbError::Connect(chain)
-            })?;
+        let cfg = ConnectionConfig {
+            host: host.clone(),
+            port,
+            ..cfg
+        };
+        let pool = build_pool(&cfg).await?;
+        let (engine_edition, connected_database) = detect_server_context(&pool).await?;
 
         Ok(Self {
             pool,
-            cfg: ConnectionConfig {
-                host: host.clone(),
-                port,
-                ..cfg
-            },
+            database_pools: dashmap::DashMap::new(),
+            pool_create_lock: tokio::sync::Mutex::new(()),
+            engine_edition,
+            default_database: connected_database,
+            cfg,
         })
     }
 
@@ -181,6 +113,155 @@ impl MsSqlConnection {
             .await
             .map_err(|e| DbError::Query(format!("pool: {e}")))
     }
+
+    /// Acquire a connection already scoped to `database`.
+    ///
+    /// SQL Server and Azure SQL Managed Instance use `USE` on the checked-out
+    /// session. Azure SQL Database instead gets a pool whose LOGIN7 database
+    /// is the requested database, because EngineEdition 5 rejects switching
+    /// database context within a session.
+    async fn acquire_for_database(
+        &self,
+        database: Option<&str>,
+    ) -> DbResult<bb8::PooledConnection<'static, ConnectionManager>> {
+        let requested = database.map(str::trim).filter(|db| !db.is_empty());
+
+        if requires_direct_database_connection(self.engine_edition) {
+            let target = requested.unwrap_or(&self.default_database);
+            let pool = if target.eq_ignore_ascii_case(&self.default_database) {
+                self.pool.clone()
+            } else if let Some(existing) = self.database_pools.get(target) {
+                existing.clone()
+            } else {
+                // Avoid racing two cold schema/query requests into building
+                // duplicate pools for the same newly-selected database.
+                let _guard = self.pool_create_lock.lock().await;
+                if let Some(existing) = self.database_pools.get(target) {
+                    existing.clone()
+                } else {
+                    let mut cfg = self.cfg.clone();
+                    cfg.database = target.to_string();
+                    let pool = build_pool(&cfg).await.map_err(|e| {
+                        DbError::Connect(format!(
+                            "could not connect to Azure SQL database '{target}': {e}"
+                        ))
+                    })?;
+                    self.database_pools.insert(target.to_string(), pool.clone());
+                    pool
+                }
+            };
+            return pool
+                .get_owned()
+                .await
+                .map_err(|e| DbError::Query(format!("pool for database '{target}': {e}")));
+        }
+
+        let mut conn = self
+            .pool
+            .get_owned()
+            .await
+            .map_err(|e| DbError::Query(format!("pool: {e}")))?;
+        if let Some(db) = requested {
+            let stmt = format!("USE [{}]", escape_ident(db));
+            conn.simple_query(stmt)
+                .await
+                .map_err(|e| DbError::Query(e.to_string()))?;
+        }
+        Ok(conn)
+    }
+
+    fn sampler_config(&self, database: Option<&str>) -> ConnectionConfig {
+        let mut cfg = self.cfg.clone();
+        if requires_direct_database_connection(self.engine_edition) {
+            if let Some(database) = database.map(str::trim).filter(|db| !db.is_empty()) {
+                cfg.database = database.to_string();
+            }
+        }
+        cfg
+    }
+}
+
+/// Build one pool for the database named in `cfg`. Azure SQL database
+/// switching creates additional pools through this same path, keeping TLS,
+/// authentication, timeout, and sleep/wake behavior identical to the initial
+/// connection.
+async fn build_pool(cfg: &ConnectionConfig) -> DbResult<MsPool> {
+    let mut tib_cfg = Config::new();
+    tib_cfg.host(&cfg.host);
+    tib_cfg.port(cfg.port);
+    if !cfg.database.is_empty() {
+        tib_cfg.database(&cfg.database);
+    }
+    tib_cfg.authentication(AuthMethod::sql_server(&cfg.username, &cfg.password));
+    if cfg.trust_server_certificate {
+        tib_cfg.trust_cert();
+    }
+    tib_cfg.encryption(EncryptionLevel::Required);
+
+    let mgr = ConnectionManager::new(tib_cfg);
+    Pool::builder()
+        .max_size(4)
+        .min_idle(Some(1))
+        .connection_timeout(Duration::from_secs(30))
+        .idle_timeout(Some(Duration::from_secs(10 * 60)))
+        .test_on_check_out(true)
+        .build(mgr)
+        .await
+        .map_err(|e| {
+            let chain = format_error_chain(&e);
+            tracing::warn!(
+                error = %chain,
+                host = %cfg.host,
+                port = cfg.port,
+                database = %cfg.database,
+                "mssql connect failed"
+            );
+            DbError::Connect(chain)
+        })
+}
+
+/// Read both the server capability and the actual login database from the
+/// live connection. The latter matters when the saved database is blank and
+/// SQL Server chooses the login's default database.
+async fn detect_server_context(pool: &MsPool) -> DbResult<(i32, String)> {
+    let mut conn = pool
+        .get()
+        .await
+        .map_err(|e| DbError::Connect(format!("pool: {e}")))?;
+    let mut stream = conn
+        .simple_query(
+            "SELECT CONVERT(int, SERVERPROPERTY('EngineEdition')) AS engine_edition, \
+                    DB_NAME() AS database_name",
+        )
+        .await
+        .map_err(|e| DbError::Connect(e.to_string()))?;
+    while let Some(item) = stream
+        .try_next()
+        .await
+        .map_err(|e| DbError::Connect(e.to_string()))?
+    {
+        if let QueryItem::Row(row) = item {
+            let edition = row
+                .try_get::<i32, _>("engine_edition")
+                .ok()
+                .flatten()
+                .ok_or_else(|| DbError::Connect("SERVERPROPERTY returned no edition".into()))?;
+            let database = row
+                .try_get::<&str, _>("database_name")
+                .ok()
+                .flatten()
+                .unwrap_or_default()
+                .to_string();
+            return Ok((edition, database));
+        }
+    }
+    Err(DbError::Connect(
+        "could not detect SQL Server engine edition".into(),
+    ))
+}
+
+fn requires_direct_database_connection(engine_edition: i32) -> bool {
+    engine_edition == 5
 }
 
 #[async_trait]
@@ -212,16 +293,7 @@ impl DbConnection for MsSqlConnection {
     }
 
     async fn list_schemas(&self, database: &str) -> DbResult<Vec<String>> {
-        let mut conn = self.acquire().await?;
-        // `USE [db]` only affects the connection it runs on, so we
-        // pin one connection across both statements. If we let the
-        // pool hand out a fresh one between calls, the SELECT below
-        // would land in whatever database that other connection
-        // happened to be in.
-        let use_stmt = format!("USE [{}]", escape_ident(database));
-        conn.simple_query(use_stmt)
-            .await
-            .map_err(|e| DbError::Query(e.to_string()))?;
+        let mut conn = self.acquire_for_database(Some(database)).await?;
         run_string_column(
             &mut conn,
             "SELECT name FROM sys.schemas \
@@ -235,11 +307,7 @@ impl DbConnection for MsSqlConnection {
     }
 
     async fn list_tables(&self, database: &str, schema: &str) -> DbResult<Vec<String>> {
-        let mut conn = self.acquire().await?;
-        let use_stmt = format!("USE [{}]", escape_ident(database));
-        conn.simple_query(use_stmt)
-            .await
-            .map_err(|e| DbError::Query(e.to_string()))?;
+        let mut conn = self.acquire_for_database(Some(database)).await?;
 
         let q = format!(
             "SELECT t.name AS name FROM sys.tables t \
@@ -257,13 +325,7 @@ impl DbConnection for MsSqlConnection {
     }
 
     async fn list_all_tables(&self, database: &str) -> DbResult<Vec<TableSummary>> {
-        // Pin one pool connection so `USE` + the catalog query run
-        // on the same logical session.
-        let mut conn = self.acquire().await?;
-        let use_stmt = format!("USE [{}]", escape_ident(database));
-        conn.simple_query(use_stmt)
-            .await
-            .map_err(|e| DbError::Query(e.to_string()))?;
+        let mut conn = self.acquire_for_database(Some(database)).await?;
 
         let q = "SELECT s.name AS schema_name, t.name AS table_name, 'TABLE' AS table_type \
                  FROM sys.tables t \
@@ -327,14 +389,8 @@ impl DbConnection for MsSqlConnection {
         schema: &str,
         table: &str,
     ) -> DbResult<TableDescription> {
-        // Pin one pool connection for the whole describe — `USE [db]`
-        // sets the database context per-connection, and the eight
-        // catalog queries below all assume that context.
-        let mut conn = self.acquire().await?;
-        let use_stmt = format!("USE [{}]", escape_ident(database));
-        conn.simple_query(use_stmt)
-            .await
-            .map_err(|e| DbError::Query(e.to_string()))?;
+        // Keep every catalog query on one session in the requested database.
+        let mut conn = self.acquire_for_database(Some(database)).await?;
 
         // Detect view vs base table up-front. Empty result = not found.
         let kind_q = format!(
@@ -799,13 +855,7 @@ impl DbConnection for MsSqlConnection {
         database: &str,
         schema: &str,
     ) -> DbResult<Vec<RoutineDescription>> {
-        // Pin one pool connection — `USE [db]` is per-connection so
-        // both queries below need to share the same session.
-        let mut conn = self.acquire().await?;
-        let use_stmt = format!("USE [{}]", escape_ident(database));
-        conn.simple_query(use_stmt)
-            .await
-            .map_err(|e| DbError::Query(e.to_string()))?;
+        let mut conn = self.acquire_for_database(Some(database)).await?;
 
         // Object types: 'P' = stored procedure, 'PC' = CLR procedure,
         // 'FN' = scalar function, 'IF' = inline TVF, 'TF' = TVF,
@@ -942,17 +992,8 @@ impl DbConnection for MsSqlConnection {
         sql: &str,
         analyze: bool,
     ) -> DbResult<ExplainResult> {
-        // Pin one pool connection for the duration of the explain
-        // round-trip — `USE [db]`, the `SET STATISTICS / SHOWPLAN`
-        // toggle, and the user query all need to share one logical
-        // session.
-        let mut conn = self.acquire().await?;
-        if let Some(db) = database {
-            let stmt = format!("USE [{}]", escape_ident(db));
-            conn.simple_query(stmt)
-                .await
-                .map_err(|e| DbError::Query(e.to_string()))?;
-        }
+        // The database context, SET toggle, and query share one session.
+        let mut conn = self.acquire_for_database(database).await?;
 
         // Two flavours, very different result shapes:
         //
@@ -1071,14 +1112,7 @@ impl DbConnection for MsSqlConnection {
         // pings before handing us the connection, and bb8 swaps
         // out a stale entry transparently. So no manual
         // ensure-alive probe is needed any more.
-        let mut conn = self.acquire().await?;
-
-        if let Some(db) = database {
-            let stmt = format!("USE [{}]", escape_ident(db));
-            conn.simple_query(stmt)
-                .await
-                .map_err(|e| DbError::Query(e.to_string()))?;
-        }
+        let mut conn = self.acquire_for_database(database).await?;
 
         // For lock telemetry: capture @@SPID on the pinned
         // connection. The SPID belongs to this specific TDS
@@ -1120,7 +1154,8 @@ impl DbConnection for MsSqlConnection {
         // So: drag-select a transaction block, hit Run with locks,
         // land on tab 0, see the entire batch's lock timeline. No
         // tab-juggling, no `sp_executesql` hack.
-        let sampler = spid.map(|s| MsSqlLockSampler::start(self.cfg.clone(), s, interval_ms));
+        let sampler =
+            spid.map(|s| MsSqlLockSampler::start(self.sampler_config(database), s, interval_ms));
 
         let mut out = Vec::with_capacity(statements.len());
         for sql in statements {
@@ -1591,7 +1626,20 @@ fn format_error_chain<E: std::error::Error>(err: &E) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_host_port;
+    use super::{parse_host_port, requires_direct_database_connection};
+
+    #[test]
+    fn azure_sql_database_uses_database_specific_connections() {
+        assert!(requires_direct_database_connection(5));
+    }
+
+    #[test]
+    fn sql_server_and_managed_instance_can_use_database_context() {
+        assert!(!requires_direct_database_connection(2));
+        assert!(!requires_direct_database_connection(3));
+        assert!(!requires_direct_database_connection(4));
+        assert!(!requires_direct_database_connection(8));
+    }
 
     #[test]
     fn plain_host_keeps_default_port() {

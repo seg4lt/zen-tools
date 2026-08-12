@@ -168,7 +168,7 @@ impl ConnectionRegistry {
     /// Run a sequence of statements with optional database/schema
     /// context. The driver is responsible for pinning everything to a
     /// single physical connection so session state (`SET search_path`,
-    /// `USE [db]`) actually takes effect.
+    /// transactions, and database context) actually takes effect.
     pub async fn execute_batch(
         &self,
         id: &str,
